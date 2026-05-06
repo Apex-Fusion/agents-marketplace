@@ -60,6 +60,10 @@ export interface AppDeps {
    * The browser SPA calls fetch('/v1/submit-prompt') instead of touching
    * the SDK directly, so the chain stub in the SPA never has to fire. */
   marketplace?: Marketplace;
+  /** Base URL of the openedai-speech-min PiperTTS deployment that
+   * `/v1/synth-speech` proxies to. Falls back to the public Vector-testnet
+   * host when not set. Endpoint stays disabled (503) when this is empty. */
+  ttsPiperBaseUrl?: string;
   /** Injectable fetch for tests. Defaults to globalThis.fetch. */
   fetchImpl?: typeof globalThis.fetch;
 }
@@ -306,7 +310,112 @@ export function createApp(deps: AppDeps): Express {
       const reason = err instanceof Error && "reason" in err
         ? String((err as { reason: unknown }).reason)
         : "submit_prompt_failed";
+      // Surface the failure to logs so 502 responses aren't a silent black
+      // hole during deploy debugging. SDK errors carry .reason; raw Errors
+      // carry stack — we want both.
+      console.error(
+        `[buyer] /v1/submit-prompt failed reason=${reason} message=${message}`,
+        err instanceof Error && err.stack ? `\n${err.stack}` : "",
+      );
       return res.status(502).json({ error: reason, message });
+    }
+  });
+
+  // ── POST /v1/synth-speech — PiperTTS-specific proxy.
+  // Body: { text, voice, format, speed }
+  // Returns: audio bytes (Content-Type from upstream, e.g. audio/mpeg).
+  //
+  // Path B of the multi-capability story: the SPA's `PiperTTSForm` component
+  // hits this directly (no escrow yet) so we can demo the audio.synthesize.
+  // piper.v1 capability without waiting for the on-chain TTS-supplier
+  // adapter to land. The endpoint is intentionally locked to PiperTTS' OpenAI-
+  // shape `/v1/audio/speech` — different TTS providers (xtts, coqui, …) get
+  // their own endpoint so each form's parameter space is explicit.
+  //
+  // Knobs limited to what openedai-speech-min actually honours:
+  //   voice ∈ alloy|echo|fable|onyx|nova|shimmer|lessac
+  //   format ∈ mp3|wav|opus|aac|flac
+  //   speed ∈ [0.5, 1.5]
+  const ALLOWED_VOICES = new Set([
+    "alloy", "echo", "fable", "onyx", "nova", "shimmer", "lessac",
+  ]);
+  const ALLOWED_FORMATS = new Set(["mp3", "wav", "opus", "aac", "flac"]);
+  const ttsPiperBaseUrl = (deps.ttsPiperBaseUrl ?? "").replace(/\/+$/, "");
+  const ttsFetch = deps.fetchImpl ?? globalThis.fetch;
+
+  app.post("/v1/synth-speech", async (req: Request, res: Response) => {
+    if (!ttsPiperBaseUrl) {
+      return jsonError(
+        res,
+        503,
+        "service_unavailable",
+        "buyer-app booted without TTS_PIPER_BASE_URL; /v1/synth-speech disabled",
+      );
+    }
+
+    const body = readBody(req.body);
+    const text = typeof body.text === "string" ? body.text.trim() : "";
+    if (text.length === 0) {
+      return jsonError(res, 400, "text_required",
+        "body.text must be a non-empty string");
+    }
+    if (text.length > 4000) {
+      return jsonError(res, 400, "text_too_long",
+        "body.text must be ≤ 4000 chars (Piper softcap; longer texts can be split client-side)");
+    }
+    const voice = typeof body.voice === "string" ? body.voice : "nova";
+    if (!ALLOWED_VOICES.has(voice)) {
+      return jsonError(res, 400, "voice_invalid",
+        `voice must be one of: ${[...ALLOWED_VOICES].join(", ")}`);
+    }
+    const format = typeof body.format === "string" ? body.format : "mp3";
+    if (!ALLOWED_FORMATS.has(format)) {
+      return jsonError(res, 400, "format_invalid",
+        `format must be one of: ${[...ALLOWED_FORMATS].join(", ")}`);
+    }
+    const speedRaw = body.speed;
+    const speed = typeof speedRaw === "number" ? speedRaw
+      : typeof speedRaw === "string" ? Number(speedRaw)
+      : 1.0;
+    if (!Number.isFinite(speed) || speed < 0.5 || speed > 1.5) {
+      return jsonError(res, 400, "speed_out_of_range",
+        "speed must be a finite number in [0.5, 1.5]");
+    }
+
+    try {
+      const upstream = await ttsFetch(`${ttsPiperBaseUrl}/v1/audio/speech`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "tts-1",
+          input: text,
+          voice,
+          response_format: format,
+          speed,
+        }),
+      });
+      if (!upstream.ok) {
+        const detail = await upstream.text().catch(() => "");
+        return jsonError(
+          res,
+          502,
+          "tts_upstream_error",
+          `TTS upstream ${upstream.status} ${upstream.statusText}: ${detail.slice(0, 200)}`,
+        );
+      }
+      const contentType = upstream.headers.get("content-type") ?? `audio/${format}`;
+      const buf = Buffer.from(await upstream.arrayBuffer());
+      res.status(200);
+      res.setHeader("Content-Type", contentType);
+      res.setHeader("Content-Length", String(buf.length));
+      // Hint a sensible filename for the SPA's download anchor.
+      res.setHeader("Content-Disposition",
+        `inline; filename="speech.${format}"`);
+      return res.send(buf);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[buyer] /v1/synth-speech failed: ${message}`);
+      return jsonError(res, 502, "tts_unreachable", message);
     }
   });
 

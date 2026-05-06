@@ -122,12 +122,18 @@ describe("<Dashboard /> smoke", () => {
       makeSampleSupplierView({ supplier_pkh: "b".repeat(56) }),
     ]);
     render(wrap(<Dashboard />, mp));
-    // Wait for async discover to complete and cards to render
+    // Wait for async discover to complete and cards to render. Dashboard
+    // appends a synthetic Piper-TTS demo card to whatever the indexer
+    // returned, so the count is N+1 until the on-chain TTS supplier ships.
     await waitFor(() => {
-      // Each card should render something with the supplier_pkh visible or a test-id
       const cards = document.querySelectorAll("[data-testid='supplier-card']");
-      expect(cards.length).toBe(2);
+      expect(cards.length).toBe(3);
     });
+    // Sanity: one of the cards is the demo Piper supplier.
+    const piperBadges = Array.from(
+      document.querySelectorAll("[data-testid='supplier-card']"),
+    ).filter((c) => c.textContent?.includes("audio.synthesize.piper.v1"));
+    expect(piperBadges.length).toBe(1);
   });
 });
 
@@ -237,14 +243,68 @@ describe("<PromptForm /> smoke", () => {
 });
 
 describe("<TaskHistory /> smoke", () => {
-  it("calls getTaskHistory() and renders a row for each task", async () => {
+  // TaskHistory now fetches /v1/indexer/escrows?buyer=<pkh> via the buyer-app
+  // server proxy and groups rows by posted_at. Each lifecycle (Open → Claimed
+  // → Submitted → terminal) shares one posted_at value, so we mock the
+  // indexer with a couple of fully-populated rows representing two distinct
+  // lifecycles in different states and assert one task-row per lifecycle.
+  it("fetches /v1/indexer/escrows and renders one row per distinct lifecycle (posted_at)", async () => {
     const mp = makeMockMarketplace();
-    vi.spyOn(mp, "getTaskHistory").mockReturnValue(ALL_SAMPLE_TASK_RECORDS);
+    const buyerPkh = mp.getWalletKey().pubKeyHash;
+    const baseRow = (overrides: Record<string, unknown>) => ({
+      utxo_ref: "a".repeat(64) + "#0",
+      buyer_pkh: buyerPkh,
+      supplier_pkh: "b".repeat(56),
+      advert_ref: "c".repeat(64) + "#0",
+      capability_id: "llm.text.generate.v1",
+      prompt_hash: "d".repeat(64),
+      payment_lovelace: "2000000",
+      buyer_bond_lovelace: "1000000",
+      supplier_bond_lovelace: "1000000",
+      posted_at: 1700000000000,
+      submitted_at: null,
+      result_receipt_hash: null,
+      state: "Submitted",
+      created_slot: 1000,
+      ...overrides,
+    });
+    // Lifecycle A: posted_at=1700000000000 — Open + Submitted rows (two
+    // chain rows in same lifecycle).
+    // Lifecycle B: posted_at=1700000099999 — Open + Accepted (different lifecycle).
+    const rows = [
+      baseRow({ utxo_ref: "1".repeat(64) + "#0", state: "Open", created_slot: 1000 }),
+      baseRow({ utxo_ref: "2".repeat(64) + "#0", state: "Submitted", created_slot: 1010 }),
+      baseRow({ utxo_ref: "3".repeat(64) + "#0", state: "Open",     created_slot: 2000, posted_at: 1700000099999 }),
+      baseRow({ utxo_ref: "4".repeat(64) + "#0", state: "Accepted", created_slot: 2020, posted_at: 1700000099999 }),
+    ];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : (input instanceof URL ? input.toString() : input.url);
+      if (!url.includes(`/v1/indexer/escrows?buyer=${buyerPkh}`)) {
+        throw new Error(`unexpected fetch: ${url}`);
+      }
+      return new Response(JSON.stringify(rows), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }));
     render(wrap(<TaskHistory />, mp));
     await waitFor(() => {
-      const rows = document.querySelectorAll("[data-testid='task-row']");
-      expect(rows.length).toBe(ALL_SAMPLE_TASK_RECORDS.length);
+      const taskRows = document.querySelectorAll("[data-testid='task-row']");
+      expect(taskRows.length).toBe(2); // 2 distinct lifecycles
     });
+    vi.unstubAllGlobals();
+  });
+
+  it("renders an empty-state when the indexer returns no rows", async () => {
+    const mp = makeMockMarketplace();
+    vi.stubGlobal("fetch", vi.fn(async () =>
+      new Response(JSON.stringify([]), { status: 200, headers: { "Content-Type": "application/json" } })
+    ));
+    render(wrap(<TaskHistory />, mp));
+    await waitFor(() => {
+      expect(screen.getByTestId("task-history-empty")).toBeTruthy();
+    });
+    vi.unstubAllGlobals();
   });
 });
 

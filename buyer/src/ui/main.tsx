@@ -20,7 +20,13 @@ import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import App from "./App.js";
 import { MarketplaceProvider } from "./state/MarketplaceContext.js";
-import { Marketplace, MemoryTaskHistoryStore, LocalStorageTaskHistoryStore } from "../sdk/index.js";
+// MemoryTaskHistoryStore is a no-op placeholder for the browser-side SDK
+// instance — submitPrompt now runs server-side, so the browser never
+// records anything to a history store. The /tasks page reads directly
+// from the indexer (chain is the source of truth). LocalStorageTaskHistoryStore
+// was the previous browser-only persistence path; dropped because it
+// always rendered empty post UX-2b.
+import { Marketplace, MemoryTaskHistoryStore } from "../sdk/index.js";
 import type { ChainProvider } from "@marketplace/shared/chain";
 
 interface BuyerBoot {
@@ -49,9 +55,7 @@ const chainStub: ChainProvider = {
   awaitTx: () => { throw new Error("browser SPA must not call chain.awaitTx — go through /v1/*"); },
 };
 
-const historyStore = typeof window !== "undefined" && window.localStorage
-  ? new LocalStorageTaskHistoryStore()
-  : new MemoryTaskHistoryStore();
+const historyStore = new MemoryTaskHistoryStore();
 const marketplace = new Marketplace({
   chain: chainStub,
   // Same-origin proxy: SDK calls land on /v1/indexer/<path> on the buyer

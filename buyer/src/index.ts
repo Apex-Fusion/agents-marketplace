@@ -80,6 +80,7 @@ export async function runMain(env: Record<string, string | undefined>): Promise<
     walletKey,
     indexerUrl: config.indexerUrl,
     marketplace,
+    ttsPiperBaseUrl: config.ttsPiperBaseUrl,
   });
 
   const server = app.listen(config.port, () => {

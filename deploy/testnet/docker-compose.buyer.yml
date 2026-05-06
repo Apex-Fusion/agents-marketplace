@@ -35,6 +35,11 @@ services:
       OGMIOS_URL: http://ogmios:1337
       LIVE_CHAIN: "1"
       NETWORK_ID: "0"
+      # Path-B PiperTTS proxy target. Public CF hostname so the buyer-app
+      # reaches it via the internet (we don't share a docker network with
+      # apex-simulation). When this is unset, /v1/synth-speech responds 503
+      # and the SPA's PiperTTSForm shows a clear error.
+      TTS_PIPER_BASE_URL: "https://tts-piper.vector.testnet.apexfusion.org"
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8070/healthz >/dev/null || exit 1"]
       interval: 20s

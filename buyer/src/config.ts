@@ -11,6 +11,10 @@
  *   OGMIOS_URL          — Ogmios HTTP endpoint (required iff LIVE_CHAIN=1)
  *   LIVE_CHAIN          — "1" opts in to LiveOgmiosProvider (real submitTx).
  *                         Default off → ReadOnlyOgmiosProvider (safe).
+ *   TTS_PIPER_BASE_URL  — Base URL of the openedai-speech-min PiperTTS host.
+ *                         When unset, /v1/synth-speech responds 503 (the
+ *                         capability stays disabled — the rest of the
+ *                         buyer-app boots normally).
  */
 
 const HEX64_RE = /^[0-9a-fA-F]{64}$/;
@@ -23,6 +27,7 @@ export interface BuyerConfig {
   networkId: 0 | 1;
   ogmiosUrl: string;
   liveChain: boolean;
+  ttsPiperBaseUrl: string;
 }
 
 function requireField(env: Record<string, string | undefined>, name: string): string {
@@ -70,5 +75,10 @@ export function loadConfig(env: Record<string, string | undefined>): BuyerConfig
     throw new Error("loadConfig: OGMIOS_URL is required when LIVE_CHAIN=1");
   }
 
-  return { privKeyHex, indexerUrl, port, networkId, ogmiosUrl, liveChain };
+  // TTS_PIPER_BASE_URL is purely optional — empty string means the
+  // /v1/synth-speech endpoint stays disabled. We don't validate the URL
+  // shape here; an unreachable URL surfaces as a clear 502 from the proxy.
+  const ttsPiperBaseUrl = env.TTS_PIPER_BASE_URL ?? "";
+
+  return { privKeyHex, indexerUrl, port, networkId, ogmiosUrl, liveChain, ttsPiperBaseUrl };
 }
