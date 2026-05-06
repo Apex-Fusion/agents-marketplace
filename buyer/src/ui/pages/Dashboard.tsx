@@ -153,6 +153,12 @@ function renderCapabilityForm(
       return <PromptForm advertRef={advertRef} payment_lovelace={payment_lovelace} />;
 
     case "audio.synthesize.piper.v1":
+      // Real on-chain TTS supplier → marketplace mode (full escrow). The
+      // synthetic demo supplier has utxo_ref="demo:piper-tts" which fails
+      // parseUtxoRef → advertRef is null → form falls back to demo mode.
+      if (advertRef) {
+        return <PiperTTSForm advertRef={advertRef} payment_lovelace={payment_lovelace} />;
+      }
       return <PiperTTSForm />;
 
     default:

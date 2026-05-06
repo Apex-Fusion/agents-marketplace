@@ -155,6 +155,37 @@ export interface SubmitPromptOptions {
 }
 
 /**
+ * SubmitTtsOptions — arguments to Marketplace.submitTts() for the
+ * `audio.synthesize.piper.v1` capability. The same `{text, voice, format,
+ * speed}` envelope is hashed (sha256 ∘ canonical) into the escrow datum's
+ * `prompt_hash` AND posted to the supplier's /v1/audio/synthesize body, so
+ * the supplier can verify the request matches what was committed on chain.
+ */
+export interface SubmitTtsOptions {
+  advertRef: OutputReference;
+  text: string;
+  voice: string;       // alloy | echo | fable | onyx | nova | shimmer | lessac
+  format: string;      // mp3 | wav | opus | aac | flac
+  speed: number;       // 0.5 .. 1.5
+  payment_lovelace: bigint;
+}
+
+/**
+ * SubmitTtsResult — returned from Marketplace.submitTts() on success.
+ * Audio is base64 over the wire to keep the JSON poll response clean; the
+ * caller decodes once and renders / persists as needed.
+ */
+export interface SubmitTtsResult {
+  audio_b64: string;
+  format: string;
+  content_type: string;
+  byte_length: number;
+  receipt: Receipt;
+  receiptSignature: string;
+  escrowRef: OutputReference;
+}
+
+/**
  * AcceptResultOptions — arguments to Marketplace.acceptResult().
  */
 export interface AcceptResultOptions {

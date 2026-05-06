@@ -22,6 +22,13 @@ export { buildRetireAdvertTx } from "./advert/retireAdvert.js";
 // Escrow builders
 export type { PostEscrowParams } from "./escrow/postEscrow.js";
 export { buildPostEscrowTx } from "./escrow/postEscrow.js";
+export type { PostTtsEscrowParams, TtsRequest } from "./escrow/postTtsEscrow.js";
+export {
+  buildPostTtsEscrowTx,
+  ttsPromptHash,
+  ALLOWED_TTS_VOICES,
+  ALLOWED_TTS_FORMATS,
+} from "./escrow/postTtsEscrow.js";
 export type { ClaimParams } from "./escrow/claim.js";
 export { buildClaimTx } from "./escrow/claim.js";
 export type { SubmitParams } from "./escrow/submit.js";

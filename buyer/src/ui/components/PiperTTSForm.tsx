@@ -2,25 +2,32 @@
  * buyer/src/ui/components/PiperTTSForm.tsx — capability-specific form
  * for `audio.synthesize.piper.v1` suppliers.
  *
- * The form posts directly to the buyer-app's `/v1/synth-speech` proxy,
- * which forwards to the openedai-speech-min PiperTTS host. Path B of the
- * multi-capability story: we render a Piper-shaped UI now (text + voice +
- * format + speed) without going through escrow. When the marketplace TTS-
- * supplier adapter lands, this same component is reused unchanged — only
- * the server endpoint swaps from /v1/synth-speech to a /v1/submit-tts.
+ * Two modes, controlled by whether `advertRef` is provided:
+ *   - **Marketplace mode** (advertRef + payment_lovelace given): posts to
+ *     `/v1/submit-tts`, which runs the full PostEscrow → supplier inference
+ *     → on-chain Submit lifecycle. Returns base64 audio + signed receipt.
+ *   - **Demo mode** (no advertRef): falls back to `/v1/synth-speech`, the
+ *     direct proxy that bypasses escrow. Used only for the synthetic
+ *     "PiperTTS demo" tile when no real on-chain TTS supplier is present.
  *
  * UX notes:
  *   - Voices and formats are hard-coded to what openedai-speech-min actually
- *     honours. If a future Piper deploy adds voices, expose them via a
- *     /v1/synth-speech-voices listing call instead of free-typing here.
- *   - We render a native <audio controls> on success so the user can play
- *     without leaving the page, plus a Download anchor whose href is the
- *     same blob URL (the audio buffer is materialised once and reused).
- *   - Blob URLs are revoked on unmount + on each new submit to avoid
- *     accumulating leaked memory across many demo runs.
+ *     honours.
+ *   - We render a native <audio controls> on success + a Download anchor.
+ *   - Blob URLs are revoked on unmount + on each new submit.
  */
 
 import { useEffect, useRef, useState } from "react";
+import type { OutputReference } from "@marketplace/shared/chain";
+
+export interface PiperTTSFormProps {
+  /** When set, the form runs the full marketplace lifecycle via
+   * /v1/submit-tts. When undefined, the form falls back to /v1/synth-speech
+   * (the path-B direct proxy). */
+  advertRef?: OutputReference;
+  /** Required iff advertRef is set; matches the supplier's advertised price. */
+  payment_lovelace?: bigint;
+}
 
 const VOICES = [
   { value: "nova",    label: "Nova (default — feminine, warm)" },
@@ -46,7 +53,7 @@ interface AudioResult {
   byteLength: number;
 }
 
-export default function PiperTTSForm(): JSX.Element {
+export default function PiperTTSForm({ advertRef, payment_lovelace }: PiperTTSFormProps = {}): JSX.Element {
   const [text, setText] = useState("");
   const [voice, setVoice] = useState("nova");
   const [format, setFormat] = useState("mp3");
@@ -78,23 +85,62 @@ export default function PiperTTSForm(): JSX.Element {
     setResult(null);
 
     try {
-      const resp = await fetch("/v1/synth-speech", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: text.trim(), voice, format, speed }),
-      });
-      if (!resp.ok) {
-        // Try to parse JSON error; fall through to status text on non-JSON.
-        let errMsg = `${resp.status} ${resp.statusText}`;
-        try {
-          const j = (await resp.json()) as { error?: string; message?: string };
-          if (j.error || j.message) errMsg = `${j.error ?? "error"}: ${j.message ?? ""}`;
-        } catch {
-          /* keep status fallback */
+      let blob: Blob;
+
+      if (advertRef && payment_lovelace !== undefined) {
+        // Marketplace mode: full escrow lifecycle. Server returns JSON with
+        // base64 audio + a signed receipt. We decode the audio into a blob
+        // here and let it flow through the same UI path as demo mode.
+        const resp = await fetch("/v1/submit-tts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            advert_ref: `${advertRef.txHash}#${advertRef.index}`,
+            text: text.trim(),
+            voice,
+            format,
+            speed,
+            payment_lovelace: payment_lovelace.toString(),
+          }),
+        });
+        if (!resp.ok) {
+          let errMsg = `${resp.status} ${resp.statusText}`;
+          try {
+            const j = (await resp.json()) as { error?: string; message?: string };
+            if (j.error || j.message) errMsg = `${j.error ?? "error"}: ${j.message ?? ""}`;
+          } catch { /* keep status fallback */ }
+          throw new Error(errMsg);
         }
-        throw new Error(errMsg);
+        const j = (await resp.json()) as {
+          audio_b64: string;
+          format: string;
+          content_type: string;
+        };
+        // atob → bytes → Blob. Avoids a base64-decoder dependency since the
+        // SPA already runs in a browser; large strings would warrant
+        // streaming, but a single sentence is ≤200 KB.
+        const bin = atob(j.audio_b64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        blob = new Blob([bytes], { type: j.content_type });
+      } else {
+        // Demo mode: direct proxy to PiperTTS host (no escrow).
+        const resp = await fetch("/v1/synth-speech", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: text.trim(), voice, format, speed }),
+        });
+        if (!resp.ok) {
+          let errMsg = `${resp.status} ${resp.statusText}`;
+          try {
+            const j = (await resp.json()) as { error?: string; message?: string };
+            if (j.error || j.message) errMsg = `${j.error ?? "error"}: ${j.message ?? ""}`;
+          } catch { /* keep status fallback */ }
+          throw new Error(errMsg);
+        }
+        blob = await resp.blob();
       }
-      const blob = await resp.blob();
+
       const url = URL.createObjectURL(blob);
       activeBlobUrl.current = url;
       setResult({ blobUrl: url, format, byteLength: blob.size });

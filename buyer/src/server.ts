@@ -419,6 +419,77 @@ export function createApp(deps: AppDeps): Express {
     }
   });
 
+  // ── POST /v1/submit-tts — full server-side buyer lifecycle for TTS.
+  // Body: { advert_ref, text, voice, format, speed, payment_lovelace }
+  // Returns: { audio_b64, format, content_type, byte_length, receipt,
+  //            receipt_signature, escrow_ref }
+  //
+  // Same shape as /v1/submit-prompt but routes to Marketplace.submitTts
+  // instead. Audio bytes are base64'd in the JSON response so the SPA's
+  // PiperTTSForm can decode → blob → <audio> + Download anchor without
+  // negotiating a binary content-type with the SDK layer.
+  app.post("/v1/submit-tts", async (req: Request, res: Response) => {
+    if (!deps.marketplace) {
+      return jsonError(res, 503, "service_unavailable",
+        "buyer-app booted without Marketplace SDK; /v1/submit-tts disabled");
+    }
+    const body = readBody(req.body);
+    const rawRef = body.advert_ref;
+    if (typeof rawRef !== "string" || !ESCROW_REF_RE.test(rawRef)) {
+      return jsonError(res, 400, "advert_ref_invalid",
+        'body must include { "advert_ref": "<64-hex-txhash>#<index>" }');
+    }
+    const text = typeof body.text === "string" ? body.text.trim() : "";
+    if (text.length === 0) {
+      return jsonError(res, 400, "text_required",
+        "body.text must be a non-empty string");
+    }
+    const voice = typeof body.voice === "string" ? body.voice : "nova";
+    const format = typeof body.format === "string" ? body.format : "mp3";
+    const speedRaw = body.speed;
+    const speed = typeof speedRaw === "number" ? speedRaw
+      : typeof speedRaw === "string" ? Number(speedRaw)
+      : 1.0;
+    let payment_lovelace: bigint;
+    try {
+      payment_lovelace = BigInt(body.payment_lovelace as string | number);
+    } catch {
+      return jsonError(res, 400, "payment_lovelace_invalid",
+        "body must include `payment_lovelace` (numeric string)");
+    }
+    const m = ESCROW_REF_RE.exec(rawRef)!;
+    const advertRef = { txHash: m[1], index: Number(m[2]) };
+    try {
+      const result = await deps.marketplace.submitTts({
+        advertRef,
+        text,
+        voice,
+        format,
+        speed,
+        payment_lovelace,
+      });
+      return res.status(200).json({
+        audio_b64: result.audio_b64,
+        format: result.format,
+        content_type: result.content_type,
+        byte_length: result.byte_length,
+        receipt: result.receipt,
+        receipt_signature: result.receiptSignature,
+        escrow_ref: `${result.escrowRef.txHash}#${result.escrowRef.index}`,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const reason = err instanceof Error && "reason" in err
+        ? String((err as { reason: unknown }).reason)
+        : "submit_tts_failed";
+      console.error(
+        `[buyer] /v1/submit-tts failed reason=${reason} message=${message}`,
+        err instanceof Error && err.stack ? `\n${err.stack}` : "",
+      );
+      return res.status(502).json({ error: reason, message });
+    }
+  });
+
   app.post("/v1/accept", async (req: Request, res: Response) => {
     if (!resolved) {
       return jsonError(

@@ -71,6 +71,8 @@ import type { ChainProvider, OutputReference } from "@marketplace/shared/chain";
 import type { WalletKey } from "@marketplace/shared/tx";
 import {
   buildPostEscrowTx,
+  buildPostTtsEscrowTx,
+  ttsPromptHash,
   buildAcceptTx,
   buildReclaimTx,
   TxConstructionError,
@@ -82,6 +84,8 @@ import type {
   DiscoverSuppliersOptions,
   SubmitPromptOptions,
   SubmitPromptResult,
+  SubmitTtsOptions,
+  SubmitTtsResult,
   AcceptResultOptions,
   ReclaimOptions,
   TaskRecord,
@@ -511,6 +515,266 @@ export class Marketplace extends EventEmitterBase {
 
     return {
       response: responseContent,
+      receipt,
+      receiptSignature,
+      escrowRef: escrowOutputRef,
+    };
+  }
+
+  // ─── submitTts — full marketplace lifecycle for audio.synthesize.piper.v1 ─
+
+  async submitTts(opts: SubmitTtsOptions): Promise<SubmitTtsResult> {
+    const { advertRef, text, voice, format, speed, payment_lovelace } = opts;
+    const request = { text, voice, format, speed };
+
+    let advertDatum: AdvertDatum | null = null;
+    let escrowOutputRef: OutputReference | null = null;
+    let escrowRefStr = "";
+    let postedAtMs = Date.now();
+
+    const recordFailure = (reason: string): void => {
+      this.historyStore.save({
+        escrow_ref: escrowRefStr || `${"0".repeat(64)}#0`,
+        supplier_pkh: advertDatum?.supplier_pkh ?? "",
+        capability_id: advertDatum?.capability_id ?? "",
+        prompt_preview: text.length <= 100 ? text : text.slice(0, 100),
+        posted_at: postedAtMs,
+        status: "failed",
+        failure_reason: reason,
+      });
+    };
+
+    // ── 1. Resolve advert + post escrow (TTS prompt_hash) ─────────────
+    let escrowResult;
+    try {
+      const utxo = await this.chain.queryUtxo(advertRef);
+      if (utxo && utxo.datumHex) {
+        try {
+          advertDatum = decodeAdvertDatum(utxo.datumHex);
+        } catch { /* builder will re-throw structurally */ }
+      }
+      escrowResult = await buildPostTtsEscrowTx({
+        chain: this.chain,
+        buyerKey: this.walletKey,
+        advertRef,
+        request,
+        payment_lovelace,
+      });
+    } catch (err) {
+      if (err instanceof TxConstructionError) {
+        recordFailure(err.reason);
+        throw err;
+      }
+      this.emitProgress({ type: "chain_submit_failed", detail: (err as Error).message });
+      recordFailure((err as Error).message);
+      throw err;
+    }
+
+    escrowOutputRef = escrowResult.escrowOutputRef;
+    escrowRefStr = refToString(escrowOutputRef);
+
+    this.emitProgress({ type: "escrow_posted", escrow_ref: escrowRefStr });
+
+    // ── 2. Wait for the escrow tx to confirm ──────────────────────────
+    try {
+      await this.chain.awaitTx(escrowResult.expectedTxHash, 120_000);
+    } catch { /* mock providers / tests */ }
+
+    // ── 3. Re-fetch escrow datum to capture posted_at ─────────────────
+    try {
+      const escrowUtxo = await this.chain.queryUtxo(escrowOutputRef);
+      if (escrowUtxo && escrowUtxo.datumHex) {
+        const ed = decodeEscrowDatum(escrowUtxo.datumHex);
+        postedAtMs = ed.posted_at;
+      }
+    } catch { /* metadata best-effort */ }
+
+    if (!advertDatum) {
+      const reason = "advert datum unavailable after escrow post";
+      recordFailure(reason);
+      throw new ReceiptVerificationError(reason);
+    }
+
+    // ── 4. Call supplier /v1/audio/synthesize ─────────────────────────
+    const supplierBaseUrl = advertDatum.endpoint_url;
+    const supplierHttp = new HttpClient({
+      baseUrl: supplierBaseUrl,
+      fetch: this.fetchImpl,
+    });
+    const ttsBody = { text, voice, format, speed };
+
+    let synthResult;
+    try {
+      synthResult = await supplierHttp.postJson("/v1/audio/synthesize", ttsBody, {
+        headers: { "X-Escrow-Ref": escrowRefStr },
+      });
+    } catch (err) {
+      if (err instanceof HttpError) {
+        const reason = err.kind === "timeout" ? "timeout" : "network_error";
+        const sErr = new SupplierError(reason, { message: err.message });
+        recordFailure(reason);
+        throw sErr;
+      }
+      recordFailure((err as Error).message);
+      throw err;
+    }
+
+    // 202 + poll mirror of submitPrompt's async chat handling.
+    if (synthResult.status === 202 && synthResult.body && typeof synthResult.body === "object") {
+      const jobId = (synthResult.body as { job_id?: string }).job_id;
+      if (typeof jobId !== "string" || jobId.length === 0) {
+        const sErr = new SupplierError("malformed_response", {
+          status: synthResult.status,
+          message: "supplier 202 response missing job_id",
+        });
+        recordFailure("malformed_response");
+        throw sErr;
+      }
+      const POLL_INTERVAL_MS = 2_000;
+      // TTS jobs run on CPU and finish in 1–3s for short text; the long
+      // tail is dominated by the Submit tx confirmation (slot rate). 180s
+      // mirrors the chat path so polled.status hits 200 cleanly.
+      const POLL_TIMEOUT_MS = 180_000;
+      const pollDeadline = Date.now() + POLL_TIMEOUT_MS;
+      let polled = synthResult;
+      let firstIter = true;
+      while (Date.now() < pollDeadline) {
+        if (!firstIter) {
+          await new Promise<void>((r) => setTimeout(r, POLL_INTERVAL_MS));
+        }
+        firstIter = false;
+        try {
+          polled = await supplierHttp.getJson(`/v1/audio/synthesize/${jobId}`);
+        } catch (err) {
+          if (err instanceof HttpError) {
+            const reason = err.kind === "timeout" ? "timeout" : "network_error";
+            const sErr = new SupplierError(reason, { message: err.message });
+            recordFailure(reason);
+            throw sErr;
+          }
+          throw err;
+        }
+        if (polled.status === 200) break;
+        if (polled.status === 202) continue;
+        const failBody = (polled.body && typeof polled.body === "object")
+          ? polled.body as { reason?: string; message?: string }
+          : {};
+        const sErr = new SupplierError(failBody.reason ?? "supplier_http_error", {
+          status: polled.status,
+          message: failBody.message ?? `supplier returned ${polled.status}`,
+        });
+        recordFailure(sErr.reason);
+        throw sErr;
+      }
+      if (polled.status !== 200) {
+        const sErr = new SupplierError("timeout", {
+          status: polled.status,
+          message: `supplier job ${jobId} not done within ${POLL_TIMEOUT_MS}ms`,
+        });
+        recordFailure("timeout");
+        throw sErr;
+      }
+      synthResult = polled;
+    }
+
+    if (!synthResult.ok) {
+      const bodyReason =
+        synthResult.body && typeof synthResult.body === "object"
+          ? ((synthResult.body as { reason?: string }).reason ?? "supplier_http_error")
+          : "supplier_http_error";
+      const sErr = new SupplierError(bodyReason, {
+        status: synthResult.status,
+        message: `supplier returned ${synthResult.status}`,
+      });
+      recordFailure(bodyReason);
+      throw sErr;
+    }
+    if (synthResult.parseError || !synthResult.body || typeof synthResult.body !== "object") {
+      const sErr = new SupplierError("malformed_response", {
+        status: synthResult.status,
+        message: "supplier body is not valid JSON",
+      });
+      recordFailure("malformed_response");
+      throw sErr;
+    }
+
+    const responseBody = synthResult.body as {
+      audio_b64?: string;
+      format?: string;
+      content_type?: string;
+      byte_length?: number;
+      receipt?: import("@marketplace/shared/receipt").Receipt;
+      receipt_signature?: string;
+    };
+    if (!responseBody.audio_b64 || !responseBody.receipt || !responseBody.receipt_signature) {
+      const sErr = new SupplierError("malformed_response", {
+        status: synthResult.status,
+        message: "supplier response is missing audio_b64 / receipt / receipt_signature",
+      });
+      recordFailure("malformed_response");
+      throw sErr;
+    }
+    const receipt = responseBody.receipt;
+    const receiptSignature = responseBody.receipt_signature;
+
+    this.emitProgress({ type: "supplier_called", escrow_ref: escrowRefStr });
+
+    // ── 5. Receipt verification ───────────────────────────────────────
+    if (receipt.supplier_pkh !== advertDatum.supplier_pkh) {
+      recordFailure("wrong_supplier");
+      throw new ReceiptVerificationError("wrong_supplier");
+    }
+    if (receipt.escrow_ref !== escrowRefStr) {
+      recordFailure("wrong_escrow_ref");
+      throw new ReceiptVerificationError("wrong_escrow_ref");
+    }
+    // The TTS prompt commitment uses the SAME canonical hash that the
+    // supplier validated against the escrow datum. If we recompute it from
+    // the request envelope we sent and it doesn't match the receipt, the
+    // supplier signed a receipt for a different request → reject.
+    const expectedPromptHash = ttsPromptHash(request);
+    if (receipt.prompt_hash !== expectedPromptHash) {
+      recordFailure("prompt_hash_mismatch");
+      throw new ReceiptVerificationError("prompt_hash_mismatch");
+    }
+    if (receipt.model !== advertDatum.model) {
+      recordFailure("request_spec_hash_mismatch");
+      throw new ReceiptVerificationError("request_spec_hash_mismatch");
+    }
+    if (typeof receiptSignature !== "string" || !SIG_RE.test(receiptSignature)) {
+      recordFailure("invalid_signature");
+      throw new ReceiptVerificationError("invalid_signature");
+    }
+    if (receiptSignature === ZERO_SIGNATURE) {
+      recordFailure("invalid_signature");
+      throw new ReceiptVerificationError("invalid_signature");
+    }
+    if (!HEX64_RE.test(receipt.prompt_hash) || !HEX64_RE.test(receipt.response_hash)) {
+      recordFailure("malformed_receipt");
+      throw new ReceiptVerificationError("malformed_receipt");
+    }
+
+    this.emitProgress({ type: "receipt_verified", escrow_ref: escrowRefStr });
+
+    this.historyStore.save({
+      escrow_ref: escrowRefStr,
+      supplier_pkh: advertDatum.supplier_pkh,
+      capability_id: advertDatum.capability_id,
+      prompt_preview: text.length <= 100 ? text : text.slice(0, 100),
+      posted_at: postedAtMs,
+      status: "completed",
+      // Reuse the chat history shape — `response` carries a marker; the
+      // SPA renders audio via the live result, not from history.
+      response: `[audio:${responseBody.format ?? format} ${responseBody.byte_length ?? "?"}B]`,
+      receipt,
+      receipt_signature: receiptSignature,
+    });
+
+    return {
+      audio_b64: responseBody.audio_b64,
+      format: responseBody.format ?? format,
+      content_type: responseBody.content_type ?? `audio/${format}`,
+      byte_length: responseBody.byte_length ?? 0,
       receipt,
       receiptSignature,
       escrowRef: escrowOutputRef,
