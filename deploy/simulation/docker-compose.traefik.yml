@@ -1,0 +1,69 @@
+# deploy/simulation/docker-compose.traefik.yml — apex-simulation Traefik
+#
+# Runs as its own compose project so individual services (TTS today,
+# more later) can be brought up/down independently without touching the
+# reverse proxy. Cloudflare terminates TLS in front, so we expose a
+# single :80 entrypoint and rely on CF Full / Flexible SSL for the
+# browser-side connection (same pattern as the apex-dashboard host).
+#
+# Bring up:
+#   docker compose -f deploy/simulation/docker-compose.traefik.yml up -d
+#
+# Verify:
+#   curl -i http://<server-ip>:80    # 404 from Traefik = healthy / no router matched
+
+name: traefik
+
+services:
+  traefik:
+    # `:latest` (currently v3.5+) carries an updated Docker SDK that
+    # negotiates correctly against Docker daemon 29.x. v3.1 — and even
+    # v3.4 with `DOCKER_API_VERSION=1.45` — still requested API 1.24,
+    # which Docker 29 rejects ("Minimum supported API version is 1.40").
+    # Result: provider error loop, no routers ever published.
+    image: traefik:latest
+    container_name: traefik
+    restart: unless-stopped
+    command:
+      # Docker provider — services join `traefik-net` and add labels.
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=traefik-net
+      # Single HTTP entrypoint (Cloudflare does TLS in front).
+      - --entrypoints.web.address=:80
+      # Health probe + access logs.
+      - --ping=true
+      # API (insecure) so we can introspect routers/services on :8080
+      # via `docker exec traefik wget -qO- http://localhost:8080/api/...`.
+      # Not published on the host, so only reachable from inside the
+      # traefik-net or via docker exec.
+      - --api=true
+      - --api.insecure=true
+      - --log.level=DEBUG
+      - --log.format=json
+      - --accesslog=true
+      - --accesslog.format=json
+    ports:
+      - "80:80"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - traefik-net
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+networks:
+  # traefik-net is created once out-of-band (`deploy.sh` does
+  # `docker network create traefik-net`) so the TTS compose project
+  # can also attach to it. Both compose projects mark it `external`.
+  traefik-net:
+    external: true
+    name: traefik-net

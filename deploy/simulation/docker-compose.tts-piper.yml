@@ -1,0 +1,80 @@
+# deploy/simulation/docker-compose.tts-piper.yml — PiperTTS as OpenAI-compatible /v1/audio/speech
+#
+# Wraps rhasspy/piper (CPU neural TTS) behind matatonic/openedai-speech,
+# which exposes the OpenAI Audio API (`POST /v1/audio/speech`). Once
+# online behind Traefik on `apex-simulation`, this becomes a viable
+# capability for a future `audio.synthesize.v1` supplier in the
+# marketplace — same OpenAI-shaped HTTP surface as Ollama for chat.
+#
+# `*-min` image is the CPU/Piper-only variant (the full image pulls
+# parler-tts + xtts which want a GPU). Default model is `en_US-amy-low`
+# — small (~10 MB) and fast on CPU. Add `PRELOAD_MODEL=...` env to
+# pre-warm a different voice on boot.
+#
+# Bring up:
+#   docker compose -f deploy/simulation/docker-compose.tts-piper.yml up -d
+#
+# Quick test (from any host that resolves the Traefik route):
+#   curl -s -X POST https://tts-piper.vector.testnet.apexfusion.org/v1/audio/speech \
+#     -H "Content-Type: application/json" \
+#     -d '{"model":"tts-1","input":"Hello from the marketplace.","voice":"alloy","response_format":"wav"}' \
+#     -o /tmp/out.wav && aplay /tmp/out.wav   # or `mpv` / `ffplay`
+
+name: marketplace-tts-piper
+
+services:
+  tts-piper:
+    image: ghcr.io/matatonic/openedai-speech-min:latest
+    container_name: marketplace-tts-piper
+    restart: unless-stopped
+    environment:
+      # Pre-load Piper's highest-quality American-English voice so first
+      # /v1/audio/speech doesn't pay the model-download tax. `-high`
+      # variants are 60–70 MB and noticeably more natural than `-low`/
+      # `-medium` on CPU. Browse alternatives at
+      # https://huggingface.co/rhasspy/piper-voices/tree/main
+      #   en_US-lessac-high       — clean female, very natural (default)
+      #   en_GB-alan-high         — British male
+      #   en_US-ryan-high         — American male
+      #   en_US-libritts_r-medium — multi-speaker (904 voices)
+      PRELOAD_MODEL: en_US-lessac-high
+      # Expose port — matches the loadbalancer label below.
+      PORT: "8000"
+    volumes:
+      # Host bind mounts (not Docker named volumes) so the deploy user can
+      # `ls`/`du`/back-up the downloaded Piper voices directly without
+      # `docker volume inspect`. Paths are relative to THIS compose file,
+      # i.e. `deploy/simulation/data/tts-piper/{voices,config}` from the
+      # repo root. Create the dirs once before `compose up` (see README).
+      - ./data/tts-piper/voices:/app/voices
+      - ./data/tts-piper/config:/app/config
+    healthcheck:
+      # /v1/models is the OpenAI-shape model list; a 200 here proves the
+      # server is up and at least one voice is loaded. Image ships with
+      # curl (and python3) but NOT wget — using wget here marks the
+      # container unhealthy on every probe, and Traefik then filters it
+      # out of the docker provider ("Filtering unhealthy or starting
+      # container"), which means no router ever registers.
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/v1/models >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+    networks:
+      - traefik-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-net"
+      - "traefik.http.routers.tts-piper.entrypoints=web"
+      - "traefik.http.routers.tts-piper.rule=Host(`tts-piper.vector.testnet.apexfusion.org`)"
+      - "traefik.http.services.tts-piper.loadbalancer.server.port=8000"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  traefik-net:
+    external: true
+    name: traefik-net

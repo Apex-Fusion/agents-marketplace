@@ -9,7 +9,8 @@ coverage
 .env.*
 !.env.example
 
-# Local data / caches
+# Local data / caches (matches at any depth — covers
+# deploy/simulation/data/, indexer/data/, etc.)
 data/
 *.log
 .vitest-cache
@@ -26,3 +27,8 @@ docs/img/*.mmd
 # secrets inside their entries that .gitignore can't strip from a zip.
 # Don't republish them.
 docs/*.zip
+
+# Python bytecode (only present under docs/ reference material).
+# .pyc files can embed absolute dev-machine paths via co_filename.
+__pycache__/
+*.pyc
