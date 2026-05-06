@@ -26,7 +26,13 @@
 
 export type JobStatus = "accepted" | "running" | "done" | "failed";
 
-export interface JobResponsePayload {
+/**
+ * Chat-flavoured terminal payload. Stored when a `runChatJob` succeeds.
+ * Shape mirrors the OpenAI chat-completion response so the buyer-side SDK
+ * can parse it without translation.
+ */
+export interface ChatJobResponsePayload {
+  kind?: "chat";
   choices: Array<{
     index: number;
     message: { role: "assistant"; content: string };
@@ -40,6 +46,30 @@ export interface JobResponsePayload {
   receipt: Record<string, unknown>;
   receipt_signature: string;
 }
+
+/**
+ * TTS-flavoured terminal payload. Stored when a `runTtsJob` succeeds.
+ * Audio bytes are base64-encoded so the in-memory store stays JSON-clean
+ * (and so the GET /v1/audio/synthesize/:jobId poll route can return them
+ * without a binary content-type negotiation).
+ */
+export interface TtsJobResponsePayload {
+  kind: "tts";
+  audio_b64: string;
+  format: string;            // "mp3" | "wav" | …
+  content_type: string;      // verbatim from upstream Piper, e.g. "audio/mpeg"
+  byte_length: number;
+  receipt: Record<string, unknown>;
+  receipt_signature: string;
+}
+
+/**
+ * Discriminated union of every job-payload shape the store can hold.
+ * `kind` defaults to "chat" on the chat shape (older code paths don't
+ * set it; new `runChatJob` writes can set kind: "chat" explicitly to make
+ * the discriminator narrowing reliable).
+ */
+export type JobResponsePayload = ChatJobResponsePayload | TtsJobResponsePayload;
 
 export interface JobFailure {
   httpStatus: number;

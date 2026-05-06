@@ -28,7 +28,20 @@ export function buildSampleConfig(): SupplierConfig {
     networkId: 0,
     port: 8080,
     ollamaTimeoutMs: 120_000,
+    piperUrl: "",
+    piperTimeoutMs: 120_000,
+    capabilityKind: "chat",
     liveChain: false,
+  };
+}
+
+/** TTS variant: same wallet/chain plumbing, capabilityKind="tts" + Piper URL set. */
+export function buildSampleTtsConfig(): SupplierConfig {
+  return {
+    ...buildSampleConfig(),
+    ollamaUrl: "",
+    piperUrl: "http://piper.fake",
+    capabilityKind: "tts",
   };
 }
 

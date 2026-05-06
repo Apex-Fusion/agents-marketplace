@@ -36,7 +36,13 @@ import { createHash } from "crypto";
 import type { SupplierState } from "./state.js";
 import type { SupplierConfig } from "./config.js";
 import * as ollama from "./ollama.js";
-import type { JobStore, JobResponsePayload } from "./jobs.js";
+import * as piper from "./piper.js";
+import type {
+  JobStore,
+  JobResponsePayload,
+  ChatJobResponsePayload,
+  TtsJobResponsePayload,
+} from "./jobs.js";
 
 export interface RunChatJobDeps {
   chain: ChainProvider;
@@ -145,7 +151,8 @@ export async function runChatJob(params: RunChatJobParams): Promise<void> {
     }
 
     // ── 6. Mark complete ────────────────────────────────────────────────
-    const payload: JobResponsePayload = {
+    const payload: ChatJobResponsePayload = {
+      kind: "chat",
       choices: [
         {
           index: 0,
@@ -168,6 +175,138 @@ export async function runChatJob(params: RunChatJobParams): Promise<void> {
       deps.state.release();
     } catch {
       // never let a lock-release error escape the runner
+    }
+  }
+}
+
+// ─── runTtsJob ────────────────────────────────────────────────────────────
+//
+// Mirror of runChatJob for the audio.synthesize.piper.v1 capability. Same
+// 7-step shape (setRunning → upstream → receipt → buildSubmit → awaitTx →
+// complete → finally release). Differences from chat path:
+//
+//   - Upstream is `piper.callPiper` returning audio bytes + content-type,
+//     not Ollama returning text + token counts.
+//   - response_hash = sha256(audio_bytes) — opaque-bytes commitment, in
+//     contrast to chat which hashes a canonicalised assistant message JSON.
+//   - prompt_tokens / completion_tokens are reported as 0 in the receipt;
+//     Piper has no token concept and the on-chain validator doesn't read
+//     these fields (they're off-chain billing metadata only).
+//   - JobStore terminal payload is `TtsJobResponsePayload` with audio_b64.
+
+export interface RunTtsJobParams {
+  deps: RunChatJobDeps;
+  jobId: string;
+  escrowRef: string;
+  claimedRef: OutputReference;
+  advert: AdvertDatum;
+  escrowDatum: EscrowDatum;
+  /** The TTS request body fields. The PROMPT_HASH committed by the buyer in
+   * the escrow datum is sha256(canonicalize(this same object)), so the
+   * supplier reproduces that hash and validates it before claiming. */
+  requestBody: { text: string; voice: string; format: string; speed: number };
+}
+
+function sha256BytesHex(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+export async function runTtsJob(params: RunTtsJobParams): Promise<void> {
+  const { deps, jobId, escrowRef, claimedRef, advert, escrowDatum, requestBody } = params;
+
+  deps.jobs.setRunning(jobId);
+
+  try {
+    // ── 2. Call Piper ─────────────────────────────────────────────────
+    let inference: piper.PiperResult;
+    try {
+      inference = await piper.callPiper({
+        piperUrl: deps.config.piperUrl,
+        text: requestBody.text,
+        voice: requestBody.voice,
+        format: requestBody.format,
+        speed: requestBody.speed,
+        timeoutMs: deps.config.piperTimeoutMs,
+      });
+    } catch (err) {
+      const reason = (err as piper.PiperError)?.reason ?? "piper_failure";
+      const message = err instanceof Error ? err.message : String(err);
+      deps.jobs.fail(jobId, {
+        httpStatus: 502,
+        reason: reason === "piper_timeout" ? "piper_failure" : reason,
+        message,
+      });
+      return;
+    }
+
+    // ── 3. Build + sign receipt ───────────────────────────────────────
+    const responseHash = sha256BytesHex(inference.audio);
+
+    const receipt = buildReceipt({
+      prompt_hash: escrowDatum.prompt_hash,
+      response_hash: responseHash,
+      model: advert.model,
+      // Piper has no token semantics — pin both to 0 so the field is present
+      // but doesn't masquerade as a real token count. Off-chain only; the
+      // validator never reads these.
+      prompt_tokens: 0,
+      completion_tokens: 0,
+      wallclock_ms: inference.wallclock_ms,
+      supplier_pkh: deps.supplierKey.pubKeyHash,
+      escrow_ref: escrowRef,
+    });
+    const signed = signReceipt(receipt, deps.supplierKey.privateKeyHex);
+    const resultHash = receiptResultHash(signed);
+
+    // ── 4. Build + submit Submit tx ───────────────────────────────────
+    let buildResult: { txCborHex: string; expectedTxHash: string };
+    try {
+      buildResult = await buildSubmitTx({
+        chain: deps.chain,
+        supplierKey: deps.supplierKey,
+        escrowRef: claimedRef,
+        receiptHash: resultHash,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      deps.jobs.fail(jobId, {
+        httpStatus: 502,
+        reason: "submit_failed",
+        message: `Submit tx failed: ${message}`,
+      });
+      return;
+    }
+
+    // ── 5. Submit confirmation ────────────────────────────────────────
+    try {
+      await deps.chain.awaitTx(buildResult.expectedTxHash, 60_000);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      deps.jobs.fail(jobId, {
+        httpStatus: 502,
+        reason: "submit_timeout",
+        message: `Submit awaitTx failed: ${msg}`,
+      });
+      return;
+    }
+
+    // ── 6. Mark complete ──────────────────────────────────────────────
+    const audio_b64 = Buffer.from(inference.audio).toString("base64");
+    const payload: TtsJobResponsePayload = {
+      kind: "tts",
+      audio_b64,
+      format: requestBody.format,
+      content_type: inference.contentType,
+      byte_length: inference.audio.byteLength,
+      receipt: signed.receipt as unknown as Record<string, unknown>,
+      receipt_signature: signed.signature,
+    };
+    deps.jobs.complete(jobId, payload);
+  } finally {
+    try {
+      deps.state.release();
+    } catch {
+      /* never let lock-release escape */
     }
   }
 }

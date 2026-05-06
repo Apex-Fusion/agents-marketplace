@@ -7,13 +7,24 @@
  * Required env vars:
  *   SUPPLIER_PRIV_KEY_HEX  — 64-char hex Ed25519 private key
  *   OGMIOS_URL             — ws:// or wss:// URL
- *   OLLAMA_URL             — http:// URL for local Ollama
  *   ADVERT_REF             — "<64hex>#<int>" OutputReference to the supplier's advert UTxO
  *   NETWORK_ID             — "0" (testnet) or "1" (mainnet)
  *
+ * Required for CAPABILITY_KIND="chat" (default):
+ *   OLLAMA_URL             — http:// URL for local Ollama
+ *
+ * Required for CAPABILITY_KIND="tts":
+ *   PIPER_URL              — http(s):// URL for the openedai-speech-min PiperTTS host
+ *
  * Optional:
+ *   CAPABILITY_KIND        — "chat" (default) or "tts". Selects which upstream
+ *                            adapter is loaded and which HTTP route is mounted.
+ *                            The route handler still validates the on-chain
+ *                            advert's capability_id; this env just decides
+ *                            which dispatch lives in the process.
  *   PORT                   — listen port (default 8080)
  *   OLLAMA_TIMEOUT_MS      — ollama request timeout in ms (default 120_000)
+ *   PIPER_TIMEOUT_MS       — piper request timeout in ms (default 120_000)
  *   LIVE_CHAIN             — "1" opts in to live-chain submit/await (default off).
  *                            Any other value (including "true", "yes", "TRUE")
  *                            keeps the supplier in read-only mode for safety.
@@ -32,14 +43,22 @@ export interface AdvertRef {
   index: number;
 }
 
+/** Capability the supplier is configured to serve. */
+export type CapabilityKind = "chat" | "tts";
+
 export interface SupplierConfig {
   supplierPrivKeyHex: string;
   ogmiosUrl: string;
+  /** Empty string when capabilityKind="tts". */
   ollamaUrl: string;
+  /** Empty string when capabilityKind="chat". */
+  piperUrl: string;
   advertRef: AdvertRef;
   networkId: 0 | 1;
   port: number;
   ollamaTimeoutMs: number;
+  piperTimeoutMs: number;
+  capabilityKind: CapabilityKind;
   /**
    * When true, the supplier boots a LiveOgmiosProvider (real submitTx/awaitTx).
    * Default false → ReadOnlyOgmiosProvider (safe; no chain writes).
@@ -82,7 +101,29 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
   }
 
   const ogmiosUrl = requireField(env, "OGMIOS_URL");
-  const ollamaUrl = requireField(env, "OLLAMA_URL");
+
+  // CAPABILITY_KIND drives whether OLLAMA_URL or PIPER_URL is required.
+  // Default to "chat" so existing chat suppliers keep booting unchanged.
+  const capKindStr = env.CAPABILITY_KIND ?? "chat";
+  if (capKindStr !== "chat" && capKindStr !== "tts") {
+    throw new Error('loadConfig: CAPABILITY_KIND must be "chat" or "tts"');
+  }
+  const capabilityKind: CapabilityKind = capKindStr;
+
+  // Per-capability upstream URL — the OTHER capability's URL becomes
+  // optional/unused. The route handler also validates the on-chain advert's
+  // capability_id, so a misconfiguration here can't trick a TTS supplier into
+  // serving chat traffic; this gate just keeps the process boot honest.
+  let ollamaUrl = "";
+  let piperUrl = "";
+  if (capabilityKind === "chat") {
+    ollamaUrl = requireField(env, "OLLAMA_URL");
+    piperUrl = env.PIPER_URL ?? "";
+  } else {
+    piperUrl = requireField(env, "PIPER_URL");
+    ollamaUrl = env.OLLAMA_URL ?? "";
+  }
+
   const advertRefStr = requireField(env, "ADVERT_REF");
   const advertRef = parseAdvertRef(advertRefStr);
 
@@ -110,6 +151,15 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
     ollamaTimeoutMs = Number(timeoutStr);
   }
 
+  const piperTimeoutStr = env.PIPER_TIMEOUT_MS;
+  let piperTimeoutMs = 120_000;
+  if (piperTimeoutStr !== undefined && piperTimeoutStr !== "") {
+    if (!POS_INT_RE.test(piperTimeoutStr)) {
+      throw new Error("loadConfig: PIPER_TIMEOUT_MS must be a positive integer");
+    }
+    piperTimeoutMs = Number(piperTimeoutStr);
+  }
+
   // LIVE_CHAIN: only the literal "1" opts in to live-chain mode. Any other
   // value (including "true", "yes", "TRUE", "", undefined) keeps the supplier
   // in safe read-only mode. Real submissions require explicit opt-in.
@@ -119,10 +169,13 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
     supplierPrivKeyHex,
     ogmiosUrl,
     ollamaUrl,
+    piperUrl,
     advertRef,
     networkId,
     port,
     ollamaTimeoutMs,
+    piperTimeoutMs,
+    capabilityKind,
     liveChain,
   };
 }

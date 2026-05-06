@@ -43,7 +43,7 @@ import { buildClaimTx, mockSlotToWallclockMs, detectCborBackend } from "@marketp
 import type { SupplierState } from "./state.js";
 import type { SupplierConfig } from "./config.js";
 import { JobStore } from "./jobs.js";
-import { runChatJob } from "./jobRunner.js";
+import { runChatJob, runTtsJob } from "./jobRunner.js";
 import { healthzRouter } from "./routes/healthz.js";
 
 export interface SupplierDeps {
@@ -382,9 +382,244 @@ function makeGetJobHandler(deps: ResolvedDeps) {
     }
     if (record.status === "done") {
       const payload = record.responsePayload!;
+      // Defensive narrowing: this poll route only knows how to render the
+      // chat shape. A future shared JobStore could mix capabilities; we'd
+      // want each kind's poll to be sure it's reading its own.
+      if ("audio_b64" in payload) {
+        return jsonError(res, 500, "wrong_payload_kind",
+          "tts payload returned to chat poll route");
+      }
       return res.status(200).json({
         choices: payload.choices,
         usage: payload.usage,
+        receipt: payload.receipt,
+        receipt_signature: payload.receipt_signature,
+        escrow_ref: record.escrowRef,
+      });
+    }
+    // failed
+    const f = record.failure!;
+    return res.status(f.httpStatus).json({
+      status: "failed",
+      reason: f.reason,
+      message: f.message,
+      escrow_ref: record.escrowRef,
+    });
+  };
+}
+
+// ─── POST /v1/audio/synthesize ──────────────────────────────────────────────
+//
+// Mirror of makeChatHandler for the audio.synthesize.piper.v1 capability.
+// Same lifecycle (validate → resolve advert → resolve escrow → hash check →
+// claim → fire-and-forget runner → 202). Differences:
+//   - body shape: { text, voice, format, speed } (no messages array)
+//   - prompt_hash is sha256(canonical({text, voice, format, speed})), so the
+//     escrow datum the buyer commits MUST hash the same object shape — see
+//     packages/shared/src/tx/escrow/postEscrow*.ts (TTS variant).
+
+const ALLOWED_TTS_VOICES = new Set([
+  "alloy", "echo", "fable", "onyx", "nova", "shimmer", "lessac",
+]);
+const ALLOWED_TTS_FORMATS = new Set(["mp3", "wav", "opus", "aac", "flac"]);
+
+function makeTtsHandler(deps: ResolvedDeps) {
+  return async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      // ── 1. Header ───────────────────────────────────────────────────
+      const headerVal = req.header("X-Escrow-Ref");
+      if (!headerVal) {
+        return jsonError(res, 400, "escrow_ref_required", "X-Escrow-Ref header is required");
+      }
+      const escrowRef = parseEscrowRef(headerVal);
+      if (escrowRef === null) {
+        return jsonError(res, 400, "escrow_ref_malformed",
+          'X-Escrow-Ref must match "<64-hex>#<int>"');
+      }
+      const escrowRefStr = `${escrowRef.txHash}#${escrowRef.index}`;
+
+      // ── 2. Body ─────────────────────────────────────────────────────
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const text = typeof body.text === "string" ? body.text : "";
+      if (text.length === 0) {
+        return jsonError(res, 400, "text_required", "body.text must be a non-empty string");
+      }
+      const voice = typeof body.voice === "string" ? body.voice : "";
+      if (!ALLOWED_TTS_VOICES.has(voice)) {
+        return jsonError(res, 400, "voice_invalid",
+          `voice must be one of: ${[...ALLOWED_TTS_VOICES].join(", ")}`);
+      }
+      const format = typeof body.format === "string" ? body.format : "";
+      if (!ALLOWED_TTS_FORMATS.has(format)) {
+        return jsonError(res, 400, "format_invalid",
+          `format must be one of: ${[...ALLOWED_TTS_FORMATS].join(", ")}`);
+      }
+      const speedRaw = body.speed;
+      const speed = typeof speedRaw === "number" ? speedRaw : Number(speedRaw);
+      if (!Number.isFinite(speed) || speed < 0.5 || speed > 1.5) {
+        return jsonError(res, 400, "speed_out_of_range",
+          "speed must be a finite number in [0.5, 1.5]");
+      }
+
+      // ── 3. Advert ───────────────────────────────────────────────────
+      const advertResult = await fetchActiveAdvert(deps);
+      if ("error" in advertResult) {
+        const e = advertResult.error;
+        return jsonError(res, e.status, e.reason, e.message);
+      }
+      const advert = advertResult.datum;
+
+      // ── 4. Escrow ───────────────────────────────────────────────────
+      const escrowUtxo = await deps.chain.queryUtxo(escrowRef);
+      if (escrowUtxo === null || !escrowUtxo.datumHex) {
+        return jsonError(res, 404, "escrow_not_found",
+          `escrow UTxO ${escrowRefStr} not found on chain`);
+      }
+      let escrowDatum: EscrowDatum;
+      try {
+        escrowDatum = decodeEscrowDatum(escrowUtxo.datumHex);
+      } catch (err) {
+        return jsonError(res, 404, "escrow_decode_failed", (err as Error).message);
+      }
+
+      // ── 5. State / identity / capability ────────────────────────────
+      if (escrowDatum.state !== "Open") {
+        return jsonError(res, 409, "escrow_not_claimable",
+          `escrow state is ${escrowDatum.state}, expected Open`);
+      }
+      if (escrowDatum.supplier_pkh !== deps.supplierKey.pubKeyHash) {
+        return jsonError(res, 403, "wrong_supplier",
+          "escrow supplier_pkh does not match this node");
+      }
+      if (escrowDatum.capability_id !== advert.capability_id) {
+        return jsonError(res, 409, "capability_mismatch",
+          `escrow capability ${escrowDatum.capability_id} != advert ${advert.capability_id}`);
+      }
+
+      // ── 6. Hash checks ──────────────────────────────────────────────
+      const expectedRequestSpecHash = sha256Hex(canonicalize({
+        capability_id: advert.capability_id,
+        max_output_tokens: advert.max_output_tokens,
+        model: advert.model,
+      }));
+      if (escrowDatum.request_spec_hash !== expectedRequestSpecHash) {
+        return jsonError(res, 409, "request_spec_mismatch",
+          "request_spec_hash in escrow does not match advert spec");
+      }
+      // The TTS prompt commitment is the canonicalisation of the full
+      // request envelope (text + voice + format + speed). The buyer SDK
+      // computes the same shape when building the escrow datum.
+      const expectedPromptHash = sha256Hex(canonicalize({
+        text, voice, format, speed,
+      }));
+      if (escrowDatum.prompt_hash !== expectedPromptHash) {
+        return jsonError(res, 409, "prompt_mismatch",
+          "prompt_hash in escrow does not match request body");
+      }
+
+      // ── 7. Deadline ─────────────────────────────────────────────────
+      const tipSlot = await deps.chain.tip();
+      const isLive = detectCborBackend(deps.chain) === "live";
+      const nowMs = isLive
+        ? Date.now()
+        : Math.max(mockSlotToWallclockMs(tipSlot), escrowDatum.posted_at);
+      if (nowMs >= escrowDatum.deliver_by) {
+        return jsonError(res, 408, "past_deliver_by",
+          `now ${nowMs} >= deliver_by ${escrowDatum.deliver_by}`);
+      }
+
+      // ── 8. Lock ─────────────────────────────────────────────────────
+      if (!deps.state.tryAcquire(escrowRefStr)) {
+        return jsonError(res, 409, "supplier_busy", "supplier is already working another job");
+      }
+
+      // ── 9. Claim tx ─────────────────────────────────────────────────
+      let claimResult;
+      try {
+        claimResult = await buildClaimTx({
+          chain: deps.chain,
+          supplierKey: deps.supplierKey,
+          escrowRef,
+        });
+      } catch (err) {
+        deps.state.release();
+        return jsonError(res, 503, "chain_submit_failed",
+          `Claim tx submit failed: ${(err as Error).message}`);
+      }
+      try {
+        await deps.chain.awaitTx(claimResult.expectedTxHash, 60_000);
+      } catch (err) {
+        deps.state.release();
+        return jsonError(res, 504, "claim_timeout",
+          `Claim awaitTx failed: ${(err as Error).message}`);
+      }
+
+      // ── 10. Spawn runner + 202 ──────────────────────────────────────
+      const claimedRef: OutputReference = {
+        txHash: claimResult.expectedTxHash,
+        index: 0,
+      };
+      const jobId = deps.jobs.create(escrowRefStr);
+
+      void runTtsJob({
+        deps: {
+          chain: deps.chain,
+          state: deps.state,
+          config: deps.config,
+          supplierKey: deps.supplierKey,
+          jobs: deps.jobs,
+        },
+        jobId,
+        escrowRef: escrowRefStr,
+        claimedRef,
+        advert,
+        escrowDatum,
+        requestBody: { text, voice, format, speed },
+      });
+
+      return res.status(202).json({
+        job_id: jobId,
+        status: "accepted",
+        escrow_ref: escrowRefStr,
+      });
+    } catch (err) {
+      try { deps.state.release(); } catch { /* ignore */ }
+      next(err);
+      return;
+    }
+  };
+}
+
+// ─── GET /v1/audio/synthesize/:jobId ────────────────────────────────────────
+function makeGetTtsJobHandler(deps: ResolvedDeps) {
+  return (req: Request, res: Response) => {
+    const rawJobId = req.params.jobId;
+    const jobId = typeof rawJobId === "string" ? rawJobId : "";
+    if (!UUID_V4_RE.test(jobId)) {
+      return jsonError(res, 400, "invalid_job_id", "jobId must be a UUIDv4 string");
+    }
+    const record = deps.jobs.get(jobId);
+    if (!record) {
+      return jsonError(res, 404, "job_not_found", `no job found with id ${jobId}`);
+    }
+    res.setHeader("Content-Type", "application/json");
+    if (record.status === "accepted" || record.status === "running") {
+      return res.status(202).json({
+        status: record.status,
+        escrow_ref: record.escrowRef,
+      });
+    }
+    if (record.status === "done") {
+      const payload = record.responsePayload!;
+      if (!("audio_b64" in payload)) {
+        return jsonError(res, 500, "wrong_payload_kind",
+          "chat payload returned to tts poll route");
+      }
+      return res.status(200).json({
+        audio_b64: payload.audio_b64,
+        format: payload.format,
+        content_type: payload.content_type,
+        byte_length: payload.byte_length,
         receipt: payload.receipt,
         receipt_signature: payload.receipt_signature,
         escrow_ref: record.escrowRef,
@@ -422,8 +657,20 @@ export function createApp(deps: SupplierDeps): Application {
 
   app.get("/capability", makeCapabilityHandler(resolved));
   app.get("/status", makeStatusHandler(resolved));
-  app.post("/v1/chat/completions", makeChatHandler(resolved));
-  app.get("/v1/chat/completions/:jobId", makeGetJobHandler(resolved));
+
+  // Dispatch by configured capability. The supplier is a single-capability
+  // process — it advertises one on-chain capability_id and serves one route
+  // shape. Hard-mounting the wrong route would let a misconfigured client
+  // hang on a request that's guaranteed to fail capability validation; we'd
+  // rather it 404 immediately. (The on-chain capability_id check still runs
+  // on every request, so this is belt-and-braces.)
+  if (resolved.config.capabilityKind === "tts") {
+    app.post("/v1/audio/synthesize", makeTtsHandler(resolved));
+    app.get("/v1/audio/synthesize/:jobId", makeGetTtsJobHandler(resolved));
+  } else {
+    app.post("/v1/chat/completions", makeChatHandler(resolved));
+    app.get("/v1/chat/completions/:jobId", makeGetJobHandler(resolved));
+  }
 
   // Centralised error handler (4 args required by Express).
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
