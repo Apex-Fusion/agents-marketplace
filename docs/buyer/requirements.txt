@@ -1,0 +1,9 @@
+fastapi>=0.104.0
+uvicorn>=0.24.0
+httpx>=0.27.0
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+aiofiles>=23.0.0
+pycardano>=0.11.0
+cbor2>=5.4.0
+vector-agent>=0.1.0

@@ -1,0 +1,53 @@
+# MAINNET DEPLOYMENT — DEFERRED
+# Wired but not yet exercised. Mainnet rollout requires:
+#   - ARCHITECTURE.md §9 #5 (mainnet safety: env-gate, wallet allowlist, MAINNET=1 flag)
+#   - Real funded mainnet wallets
+#   - Vector mainnet ogmios stack (apex-dashboard-mainnet) running on the same host
+# Do NOT `docker compose up` until those land.
+#
+# deploy/mainnet/docker-compose.buyer.yml — Buyer (Express + Vite UI) — MAINNET
+
+name: marketplace-mainnet-buyer
+
+services:
+  buyer:
+    build:
+      context: ../..
+      dockerfile: buyer/Dockerfile
+    container_name: marketplace-mainnet-buyer
+    restart: unless-stopped
+    env_file:
+      - path: ../../buyer/.env
+        required: false
+    environment:
+      INDEXER_URL: http://marketplace-mainnet-indexer:8090
+      BUYER_PORT: "8070"
+      # NETWORK_ID intentionally not pinned — see supplier compose comment.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8070/healthz >/dev/null || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - marketplace-mainnet-net
+      - traefik-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=dashboard_default"
+      - "traefik.http.routers.mp-buyer-mainnet.entrypoints=web"
+      - "traefik.http.routers.mp-buyer-mainnet.rule=Host(`mp.vector.apexfusion.org`)"
+      - "traefik.http.services.mp-buyer-mainnet.loadbalancer.server.port=8070"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  marketplace-mainnet-net:
+    external: true
+    name: marketplace-mainnet-net
+  traefik-net:
+    external: true
+    name: dashboard_default

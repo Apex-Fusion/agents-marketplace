@@ -1,0 +1,50 @@
+# deploy/traefik.yml — STUB. Not wired into docker-compose.yml.
+#
+# To enable HTTPS termination via Traefik:
+#   1. Add a `traefik` service to docker-compose.yml that mounts this file
+#      at /etc/traefik/traefik.yml and the docker socket read-only.
+#   2. Add a `traefik-net` network (external or co-managed).
+#   3. Add traefik.http.routers.* labels to the buyer / supplier / indexer
+#      services pointing at the appropriate hostnames.
+#   4. Set `tls.certResolver=letsencrypt` and let the ACME loop populate
+#      acme.json via DNS-01 or HTTP-01 challenge.
+#
+# Apex-dashboard runs this exact pattern via its `dashboard_default`
+# external network — see the apex-dashboard project's docker-compose.yml
+# for the working labels reference.
+#
+# Until M1-F-mainnet, this file is reference-only.
+
+api:
+  dashboard: true
+  insecure: false
+
+entryPoints:
+  web:
+    address: ":80"
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+          permanent: true
+  websecure:
+    address: ":443"
+
+providers:
+  docker:
+    exposedByDefault: false
+    network: traefik-net
+
+certificatesResolvers:
+  letsencrypt:
+    acme:
+      email: PASTE_OPERATOR_EMAIL_HERE
+      storage: /letsencrypt/acme.json
+      httpChallenge:
+        entryPoint: web
+
+log:
+  level: INFO
+
+accessLog: {}

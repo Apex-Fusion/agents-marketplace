@@ -1,0 +1,66 @@
+# Top-level .dockerignore — applies to every `docker build` invoked with
+# the repo root as the context (which is what all three service Dockerfiles
+# use, so they can resolve the workspace via pnpm).
+#
+# We keep this conservative on purpose: each service Dockerfile is explicit
+# about which directories it COPYs in (packages/shared + its own dir), so we
+# don't strictly need to exclude every other service's source. But excluding
+# build artifacts and secrets at the context layer makes builds faster and
+# safer.
+
+# Dependencies — installed inside builder stage, not from host
+**/node_modules
+
+# Compiled / built artifacts (Vite + tsc) — rebuilt in builder
+**/dist
+**/build
+**/.vite
+**/.vitest-cache
+**/*.tsbuildinfo
+
+# Logs
+**/*.log
+logs/
+
+# Environment files (NEVER ship local .env into images)
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# Local data dirs (SQLite cache, etc.) — handled via named volumes
+data/
+indexer/data/
+
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Git metadata
+.git
+.gitignore
+.gitattributes
+
+# CI / scripts not needed for runtime
+.github/
+coverage/
+
+# Tests — not needed in production images
+**/tests
+**/*.test.ts
+**/*.test.tsx
+**/*.spec.ts
+**/*.spec.tsx
+
+# Docs — not needed in production images
+docs/
+README.md
+deploy/
+
+# Contracts (Aiken/Plutus build outputs)
+contracts/build/
+contracts/.aiken/

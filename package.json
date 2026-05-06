@@ -1,0 +1,41 @@
+{
+  "name": "local-agents-marketplace",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Cardano Vector-L2 marketplace where buyers pay AP3X via on-chain bonded escrow for prompts, and suppliers return OpenAI-compatible responses with signed receipts.",
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=9.0.0"
+  },
+  "packageManager": "pnpm@10.33.2",
+  "scripts": {
+    "typecheck": "pnpm -r typecheck",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.4.0",
+    "@testing-library/react": "^16.0.0",
+    "@testing-library/user-event": "^14.5.2",
+    "@types/eventsource": "^1.1.15",
+    "@types/express": "^5.0.3",
+    "@types/node": "^25.6.0",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "@types/supertest": "^6.0.2",
+    "@vitejs/plugin-react": "^4.3.0",
+    "@vitest/coverage-v8": "2.1.9",
+    "cbor-x": "^1.5.4",
+    "eventsource": "^2.0.2",
+    "express": "^4.21.2",
+    "happy-dom": "^15.7.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.26.0",
+    "supertest": "^7.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

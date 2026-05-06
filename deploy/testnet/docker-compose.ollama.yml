@@ -1,0 +1,52 @@
+# deploy/testnet/docker-compose.ollama.yml — Ollama (local LLM) — TESTNET
+#
+# REVIEW DRAFT. Independent compose project so it can be started/stopped
+# without affecting supplier/indexer/buyer.
+#
+# Networks:
+#   - marketplace-net (external) — internal service-to-service hostname
+#     `marketplace-ollama` resolves here. The supplier reaches Ollama via
+#     http://marketplace-ollama:11434.
+#
+# One-shot prerequisite (run once on the host):
+#   docker network create marketplace-net
+#
+# Bring up:
+#   docker compose -f deploy/testnet/docker-compose.ollama.yml up -d
+#
+# After the container is healthy, pull the model:
+#   docker exec marketplace-ollama ollama pull qwen2.5:0.5b
+
+name: marketplace-ollama
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: marketplace-ollama
+    restart: unless-stopped
+    # No ports: section — ollama is reachable only via marketplace-net.
+    volumes:
+      - marketplace_ollama_models:/root/.ollama
+    healthcheck:
+      # `ollama list` exits 0 when the daemon is reachable, regardless of
+      # whether any model is pulled yet.
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - marketplace-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  marketplace-net:
+    external: true
+    name: marketplace-net
+
+volumes:
+  marketplace_ollama_models:

@@ -1,0 +1,18 @@
+# indexer/.dockerignore — defence-in-depth (top-level .dockerignore is primary).
+
+node_modules
+dist
+*.tsbuildinfo
+.vitest-cache
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+.git
+data/
+*.db
+*.db-shm
+*.db-wal
+tests/
+**/*.test.ts

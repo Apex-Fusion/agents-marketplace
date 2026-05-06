@@ -1,0 +1,177 @@
+/**
+ * buyer/src/sdk/types.ts — SDK-specific types for M1-E.
+ *
+ * Stub — all runtime values throw until M1-E-green.
+ */
+
+import type { Receipt } from "@marketplace/shared/receipt";
+import type { SignedReceipt } from "@marketplace/shared/receipt";
+import type { OutputReference } from "@marketplace/shared/chain";
+
+// Re-export for consumers
+export type { Receipt, SignedReceipt };
+
+/**
+ * SubmitPromptResult — returned from Marketplace.submitPrompt() on success.
+ */
+export interface SubmitPromptResult {
+  /** The assistant content string from the supplier's response. */
+  response: string;
+  /** Full receipt object, validated and canonical. */
+  receipt: Receipt;
+  /** Ed25519 hex signature over canonical(receipt), 64 bytes. */
+  receiptSignature: string;
+  /** The escrow OutputReference created for this prompt. */
+  escrowRef: OutputReference;
+}
+
+/**
+ * TaskStatus — lifecycle states for a recorded task.
+ */
+export type TaskStatus = "pending" | "completed" | "failed" | "reclaimed";
+
+/**
+ * TaskRecord — stored in TaskHistoryStore (localStorage-backed or memory).
+ */
+export interface TaskRecord {
+  escrow_ref: string;                // "<txHash>#<index>"
+  supplier_pkh: string;              // 28-byte hex
+  capability_id: string;
+  prompt_preview: string;            // first 100 chars of first user message
+  posted_at: number;                 // POSIX ms
+  status: TaskStatus;
+  response?: string;                 // set on completed
+  receipt?: Receipt;                 // set on completed
+  receipt_signature?: string;        // set on completed
+  failure_reason?: string;           // set on failed
+}
+
+/**
+ * ProgressEventType — names of events emitted by Marketplace.
+ */
+export type ProgressEventType =
+  | "escrow_posted"
+  | "supplier_called"
+  | "receipt_verified"
+  | "accept_submitted"
+  | "reclaim_submitted"
+  | "chain_submit_failed";
+
+/**
+ * ProgressEvent — payload emitted via EventEmitter on each step.
+ */
+export interface ProgressEvent {
+  type: ProgressEventType;
+  escrow_ref?: string;
+  detail?: string;
+}
+
+/**
+ * ReceiptVerificationError — thrown when receipt signature or fields are invalid.
+ * `reason` is a machine-readable snake_case identifier tests assert against.
+ */
+export class ReceiptVerificationError extends Error {
+  public readonly reason: string;
+
+  constructor(reason: string, message?: string) {
+    super(message ?? reason);
+    this.name = "ReceiptVerificationError";
+    this.reason = reason;
+  }
+}
+
+/**
+ * IndexerError — thrown when the indexer returns a non-2xx or unparseable response.
+ */
+export class IndexerError extends Error {
+  public readonly status?: number;
+  public readonly reason: string;
+
+  constructor(reason: string, opts?: { status?: number; message?: string }) {
+    super(opts?.message ?? reason);
+    this.name = "IndexerError";
+    this.reason = reason;
+    this.status = opts?.status;
+  }
+}
+
+/**
+ * SupplierError — thrown when the supplier returns a non-2xx, times out, or
+ * returns a malformed response body.
+ */
+export class SupplierError extends Error {
+  public readonly status?: number;
+  public readonly reason: string;
+
+  constructor(reason: string, opts?: { status?: number; message?: string }) {
+    super(opts?.message ?? reason);
+    this.name = "SupplierError";
+    this.reason = reason;
+    this.status = opts?.status;
+  }
+}
+
+/**
+ * SupplierView — the shape returned by GET /suppliers (indexer).
+ * Matches indexer/src/routes/suppliers.ts `SupplierView`.
+ */
+export interface SupplierView {
+  utxo_ref: string;
+  supplier_pkh: string;
+  capability_id: string;
+  model: string;
+  max_output_tokens: number;
+  max_processing_ms: number;
+  price_lovelace: string;
+  supplier_bond_lovelace: string;
+  buyer_bond_lovelace: string;
+  endpoint_url: string;
+  detail_uri: string;
+  detail_hash: string;
+  advertised_at: number;
+  status: string;
+  advert_status: string;
+  current_escrow_ref: string | null;
+  last_seen_iso: string | null;
+  created_slot: number;
+}
+
+/**
+ * DiscoverSuppliersOptions — optional filters for discoverSuppliers().
+ */
+export interface DiscoverSuppliersOptions {
+  capability_id?: string;
+  sort?: "price" | "last_seen";
+}
+
+/**
+ * SubmitPromptOptions — arguments to Marketplace.submitPrompt().
+ */
+export interface SubmitPromptOptions {
+  advertRef: OutputReference;
+  messages: import("@marketplace/shared/tx").ChatMessage[];
+  payment_lovelace: bigint;
+  max_output_tokens?: number;
+}
+
+/**
+ * AcceptResultOptions — arguments to Marketplace.acceptResult().
+ */
+export interface AcceptResultOptions {
+  escrowRef: OutputReference;
+}
+
+/**
+ * ReclaimOptions — arguments to Marketplace.reclaim().
+ */
+export interface ReclaimOptions {
+  escrowRef: OutputReference;
+}
+
+/**
+ * GetTaskHistoryOptions — optional filters for getTaskHistory().
+ */
+export interface GetTaskHistoryOptions {
+  status?: TaskStatus;
+  supplier?: string;   // supplier_pkh
+}

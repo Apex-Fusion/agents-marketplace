@@ -1,0 +1,79 @@
+# deploy/testnet/docker-compose.supplier.yml — Supplier — TESTNET
+#
+# REVIEW DRAFT. Independent compose project. Joins three external networks:
+#
+#   marketplace-net           service-to-service (ollama, indexer, buyer)
+#   apex-dashboard_apex-net   reaches ws://ogmios:1337 in the apex-dashboard
+#                             testnet stack
+#   dashboard_default         Traefik public entrypoint
+#
+# All three networks must already exist on the host:
+#   docker network create marketplace-net                  # one-shot
+#   # apex-dashboard_apex-net is created by the apex-dashboard testnet stack
+#   # dashboard_default       is created by the Traefik project
+#
+# Build context is ../.. so pnpm sees the workspace root.
+#
+# Bring up:
+#   docker compose -f deploy/testnet/docker-compose.supplier.yml up -d
+
+name: marketplace-supplier
+
+services:
+  supplier:
+    build:
+      context: ../..
+      dockerfile: supplier/Dockerfile
+    container_name: marketplace-supplier
+    restart: unless-stopped
+    env_file:
+      - path: ../../supplier/.env
+        required: false
+    environment:
+      # Compose-level overrides — these always win over .env so service-to-
+      # service URLs are anchored to the docker network names regardless of
+      # what a populated .env says.
+      OLLAMA_URL: http://marketplace-ollama:11434
+      # LiveOgmiosProvider uses HTTP JSON-RPC (queryLedgerState/utxo, evaluateTransaction, submitTransaction).
+      # Ogmios v6 serves both HTTP and WS on :1337; supplier needs HTTP.
+      OGMIOS_URL: http://ogmios:1337
+      PORT: "8080"
+      # M1-F-2: enable LiveOgmiosProvider on testnet so submitTx/awaitTx
+      # actually broadcast against the apex testnet ogmios stack.
+      # Set to "0" or remove to fall back to ReadOnly (safe for local dev).
+      # Only the literal "1" opts in — see supplier/src/config.ts.
+      LIVE_CHAIN: "1"
+    healthcheck:
+      # /healthz is the cross-service liveness probe (standardized 2026-04-27).
+      # Stateless — never touches chain or supplier state. Safe on cold boot.
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz >/dev/null || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - marketplace-net
+      - apex-net
+      - traefik-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=dashboard_default"
+      - "traefik.http.routers.mp-suppliers.entrypoints=web"
+      - "traefik.http.routers.mp-suppliers.rule=Host(`mp-suppliers.vector.testnet.apexfusion.org`)"
+      - "traefik.http.services.mp-suppliers.loadbalancer.server.port=8080"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  marketplace-net:
+    external: true
+    name: marketplace-net
+  apex-net:
+    external: true
+    name: apex-dashboard_apex-net
+  traefik-net:
+    external: true
+    name: dashboard_default

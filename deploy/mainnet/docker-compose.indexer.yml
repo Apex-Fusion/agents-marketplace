@@ -1,0 +1,63 @@
+# MAINNET DEPLOYMENT — DEFERRED
+# Wired but not yet exercised. Mainnet rollout requires:
+#   - ARCHITECTURE.md §9 #5 (mainnet safety: env-gate, wallet allowlist, MAINNET=1 flag)
+#   - Real funded mainnet wallets
+#   - Vector mainnet ogmios stack (apex-dashboard-mainnet) running on the same host
+# Do NOT `docker compose up` until those land.
+#
+# deploy/mainnet/docker-compose.indexer.yml — Indexer (chain follower) — MAINNET
+
+name: marketplace-mainnet-indexer
+
+services:
+  indexer:
+    build:
+      context: ../..
+      dockerfile: indexer/Dockerfile
+    container_name: marketplace-mainnet-indexer
+    restart: unless-stopped
+    env_file:
+      - path: ../../indexer/.env
+        required: false
+    environment:
+      OGMIOS_URL: ws://ogmios:1337
+      DB_PATH: /repo/indexer/data/indexer.db
+      INDEXER_PORT: "8090"
+      # NETWORK_ID intentionally not pinned — see supplier compose comment.
+    volumes:
+      - marketplace_mainnet_indexer_data:/repo/indexer/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8090/healthz >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - marketplace-mainnet-net
+      - apex-net
+      - traefik-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=dashboard_default"
+      - "traefik.http.routers.mp-indexer-mainnet.entrypoints=web"
+      - "traefik.http.routers.mp-indexer-mainnet.rule=Host(`mp-indexer.vector.apexfusion.org`)"
+      - "traefik.http.services.mp-indexer-mainnet.loadbalancer.server.port=8090"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  marketplace-mainnet-net:
+    external: true
+    name: marketplace-mainnet-net
+  apex-net:
+    external: true
+    name: apex-dashboard-mainnet_mainnet-net
+  traefik-net:
+    external: true
+    name: dashboard_default
+
+volumes:
+  marketplace_mainnet_indexer_data:

@@ -1,0 +1,71 @@
+# deploy/testnet/docker-compose.indexer.yml — Indexer (chain follower) — TESTNET
+#
+# REVIEW DRAFT. Independent compose project. Joins three external networks:
+#
+#   marketplace-net           service-to-service (buyer reaches indexer here)
+#   apex-dashboard_apex-net   reaches ws://ogmios:1337
+#   dashboard_default         Traefik public entrypoint
+#
+# All three networks must already exist on the host (see supplier compose
+# header for the one-shot setup).
+#
+# Bring up:
+#   docker compose -f deploy/testnet/docker-compose.indexer.yml up -d
+
+name: marketplace-indexer
+
+services:
+  indexer:
+    build:
+      context: ../..
+      dockerfile: indexer/Dockerfile
+    container_name: marketplace-indexer
+    restart: unless-stopped
+    env_file:
+      - path: ../../indexer/.env
+        required: false
+    environment:
+      # Compose-level overrides — anchor service-to-service URLs and the DB
+      # path to the named volume regardless of what .env says.
+      # Indexer chain-follower uses WebSocket chain-sync, not HTTP — keep ws://
+      OGMIOS_URL: ws://ogmios:1337
+      DB_PATH: /repo/indexer/data/indexer.db
+      INDEXER_PORT: "8090"
+    volumes:
+      - marketplace_indexer_data:/repo/indexer/data
+    healthcheck:
+      # /healthz is the cross-service liveness probe (standardized 2026-04-27).
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8090/healthz >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - marketplace-net
+      - apex-net
+      - traefik-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=dashboard_default"
+      - "traefik.http.routers.mp-indexer.entrypoints=web"
+      - "traefik.http.routers.mp-indexer.rule=Host(`mp-indexer.vector.testnet.apexfusion.org`)"
+      - "traefik.http.services.mp-indexer.loadbalancer.server.port=8090"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  marketplace-net:
+    external: true
+    name: marketplace-net
+  apex-net:
+    external: true
+    name: apex-dashboard_apex-net
+  traefik-net:
+    external: true
+    name: dashboard_default
+
+volumes:
+  marketplace_indexer_data:

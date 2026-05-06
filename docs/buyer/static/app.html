@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Vector AI Compute Network -- Buyer</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: linear-gradient(135deg, #0a0b0f 0%, #12141c 100%);
+    color: #e0e0e0;
+    min-height: 100vh;
+  }
+  header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 16px 32px; border-bottom: 1px solid #1e2030;
+    background: rgba(10,11,15,0.95); backdrop-filter: blur(12px);
+    position: sticky; top: 0; z-index: 100;
+  }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .logo {
+    width: 40px; height: 40px; border-radius: 10px;
+    background: linear-gradient(135deg, #6366f1, #8b5cf6);
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 800; font-size: 20px; color: #fff; line-height: 40px; text-align: center;
+  }
+  .brand h1 { font-size: 18px; font-weight: 700; color: #f0f0f0; }
+  .brand p { font-size: 12px; color: #6b7280; }
+  .header-right { display: flex; align-items: center; gap: 16px; }
+  .balance-display {
+    padding: 6px 14px; border-radius: 8px; background: #1e2030;
+    font-size: 13px; color: #10b981; font-weight: 600; font-family: monospace;
+  }
+  nav { display: flex; gap: 4px; }
+  .nav-btn {
+    padding: 8px 16px; border-radius: 8px; border: none;
+    background: transparent; color: #9ca3af; cursor: pointer;
+    font-size: 14px; font-weight: 500;
+  }
+  .nav-btn.active { background: #1e2030; color: #e0e0e0; }
+  main { padding: 24px 32px; max-width: 1200px; margin: 0 auto; }
+  .section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+  .section-title { font-size: 20px; font-weight: 700; color: #f0f0f0; }
+  .badge { padding: 4px 12px; border-radius: 12px; background: #1e2030; color: #9ca3af; font-size: 13px; }
+
+  /* Tab content */
+  .tab { display: none; }
+  .tab.active { display: block; }
+
+  /* Form */
+  .card { background: #14161e; border-radius: 12px; border: 1px solid #1e2030; padding: 24px; }
+  .field-label {
+    display: block; font-size: 12px; font-weight: 600; color: #9ca3af;
+    text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;
+  }
+  textarea {
+    width: 100%; padding: 12px 14px; border-radius: 8px;
+    border: 1px solid #2a2d3e; background: #1a1c28; color: #e0e0e0;
+    font-size: 14px; line-height: 1.6; font-family: inherit;
+    resize: vertical; outline: none;
+  }
+  textarea:focus { border-color: #6366f1; }
+  .controls { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 16px; margin: 16px 0 20px; }
+  .payment-val { color: #10b981; font-weight: 700; font-family: monospace; }
+  input[type="range"] { width: 100%; accent-color: #6366f1; cursor: pointer; }
+  select {
+    padding: 8px 10px; border-radius: 6px; border: 1px solid #2a2d3e;
+    background: #1a1c28; color: #d1d5db; font-size: 13px; cursor: pointer; outline: none; width: 100%;
+  }
+  .submit-btn {
+    width: 100%; padding: 14px; border-radius: 10px; border: none;
+    background: linear-gradient(135deg, #6366f1, #8b5cf6);
+    color: #fff; font-size: 15px; font-weight: 700; cursor: pointer;
+  }
+  .submit-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .accept-btn {
+    width: 100%; padding: 12px; border-radius: 10px; border: none;
+    background: linear-gradient(135deg, #10b981, #059669);
+    color: #fff; font-size: 14px; font-weight: 700; cursor: pointer;
+    margin-top: 12px;
+  }
+  .accept-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .loading-bar { margin-top: 12px; height: 3px; border-radius: 2px; background: #1e2030; overflow: hidden; }
+  .loading-fill {
+    width: 40%; height: 100%; border-radius: 2px;
+    background: linear-gradient(90deg, #6366f1, #8b5cf6);
+    animation: slide 1.5s ease-in-out infinite alternate;
+  }
+  @keyframes slide { from { margin-left: 0; } to { margin-left: 60%; } }
+
+  /* Result */
+  .result-card { background: #14161e; border-radius: 12px; border: 1px solid #10b98140; padding: 24px; }
+  .result-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+  .success-badge {
+    padding: 4px 12px; border-radius: 6px; background: #10b98120;
+    color: #10b981; font-size: 13px; font-weight: 600; border: 1px solid #10b98140;
+  }
+  .accepted-badge {
+    padding: 4px 12px; border-radius: 6px; background: #6366f120;
+    color: #a5b4fc; font-size: 13px; font-weight: 600; border: 1px solid #6366f140;
+  }
+  .result-cost { font-size: 18px; font-weight: 700; color: #10b981; }
+  .role-label {
+    font-size: 11px; font-weight: 600; text-transform: uppercase;
+    color: #6366f1; letter-spacing: 0.5px; margin-bottom: 4px;
+  }
+  .prompt-box { background: #1a1c28; border-radius: 8px; padding: 12px 14px; border-left: 3px solid #f59e0b; margin-bottom: 14px; }
+  .response-box { background: #1a1c28; border-radius: 8px; padding: 12px 14px; border-left: 3px solid #10b981; margin-bottom: 16px; }
+  .content-text { font-size: 14px; color: #d1d5db; line-height: 1.6; white-space: pre-wrap; }
+  .meta-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 10px; border-top: 1px solid #1e2030; padding-top: 14px; margin-bottom: 16px;
+  }
+  .meta-label { font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.5px; }
+  .meta-value { font-size: 13px; color: #d1d5db; font-family: monospace; margin-top: 2px; }
+  .new-btn {
+    width: 100%; padding: 12px; border-radius: 10px; border: 1px solid #6366f1;
+    background: transparent; color: #a5b4fc; font-size: 14px; font-weight: 600; cursor: pointer;
+  }
+
+  /* Error */
+  .error-box {
+    background: #ef444420; border: 1px solid #ef4444; border-radius: 8px;
+    padding: 14px 18px; color: #fca5a5; font-size: 14px; margin-top: 16px;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .dismiss-btn {
+    background: transparent; border: 1px solid #ef4444; color: #ef4444;
+    border-radius: 6px; padding: 4px 12px; cursor: pointer; font-size: 12px;
+  }
+
+  /* History */
+  .history-list { display: flex; flex-direction: column; gap: 12px; }
+  .history-card {
+    background: #14161e; border-radius: 12px; border: 1px solid #1e2030;
+    padding: 16px 20px; cursor: pointer; transition: border-color 0.2s;
+  }
+  .history-card:hover { border-color: #6366f140; }
+  .history-card.expanded { border-color: #6366f1; background: #161825; }
+  .history-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+  .history-left { display: flex; align-items: center; gap: 8px; }
+  .history-right { display: flex; align-items: center; gap: 12px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #10b981; }
+  .dot.accepted { background: #6366f1; }
+  .model-badge {
+    padding: 2px 8px; border-radius: 4px; background: #8b5cf620;
+    color: #a78bfa; font-size: 11px; font-weight: 600; font-family: monospace;
+  }
+  .time-badge { font-size: 11px; color: #6b7280; }
+  .token-info { font-size: 12px; color: #6b7280; font-family: monospace; }
+  .payment { font-size: 14px; font-weight: 700; color: #10b981; }
+  .empty { text-align: center; padding: 80px 20px; background: #12141c; border-radius: 12px; border: 1px dashed #1e2030; }
+  .empty p:first-child { color: #9ca3af; font-size: 16px; margin-bottom: 8px; }
+  .empty p:last-child { color: #4b5563; font-size: 13px; }
+  .expand-hint { text-align: center; font-size: 11px; color: #4b5563; margin-top: 6px; }
+
+  /* Supplier list */
+  .supplier-item {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 10px 14px; background: #1a1c28; border-radius: 8px; margin-bottom: 6px;
+  }
+  .supplier-name { font-weight: 600; color: #e0e0e0; font-size: 14px; }
+  .supplier-models { font-size: 12px; color: #a78bfa; font-family: monospace; }
+  .supplier-url { font-size: 11px; color: #6b7280; font-family: monospace; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <div class="logo">V</div>
+    <div>
+      <h1>Vector AI Compute Network</h1>
+      <p>Buyer Interface (v2)</p>
+    </div>
+  </div>
+  <div class="header-right">
+    <div class="balance-display" id="wallet-balance">Balance: loading...</div>
+    <nav>
+      <button class="nav-btn active" onclick="switchTab('buy', this)">Buy Compute</button>
+      <button class="nav-btn" onclick="switchTab('history', this)">Task History</button>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <!-- Buy Compute Tab -->
+  <div id="tab-buy" class="tab active">
+    <div class="section-header">
+      <h2 class="section-title">Buy Compute</h2>
+      <span class="badge" id="supplier-count">Loading...</span>
+    </div>
+
+    <!-- Input Form -->
+    <div id="form-area" class="card">
+      <label class="field-label">Your Prompt</label>
+      <textarea id="prompt" rows="4" placeholder="Enter your prompt here... e.g. 'Explain the eUTXO model in simple terms'"></textarea>
+
+      <div class="controls">
+        <div>
+          <label class="field-label">Payment: <span class="payment-val" id="payment-display">5.0 AP3X</span></label>
+          <input type="range" id="payment" min="1" max="20" step="0.5" value="5" oninput="document.getElementById('payment-display').textContent = this.value + ' AP3X'">
+        </div>
+        <div>
+          <label class="field-label">Supplier</label>
+          <select id="supplier"></select>
+        </div>
+      </div>
+
+      <button class="submit-btn" id="submit-btn" onclick="submitTask()">Submit Task</button>
+      <div id="loading-bar" class="loading-bar" style="display:none"><div class="loading-fill"></div></div>
+    </div>
+
+    <!-- Error -->
+    <div id="error-area" class="error-box" style="display:none">
+      <span id="error-msg"></span>
+      <button class="dismiss-btn" onclick="document.getElementById('error-area').style.display='none'">Dismiss</button>
+    </div>
+
+    <!-- Result -->
+    <div id="result-area" class="result-card" style="display:none">
+      <div class="result-header">
+        <span class="success-badge" id="r-status-badge">Completed</span>
+        <span class="result-cost" id="r-cost"></span>
+      </div>
+      <div class="role-label">YOUR PROMPT</div>
+      <div class="prompt-box"><p class="content-text" id="r-prompt"></p></div>
+      <div class="role-label" id="r-supplier-label">RESPONSE</div>
+      <div class="response-box"><p class="content-text" id="r-response"></p></div>
+      <div class="meta-grid">
+        <div><div class="meta-label">Model</div><div class="meta-value" id="r-model"></div></div>
+        <div><div class="meta-label">Tokens</div><div class="meta-value" id="r-tokens"></div></div>
+        <div><div class="meta-label">Latency</div><div class="meta-value" id="r-latency"></div></div>
+        <div><div class="meta-label">Task ID</div><div class="meta-value" id="r-taskid"></div></div>
+        <div><div class="meta-label">Escrow TX</div><div class="meta-value" id="r-escrow"></div></div>
+        <div><div class="meta-label">Supplier</div><div class="meta-value" id="r-supplier"></div></div>
+      </div>
+      <button class="accept-btn" id="accept-btn" onclick="acceptTask()">Accept & Pay</button>
+      <div id="accept-status" style="margin-top: 8px; font-size: 13px; color: #6b7280;"></div>
+      <button class="new-btn" onclick="resetForm()" style="margin-top: 8px;">New Task</button>
+    </div>
+  </div>
+
+  <!-- History Tab -->
+  <div id="tab-history" class="tab">
+    <div class="section-header">
+      <h2 class="section-title">Task History</h2>
+      <span class="badge" id="history-count">Loading...</span>
+    </div>
+    <div id="history-list" class="history-list"></div>
+  </div>
+</main>
+
+<script>
+var API = '';
+var suppliers = [];
+var expandedId = null;
+var currentResult = null;
+
+// --- Tab switching ---
+function switchTab(tab, btn) {
+  document.querySelectorAll('.tab').forEach(function(t) { t.classList.remove('active'); });
+  document.querySelectorAll('.nav-btn').forEach(function(b) { b.classList.remove('active'); });
+  document.getElementById('tab-' + tab).classList.add('active');
+  btn.classList.add('active');
+  if (tab === 'history') loadHistory();
+}
+
+// --- Load balance ---
+async function loadBalance() {
+  try {
+    var resp = await fetch(API + '/api/balance');
+    var data = await resp.json();
+    document.getElementById('wallet-balance').textContent = 'Balance: ' + parseFloat(data.ada).toFixed(2) + ' AP3X';
+  } catch(e) {
+    document.getElementById('wallet-balance').textContent = 'Balance: unavailable';
+  }
+}
+
+// --- Load suppliers ---
+async function loadSuppliers() {
+  try {
+    var resp = await fetch(API + '/api/suppliers');
+    var data = await resp.json();
+    suppliers = data.suppliers || [];
+    document.getElementById('supplier-count').textContent = suppliers.length + ' supplier' + (suppliers.length !== 1 ? 's' : '') + ' available';
+    var sel = document.getElementById('supplier');
+    if (suppliers.length === 0) {
+      sel.innerHTML = '<option value="">No suppliers found</option>';
+    } else {
+      sel.innerHTML = suppliers.map(function(s) {
+        var label = s.name + ' [' + s.models.join(', ') + '] - ' + s.endpoint;
+        return '<option value="' + esc(s.endpoint) + '">' + esc(label) + '</option>';
+      }).join('');
+    }
+  } catch(e) {
+    document.getElementById('supplier-count').textContent = 'Could not reach API';
+  }
+}
+
+// --- Submit task ---
+async function submitTask() {
+  var prompt = document.getElementById('prompt').value.trim();
+  if (!prompt) return;
+
+  var supplierUrl = document.getElementById('supplier').value;
+  if (!supplierUrl) {
+    document.getElementById('error-msg').textContent = 'No supplier selected';
+    document.getElementById('error-area').style.display = 'flex';
+    return;
+  }
+
+  var btn = document.getElementById('submit-btn');
+  btn.disabled = true;
+  btn.textContent = 'Posting escrow on-chain...';
+  document.getElementById('loading-bar').style.display = 'block';
+  document.getElementById('error-area').style.display = 'none';
+  document.getElementById('result-area').style.display = 'none';
+
+  setTimeout(function() { if (btn.disabled) btn.textContent = 'Waiting for LLM response...'; }, 4000);
+
+  try {
+    var resp = await fetch(API + '/api/submit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        prompt: prompt,
+        payment_apex: parseFloat(document.getElementById('payment').value),
+        supplier_url: supplierUrl
+      })
+    });
+    if (!resp.ok) {
+      var err = null;
+      try { err = await resp.json(); } catch(x) {}
+      throw new Error((err && err.detail) ? err.detail : 'HTTP ' + resp.status);
+    }
+    var r = await resp.json();
+    currentResult = r;
+    showResult(prompt, r);
+    loadBalance();
+  } catch(e) {
+    document.getElementById('error-msg').textContent = e.message;
+    document.getElementById('error-area').style.display = 'flex';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Submit Task';
+    document.getElementById('loading-bar').style.display = 'none';
+  }
+}
+
+function showResult(prompt, r) {
+  document.getElementById('form-area').style.display = 'none';
+  document.getElementById('result-area').style.display = 'block';
+  document.getElementById('r-cost').textContent = r.payment_apex.toFixed(1) + ' AP3X';
+  document.getElementById('r-prompt').textContent = prompt;
+  document.getElementById('r-supplier-label').textContent = 'RESPONSE -- ' + (r.supplier_url || '');
+  document.getElementById('r-response').textContent = r.response;
+  document.getElementById('r-model').textContent = r.model_used || 'unknown';
+  document.getElementById('r-tokens').textContent = (r.input_tokens || 0) + ' in / ' + (r.output_tokens || 0) + ' out';
+  document.getElementById('r-latency').textContent = ((r.latency_ms || 0) / 1000).toFixed(1) + 's';
+  document.getElementById('r-taskid').textContent = r.task_id;
+  document.getElementById('r-escrow').textContent = r.escrow_tx ? r.escrow_tx.substring(0, 32) + '...' : '-';
+  document.getElementById('r-supplier').textContent = r.supplier_url || '-';
+
+  // Show or hide accept button
+  var acceptBtn = document.getElementById('accept-btn');
+  var acceptStatus = document.getElementById('accept-status');
+  if (r.status === 'accepted' || r.accept_tx) {
+    acceptBtn.style.display = 'none';
+    acceptStatus.textContent = 'Accepted (TX: ' + (r.accept_tx || '').substring(0, 32) + '...)';
+    acceptStatus.style.color = '#10b981';
+    document.getElementById('r-status-badge').textContent = 'Accepted';
+    document.getElementById('r-status-badge').className = 'accepted-badge';
+  } else {
+    acceptBtn.style.display = 'block';
+    acceptBtn.disabled = false;
+    acceptBtn.textContent = 'Accept & Pay';
+    acceptStatus.textContent = '';
+    document.getElementById('r-status-badge').textContent = 'Completed';
+    document.getElementById('r-status-badge').className = 'success-badge';
+  }
+}
+
+// --- Accept task ---
+async function acceptTask() {
+  if (!currentResult || !currentResult.task_id) return;
+
+  var btn = document.getElementById('accept-btn');
+  var statusEl = document.getElementById('accept-status');
+  btn.disabled = true;
+  btn.textContent = 'Accepting on-chain...';
+  statusEl.textContent = '';
+
+  try {
+    var resp = await fetch(API + '/api/accept/' + currentResult.task_id, { method: 'POST' });
+    if (!resp.ok) {
+      var err = null;
+      try { err = await resp.json(); } catch(x) {}
+      throw new Error((err && err.detail) ? err.detail : 'HTTP ' + resp.status);
+    }
+    var data = await resp.json();
+    btn.style.display = 'none';
+    statusEl.textContent = 'Accepted! TX: ' + data.accept_tx.substring(0, 32) + '...';
+    statusEl.style.color = '#10b981';
+    currentResult.accept_tx = data.accept_tx;
+    currentResult.status = 'accepted';
+    document.getElementById('r-status-badge').textContent = 'Accepted';
+    document.getElementById('r-status-badge').className = 'accepted-badge';
+    loadBalance();
+  } catch(e) {
+    statusEl.textContent = 'Accept failed: ' + e.message;
+    statusEl.style.color = '#ef4444';
+    btn.disabled = false;
+    btn.textContent = 'Accept & Pay';
+  }
+}
+
+function resetForm() {
+  document.getElementById('form-area').style.display = 'block';
+  document.getElementById('result-area').style.display = 'none';
+  document.getElementById('prompt').value = '';
+  currentResult = null;
+}
+
+// --- History ---
+function timeAgo(ts) {
+  var diff = Date.now() / 1000 - ts;
+  if (diff < 60) return Math.floor(diff) + 's ago';
+  if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+  if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+  return Math.floor(diff / 86400) + 'd ago';
+}
+
+function truncate(s, len) { return s && s.length > len ? s.substring(0, len) + '...' : (s || '-'); }
+
+async function loadHistory() {
+  try {
+    var resp = await fetch(API + '/api/tasks');
+    var data = await resp.json();
+    var tasks = data.tasks || [];
+    document.getElementById('history-count').textContent = data.total + ' tasks';
+
+    if (tasks.length === 0) {
+      document.getElementById('history-list').innerHTML = '<div class="empty"><p>No tasks yet</p><p>Tasks will appear here once you submit prompts</p></div>';
+      return;
+    }
+
+    // Show most recent first
+    tasks = tasks.slice().reverse();
+
+    document.getElementById('history-list').innerHTML = tasks.map(function(t) {
+      var isExp = expandedId === t.task_id;
+      var promptText = isExp ? t.prompt : (t.prompt || '').substring(0, 150) + ((t.prompt || '').length > 150 ? '...' : '');
+      var respText = isExp ? t.response : (t.response || '').substring(0, 200) + ((t.response || '').length > 200 ? '...' : '');
+      var isAccepted = t.status === 'accepted' || t.accept_tx;
+      var dotClass = isAccepted ? 'dot accepted' : 'dot';
+
+      var html = '<div class="history-card' + (isExp ? ' expanded' : '') + '" onclick="toggleHistory(\'' + t.task_id + '\')">'
+        + '<div class="history-header"><div class="history-left">'
+        + '<span class="' + dotClass + '"></span><span class="model-badge">' + esc(t.model_used || 'unknown') + '</span>'
+        + '<span class="time-badge">' + (t.completed_at ? timeAgo(t.completed_at) : '-') + '</span></div>'
+        + '<div class="history-right"><span class="token-info">' + ((t.input_tokens||0) + (t.output_tokens||0)) + ' tokens</span>'
+        + '<span class="payment">' + ((t.payment_dfm||0) / 1000000).toFixed(1) + ' AP3X</span></div></div>'
+        + '<div class="role-label">PROMPT</div>'
+        + '<div class="prompt-box"><p class="content-text">' + esc(promptText) + '</p></div>'
+        + '<div class="role-label">RESPONSE</div>'
+        + '<div class="response-box"><p class="content-text">' + esc(respText) + '</p></div>';
+
+      if (isExp) {
+        html += '<div class="meta-grid">'
+          + '<div><div class="meta-label">Task ID</div><div class="meta-value">' + esc(t.task_id || '-') + '</div></div>'
+          + '<div><div class="meta-label">Task Hash</div><div class="meta-value">' + truncate(t.task_hash, 24) + '</div></div>'
+          + '<div><div class="meta-label">Escrow TX</div><div class="meta-value">' + truncate(t.escrow_tx, 24) + '</div></div>'
+          + '<div><div class="meta-label">Claim TX</div><div class="meta-value">' + truncate(t.claim_tx, 24) + '</div></div>'
+          + '<div><div class="meta-label">Submit TX</div><div class="meta-value">' + truncate(t.submit_tx, 24) + '</div></div>'
+          + '<div><div class="meta-label">Accept TX</div><div class="meta-value">' + truncate(t.accept_tx, 24) + '</div></div>'
+          + '<div><div class="meta-label">Input Tokens</div><div class="meta-value">' + (t.input_tokens||0) + '</div></div>'
+          + '<div><div class="meta-label">Output Tokens</div><div class="meta-value">' + (t.output_tokens||0) + '</div></div>'
+          + '<div><div class="meta-label">Latency</div><div class="meta-value">' + (t.latency_ms||0) + 'ms</div></div>'
+          + '<div><div class="meta-label">Supplier</div><div class="meta-value">' + esc(t.supplier_url || '-') + '</div></div>'
+          + '<div><div class="meta-label">Status</div><div class="meta-value" style="color:' + (isAccepted ? '#6366f1' : '#10b981') + '">' + esc(t.status||'completed') + '</div></div>'
+          + '</div>';
+      }
+
+      html += '<div class="expand-hint">' + (isExp ? 'Click to collapse' : 'Click to expand') + '</div></div>';
+      return html;
+    }).join('');
+  } catch(e) {
+    document.getElementById('history-list').innerHTML = '<div class="empty"><p>Could not load history</p><p>' + esc(e.message) + '</p></div>';
+  }
+}
+
+function toggleHistory(id) { expandedId = expandedId === id ? null : id; loadHistory(); }
+function esc(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+// --- Init ---
+loadBalance();
+loadSuppliers();
+</script>
+</body>
+</html>

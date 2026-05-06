@@ -1,0 +1,28 @@
+# Dependencies / build artifacts
+node_modules
+dist
+*.tsbuildinfo
+coverage
+
+# Environments — never commit; .env.example is the published template
+.env
+.env.*
+!.env.example
+
+# Local data / caches
+data/
+*.log
+.vitest-cache
+.DS_Store
+
+# Claude Code local settings — per-developer, not for shared repo
+.claude/
+
+# Deck build intermediates (recreated by docs/build-deck.sh)
+docs/EXECUTIVE_SUMMARY.rendered.md
+docs/img/*.mmd
+
+# Reference-only archives copied from other projects — these can carry
+# secrets inside their entries that .gitignore can't strip from a zip.
+# Don't republish them.
+docs/*.zip

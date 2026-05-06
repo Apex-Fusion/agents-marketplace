@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Vector Supplier Node -- Dashboard</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: linear-gradient(135deg, #0a0b0f 0%, #12141c 100%);
+    color: #e0e0e0;
+    min-height: 100vh;
+  }
+
+  /* Header */
+  header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 16px 32px; border-bottom: 1px solid #1e2030;
+    background: rgba(10,11,15,0.95); backdrop-filter: blur(12px);
+    position: sticky; top: 0; z-index: 100;
+  }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .logo {
+    width: 40px; height: 40px; border-radius: 10px;
+    background: linear-gradient(135deg, #6366f1, #8b5cf6);
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 800; font-size: 20px; color: #fff; line-height: 40px; text-align: center;
+  }
+  .brand-text h1 { font-size: 18px; font-weight: 700; color: #f0f0f0; }
+  .brand-text p { font-size: 12px; color: #6b7280; }
+  .header-right { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  .wallet-address {
+    padding: 6px 14px; border-radius: 8px; background: #1e2030;
+    font-size: 13px; color: #9ca3af; font-family: 'Consolas', 'Courier New', monospace;
+  }
+  .balance-display {
+    padding: 6px 14px; border-radius: 8px; background: #1e2030;
+    font-size: 13px; color: #10b981; font-weight: 600;
+    font-family: 'Consolas', 'Courier New', monospace;
+  }
+  .status-indicator {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 14px; border-radius: 8px; background: #10b98115;
+    border: 1px solid #10b98130; font-size: 13px; color: #10b981; font-weight: 600;
+  }
+  .status-dot {
+    width: 8px; height: 8px; border-radius: 50%; background: #10b981;
+    animation: pulse-dot 2s ease-in-out infinite;
+  }
+  @keyframes pulse-dot {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.5); }
+    50% { box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }
+  }
+
+  /* Main */
+  main { padding: 24px 32px; max-width: 1400px; margin: 0 auto; }
+
+  /* Stats Cards */
+  .stats-grid {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px;
+    margin-bottom: 28px;
+  }
+  .stat-card {
+    background: #14161e; border-radius: 12px; border: 1px solid #1e2030;
+    padding: 20px 24px; transition: border-color 0.2s;
+  }
+  .stat-card:hover { border-color: #2a2d3e; }
+  .stat-label {
+    font-size: 12px; font-weight: 600; color: #6b7280;
+    text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px;
+  }
+  .stat-value {
+    font-size: 28px; font-weight: 800; color: #f0f0f0;
+    font-family: 'Consolas', 'Courier New', monospace;
+  }
+  .stat-value.green { color: #10b981; }
+  .stat-unit {
+    font-size: 14px; font-weight: 600; color: #6b7280; margin-left: 4px;
+  }
+
+  /* Section Header */
+  .section-header {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 16px;
+  }
+  .section-title { font-size: 20px; font-weight: 700; color: #f0f0f0; }
+  .refresh-info { font-size: 12px; color: #6b7280; }
+
+  /* Task List */
+  .task-list { display: flex; flex-direction: column; gap: 8px; }
+
+  .task-row {
+    background: #14161e; border-radius: 10px; border: 1px solid #1e2030;
+    cursor: pointer; transition: border-color 0.2s, background 0.2s;
+    overflow: hidden;
+  }
+  .task-row:hover { border-color: #2a2d3e; background: #161822; }
+  .task-row.expanded { border-color: #6366f140; }
+
+  .task-summary {
+    display: grid;
+    grid-template-columns: 100px 1fr 80px 100px 100px 90px 80px;
+    align-items: center; gap: 12px; padding: 14px 20px;
+    font-size: 13px;
+  }
+
+  .task-id {
+    font-family: 'Consolas', 'Courier New', monospace;
+    color: #6366f1; font-weight: 600; font-size: 12px;
+  }
+  .task-prompt {
+    color: #d1d5db; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; min-width: 0;
+  }
+  .model-badge {
+    padding: 3px 10px; border-radius: 6px; background: #6366f120;
+    color: #a78bfa; font-size: 11px; font-weight: 600;
+    border: 1px solid #6366f130; text-align: center;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .task-tokens {
+    font-family: 'Consolas', 'Courier New', monospace;
+    color: #9ca3af; font-size: 12px; text-align: center;
+  }
+  .task-payment {
+    font-family: 'Consolas', 'Courier New', monospace;
+    color: #10b981; font-weight: 600; text-align: right;
+  }
+  .task-latency {
+    font-family: 'Consolas', 'Courier New', monospace;
+    color: #9ca3af; font-size: 12px; text-align: center;
+  }
+  .status-badge {
+    padding: 3px 10px; border-radius: 6px; font-size: 11px;
+    font-weight: 600; text-align: center; text-transform: uppercase;
+    letter-spacing: 0.3px;
+  }
+  .status-badge.completed {
+    background: #10b98120; color: #10b981; border: 1px solid #10b98130;
+  }
+  .status-badge.failed {
+    background: #ef444420; color: #ef4444; border: 1px solid #ef444430;
+  }
+  .status-badge.pending {
+    background: #f59e0b20; color: #f59e0b; border: 1px solid #f59e0b30;
+  }
+
+  /* Expanded Details */
+  .task-details {
+    display: none; padding: 0 20px 20px 20px;
+    border-top: 1px solid #1e2030;
+  }
+  .task-row.expanded .task-details { display: block; }
+
+  .detail-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
+    margin-top: 16px;
+  }
+  .detail-block {
+    background: #1a1c28; border-radius: 8px; padding: 14px 16px;
+  }
+  .detail-block.full-width { grid-column: 1 / -1; }
+  .detail-label {
+    font-size: 11px; font-weight: 600; color: #6b7280;
+    text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;
+  }
+  .detail-value {
+    font-size: 13px; color: #d1d5db; line-height: 1.6;
+    word-break: break-word; white-space: pre-wrap;
+  }
+  .detail-value.mono {
+    font-family: 'Consolas', 'Courier New', monospace; font-size: 12px;
+    color: #9ca3af;
+  }
+  .detail-value.green { color: #10b981; }
+
+  .tx-row {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 6px 0; border-bottom: 1px solid #1e203060;
+  }
+  .tx-row:last-child { border-bottom: none; }
+  .tx-label { font-size: 12px; color: #6b7280; min-width: 80px; }
+  .tx-hash {
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 12px; color: #a78bfa;
+  }
+
+  .meta-row {
+    display: flex; gap: 24px; margin-top: 12px; flex-wrap: wrap;
+  }
+  .meta-item { font-size: 12px; color: #6b7280; }
+  .meta-item span { color: #d1d5db; }
+
+  /* Column Headers */
+  .task-header {
+    display: grid;
+    grid-template-columns: 100px 1fr 80px 100px 100px 90px 80px;
+    gap: 12px; padding: 10px 20px;
+    font-size: 11px; font-weight: 600; color: #6b7280;
+    text-transform: uppercase; letter-spacing: 0.5px;
+    border-bottom: 1px solid #1e2030;
+  }
+  .task-header .col-right { text-align: right; }
+  .task-header .col-center { text-align: center; }
+
+  /* Empty State */
+  .empty-state {
+    text-align: center; padding: 60px 20px; color: #6b7280;
+  }
+  .empty-state .icon { font-size: 48px; margin-bottom: 16px; opacity: 0.3; }
+  .empty-state p { font-size: 14px; }
+
+  /* Loading */
+  .loading-overlay {
+    display: flex; align-items: center; justify-content: center;
+    padding: 40px; color: #6b7280; font-size: 14px;
+  }
+  .spinner {
+    width: 20px; height: 20px; border: 2px solid #1e2030;
+    border-top-color: #6366f1; border-radius: 50%;
+    animation: spin 0.8s linear infinite; margin-right: 10px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Error Banner */
+  .error-banner {
+    display: none; padding: 12px 20px; margin-bottom: 16px;
+    background: #ef444415; border: 1px solid #ef444430;
+    border-radius: 10px; color: #ef4444; font-size: 13px;
+  }
+
+  /* Responsive */
+  @media (max-width: 1200px) {
+    .stats-grid { grid-template-columns: repeat(2, 1fr); }
+  }
+  @media (max-width: 900px) {
+    header { flex-direction: column; gap: 12px; padding: 16px; }
+    main { padding: 16px; }
+    .task-summary {
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    .task-header { display: none; }
+    .detail-grid { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 600px) {
+    .stats-grid { grid-template-columns: 1fr; }
+    .header-right { justify-content: center; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <div class="logo">S</div>
+    <div class="brand-text">
+      <h1>Vector Supplier Node</h1>
+      <p>AI Compute Provider</p>
+    </div>
+  </div>
+  <div class="header-right">
+    <div class="wallet-address" id="walletAddress">--</div>
+    <div class="balance-display" id="balanceDisplay">-- AP3X</div>
+    <div class="status-indicator">
+      <div class="status-dot"></div>
+      Online
+    </div>
+  </div>
+</header>
+
+<main>
+  <div class="error-banner" id="errorBanner"></div>
+
+  <!-- Stats -->
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="stat-label">Total Earnings</div>
+      <div class="stat-value green" id="statEarnings">--<span class="stat-unit">AP3X</span></div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Tasks Completed</div>
+      <div class="stat-value" id="statTasks">--</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Avg Response Time</div>
+      <div class="stat-value" id="statLatency">--<span class="stat-unit">s</span></div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Total Tokens Processed</div>
+      <div class="stat-value" id="statTokens">--</div>
+    </div>
+  </div>
+
+  <!-- Task History -->
+  <div class="section-header">
+    <div class="section-title">Task History</div>
+    <div class="refresh-info" id="refreshInfo">Auto-refresh in 30s</div>
+  </div>
+
+  <div class="task-header">
+    <div>Task ID</div>
+    <div>Prompt</div>
+    <div class="col-center">Model</div>
+    <div class="col-center">Tokens</div>
+    <div class="col-right">Payment</div>
+    <div class="col-center">Latency</div>
+    <div class="col-center">Status</div>
+  </div>
+
+  <div class="task-list" id="taskList">
+    <div class="loading-overlay" id="loadingOverlay">
+      <div class="spinner"></div>
+      Loading tasks...
+    </div>
+  </div>
+</main>
+
+<script>
+(function() {
+  var refreshInterval = 30;
+  var countdown = refreshInterval;
+  var timer = null;
+
+  function truncate(str, len) {
+    if (!str) return '--';
+    return str.length > len ? str.substring(0, len) + '...' : str;
+  }
+
+  function truncateHash(hash) {
+    if (!hash) return '--';
+    if (hash.length <= 16) return hash;
+    return hash.substring(0, 8) + '...' + hash.substring(hash.length - 6);
+  }
+
+  function truncateAddress(addr) {
+    if (!addr) return '--';
+    if (addr.length <= 20) return addr;
+    return addr.substring(0, 10) + '...' + addr.substring(addr.length - 8);
+  }
+
+  function formatNumber(n) {
+    if (n === null || n === undefined) return '--';
+    return n.toLocaleString('en-US');
+  }
+
+  function formatAP3X(dfm) {
+    if (dfm === null || dfm === undefined) return '--';
+    return (dfm / 1000000).toFixed(2);
+  }
+
+  function timeAgo(ts) {
+    if (!ts) return '--';
+    var now = Date.now();
+    var then = new Date(ts).getTime();
+    var diff = Math.floor((now - then) / 1000);
+    if (diff < 0) return 'just now';
+    if (diff < 60) return diff + 's ago';
+    if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+    if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+    return Math.floor(diff / 86400) + 'd ago';
+  }
+
+  function escapeHtml(str) {
+    if (!str) return '';
+    var div = document.createElement('div');
+    div.appendChild(document.createTextNode(str));
+    return div.innerHTML;
+  }
+
+  function toggleTask(el) {
+    el.classList.toggle('expanded');
+  }
+
+  function showError(msg) {
+    var banner = document.getElementById('errorBanner');
+    banner.textContent = msg;
+    banner.style.display = 'block';
+  }
+
+  function hideError() {
+    document.getElementById('errorBanner').style.display = 'none';
+  }
+
+  function renderDashboard(data) {
+    hideError();
+
+    // Wallet
+    if (data.wallet) {
+      document.getElementById('walletAddress').textContent =
+        truncateAddress(data.wallet.address);
+      var ada = data.wallet.ada !== undefined ? parseFloat(data.wallet.ada) :
+        (data.wallet.lovelace !== undefined ? (data.wallet.lovelace / 1000000) : null);
+      document.getElementById('balanceDisplay').textContent =
+        ada !== null ? ada.toFixed(2) + ' AP3X' : '-- AP3X';
+    }
+
+    // Stats
+    if (data.stats) {
+      var s = data.stats;
+      document.getElementById('statEarnings').innerHTML =
+        formatAP3X(s.total_earnings_dfm) + '<span class="stat-unit">AP3X</span>';
+      document.getElementById('statTasks').textContent =
+        formatNumber(s.tasks_completed);
+      document.getElementById('statLatency').innerHTML =
+        (s.avg_latency_ms !== null && s.avg_latency_ms !== undefined
+          ? (s.avg_latency_ms / 1000).toFixed(2)
+          : '--') + '<span class="stat-unit">s</span>';
+      document.getElementById('statTokens').textContent =
+        formatNumber(s.total_tokens);
+    }
+
+    // Tasks
+    var container = document.getElementById('taskList');
+    var tasks = data.tasks || [];
+
+    if (tasks.length === 0) {
+      container.innerHTML =
+        '<div class="empty-state">' +
+          '<div class="icon">[ ]</div>' +
+          '<p>No tasks yet. Waiting for inference requests...</p>' +
+        '</div>';
+      return;
+    }
+
+    var html = '';
+    for (var i = 0; i < tasks.length; i++) {
+      var t = tasks[i];
+      var statusClass = (t.status || 'completed').toLowerCase();
+      var inputTok = t.input_tokens || 0;
+      var outputTok = t.output_tokens || 0;
+
+      html += '<div class="task-row" onclick="this.classList.toggle(\'expanded\')">';
+
+      // Summary row
+      html += '<div class="task-summary">';
+      html += '<div class="task-id">' + escapeHtml(truncate(t.task_id || t.id || '--', 10)) + '</div>';
+      html += '<div class="task-prompt">' + escapeHtml(truncate(t.prompt, 80)) + '</div>';
+      html += '<div><span class="model-badge">' + escapeHtml(t.model || '--') + '</span></div>';
+      html += '<div class="task-tokens">' + formatNumber(inputTok) + ' / ' + formatNumber(outputTok) + '</div>';
+      html += '<div class="task-payment">' + formatAP3X(t.payment_dfm) + ' AP3X</div>';
+      html += '<div class="task-latency">' +
+        (t.latency_ms !== null && t.latency_ms !== undefined
+          ? (t.latency_ms / 1000).toFixed(2) + 's'
+          : '--') + '</div>';
+      html += '<div><span class="status-badge ' + statusClass + '">' +
+        escapeHtml(t.status || 'completed') + '</span></div>';
+      html += '</div>';
+
+      // Expanded details
+      html += '<div class="task-details">';
+      html += '<div class="detail-grid">';
+
+      // Full prompt
+      html += '<div class="detail-block full-width">';
+      html += '<div class="detail-label">Full Prompt</div>';
+      html += '<div class="detail-value">' + escapeHtml(t.prompt || '--') + '</div>';
+      html += '</div>';
+
+      // Full response
+      html += '<div class="detail-block full-width">';
+      html += '<div class="detail-label">Full Response</div>';
+      html += '<div class="detail-value">' + escapeHtml(t.response || '--') + '</div>';
+      html += '</div>';
+
+      // Transactions
+      html += '<div class="detail-block">';
+      html += '<div class="detail-label">Transactions</div>';
+      html += '<div class="detail-value mono">';
+      html += '<div class="tx-row"><span class="tx-label">Escrow TX</span><span class="tx-hash">' +
+        escapeHtml(t.escrow_tx || '--') + '</span></div>';
+      html += '<div class="tx-row"><span class="tx-label">Submit TX</span><span class="tx-hash">' +
+        escapeHtml(t.submit_tx || '--') + '</span></div>';
+      html += '<div class="tx-row"><span class="tx-label">Claim TX</span><span class="tx-hash">' +
+        escapeHtml(t.claim_tx || '--') + '</span></div>';
+      html += '</div></div>';
+
+      // Meta
+      html += '<div class="detail-block">';
+      html += '<div class="detail-label">Details</div>';
+      html += '<div class="detail-value">';
+      html += '<div class="tx-row"><span class="tx-label">Task ID</span><span class="tx-hash">' +
+        escapeHtml(t.task_id || t.id || '--') + '</span></div>';
+      html += '<div class="tx-row"><span class="tx-label">Buyer</span><span class="tx-hash">' +
+        escapeHtml(t.buyer_address ? truncateAddress(t.buyer_address) : '--') + '</span></div>';
+      html += '<div class="tx-row"><span class="tx-label">Timestamp</span><span style="color:#d1d5db;font-size:12px">' +
+        timeAgo(t.timestamp || t.created_at) + '</span></div>';
+      html += '<div class="tx-row"><span class="tx-label">Payment</span><span class="tx-hash" style="color:#10b981">' +
+        formatAP3X(t.payment_dfm) + ' AP3X</span></div>';
+      html += '<div class="tx-row"><span class="tx-label">Tokens</span><span style="color:#d1d5db;font-size:12px">' +
+        formatNumber(inputTok) + ' in / ' + formatNumber(outputTok) + ' out</span></div>';
+      html += '</div></div>';
+
+      html += '</div>'; // detail-grid
+      html += '</div>'; // task-details
+      html += '</div>'; // task-row
+    }
+
+    container.innerHTML = html;
+  }
+
+  function fetchDashboard() {
+    var xhr = new XMLHttpRequest();
+    xhr.open('GET', '/api/dashboard', true);
+    xhr.timeout = 10000;
+    xhr.onload = function() {
+      document.getElementById('loadingOverlay').style.display = 'none';
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          var data = JSON.parse(xhr.responseText);
+          renderDashboard(data);
+        } catch (e) {
+          showError('Failed to parse dashboard data: ' + e.message);
+        }
+      } else {
+        showError('API returned status ' + xhr.status);
+      }
+    };
+    xhr.onerror = function() {
+      document.getElementById('loadingOverlay').style.display = 'none';
+      showError('Network error -- could not reach /api/dashboard');
+    };
+    xhr.ontimeout = function() {
+      document.getElementById('loadingOverlay').style.display = 'none';
+      showError('Request timed out');
+    };
+    xhr.send();
+  }
+
+  function startCountdown() {
+    countdown = refreshInterval;
+    if (timer) clearInterval(timer);
+    timer = setInterval(function() {
+      countdown--;
+      document.getElementById('refreshInfo').textContent =
+        'Auto-refresh in ' + countdown + 's';
+      if (countdown <= 0) {
+        countdown = refreshInterval;
+        fetchDashboard();
+      }
+    }, 1000);
+  }
+
+  // Initial load
+  fetchDashboard();
+  startCountdown();
+})();
+</script>
+
+</body>
+</html>

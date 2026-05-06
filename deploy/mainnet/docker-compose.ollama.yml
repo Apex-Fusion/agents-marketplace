@@ -1,0 +1,48 @@
+# MAINNET DEPLOYMENT — DEFERRED
+# Wired but not yet exercised. Mainnet rollout requires:
+#   - ARCHITECTURE.md §9 #5 (mainnet safety: env-gate, wallet allowlist, MAINNET=1 flag)
+#   - Real funded mainnet wallets
+#   - Vector mainnet ogmios stack (apex-dashboard-mainnet) running on the same host
+# Do NOT `docker compose up` until those land.
+#
+# deploy/mainnet/docker-compose.ollama.yml — Ollama (local LLM) — MAINNET
+#
+# Mirrors the testnet ollama compose file, with mainnet-prefixed names so a
+# testnet stack and a mainnet stack can run side-by-side on the same host.
+#
+# One-shot prerequisite (run once on the host):
+#   docker network create marketplace-mainnet-net
+#
+# Bring up (DO NOT until mainnet safety lands):
+#   docker compose -f deploy/mainnet/docker-compose.ollama.yml up -d
+
+name: marketplace-mainnet-ollama
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: marketplace-mainnet-ollama
+    restart: unless-stopped
+    volumes:
+      - marketplace_mainnet_ollama_models:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - marketplace-mainnet-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  marketplace-mainnet-net:
+    external: true
+    name: marketplace-mainnet-net
+
+volumes:
+  marketplace_mainnet_ollama_models:
