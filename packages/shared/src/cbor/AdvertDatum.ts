@@ -118,19 +118,24 @@ export function encodeAdvertDatum(d: AdvertDatum): string {
             throw new Error(`unknown AdvertStatus: ${String(d.status)}`);
           })();
 
+  // cbor-x encodes JS Number as float64 (`fb` prefix) for values that don't
+  // fit in CBOR's compact int forms — and Plutus Data has NO float type, so
+  // CML's PlutusData.from_cbor_hex panics with "RuntimeError: unreachable"
+  // when it sees one. Coerce numeric fields to BigInt so cbor-x always emits
+  // CBOR major-type-0/1 integers. Mirrors the intAsBig pattern in EscrowDatum.
   const cbor = plutusTag(121, [
     hexToBytes(d.supplier_pkh),
     utf8Bytes(d.capability_id),
     utf8Bytes(d.model),
-    d.max_output_tokens,
-    d.max_processing_ms,
+    BigInt(d.max_output_tokens),
+    BigInt(d.max_processing_ms),
     d.price_lovelace,
     d.supplier_bond_lovelace,
     d.buyer_bond_lovelace,
     utf8Bytes(d.endpoint_url),
     utf8Bytes(d.detail_uri),
     hexToBytes(d.detail_hash),
-    d.advertised_at,
+    BigInt(d.advertised_at),
     statusTag,
   ]);
 

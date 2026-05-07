@@ -19,6 +19,7 @@ import { loadBlueprint } from "../blueprint.js";
 import { encodeTxBody, sha256Hex } from "../internal/testTxBody.js";
 import { mockSlotToWallclockMs } from "../internal/constants.js";
 import { detectCborBackend } from "../internal/cborBackend.js";
+import type { LiveOgmiosProvider } from "../../chain/LiveOgmiosProvider.js";
 
 const FIVE_MIN_MS = 5 * 60 * 1000;
 
@@ -64,6 +65,19 @@ export async function buildPostAdvertTx(
   }
 
   // 4. Construct tx body.
+  // Live path: route to lucid-evolution so the on-chain submission carries
+  // valid Conway-era CBOR. Mock path keeps the JSON-in-hex synthetic body.
+  if (isLive) {
+    const liveCborPath = "../internal/liveCbor.js";
+    const { buildLiveTxForAdvert } = await import(/* @vite-ignore */ liveCborPath);
+    return buildLiveTxForAdvert({
+      chain: chain as LiveOgmiosProvider,
+      walletKey,
+      advertDatum,
+      deposit_lovelace,
+    });
+  }
+
   const blueprint = loadBlueprint();
   const advertScriptAddress = blueprint.advertScriptAddress(0);
 

@@ -342,8 +342,18 @@ async function buildSpendOpenOrClaimedTx(opts: {
 
     // Let lucid pick coins + compute fee normally; production wallets have
     // multiple real UTxOs (no need for the test-side leftover-as-fee hack).
+    //
+    // localUPLCEval: false — delegate Plutus V3 phase-2 evaluation to Ogmios
+    // (which uses cardano-node's evaluator). lucid 0.4.30's CML WASM UPLC
+    // interpreter has a false-rejection bug for our V3 spend pattern: it
+    // rejects valid txs with "failed script execution Spend[0] the validator
+    // crashed / exited prematurely" while the chain itself accepts them
+    // without complaint. Routing eval to Ogmios sidesteps the WASM bug AND
+    // produces correct ex-units. The provider already implements evaluateTx
+    // (OgmiosLucidProvider.evaluateTx → JSON-RPC evaluateTransaction).
     const completed = await txBuilder.complete({
       presetWalletInputs: realWalletUtxos,
+      localUPLCEval: false,
     });
     signed = await completed.sign.withWallet().complete();
   } catch (err) {
