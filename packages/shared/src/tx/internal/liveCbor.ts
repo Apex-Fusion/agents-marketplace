@@ -475,7 +475,14 @@ export async function buildLiveTxForAccept(params: LiveAcceptParams): Promise<Bu
       .validTo(params.windowEnd)
       .setMinFee(500_000n);
 
-    const completed = await txBuilder.complete({ presetWalletInputs });
+    // Same UPLC-eval delegation as Claim/Submit (see buildSpendOpenOrClaimedTx
+    // for the rationale). lucid 0.4.30's CML WASM evaluator falsely rejects
+    // valid Plutus V3 spends; routing to Ogmios's evaluateTransaction
+    // (cardano-node's evaluator) sidesteps the bug.
+    const completed = await txBuilder.complete({
+      presetWalletInputs,
+      localUPLCEval: false,
+    });
     signed = await completed.sign.withWallet().complete();
   } catch (err) {
     rethrowAsTxError(err, "accept build failed");
