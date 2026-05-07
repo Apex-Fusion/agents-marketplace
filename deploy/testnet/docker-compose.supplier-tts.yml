@@ -1,0 +1,70 @@
+# deploy/testnet/docker-compose.supplier-tts.yml — TTS Supplier — TESTNET
+#
+# Second supplier instance, dedicated to capability `audio.synthesize.piper.v1`.
+# Uses the same Dockerfile as the chat supplier — the difference is purely
+# environment: CAPABILITY_KIND=tts switches the route handler from chat
+# (`POST /v1/chat/completions`) to TTS (`POST /v1/audio/synthesize`) and
+# expects `PIPER_URL` instead of `OLLAMA_URL`.
+#
+# Same three external networks as the chat supplier; Traefik routes the
+# new public hostname `mp-suppliers-tts.vector.testnet.apexfusion.org`
+# to this container.
+#
+# Bring up:
+#   docker compose -f deploy/testnet/docker-compose.supplier-tts.yml up -d --build
+
+name: marketplace-supplier-tts
+
+services:
+  supplier-tts:
+    build:
+      context: ../..
+      dockerfile: supplier/Dockerfile
+    container_name: marketplace-supplier-tts
+    restart: unless-stopped
+    env_file:
+      - path: ../../supplier/.env.tts
+        required: true
+    environment:
+      # Compose-level overrides — anchor to the docker network names
+      # regardless of what the .env says.
+      CAPABILITY_KIND: "tts"
+      # PiperTTS lives on apex-simulation; reach via its public CF hostname
+      # (no shared docker network with this host).
+      PIPER_URL: "https://tts-piper.vector.testnet.apexfusion.org"
+      OGMIOS_URL: http://ogmios:1337
+      PORT: "8080"
+      LIVE_CHAIN: "1"
+      NETWORK_ID: "0"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz >/dev/null || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - marketplace-net
+      - apex-net
+      - traefik-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=dashboard_default"
+      - "traefik.http.routers.mp-suppliers-tts.entrypoints=web"
+      - "traefik.http.routers.mp-suppliers-tts.rule=Host(`mp-suppliers-tts.vector.testnet.apexfusion.org`)"
+      - "traefik.http.services.mp-suppliers-tts.loadbalancer.server.port=8080"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  marketplace-net:
+    external: true
+    name: marketplace-net
+  apex-net:
+    external: true
+    name: apex-dashboard_apex-net
+  traefik-net:
+    external: true
+    name: dashboard_default
