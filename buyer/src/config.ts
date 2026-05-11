@@ -15,6 +15,11 @@
  *                         When unset, /v1/synth-speech responds 503 (the
  *                         capability stays disabled — the rest of the
  *                         buyer-app boots normally).
+ *   ARCHIVE_DIR         — Directory where the response archive (SQLite
+ *                         metadata + per-escrow artefact files) lives.
+ *                         Defaults to "./data/archive" relative to cwd.
+ *                         When unset, archive is disabled (responses are
+ *                         not persisted; /v1/responses* return 503).
  */
 
 const HEX64_RE = /^[0-9a-fA-F]{64}$/;
@@ -28,6 +33,7 @@ export interface BuyerConfig {
   ogmiosUrl: string;
   liveChain: boolean;
   ttsPiperBaseUrl: string;
+  archiveDir: string;
 }
 
 function requireField(env: Record<string, string | undefined>, name: string): string {
@@ -80,5 +86,11 @@ export function loadConfig(env: Record<string, string | undefined>): BuyerConfig
   // shape here; an unreachable URL surfaces as a clear 502 from the proxy.
   const ttsPiperBaseUrl = env.TTS_PIPER_BASE_URL ?? "";
 
-  return { privKeyHex, indexerUrl, port, networkId, ogmiosUrl, liveChain, ttsPiperBaseUrl };
+  // ARCHIVE_DIR — host path (typically a docker bind-mount) where the
+  // response archive lives. Default is a per-process relative dir to keep
+  // dev ergonomics; in production the compose file overrides to a
+  // bind-mounted /repo/data/archive.
+  const archiveDir = env.ARCHIVE_DIR ?? "./data/archive";
+
+  return { privKeyHex, indexerUrl, port, networkId, ogmiosUrl, liveChain, ttsPiperBaseUrl, archiveDir };
 }

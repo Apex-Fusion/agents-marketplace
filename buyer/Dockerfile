@@ -27,6 +27,11 @@ ARG NODE_VERSION=20.19.0
 FROM node:${NODE_VERSION}-alpine AS builder
 WORKDIR /repo
 
+# better-sqlite3 (used by the response archive) ships native bindings —
+# python3 + make + g++ are needed during pnpm install for the prebuild
+# install / fallback compile. Toolchain stays in the BUILDER stage only.
+RUN apk add --no-cache python3 make g++
+
 RUN corepack enable && corepack prepare pnpm@10.33.2 --activate
 
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json tsconfig.base.json .npmrc ./
@@ -38,6 +43,15 @@ COPY indexer/package.json ./indexer/package.json
 # Buyer needs vite + tailwind + react devDeps to build the UI bundle, so we
 # must install with dev deps included (default).
 RUN pnpm install --frozen-lockfile --filter '@marketplace/buyer...'
+
+# better-sqlite3 native binding fetch (mirrors indexer/Dockerfile). pnpm 10's
+# approve-builds gate skips the postinstall on native modules, so we manually
+# resolve the binary into build/Release/.
+RUN BSQ_DIR=$(ls -d node_modules/.pnpm/better-sqlite3@*/node_modules/better-sqlite3 2>/dev/null | head -1) \
+ && [ -n "$BSQ_DIR" ] || (echo "FATAL: better-sqlite3 not in pnpm store" && exit 1) \
+ && echo "rebuilding native binding at: $BSQ_DIR" \
+ && (cd "$BSQ_DIR" && (npx --yes prebuild-install --runtime=node || npm install --build-from-source --no-save)) \
+ && ls -la "$BSQ_DIR/build/Release/better_sqlite3.node"
 
 # libsodium-wrappers-sumo (transitive via @lucid-evolution/lucid → CML) does
 # `import "./libsodium-sumo.mjs"` from its wrapper, but pnpm's strict store

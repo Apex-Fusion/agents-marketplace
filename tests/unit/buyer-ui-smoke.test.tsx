@@ -279,6 +279,16 @@ describe("<TaskHistory /> smoke", () => {
     ];
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : (input instanceof URL ? input.toString() : input.url);
+      // TaskHistory now also fetches /v1/responses (the buyer-app's archive
+      // index) and joins by escrow_ref. Empty list is a valid response that
+      // means "archive disabled / no records yet" and exercises the same
+      // "no archive payload to render inline" code path as production.
+      if (url.includes("/v1/responses")) {
+        return new Response(JSON.stringify({ responses: [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
       if (!url.includes(`/v1/indexer/escrows?buyer=${buyerPkh}`)) {
         throw new Error(`unexpected fetch: ${url}`);
       }

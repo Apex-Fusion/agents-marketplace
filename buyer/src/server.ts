@@ -25,7 +25,9 @@ import type { ChainProvider } from "@marketplace/shared/chain";
 import type { WalletKey } from "@marketplace/shared/tx";
 import type { Marketplace } from "./sdk/Marketplace.js";
 import type { ChatMessage } from "@marketplace/shared/tx";
+import { canonicalize } from "@marketplace/shared/cbor";
 import { runAccept } from "./cli/acceptFlow.js";
+import type { ResponseArchive } from "./db/archive.js";
 
 const ESCROW_REF_RE = /^([0-9a-f]{64})#(\d+)$/;
 
@@ -64,6 +66,12 @@ export interface AppDeps {
    * `/v1/synth-speech` proxies to. Falls back to the public Vector-testnet
    * host when not set. Endpoint stays disabled (503) when this is empty. */
   ttsPiperBaseUrl?: string;
+  /** Persistent off-chain audit trail. When provided, every successful
+   * submitPrompt / submitTts call writes a row + on-disk artefacts and
+   * /v1/responses* exposes the archive read-only. When undefined the
+   * archive endpoints respond 503 and the lifecycle still works (just
+   * without history beyond the indexer). */
+  archive?: ResponseArchive;
   /** Injectable fetch for tests. Defaults to globalThis.fetch. */
   fetchImpl?: typeof globalThis.fetch;
 }
@@ -297,13 +305,49 @@ export function createApp(deps: AppDeps): Express {
         payment_lovelace,
         max_output_tokens,
       });
+      const escrowRefStr = `${result.escrowRef.txHash}#${result.escrowRef.index}`;
+
+      // Persist BEFORE returning so navigation away never loses the audit
+      // trail. Best-effort — a write failure is logged but doesn't fail
+      // the response (the on-chain receipt is still authoritative).
+      if (deps.archive) {
+        try {
+          // Reproduce the EXACT bytes the supplier hashed for response_hash:
+          // sha256(canonicalize({role:"assistant", content: ...})). canonicalize
+          // sorts keys alphabetically (content < role) per JCS — JSON.stringify
+          // would preserve insertion order and yield different bytes → wrong
+          // sha256 → "Verify hash" mismatch on the SPA.
+          const canonicalAssistant = canonicalize({
+            role: "assistant",
+            content: result.response,
+          });
+          deps.archive.persistChat({
+            escrow_ref: escrowRefStr,
+            posted_at: Date.now(),
+            capability_id: "llm.text.generate.v1",
+            supplier_pkh: result.receipt.supplier_pkh,
+            model: result.receipt.model,
+            payment_lovelace: payment_lovelace.toString(),
+            request_messages: messages,
+            response_canonical: canonicalAssistant,
+            receipt: result.receipt as unknown as Record<string, unknown>,
+            receipt_signature: result.receiptSignature,
+          });
+        } catch (err) {
+          console.error(
+            `[buyer] archive.persistChat failed for ${escrowRefStr}:`,
+            err instanceof Error ? err.message : String(err),
+          );
+        }
+      }
+
       // Wrap the assistant text in OpenAI-shape `choices[0].message` so
       // downstream clients (PromptForm) can unpack uniformly.
       return res.status(200).json({
         choices: [{ index: 0, message: { role: "assistant", content: result.response }, finish_reason: "stop" }],
         receipt: result.receipt,
         receipt_signature: result.receiptSignature,
-        escrow_ref: `${result.escrowRef.txHash}#${result.escrowRef.index}`,
+        escrow_ref: escrowRefStr,
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -468,6 +512,35 @@ export function createApp(deps: AppDeps): Express {
         speed,
         payment_lovelace,
       });
+      const escrowRefStr = `${result.escrowRef.txHash}#${result.escrowRef.index}`;
+
+      if (deps.archive) {
+        try {
+          // Decode base64 audio back to raw bytes — storing them on disk in
+          // their original form keeps verification simple (sha256 over the
+          // same bytes the supplier hashed for response_hash).
+          const audio = Buffer.from(result.audio_b64, "base64");
+          deps.archive.persistTts({
+            escrow_ref: escrowRefStr,
+            posted_at: Date.now(),
+            capability_id: "audio.synthesize.piper.v1",
+            supplier_pkh: result.receipt.supplier_pkh,
+            model: result.receipt.model,
+            payment_lovelace: payment_lovelace.toString(),
+            request_envelope: { text, voice, format, speed },
+            response_audio: audio,
+            response_content_type: result.content_type,
+            receipt: result.receipt as unknown as Record<string, unknown>,
+            receipt_signature: result.receiptSignature,
+          });
+        } catch (err) {
+          console.error(
+            `[buyer] archive.persistTts failed for ${escrowRefStr}:`,
+            err instanceof Error ? err.message : String(err),
+          );
+        }
+      }
+
       return res.status(200).json({
         audio_b64: result.audio_b64,
         format: result.format,
@@ -475,7 +548,7 @@ export function createApp(deps: AppDeps): Express {
         byte_length: result.byte_length,
         receipt: result.receipt,
         receipt_signature: result.receiptSignature,
-        escrow_ref: `${result.escrowRef.txHash}#${result.escrowRef.index}`,
+        escrow_ref: escrowRefStr,
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -615,6 +688,107 @@ export function createApp(deps: AppDeps): Express {
       return jsonError(res, 502, "accept_failed", message);
     }
   });
+
+  // ── Response archive (off-chain audit trail) ────────────────────────
+  // Read-only views over the buyer-app's persistent record of every
+  // completed lifecycle. The archive persists at the END of submitPrompt
+  // / submitTts, BEFORE returning to the SPA, so navigation away never
+  // loses the artefact. Each row points at on-disk files in ARCHIVE_DIR
+  // that contain the exact bytes the supplier hashed for response_hash —
+  // verifiable by computing sha256 over the file and comparing to
+  // receipt.response_hash, then verifying the receipt's Ed25519 signature
+  // against the supplier's published pub_key_hex. Combined with the
+  // on-chain Submit tx's result_receipt_hash commitment, this is a full
+  // audit trail for dispute resolution.
+  if (!deps.archive) {
+    const disabledMsg = "buyer-app booted without ARCHIVE_DIR; /v1/responses* disabled";
+    app.get(/^\/v1\/responses(\/.*)?$/, (_req: Request, res: Response) =>
+      jsonError(res, 503, "service_unavailable", disabledMsg),
+    );
+  } else {
+    const archive = deps.archive;
+
+    // GET /v1/responses?limit=100 — list metadata, newest first.
+    app.get("/v1/responses", (req: Request, res: Response) => {
+      const limitRaw = (req.query.limit as string | undefined) ?? "";
+      const limit = /^[1-9]\d*$/.test(limitRaw) ? Math.min(Number(limitRaw), 500) : 100;
+      const rows = archive.list(limit);
+      // Strip the receipt_json string into a parsed object for nicer SPA
+      // rendering, but keep receipt_signature alongside for verification.
+      const view = rows.map((r) => ({
+        escrow_ref: r.escrow_ref,
+        posted_at: r.posted_at,
+        completed_at: r.completed_at,
+        capability_id: r.capability_id,
+        supplier_pkh: r.supplier_pkh,
+        model: r.model,
+        payment_lovelace: r.payment_lovelace,
+        response_content_type: r.response_content_type,
+        response_byte_length: r.response_byte_length,
+        receipt: JSON.parse(r.receipt_json),
+        receipt_signature: r.receipt_signature,
+      }));
+      return res.status(200).json({ responses: view });
+    });
+
+    // The archive stores escrow refs in canonical "<txhash>#<index>" form.
+    // URL paths can't carry "#" (fragment delimiter) so the API uses the
+    // dir-safe "<txhash>_<index>" form in path segments — matches the
+    // filesystem layout on disk for trivial debugging. Server normalises
+    // back to "#" before SQLite lookup.
+    const URL_REF = /^([0-9a-f]{64})_(\d+)$/;
+    function normaliseUrlRef(urlRef: string): string | null {
+      const m = URL_REF.exec(urlRef);
+      return m ? `${m[1]}#${m[2]}` : null;
+    }
+
+    // GET /v1/responses/:escrow_ref — single-row metadata + receipt.
+    app.get("/v1/responses/:ref", (req: Request, res: Response) => {
+      const ref = normaliseUrlRef(typeof req.params.ref === "string" ? req.params.ref : "");
+      if (!ref) return jsonError(res, 400, "ref_invalid",
+        'path segment must be "<64hex>_<int>" (URL-safe form of escrow_ref)');
+      const row = archive.get(ref);
+      if (!row) {
+        return jsonError(res, 404, "not_found", `no archive entry for ${ref}`);
+      }
+      return res.status(200).json({
+        escrow_ref: row.escrow_ref,
+        posted_at: row.posted_at,
+        completed_at: row.completed_at,
+        capability_id: row.capability_id,
+        supplier_pkh: row.supplier_pkh,
+        model: row.model,
+        payment_lovelace: row.payment_lovelace,
+        response_content_type: row.response_content_type,
+        response_byte_length: row.response_byte_length,
+        request_filename: row.request_filename,
+        response_filename: row.response_filename,
+        receipt: JSON.parse(row.receipt_json),
+        receipt_signature: row.receipt_signature,
+      });
+    });
+
+    // GET /v1/responses/:escrow_ref/request — raw request artefact bytes.
+    app.get("/v1/responses/:ref/request", (req: Request, res: Response) => {
+      const ref = normaliseUrlRef(typeof req.params.ref === "string" ? req.params.ref : "");
+      if (!ref) return jsonError(res, 400, "ref_invalid", "bad ref");
+      const bytes = archive.readRequest(ref);
+      if (!bytes) return jsonError(res, 404, "not_found", `no request artefact for ${ref}`);
+      res.setHeader("Content-Type", "application/json");
+      return res.send(bytes);
+    });
+
+    // GET /v1/responses/:escrow_ref/response — raw response artefact bytes.
+    app.get("/v1/responses/:ref/response", (req: Request, res: Response) => {
+      const ref = normaliseUrlRef(typeof req.params.ref === "string" ? req.params.ref : "");
+      if (!ref) return jsonError(res, 400, "ref_invalid", "bad ref");
+      const r = archive.readResponse(ref);
+      if (!r) return jsonError(res, 404, "not_found", `no response artefact for ${ref}`);
+      res.setHeader("Content-Type", r.contentType);
+      res.setHeader("Content-Disposition", `inline; filename="${r.filename}"`);
+      return res.send(r.bytes);
+    });
+  }
 
   if (deps.distPath) {
     let isDir = false;

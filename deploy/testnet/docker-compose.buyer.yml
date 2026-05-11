@@ -40,6 +40,17 @@ services:
       # apex-simulation). When this is unset, /v1/synth-speech responds 503
       # and the SPA's PiperTTSForm shows a clear error.
       TTS_PIPER_BASE_URL: "https://tts-piper.vector.testnet.apexfusion.org"
+      # Response archive — SQLite metadata + per-escrow artefact files for
+      # off-chain dispute resolution. Host-bind-mounted below so it survives
+      # container rebuilds and an operator can `ls`/back-up directly.
+      ARCHIVE_DIR: /data/archive
+    volumes:
+      # Bind-mount path is repo-root-relative (../../) so the on-disk
+      # archive lives at $REPO_ROOT/data/buyer/archive — same convention
+      # we use elsewhere. Without this, docker-compose's default would
+      # place the volume at deploy/testnet/data/... (relative to THIS
+      # file), which is harder to find and back up.
+      - ../../data/buyer/archive:/data/archive
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8070/healthz >/dev/null || exit 1"]
       interval: 20s

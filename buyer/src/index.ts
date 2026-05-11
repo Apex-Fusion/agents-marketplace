@@ -15,6 +15,7 @@ import { loadConfig } from "./config.js";
 import { createApp } from "./server.js";
 import { buildChainProvider } from "./chain.js";
 import { Marketplace, MemoryTaskHistoryStore } from "./sdk/index.js";
+import { ResponseArchive } from "./db/archive.js";
 import type { WalletKey } from "@marketplace/shared/tx";
 
 // Wire ed25519 sha512 hook (idempotent — same as receipt/sign.ts).
@@ -74,6 +75,22 @@ export async function runMain(env: Record<string, string | undefined>): Promise<
   });
 
   const distPath = resolve(process.cwd(), "buyer/dist");
+
+  // Open the response archive (SQLite + filesystem under ARCHIVE_DIR).
+  // Boot is non-fatal: if the archive can't be opened (e.g. permissions),
+  // log + continue without it — /v1/responses* will respond 503 but the
+  // lifecycle endpoints still work.
+  let archive: ResponseArchive | undefined;
+  try {
+    archive = new ResponseArchive(config.archiveDir);
+    console.log(`[buyer] response archive at ${config.archiveDir}`);
+  } catch (err) {
+    console.error(
+      `[buyer] failed to open response archive at ${config.archiveDir}:`,
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+
   const app = createApp({
     distPath,
     chain,
@@ -81,6 +98,7 @@ export async function runMain(env: Record<string, string | undefined>): Promise<
     indexerUrl: config.indexerUrl,
     marketplace,
     ttsPiperBaseUrl: config.ttsPiperBaseUrl,
+    archive,
   });
 
   const server = app.listen(config.port, () => {
