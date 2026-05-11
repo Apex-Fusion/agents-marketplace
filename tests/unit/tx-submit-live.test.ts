@@ -85,6 +85,17 @@ function setupSubmitHappyPath(escrowDatumHex: string): void {
     if (method === "queryNetwork/tip") {
       return rpcOk({ slot: Math.floor((DELIVER_BY - 30_000) / 1000), id: "a".repeat(64) });
     }
+    // localUPLCEval: false delegates exec-unit calc to Ogmios's
+    // evaluateTransaction. The provider has a fallback when this is missing
+    // but its synthesized budget can exceed lucid's bundled preset maxes
+    // → CML set_exunits WASM panic. Return conservative budgets that fit
+    // comfortably within PROTOCOL_PARAMETERS_DEFAULT's
+    // maxExecutionUnitsPerTransaction.
+    if (method === "evaluateTransaction") {
+      return rpcOk([
+        { validator: { purpose: "spend", index: 0 }, budget: { memory: 100_000, cpu: 50_000_000 } },
+      ]);
+    }
     if (method === "submitTransaction") return rpcOk({ transaction: { id: "d".repeat(64) } });
     return rpcOk({});
   });
@@ -94,9 +105,17 @@ function setupSubmitHappyPath(escrowDatumHex: string): void {
 
 describe("buildSubmitTx() [live] — CBOR shape", () => {
   it.skip("returns real Cardano CBOR starting with 83 or 84", async () => {
-    // TODO(M1-F-D-defer): UPLC wasm crashes on this test's lucid cost-models setup.
-    // Production path uses real Ogmios cost models and works on testnet.
-    // Defer until we plumb usePresetProtocolParameters into the test-side LucidContext.
+    // TODO(M1-F-D-defer): the ORIGINAL UPLC-WASM crash (CML interpreting
+    // the Plutus V3 script ourselves) was fixed in production by passing
+    // localUPLCEval: false to txBuilder.complete() — lucid now delegates
+    // eval to Ogmios. End-to-end chat + TTS lifecycle works on Vector
+    // testnet (commits 7ea7328 + fd24598). However this test still crashes
+    // at a DIFFERENT spot: lucid's applyUPLCEvalProvider → CML
+    // TransactionBuilder.set_exunits → wasm "unreachable" panic, even with
+    // a proper evaluateTransaction mock response. The test-side mock +
+    // CML interaction has its own bug separate from the production-path
+    // fix. Defer until we either (a) bisect the CML version or (b) rewrite
+    // these tests to assert at a layer above lucid's set_exunits.
     const claimedUtxo = buildClaimedEscrowUtxo();
     setupSubmitHappyPath(claimedUtxo.datumHex!);
     const chain = buildLiveChain();

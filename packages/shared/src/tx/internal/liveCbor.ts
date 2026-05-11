@@ -180,9 +180,25 @@ function chainUtxoToLucidScriptInput(
 }
 
 /** TxConstructionError wrapping arbitrary lucid failures, surfacing
- * collateral mismatches with a stable substring so tests can assert. */
+ * collateral mismatches with a stable substring so tests can assert.
+ *
+ * Set LIVECBOR_DEBUG=1 to see the full inner error + WASM stack — useful
+ * for diagnosing lucid 0.4.30 / CML edge cases (e.g. the set_exunits
+ * panic that affects test fixtures but not production). */
 function rethrowAsTxError(err: unknown, fallback: string): never {
   const msg = err instanceof Error ? err.message : String(err);
+  if (process.env.LIVECBOR_DEBUG) {
+    // eslint-disable-next-line no-console
+    console.error("[liveCbor] inner error:", err);
+    if (err instanceof Error && err.stack) {
+      // eslint-disable-next-line no-console
+      console.error("[liveCbor] stack:", err.stack);
+    }
+    if (err instanceof Error && "cause" in err) {
+      // eslint-disable-next-line no-console
+      console.error("[liveCbor] cause:", (err as Error & { cause?: unknown }).cause);
+    }
+  }
   const lower = msg.toLowerCase();
   if (
     lower.includes("collateral") ||
