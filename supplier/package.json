@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "tx:post-advert": "tsx src/cli/post-advert.ts"
+    "tx:post-advert": "tsx src/cli/post-advert.ts",
+    "tx:retire-advert": "tsx src/cli/retire-advert.ts"
   },
   "dependencies": {
     "@marketplace/shared": "workspace:*",

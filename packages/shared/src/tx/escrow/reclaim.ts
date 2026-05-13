@@ -16,6 +16,8 @@ import type { WalletKey, BuildResult } from "../types.js";
 import { TxConstructionError } from "../types.js";
 import { encodeTxBody, sha256Hex } from "../internal/testTxBody.js";
 import { mockSlotToWallclockMs } from "../internal/constants.js";
+import { detectCborBackend } from "../internal/cborBackend.js";
+import type { LiveOgmiosProvider } from "../../chain/LiveOgmiosProvider.js";
 
 export interface ReclaimParams {
   chain: ChainProvider;
@@ -61,8 +63,10 @@ export async function buildReclaimTx(
   }
 
   // 3. Tip must be at or past deliver_by.
+  // Live backend uses real POSIX ms; mock backend keeps slot*1000.
   const tipSlot = await chain.tip();
-  const tipMs = mockSlotToWallclockMs(tipSlot);
+  const isLive = detectCborBackend(chain) === "live";
+  const tipMs = isLive ? Date.now() : mockSlotToWallclockMs(tipSlot);
   if (tipMs < datum.deliver_by) {
     throw new TxConstructionError(
       "reclaim before deliver_by",
@@ -70,6 +74,21 @@ export async function buildReclaimTx(
     );
   }
 
+  // Live path: real Cardano CBOR via lucid-evolution.
+  if (isLive) {
+    const liveCborPath = "../internal/liveCbor.js";
+    const { buildLiveTxForReclaim } = await import(/* @vite-ignore */ liveCborPath);
+    return buildLiveTxForReclaim({
+      chain: chain as LiveOgmiosProvider,
+      buyerKey,
+      escrowRef,
+      escrowUtxo: utxo,
+      datum,
+      tipMs,
+    });
+  }
+
+  // Mock path: synthetic testTxBody (preserves existing test behaviour).
   const buyerDue =
     datum.payment_lovelace + datum.buyer_bond_lovelace + datum.supplier_bond_lovelace;
 

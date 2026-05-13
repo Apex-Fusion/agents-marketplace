@@ -9,10 +9,12 @@
  */
 
 import type { ChainProvider, OutputReference } from "../../chain/ChainProvider.js";
+import type { LiveOgmiosProvider } from "../../chain/LiveOgmiosProvider.js";
 import { decodeAdvertDatum } from "../../cbor/AdvertDatum.js";
 import type { WalletKey, BuildResult } from "../types.js";
 import { TxConstructionError } from "../types.js";
 import { encodeTxBody, sha256Hex } from "../internal/testTxBody.js";
+import { detectCborBackend } from "../internal/cborBackend.js";
 
 export interface RetireAdvertParams {
   chain: ChainProvider;
@@ -47,6 +49,20 @@ export async function buildRetireAdvertTx(
       "supplier signature mismatch",
       `wallet pkh ${walletKey.pubKeyHash} does not match datum.supplier_pkh ${datum.supplier_pkh}`,
     );
+  }
+
+  // 2. Live path: build a real Plutus V3 spend via lucid-evolution.
+  //    Mock path falls through to the synthetic JSON-in-hex body below.
+  if (detectCborBackend(chain) === "live") {
+    const liveCborPath = "../internal/liveCbor.js";
+    const { buildLiveTxForRetireAdvert } = await import(/* @vite-ignore */ liveCborPath);
+    return buildLiveTxForRetireAdvert({
+      chain: chain as LiveOgmiosProvider,
+      walletKey,
+      advertRef,
+      advertUtxo: utxo,
+      datum,
+    });
   }
 
   const body = {

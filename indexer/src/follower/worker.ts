@@ -192,6 +192,10 @@ export class ChainSyncWorker extends EventEmitter {
       } catch {
         // already warned by processBlock
       }
+    } else if (event.type === "RetireAdvert") {
+      // The advert UTxO was spent with no continuing output → flip the row's
+      // status to Retired so listActiveAdvertisements drops it.
+      this.cache.markAdvertisementRetired(event.utxoRef);
     } else if (event.type === "PostEscrow" || event.type === "ClaimEscrow" || event.type === "SubmitEscrow") {
       try {
         const d = decodeEscrowDatum(event.datumHex);

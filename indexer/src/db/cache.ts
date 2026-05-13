@@ -168,6 +168,16 @@ export class SqliteCache {
     return row ?? null;
   }
 
+  /** Mark an advertisement row as Retired. Called when the indexer observes
+   * a RetireAdvert spend (advert UTxO spent with no continuing output at
+   * the advert script address). Drops the row out of listActiveAdvertisements
+   * which filters on `status = 'Active'`. */
+  markAdvertisementRetired(utxoRef: string): void {
+    this.db.prepare(
+      `UPDATE advertisements SET status = 'Retired' WHERE utxo_ref = ?`
+    ).run(utxoRef);
+  }
+
   listActiveAdvertisements(filter?: { capability_id?: string; supplier_pkh?: string }): AdvertRow[] {
     let sql = `SELECT * FROM advertisements WHERE status = 'Active' AND rolled_back = 0`;
     const params: unknown[] = [];

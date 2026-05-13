@@ -24,10 +24,17 @@ import type { UTxO as LucidUTxO, Script } from "@lucid-evolution/lucid";
 
 import type { OutputReference, Utxo } from "../../chain/ChainProvider.js";
 import type { LiveOgmiosProvider } from "../../chain/LiveOgmiosProvider.js";
-import type { EscrowDatum } from "../../cbor/types.js";
-import type { ChatMessage, BuildResult, PostEscrowBuildResult, WalletKey } from "../types.js";
+import type { AdvertDatum, EscrowDatum } from "../../cbor/types.js";
+import type {
+  ChatMessage,
+  BuildResult,
+  PostAdvertBuildResult,
+  PostEscrowBuildResult,
+  WalletKey,
+} from "../types.js";
 import { TxConstructionError } from "../types.js";
 
+import { encodeAdvertDatum } from "../../cbor/AdvertDatum.js";
 import { encodeEscrowDatum } from "../../cbor/EscrowDatum.js";
 import { plutusTag } from "../../cbor/plutus-tag.js";
 import { encodePlutus } from "../../cbor/plutus-encoder.js";
@@ -53,6 +60,13 @@ const MIN_UTXO_LOVELACE = 2_000_000n;
 const REDEEMER_CLAIM = 121;
 const REDEEMER_SUBMIT = 122;
 const REDEEMER_ACCEPT = 123;
+const REDEEMER_RECLAIM = 124;
+
+// AdvertRedeemer Constr indices per lib/marketplace/types.ak:
+//   PostAdvert    → Constr0 (tag 121, creation event — never seen by spend)
+//   UpdateAdvert  → Constr1 (tag 122, nullary)
+//   RetireAdvert  → Constr2 (tag 123, nullary)
+const REDEEMER_RETIRE_ADVERT = 123;
 
 // ─── Param types (legacy stub shape — preserved for compatibility) ────────────
 
@@ -96,6 +110,30 @@ export interface LiveAcceptParams {
   datum: EscrowDatum;
   tipMs: number;
   windowEnd: number;
+}
+
+export interface LiveReclaimParams {
+  chain: LiveOgmiosProvider;
+  buyerKey: WalletKey;
+  escrowRef: OutputReference;
+  escrowUtxo: Utxo;
+  datum: EscrowDatum;
+  tipMs: number;
+}
+
+export interface LivePostAdvertParams {
+  chain: LiveOgmiosProvider;
+  walletKey: WalletKey;
+  advertDatum: AdvertDatum;
+  deposit_lovelace: bigint;
+}
+
+export interface LiveRetireAdvertParams {
+  chain: LiveOgmiosProvider;
+  walletKey: WalletKey;
+  advertRef: OutputReference;
+  advertUtxo: Utxo;
+  datum: AdvertDatum;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────
@@ -159,6 +197,36 @@ function readEscrowCompiledCode(): string {
     }
   }
   throw new Error("loadEscrowScript: plutus.json missing escrow validator compiledCode");
+}
+
+/** Load the advert spending validator script bytes from the blueprint. */
+function loadAdvertScript(): { script: Script; address: string } {
+  const blueprint = loadBlueprint();
+  const compiled = readAdvertCompiledCode();
+  const script: Script = { type: "PlutusV3", script: compiled };
+  return { script, address: blueprint.advertScriptAddress(MAINNET_ID) };
+}
+
+let cachedAdvertCompiledCode: string | undefined;
+function readAdvertCompiledCode(): string {
+  if (cachedAdvertCompiledCode) return cachedAdvertCompiledCode;
+  const here = dirname(fileURLToPath(import.meta.url));
+  const filePath = resolve(
+    here,
+    "..", "..", "..", "..", "..",
+    "contracts", "marketplace", "plutus.json",
+  );
+  const raw = readFileSync(filePath, "utf8");
+  const parsed = JSON.parse(raw) as {
+    validators: Array<{ title: string; compiledCode?: string }>;
+  };
+  for (const v of parsed.validators) {
+    if (typeof v.title === "string" && v.title.startsWith("advert.") && typeof v.compiledCode === "string") {
+      cachedAdvertCompiledCode = v.compiledCode;
+      return cachedAdvertCompiledCode;
+    }
+  }
+  throw new Error("loadAdvertScript: plutus.json missing advert validator compiledCode");
 }
 
 /** Build a lucid-shaped UTxO from our chain Utxo, swapping in the live
@@ -511,6 +579,185 @@ export async function buildLiveTxForAccept(params: LiveAcceptParams): Promise<Bu
   // Re-export the constant so callers that import from liveCbor still see
   // the canonical accept-window value.
   void ACCEPT_WINDOW_MS;
+
+  return { txCborHex, expectedTxHash };
+}
+
+// ─── Reclaim ─────────────────────────────────────────────────────────
+
+export async function buildLiveTxForReclaim(params: LiveReclaimParams): Promise<BuildResult> {
+  const provider = buildLucidProvider(params.chain);
+  const { lucid } = await createLucidContext(provider, params.buyerKey, {
+    networkId: 1,
+    systemStartUnix: 0,
+    slotLengthMs: 1000,
+  }, { usePresetProtocolParameters: true });
+
+  const { script, address: escrowAddress } = loadEscrowScript();
+  const lucidInput = chainUtxoToLucidScriptInput(params.escrowUtxo, escrowAddress);
+  const reclaimRedeemerHex = encodeNullaryConstrHex(REDEEMER_RECLAIM);
+
+  // Reclaim returns everything to the buyer: payment + buyer_bond + supplier_bond.
+  const buyerDue =
+    params.datum.payment_lovelace +
+    params.datum.buyer_bond_lovelace +
+    params.datum.supplier_bond_lovelace;
+  const buyerLovelace = buyerDue < MIN_UTXO_LOVELACE ? MIN_UTXO_LOVELACE : buyerDue;
+  const buyerAddress = pkhToEnterpriseAddress(params.datum.buyer_pkh, MAINNET_ID);
+
+  const realWalletUtxos = await lucid.wallet().getUtxos();
+  const presetWalletInputs = realWalletUtxos;
+
+  let signed;
+  try {
+    const txBuilder = lucid
+      .newTx()
+      .attach.SpendingValidator(script)
+      .collectFrom([lucidInput], reclaimRedeemerHex)
+      .pay.ToAddress(buyerAddress, { lovelace: buyerLovelace })
+      .addSignerKey(params.buyerKey.pubKeyHash)
+      // Validity range mirrors Accept's pattern: a narrow window centred on
+      // tipMs. The on-chain validator only checks `lower_bound >= deliver_by`,
+      // which holds as long as `tipMs - 60s >= deliver_by` — the caller has
+      // already verified tipMs >= deliver_by, so a 60s back-pad is safe.
+      .validFrom(params.tipMs - 60_000)
+      .validTo(params.tipMs + 60_000)
+      .setMinFee(500_000n);
+
+    // Same UPLC eval delegation as Accept — lucid's CML evaluator falsely
+    // rejects valid Plutus V3 spends; route to Ogmios.
+    const completed = await txBuilder.complete({
+      presetWalletInputs,
+      localUPLCEval: false,
+    });
+    signed = await completed.sign.withWallet().complete();
+  } catch (err) {
+    rethrowAsTxError(err, "reclaim build failed");
+  }
+
+  const txCborHex = signed.toCBOR();
+  const expectedTxHash = signed.toHash();
+  await params.chain.submitTx(txCborHex);
+  return { txCborHex, expectedTxHash };
+}
+
+// ─── PostAdvert ──────────────────────────────────────────────────────
+
+export async function buildLiveTxForAdvert(
+  params: LivePostAdvertParams,
+): Promise<PostAdvertBuildResult> {
+  const { chain, walletKey, advertDatum, deposit_lovelace } = params;
+
+  const provider = buildLucidProvider(chain);
+  const { lucid } = await createLucidContext(provider, walletKey, {
+    networkId: 1,
+    systemStartUnix: 0,
+    slotLengthMs: 1000,
+  }, { usePresetProtocolParameters: true });
+
+  const blueprint = loadBlueprint();
+  const advertAddress = blueprint.advertScriptAddress(MAINNET_ID);
+  const datumHex = encodeAdvertDatum(advertDatum);
+
+  // Pad to protocol min-utxo if the supplier bond is below floor — same
+  // pattern as PostEscrow. The validator only checks ≥ supplier_bond_lovelace,
+  // so excess ada in the output is fine.
+  const lockedLovelace =
+    deposit_lovelace < MIN_UTXO_LOVELACE ? MIN_UTXO_LOVELACE : deposit_lovelace;
+
+  // postAdvert.ts validates advertised_at is within ±5 min of chain tip;
+  // a centred 5-min window absorbs the build+submit gap. lucid's slot
+  // rounding-up means we still subtract 60s from validFrom like PostEscrow.
+  const advertisedAt = advertDatum.advertised_at;
+
+  let signed;
+  try {
+    const txBuilder = lucid
+      .newTx()
+      .pay.ToAddressWithData(
+        advertAddress,
+        { kind: "inline", value: datumHex },
+        { lovelace: lockedLovelace },
+      )
+      .addSignerKey(walletKey.pubKeyHash)
+      .validFrom(advertisedAt - 60_000)
+      .validTo(advertisedAt + 5 * 60_000)
+      .setMinFee(500_000n);
+
+    const completed = await txBuilder.complete();
+    signed = await completed.sign.withWallet().complete();
+  } catch (err) {
+    rethrowAsTxError(err, "post-advert build failed");
+  }
+
+  const txCborHex = signed.toCBOR();
+  const expectedTxHash = signed.toHash();
+
+  await chain.submitTx(txCborHex);
+
+  return {
+    txCborHex,
+    expectedTxHash,
+    advertOutputRef: { txHash: expectedTxHash, index: 0 },
+  };
+}
+
+// ─── RetireAdvert ────────────────────────────────────────────────────
+
+export async function buildLiveTxForRetireAdvert(
+  params: LiveRetireAdvertParams,
+): Promise<BuildResult> {
+  const { chain, walletKey, advertUtxo, datum } = params;
+
+  const provider = buildLucidProvider(chain);
+  const { lucid } = await createLucidContext(provider, walletKey, {
+    networkId: 1,
+    systemStartUnix: 0,
+    slotLengthMs: 1000,
+  }, { usePresetProtocolParameters: true });
+
+  const { script, address: advertAddress } = loadAdvertScript();
+  const lucidInput = chainUtxoToLucidScriptInput(advertUtxo, advertAddress);
+  const retireRedeemerHex = encodeNullaryConstrHex(REDEEMER_RETIRE_ADVERT);
+
+  // Validator only requires: (1) signed by datum.supplier_pkh and (2) at
+  // least one output to that pkh's vkh address. Pay the input lovelace
+  // (less fee, handled by lucid coin-selection) back to the supplier.
+  const supplierAddress = pkhToEnterpriseAddress(datum.supplier_pkh, MAINNET_ID);
+  const refundLovelace =
+    advertUtxo.lovelace < MIN_UTXO_LOVELACE ? MIN_UTXO_LOVELACE : advertUtxo.lovelace;
+
+  const presetWalletInputs = await lucid.wallet().getUtxos();
+
+  let signed;
+  try {
+    const nowMs = Date.now();
+    const txBuilder = lucid
+      .newTx()
+      .attach.SpendingValidator(script)
+      .collectFrom([lucidInput], retireRedeemerHex)
+      .pay.ToAddress(supplierAddress, { lovelace: refundLovelace })
+      .addSignerKey(walletKey.pubKeyHash)
+      // Validator has no time check, but a sane window absorbs build+submit
+      // propagation lag the same as sibling builders.
+      .validFrom(nowMs - 60_000)
+      .validTo(nowMs + 5 * 60_000)
+      .setMinFee(500_000n);
+
+    // Same UPLC-eval delegation as Claim/Submit/Accept — see
+    // buildSpendOpenOrClaimedTx for the lucid 0.4.30 false-rejection rationale.
+    const completed = await txBuilder.complete({
+      presetWalletInputs,
+      localUPLCEval: false,
+    });
+    signed = await completed.sign.withWallet().complete();
+  } catch (err) {
+    rethrowAsTxError(err, "retire-advert build failed");
+  }
+
+  const txCborHex = signed.toCBOR();
+  const expectedTxHash = signed.toHash();
+  await chain.submitTx(txCborHex);
 
   return { txCborHex, expectedTxHash };
 }
