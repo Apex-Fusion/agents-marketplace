@@ -10,6 +10,14 @@ export type { Signer } from "./signer.js";
 export { MockSigner } from "./signer.js";
 export type { Blueprint } from "./blueprint.js";
 export { loadBlueprint } from "./blueprint.js";
+// Script-bytes loaders (used by the publish-reference-scripts CLI).
+export { loadEscrowScript, loadAdvertScript } from "./internal/liveCbor.js";
+export { pkhToEnterpriseAddress } from "./internal/pkhAddress.js";
+export type {
+  LivePublishRefScriptsParams,
+  PublishRefScriptsBuildResult,
+} from "./internal/publishReferenceScripts.js";
+export { buildLiveTxForPublishReferenceScripts } from "./internal/publishReferenceScripts.js";
 
 // Advert builders
 export type { PostAdvertParams } from "./advert/postAdvert.js";

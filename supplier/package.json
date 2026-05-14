@@ -6,7 +6,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "tx:post-advert": "tsx src/cli/post-advert.ts",
-    "tx:retire-advert": "tsx src/cli/retire-advert.ts"
+    "tx:retire-advert": "tsx src/cli/retire-advert.ts",
+    "tx:publish-reference-scripts": "tsx src/cli/publish-reference-scripts.ts"
   },
   "dependencies": {
     "@marketplace/shared": "workspace:*",

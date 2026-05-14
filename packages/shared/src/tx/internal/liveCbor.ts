@@ -20,7 +20,7 @@ import { readFileSync } from "fs";
 import { dirname, resolve } from "path";
 import { fileURLToPath } from "url";
 
-import type { UTxO as LucidUTxO, Script } from "@lucid-evolution/lucid";
+import type { LucidEvolution, UTxO as LucidUTxO, Script } from "@lucid-evolution/lucid";
 
 import type { OutputReference, Utxo } from "../../chain/ChainProvider.js";
 import type { LiveOgmiosProvider } from "../../chain/LiveOgmiosProvider.js";
@@ -167,8 +167,10 @@ function buildLucidProvider(chain: LiveOgmiosProvider): OgmiosLucidProvider {
   });
 }
 
-/** Load the escrow spending validator script bytes from the blueprint. */
-function loadEscrowScript(): { script: Script; address: string } {
+/** Load the escrow spending validator script bytes from the blueprint.
+ *  Exported so the publish-reference-scripts CLI can publish the same bytes
+ *  under a CIP-33 scriptRef without duplicating plutus.json reading. */
+export function loadEscrowScript(): { script: Script; address: string } {
   const blueprint = loadBlueprint();
   // Read plutus.json directly to grab compiledCode (the blueprint loader only
   // exposes the hash). We piggyback on the same path resolution.
@@ -199,8 +201,9 @@ function readEscrowCompiledCode(): string {
   throw new Error("loadEscrowScript: plutus.json missing escrow validator compiledCode");
 }
 
-/** Load the advert spending validator script bytes from the blueprint. */
-function loadAdvertScript(): { script: Script; address: string } {
+/** Load the advert spending validator script bytes from the blueprint.
+ *  Exported for the same reason as loadEscrowScript above. */
+export function loadAdvertScript(): { script: Script; address: string } {
   const blueprint = loadBlueprint();
   const compiled = readAdvertCompiledCode();
   const script: Script = { type: "PlutusV3", script: compiled };
@@ -227,6 +230,48 @@ function readAdvertCompiledCode(): string {
     }
   }
   throw new Error("loadAdvertScript: plutus.json missing advert validator compiledCode");
+}
+
+/** Parse a `<txhash>#<idx>` env var into an OutRef. Returns null if unset. */
+function parseRefUtxoEnv(envKey: string): { txHash: string; outputIndex: number } | null {
+  const v = process.env[envKey];
+  if (!v) return null;
+  const [txHash, idxStr] = v.split("#");
+  if (!txHash || !idxStr) {
+    throw new Error(`${envKey} must be <txhash>#<idx>, got: ${v}`);
+  }
+  const outputIndex = Number(idxStr);
+  if (!Number.isInteger(outputIndex) || outputIndex < 0) {
+    throw new Error(`${envKey} index must be a non-negative integer, got: ${idxStr}`);
+  }
+  return { txHash, outputIndex };
+}
+
+/** Resolve script-witness mode for a spending tx.
+ *  - If `<envKey>` is set, fetch the referenced UTxO and use CIP-33 reference-script mode.
+ *    The caller threads the UTxO into `tx.readFrom([refUtxo])`; lucid-evolution 0.4.30
+ *    auto-extracts `refUtxo.scriptRef` and registers it as a witness
+ *    (dist/index.js:1903–1913). No `attach.SpendingValidator` call is needed.
+ *  - Otherwise, fall back to the inlined script (current behavior). */
+async function resolveSpendCtx(
+  lucid: LucidEvolution,
+  envKey: "ESCROW_REF_UTXO" | "ADVERT_REF_UTXO",
+  inlineScript: Script,
+): Promise<{ kind: "ref"; refUtxo: LucidUTxO } | { kind: "inline"; script: Script }> {
+  const refSpec = parseRefUtxoEnv(envKey);
+  if (!refSpec) return { kind: "inline", script: inlineScript };
+  const [refUtxo] = await lucid.utxosByOutRef([refSpec]);
+  if (!refUtxo) {
+    throw new Error(
+      `${envKey} ${refSpec.txHash}#${refSpec.outputIndex} not found on chain`,
+    );
+  }
+  if (!refUtxo.scriptRef) {
+    throw new Error(
+      `${envKey} ${refSpec.txHash}#${refSpec.outputIndex} has no scriptRef attached`,
+    );
+  }
+  return { kind: "ref", refUtxo };
 }
 
 /** Build a lucid-shaped UTxO from our chain Utxo, swapping in the live
@@ -375,6 +420,7 @@ async function buildSpendOpenOrClaimedTx(opts: {
   }, { usePresetProtocolParameters: true });
 
   const { script, address: escrowAddress } = loadEscrowScript();
+  const spendCtx = await resolveSpendCtx(lucid, "ESCROW_REF_UTXO", script);
   const datumHex = encodeEscrowDatum(opts.newDatum);
   const redeemerHex = opts.redeemerHex;
   const lucidInput = chainUtxoToLucidScriptInput(opts.escrowUtxo, escrowAddress);
@@ -403,9 +449,11 @@ async function buildSpendOpenOrClaimedTx(opts: {
 
   let signed;
   try {
-    const txBuilder = lucid
-      .newTx()
-      .attach.SpendingValidator(script)
+    const txBuilder = (
+      spendCtx.kind === "ref"
+        ? lucid.newTx().readFrom([spendCtx.refUtxo])
+        : lucid.newTx().attach.SpendingValidator(spendCtx.script)
+    )
       .collectFrom([lucidInput], redeemerHex)
       .pay.ToAddressWithData(
         escrowAddress,
@@ -525,6 +573,7 @@ export async function buildLiveTxForAccept(params: LiveAcceptParams): Promise<Bu
   }, { usePresetProtocolParameters: true });
 
   const { script, address: escrowAddress } = loadEscrowScript();
+  const spendCtx = await resolveSpendCtx(lucid, "ESCROW_REF_UTXO", script);
   const lucidInput = chainUtxoToLucidScriptInput(params.escrowUtxo, escrowAddress);
   const acceptRedeemerHex = encodeNullaryConstrHex(REDEEMER_ACCEPT);
 
@@ -548,9 +597,11 @@ export async function buildLiveTxForAccept(params: LiveAcceptParams): Promise<Bu
 
   let signed;
   try {
-    const txBuilder = lucid
-      .newTx()
-      .attach.SpendingValidator(script)
+    const txBuilder = (
+      spendCtx.kind === "ref"
+        ? lucid.newTx().readFrom([spendCtx.refUtxo])
+        : lucid.newTx().attach.SpendingValidator(spendCtx.script)
+    )
       .collectFrom([lucidInput], acceptRedeemerHex)
       .pay.ToAddress(supplierAddress, { lovelace: supplierLovelace })
       .pay.ToAddress(buyerAddress, { lovelace: buyerLovelace })
@@ -594,6 +645,7 @@ export async function buildLiveTxForReclaim(params: LiveReclaimParams): Promise<
   }, { usePresetProtocolParameters: true });
 
   const { script, address: escrowAddress } = loadEscrowScript();
+  const spendCtx = await resolveSpendCtx(lucid, "ESCROW_REF_UTXO", script);
   const lucidInput = chainUtxoToLucidScriptInput(params.escrowUtxo, escrowAddress);
   const reclaimRedeemerHex = encodeNullaryConstrHex(REDEEMER_RECLAIM);
 
@@ -610,9 +662,11 @@ export async function buildLiveTxForReclaim(params: LiveReclaimParams): Promise<
 
   let signed;
   try {
-    const txBuilder = lucid
-      .newTx()
-      .attach.SpendingValidator(script)
+    const txBuilder = (
+      spendCtx.kind === "ref"
+        ? lucid.newTx().readFrom([spendCtx.refUtxo])
+        : lucid.newTx().attach.SpendingValidator(spendCtx.script)
+    )
       .collectFrom([lucidInput], reclaimRedeemerHex)
       .pay.ToAddress(buyerAddress, { lovelace: buyerLovelace })
       .addSignerKey(params.buyerKey.pubKeyHash)
@@ -717,6 +771,7 @@ export async function buildLiveTxForRetireAdvert(
   }, { usePresetProtocolParameters: true });
 
   const { script, address: advertAddress } = loadAdvertScript();
+  const spendCtx = await resolveSpendCtx(lucid, "ADVERT_REF_UTXO", script);
   const lucidInput = chainUtxoToLucidScriptInput(advertUtxo, advertAddress);
   const retireRedeemerHex = encodeNullaryConstrHex(REDEEMER_RETIRE_ADVERT);
 
@@ -732,9 +787,11 @@ export async function buildLiveTxForRetireAdvert(
   let signed;
   try {
     const nowMs = Date.now();
-    const txBuilder = lucid
-      .newTx()
-      .attach.SpendingValidator(script)
+    const txBuilder = (
+      spendCtx.kind === "ref"
+        ? lucid.newTx().readFrom([spendCtx.refUtxo])
+        : lucid.newTx().attach.SpendingValidator(spendCtx.script)
+    )
       .collectFrom([lucidInput], retireRedeemerHex)
       .pay.ToAddress(supplierAddress, { lovelace: refundLovelace })
       .addSignerKey(walletKey.pubKeyHash)
