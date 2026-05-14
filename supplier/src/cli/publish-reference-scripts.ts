@@ -25,13 +25,13 @@ import * as ed from "@noble/ed25519";
 import { blake2b } from "@noble/hashes/blake2b";
 import { bech32 } from "bech32";
 import { LiveOgmiosProvider } from "@marketplace/shared/chain";
+import type { WalletKey } from "@marketplace/shared/tx";
 import {
   buildLiveTxForPublishReferenceScripts,
   loadEscrowScript,
   loadAdvertScript,
   pkhToEnterpriseAddress,
-} from "@marketplace/shared/tx";
-import type { WalletKey } from "@marketplace/shared/tx";
+} from "@marketplace/shared/tx/server";
 
 ed.etc.sha512Sync = (...messages: Uint8Array[]): Uint8Array => {
   const h = createHash("sha512");

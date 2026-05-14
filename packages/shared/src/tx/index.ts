@@ -10,14 +10,11 @@ export type { Signer } from "./signer.js";
 export { MockSigner } from "./signer.js";
 export type { Blueprint } from "./blueprint.js";
 export { loadBlueprint } from "./blueprint.js";
-// Script-bytes loaders (used by the publish-reference-scripts CLI).
-export { loadEscrowScript, loadAdvertScript } from "./internal/liveCbor.js";
-export { pkhToEnterpriseAddress } from "./internal/pkhAddress.js";
-export type {
-  LivePublishRefScriptsParams,
-  PublishRefScriptsBuildResult,
-} from "./internal/publishReferenceScripts.js";
-export { buildLiveTxForPublishReferenceScripts } from "./internal/publishReferenceScripts.js";
+// Note: live-CBOR helpers (loadEscrowScript, loadAdvertScript,
+// buildLiveTxForPublishReferenceScripts, pkhToEnterpriseAddress) live in
+// "./server.js" — kept OUT of this index so the buyer's vite bundle
+// doesn't trace into lucid-evolution / CML WASM (sibling builders use
+// /* @vite-ignore */ dynamic imports for the same reason).
 
 // Advert builders
 export type { PostAdvertParams } from "./advert/postAdvert.js";

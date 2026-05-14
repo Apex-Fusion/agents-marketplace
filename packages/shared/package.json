@@ -10,7 +10,8 @@
     "./chain": "./src/chain/index.ts",
     "./cbor": "./src/cbor/index.ts",
     "./receipt": "./src/receipt/index.ts",
-    "./tx": "./src/tx/index.ts"
+    "./tx": "./src/tx/index.ts",
+    "./tx/server": "./src/tx/server.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"
