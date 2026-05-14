@@ -26,9 +26,12 @@ export interface LivePublishRefScriptsParams {
   burnAddr: string;
   escrowScript: Script;
   advertScript: Script;
-  /** Lovelace per output. Default 30_000_000n (30 AP3X) — covers min-UTxO for
-   *  a ~5 KB script (4310 lovelace/byte × 5_140 bytes ≈ 22.2 AP3X) with headroom. */
-  lovelacePerOutput?: bigint;
+  /** Lovelace for the escrow output. Default 30_000_000n (30 AP3X). For tight
+   *  budgets pass ~17_000_000n — escrow script is ~3.4 KB → ledger min ~15.7 AP3X. */
+  escrowLovelace?: bigint;
+  /** Lovelace for the advert output. Default 30_000_000n (30 AP3X). For tight
+   *  budgets pass ~7_000_000n — advert script is ~1 KB → ledger min ~5.4 AP3X. */
+  advertLovelace?: bigint;
 }
 
 export interface PublishRefScriptsBuildResult extends BuildResult {
@@ -46,7 +49,8 @@ export async function buildLiveTxForPublishReferenceScripts(
   params: LivePublishRefScriptsParams,
 ): Promise<PublishRefScriptsBuildResult> {
   const { chain, walletKey, burnAddr, escrowScript, advertScript } = params;
-  const lovelacePerOutput = params.lovelacePerOutput ?? DEFAULT_LOVELACE_PER_OUTPUT;
+  const escrowLovelace = params.escrowLovelace ?? DEFAULT_LOVELACE_PER_OUTPUT;
+  const advertLovelace = params.advertLovelace ?? DEFAULT_LOVELACE_PER_OUTPUT;
 
   const provider = new OgmiosLucidProvider({
     ogmiosUrl: chain.url,
@@ -68,14 +72,14 @@ export async function buildLiveTxForPublishReferenceScripts(
       .pay.ToAddressWithData(
         burnAddr,
         undefined,
-        { lovelace: lovelacePerOutput },
+        { lovelace: escrowLovelace },
         escrowScript,
       )
       // Output 1: advert script reference.
       .pay.ToAddressWithData(
         burnAddr,
         undefined,
-        { lovelace: lovelacePerOutput },
+        { lovelace: advertLovelace },
         advertScript,
       )
       .addSignerKey(walletKey.pubKeyHash)

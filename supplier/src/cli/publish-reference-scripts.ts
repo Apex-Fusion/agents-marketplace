@@ -9,10 +9,14 @@
  *   ADVERT_REF_UTXO=<txhash>#1
  *
  * Reads env (no flags):
- *   SUPPLIER_PRIV_KEY_HEX  64-hex Ed25519 private key
- *   OGMIOS_URL             https:// or wss:// endpoint (HTTPS preferred)
- *   NETWORK_ID             "0" (testnet) or "1" (mainnet)
- *   VECTOR_ZERO_TIME_MS    optional, mainnet override; defaults to testnet genesis
+ *   SUPPLIER_PRIV_KEY_HEX     64-hex Ed25519 private key (also accepts buyer
+ *                             key value if you want to fund publish from buyer
+ *                             wallet — env name stays the same internally)
+ *   OGMIOS_URL                https:// or wss:// endpoint (HTTPS preferred)
+ *   NETWORK_ID                "0" (testnet) or "1" (mainnet)
+ *   VECTOR_ZERO_TIME_MS       optional, mainnet override; defaults to testnet genesis
+ *   ESCROW_PUBLISH_LOVELACE   optional, lovelace for the escrow output (default 30_000_000)
+ *   ADVERT_PUBLISH_LOVELACE   optional, lovelace for the advert output (default 30_000_000)
  *
  * stdout (success):
  *   ESCROW_REF_UTXO=<txhash>#0
@@ -95,6 +99,16 @@ export async function main(env: Record<string, string | undefined>): Promise<num
   }
   const networkId: 0 | 1 = networkIdStr === "1" ? 1 : 0;
 
+  let escrowLovelace: bigint | undefined;
+  let advertLovelace: bigint | undefined;
+  try {
+    if (env.ESCROW_PUBLISH_LOVELACE) escrowLovelace = BigInt(env.ESCROW_PUBLISH_LOVELACE);
+    if (env.ADVERT_PUBLISH_LOVELACE) advertLovelace = BigInt(env.ADVERT_PUBLISH_LOVELACE);
+  } catch (err) {
+    process.stderr.write(`error: *_PUBLISH_LOVELACE must be integer lovelace, got: ${err instanceof Error ? err.message : String(err)}\n`);
+    return 1;
+  }
+
   const walletKey = deriveWalletKey(privHex, networkId);
   const burnAddr = pkhToEnterpriseAddress(ZERO_PKH_HEX, networkId);
   const { script: escrowScript } = loadEscrowScript();
@@ -104,6 +118,8 @@ export async function main(env: Record<string, string | undefined>): Promise<num
   process.stderr.write(`burn addr: ${burnAddr}\n`);
   process.stderr.write(`ogmios:    ${ogmiosUrl}\n`);
   process.stderr.write(`network:   ${networkId === 0 ? "testnet" : "mainnet"}\n`);
+  process.stderr.write(`escrow lovelace: ${escrowLovelace ?? "30000000 (default)"}\n`);
+  process.stderr.write(`advert lovelace: ${advertLovelace ?? "30000000 (default)"}\n`);
 
   const chain = new LiveOgmiosProvider({ ogmiosUrl });
 
@@ -115,6 +131,8 @@ export async function main(env: Record<string, string | undefined>): Promise<num
       burnAddr,
       escrowScript,
       advertScript,
+      escrowLovelace,
+      advertLovelace,
     });
     process.stderr.write(`submitted: ${result.expectedTxHash}\n`);
     process.stdout.write(`ESCROW_REF_UTXO=${result.formattedEscrowRef}\n`);
