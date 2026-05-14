@@ -20,9 +20,10 @@ services:
       - path: ../../indexer/.env
         required: false
     environment:
-      OGMIOS_URL: ws://ogmios:1337
       DB_PATH: /repo/indexer/data/indexer.db
       INDEXER_PORT: "8090"
+      # OGMIOS_URL intentionally not pinned here — comes from indexer/.env so
+      # the operator can choose hosted WSS vs an in-cluster ogmios container.
       # NETWORK_ID intentionally not pinned — see supplier compose comment.
     volumes:
       - marketplace_mainnet_indexer_data:/repo/indexer/data
