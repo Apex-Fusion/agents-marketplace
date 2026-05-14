@@ -37,7 +37,7 @@ services:
       - traefik-net
     labels:
       - "traefik.enable=true"
-      - "traefik.docker.network=dashboard_default"
+      - "traefik.docker.network=traefik-net"
       - "traefik.http.routers.mp-indexer-mainnet.entrypoints=web"
       - "traefik.http.routers.mp-indexer-mainnet.rule=Host(`mp-indexer.vector.apexfusion.org`)"
       - "traefik.http.services.mp-indexer-mainnet.loadbalancer.server.port=8090"
@@ -53,7 +53,7 @@ networks:
     name: marketplace-mainnet-net
   traefik-net:
     external: true
-    name: dashboard_default
+    name: traefik-net
 
 volumes:
   marketplace_mainnet_indexer_data:

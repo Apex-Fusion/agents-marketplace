@@ -16,7 +16,7 @@
 # Pre-flight networks (must already exist):
 #   docker network create marketplace-mainnet-net                  # one-shot
 #   # apex-dashboard-mainnet_mainnet-net is created by apex-dashboard-mainnet
-#   # dashboard_default                  is created by the Traefik project
+#   # traefik-net                  is created by the Traefik project
 
 name: marketplace-mainnet-supplier
 
@@ -50,7 +50,7 @@ services:
       - traefik-net
     labels:
       - "traefik.enable=true"
-      - "traefik.docker.network=dashboard_default"
+      - "traefik.docker.network=traefik-net"
       - "traefik.http.routers.mp-suppliers-mainnet.entrypoints=web"
       - "traefik.http.routers.mp-suppliers-mainnet.rule=Host(`mp-suppliers.vector.apexfusion.org`)"
       - "traefik.http.services.mp-suppliers-mainnet.loadbalancer.server.port=8080"
@@ -69,4 +69,4 @@ networks:
     name: apex-dashboard-mainnet_mainnet-net
   traefik-net:
     external: true
-    name: dashboard_default
+    name: traefik-net
