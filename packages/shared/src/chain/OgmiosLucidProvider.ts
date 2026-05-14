@@ -370,10 +370,25 @@ function ogmiosUtxoToLucidUtxo(o: OgmiosUtxo): UTxO {
     assets,
     datumHash: o.datumHash ?? null,
     datum: typeof o.datum === "string" ? o.datum : null,
-    scriptRef: typeof o.script === "string"
-      ? { type: "PlutusV3", script: o.script }
-      : null,
+    scriptRef: ogmiosScriptToLucidScript(o.script),
   };
+}
+
+/** Ogmios v6 returns the script as `{ language: "plutus:v3", cbor: "<hex>" }`
+ *  (or `"native"` for native scripts). lucid-evolution wants
+ *  `{ type: "PlutusV1"|"PlutusV2"|"PlutusV3"|"Native", script: "<cbor-hex>" }`.
+ *  Returns null if the field is missing or unrecognised. */
+function ogmiosScriptToLucidScript(s: unknown): UTxO["scriptRef"] {
+  if (!s || typeof s !== "object") return null;
+  const obj = s as { language?: string; cbor?: string };
+  if (typeof obj.cbor !== "string") return null;
+  switch (obj.language) {
+    case "plutus:v1": return { type: "PlutusV1", script: obj.cbor };
+    case "plutus:v2": return { type: "PlutusV2", script: obj.cbor };
+    case "plutus:v3": return { type: "PlutusV3", script: obj.cbor };
+    case "native":   return { type: "Native",   script: obj.cbor };
+    default: return null;
+  }
 }
 
 function fractionToNumber(value: string | number | undefined, fallback: number): number {
