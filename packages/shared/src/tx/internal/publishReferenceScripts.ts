@@ -83,7 +83,11 @@ export async function buildLiveTxForPublishReferenceScripts(
         advertScript,
       )
       .addSignerKey(walletKey.pubKeyHash)
-      .setMinFee(200_000n);
+      // Bump floor to 500K — lucid's auto-fee under-estimates this tx by
+      // ~5K lovelace on Vector L2 mainnet (observed: needed 372,658, lucid
+      // computed 367,197). Publish is a one-shot, so 0.13 AP3X overhead is
+      // a fine price for not having to chase the fee model.
+      .setMinFee(500_000n);
 
     const completed = await txBuilder.complete({
       presetWalletInputs: realWalletUtxos,
