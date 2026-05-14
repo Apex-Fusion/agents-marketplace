@@ -34,7 +34,6 @@ services:
       start_period: 20s
     networks:
       - marketplace-mainnet-net
-      - apex-net
       - traefik-net
     labels:
       - "traefik.enable=true"
@@ -52,9 +51,6 @@ networks:
   marketplace-mainnet-net:
     external: true
     name: marketplace-mainnet-net
-  apex-net:
-    external: true
-    name: apex-dashboard-mainnet_mainnet-net
   traefik-net:
     external: true
     name: dashboard_default

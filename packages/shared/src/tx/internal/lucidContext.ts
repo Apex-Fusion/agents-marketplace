@@ -41,7 +41,7 @@ const HEX64_RE = /^[0-9a-fA-F]{64}$/;
 // idempotent — repeated calls leave the values identical. createLucidContext
 // invokes it before constructing the Lucid instance.
 
-const VECTOR_ZERO_TIME = 1_752_057_484_000;
+const VECTOR_ZERO_TIME = Number(process.env.VECTOR_ZERO_TIME_MS) || 1_752_057_484_000;
 const VECTOR_ZERO_SLOT = 0;
 const VECTOR_SLOT_LENGTH = 1000;
 

@@ -489,7 +489,7 @@ export async function buildLiveTxForSubmit(params: LiveSubmitParams): Promise<Bu
   // because no slot in [tip, tip] could hold it. Push stamp forward to give
   // the chain SUBMIT_WINDOW_MS of headroom for inclusion, capped at
   // deliver_by so deadline_ok stays satisfied.
-  const VECTOR_ZERO_TIME = 1_752_057_484_000;  // ms
+  const VECTOR_ZERO_TIME = Number(process.env.VECTOR_ZERO_TIME_MS) || 1_752_057_484_000;  // ms (env override for mainnet; default = testnet genesis)
   const SLOT_LENGTH = 1_000;                   // ms
   const SUBMIT_WINDOW_MS = 120_000;            // 2-minute inclusion window
   const tipMs = params.tipMs;

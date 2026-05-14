@@ -36,7 +36,7 @@ services:
       - "traefik.enable=true"
       - "traefik.docker.network=dashboard_default"
       - "traefik.http.routers.mp-buyer-mainnet.entrypoints=web"
-      - "traefik.http.routers.mp-buyer-mainnet.rule=Host(`mp.vector.apexfusion.org`)"
+      - "traefik.http.routers.mp-buyer-mainnet.rule=Host(`marketplace.vector.apexfusion.org`)"
       - "traefik.http.services.mp-buyer-mainnet.loadbalancer.server.port=8070"
     logging:
       driver: json-file
