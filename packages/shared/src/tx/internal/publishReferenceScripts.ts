@@ -79,7 +79,7 @@ export async function buildLiveTxForPublishReferenceScripts(
         advertScript,
       )
       .addSignerKey(walletKey.pubKeyHash)
-      .setMinFee(500_000n);
+      .setMinFee(200_000n);
 
     const completed = await txBuilder.complete({
       presetWalletInputs: realWalletUtxos,
