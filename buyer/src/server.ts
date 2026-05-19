@@ -18,7 +18,7 @@
  * through the buyer-app keeps the buyer_pkh out of the page bundle.
  */
 
-import express, { type Express, type Request, type Response } from "express";
+import express, { type Express, type NextFunction, type Request, type Response } from "express";
 import { existsSync, readFileSync, statSync } from "fs";
 import { bech32 } from "bech32";
 import type { ChainProvider } from "@marketplace/shared/chain";
@@ -28,6 +28,18 @@ import type { ChatMessage } from "@marketplace/shared/tx";
 import { canonicalize } from "@marketplace/shared/cbor";
 import { runAccept } from "./cli/acceptFlow.js";
 import type { ResponseArchive } from "./db/archive.js";
+import {
+  SESSION_COOKIE_NAME,
+  SESSION_MAX_AGE_MS,
+  buildClearCookieHeader,
+  buildSessionCookieHeader,
+  createRateLimiter,
+  getCookie,
+  signSession,
+  timingSafeCompareStrings,
+  verifySession,
+  type RateLimiter,
+} from "./auth.js";
 
 const ESCROW_REF_RE = /^([0-9a-f]{64})#(\d+)$/;
 
@@ -74,6 +86,19 @@ export interface AppDeps {
   archive?: ResponseArchive;
   /** Injectable fetch for tests. Defaults to globalThis.fetch. */
   fetchImpl?: typeof globalThis.fetch;
+  /** Operator login password (BUYER_PASSWORD). When missing, all /v1/*
+   * non-auth routes and the SPA shell respond 503 auth_unconfigured. */
+  password?: string;
+  /** HMAC key for the buyer_session cookie (SESSION_SECRET). When missing,
+   * auth is treated as unconfigured (same 503 behavior as a missing password). */
+  sessionSecret?: string;
+  /** When true, the session cookie carries the Secure attribute. Defaults
+   * to true; tests and local-loopback dev override to false. */
+  cookieSecure?: boolean;
+  /** Injectable clock for cookie issued-at / expiry calculations and the
+   * brute-force rate-limit window. Defaults to Date.now. Tests use a fake
+   * clock to drive expiry and rolling-renewal assertions deterministically. */
+  nowMs?: () => number;
 }
 
 interface ResolvedDeps {
@@ -124,6 +149,134 @@ export function createApp(deps: AppDeps): Express {
   app.get("/healthz", (_req: Request, res: Response) => {
     res.status(200).json({ ok: true });
   });
+
+  // ─── Auth wiring ───────────────────────────────────────────────────────
+  // The single-operator login gate. When `password` and `sessionSecret` are
+  // both configured, every /v1/* route below (other than /v1/auth/*) and the
+  // SPA boot block require a valid buyer_session cookie.
+  //
+  // When either is missing, `authReady` is false and the gate is bypassed
+  // entirely (no /v1/auth/* routes mounted; no requireAuth middleware). This
+  // is purely a test-construction shape — the production boot path
+  // (runMain → loadConfig) refuses to start without both env vars, so a
+  // deployment with `authReady === false` is impossible.
+  const authReady =
+    typeof deps.password === "string" && deps.password.length > 0 &&
+    typeof deps.sessionSecret === "string" && deps.sessionSecret.length > 0;
+  const cookieSecure = deps.cookieSecure !== false; // default true
+  const nowMs = deps.nowMs ?? (() => Date.now());
+
+  // Brute-force limiter: 5 attempts per 15 minutes per IP. In-memory only;
+  // resets on a successful login (legitimate operator who typo'd) and on
+  // process restart. For a single-operator service this is the right trade.
+  const loginLimiter: RateLimiter = createRateLimiter({
+    max: 5,
+    windowMs: 15 * 60 * 1000,
+    now: nowMs,
+  });
+
+  function clientIp(req: Request): string {
+    // Default Express req.ip honors `trust proxy`; we deliberately don't
+    // enable trust proxy here, so this is the direct socket peer. Operators
+    // behind a reverse proxy that masks the client should configure
+    // trust proxy on the outer Express; for our brute-force gate, even the
+    // proxy IP is a usable bucket key (it just rate-limits the proxy itself).
+    return req.ip ?? "unknown";
+  }
+
+  function issueSessionCookie(res: Response): void {
+    if (!authReady) return;
+    const iat = nowMs();
+    const exp = iat + SESSION_MAX_AGE_MS;
+    const token = signSession(deps.sessionSecret!, { iat, exp });
+    res.setHeader(
+      "Set-Cookie",
+      buildSessionCookieHeader({ value: token, maxAgeMs: SESSION_MAX_AGE_MS, secure: cookieSecure }),
+    );
+  }
+
+  if (authReady) {
+    /**
+     * Express middleware that requires a valid buyer_session cookie. On
+     * success, refreshes the cookie (rolling SESSION_MAX_AGE_MS expiry).
+     * On failure responds 401 unauthenticated for /v1/* — the SPA shell
+     * route lower in the file separately handles the unauth HTML case
+     * by serving the bundle without the boot block.
+     */
+    const requireAuth = (req: Request, res: Response, next: NextFunction): void => {
+      const raw = getCookie(req.headers.cookie, SESSION_COOKIE_NAME);
+      if (raw === null) {
+        jsonError(res, 401, "unauthenticated", "no session cookie");
+        return;
+      }
+      const result = verifySession(deps.sessionSecret!, raw, nowMs());
+      if (!result.valid) {
+        jsonError(res, 401, "unauthenticated", `session ${result.reason ?? "invalid"}`);
+        return;
+      }
+      // Rolling renewal — every authenticated request pushes exp out another
+      // SESSION_MAX_AGE_MS. Keeps active operators logged in without ever
+      // accumulating long-lived tokens that linger past inactivity.
+      issueSessionCookie(res);
+      next();
+    };
+
+    // /v1/auth/* — login, logout, whoami. Mounted before any protected
+    // /v1/* routes so requireAuth doesn't gate login itself. /v1/auth/whoami
+    // is intentionally protected — the SPA's AuthProvider uses it as a
+    // "do I have a valid session?" probe.
+    app.post("/v1/auth/login", (req: Request, res: Response) => {
+      const ip = clientIp(req);
+      const limit = loginLimiter.attempt(ip);
+      if (!limit.allowed) {
+        const retryAfterSec = Math.ceil(limit.retryAfterMs / 1000);
+        res.setHeader("Retry-After", String(retryAfterSec));
+        jsonError(
+          res,
+          429,
+          "rate_limited",
+          `too many login attempts; try again in ${retryAfterSec}s`,
+        );
+        return;
+      }
+      const body = readBody(req.body);
+      const password = body.password;
+      if (typeof password !== "string" || password.length === 0) {
+        jsonError(res, 400, "password_required", 'body must include { "password": "<string>" }');
+        return;
+      }
+      if (!timingSafeCompareStrings(password, deps.password!)) {
+        jsonError(res, 401, "invalid_password", "incorrect password");
+        return;
+      }
+      loginLimiter.reset(ip);
+      issueSessionCookie(res);
+      res.status(204).end();
+    });
+
+    app.post("/v1/auth/logout", (_req: Request, res: Response) => {
+      // Idempotent — safe to call without an existing session. We always
+      // set the clear cookie header so any stale cookie in the browser is
+      // overwritten regardless of whether it was valid.
+      res.setHeader("Set-Cookie", buildClearCookieHeader(cookieSecure));
+      res.status(204).end();
+    });
+
+    app.get("/v1/auth/whoami", requireAuth, (_req: Request, res: Response) => {
+      res.status(200).json({ authenticated: true });
+    });
+
+    // Every other /v1/* route is protected. Mount the gate as a path-prefix
+    // middleware that skips /v1/auth/* (already mounted above) but applies
+    // to everything else under /v1/.
+    app.use("/v1", (req: Request, res: Response, next: NextFunction) => {
+      if (req.path.startsWith("/auth/")) {
+        next();
+        return;
+      }
+      requireAuth(req, res, next);
+    });
+  }
 
   // chain/walletKey/indexerUrl are required for /v1/* routes; if any is
   // missing we still mount the static bundle but the API endpoints respond
@@ -807,6 +960,11 @@ export function createApp(deps: AppDeps): Express {
       // can show the user their identity without the server leaking the
       // private key into the page bundle. The SPA talks to /v1/* on this
       // origin (relative URLs), so no indexer/ogmios endpoints leak either.
+      //
+      // The boot block is ALSO gated by auth: unauthenticated requests get
+      // the same HTML shell but with NO boot script, so the SPA's
+      // AuthProvider renders <Login> and the buyer's address never reaches
+      // an unauthenticated browser.
       const indexPath = `${deps.distPath}/index.html`;
       const cachedTemplate = existsSync(indexPath)
         ? readFileSync(indexPath, "utf8")
@@ -825,17 +983,28 @@ export function createApp(deps: AppDeps): Express {
             },
           })};</script>`
         : "";
-      const indexBody = cachedTemplate.replace(
+      const indexWithBoot = cachedTemplate.replace(
         "</head>",
         `${bootScript}\n  </head>`,
       );
+      // Anonymous shell: same HTML template but no boot block. The SPA's
+      // AuthProvider handles the rest.
+      const indexAnonymous = cachedTemplate;
 
-      app.get(/^\/(?!healthz|v1\/).*/, (_req: Request, res: Response) => {
-        if (!indexBody) {
+      function isAuthenticatedHtmlRequest(req: Request): boolean {
+        if (!authReady) return true; // auth disabled (test mode): no gating
+        const raw = getCookie(req.headers.cookie, SESSION_COOKIE_NAME);
+        if (raw === null) return false;
+        return verifySession(deps.sessionSecret!, raw, nowMs()).valid;
+      }
+
+      app.get(/^\/(?!healthz|v1\/).*/, (req: Request, res: Response) => {
+        if (!cachedTemplate) {
           return res.status(404).json({ error: "not_found" });
         }
         res.setHeader("Content-Type", "text/html; charset=utf-8");
-        return res.send(indexBody);
+        const body = isAuthenticatedHtmlRequest(req) ? indexWithBoot : indexAnonymous;
+        return res.send(body);
       });
     }
   }

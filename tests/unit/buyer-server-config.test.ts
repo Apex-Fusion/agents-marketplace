@@ -19,6 +19,8 @@ describe("loadConfig(env)", () => {
     INDEXER_URL: "http://localhost:3001",
     BUYER_PORT: "3002",
     NETWORK_ID: "0",
+    BUYER_PASSWORD: "hunter2",
+    SESSION_SECRET: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
   };
 
   it("returns a BuyerConfig when all required env vars are present", () => {
@@ -27,6 +29,9 @@ describe("loadConfig(env)", () => {
     expect(config.indexerUrl).toBe(VALID_ENV.INDEXER_URL);
     expect(config.port).toBe(3002);
     expect(config.networkId).toBe(0);
+    expect(config.password).toBe(VALID_ENV.BUYER_PASSWORD);
+    expect(config.sessionSecret).toBe(VALID_ENV.SESSION_SECRET);
+    expect(config.cookieSecure).toBe(true);
   });
 
   it("throws when BUYER_PRIV_KEY_HEX is missing", () => {
@@ -53,6 +58,34 @@ describe("loadConfig(env)", () => {
     delete (env as Record<string, string | undefined>).NETWORK_ID;
     const config = loadConfig(env);
     expect(config.networkId).toBe(0);
+  });
+
+  it("throws when BUYER_PASSWORD is missing", () => {
+    const env = { ...VALID_ENV };
+    delete (env as Record<string, string | undefined>).BUYER_PASSWORD;
+    expect(() => loadConfig(env)).toThrow(/BUYER_PASSWORD/);
+  });
+
+  it("throws when SESSION_SECRET is missing", () => {
+    const env = { ...VALID_ENV };
+    delete (env as Record<string, string | undefined>).SESSION_SECRET;
+    expect(() => loadConfig(env)).toThrow(/SESSION_SECRET/);
+  });
+
+  it("throws when SESSION_SECRET is shorter than 32 chars", () => {
+    const env = { ...VALID_ENV, SESSION_SECRET: "too-short" };
+    expect(() => loadConfig(env)).toThrow(/SESSION_SECRET/);
+  });
+
+  it('honours COOKIE_SECURE="0" for plain-HTTP loopback dev', () => {
+    const env = { ...VALID_ENV, COOKIE_SECURE: "0" };
+    const config = loadConfig(env);
+    expect(config.cookieSecure).toBe(false);
+  });
+
+  it("throws when COOKIE_SECURE is not 0 or 1", () => {
+    const env = { ...VALID_ENV, COOKIE_SECURE: "true" };
+    expect(() => loadConfig(env)).toThrow(/COOKIE_SECURE/);
   });
 });
 

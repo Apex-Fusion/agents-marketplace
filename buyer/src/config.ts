@@ -4,6 +4,12 @@
  * Required env vars:
  *   BUYER_PRIV_KEY_HEX  — 32-byte (64-char) hex Ed25519 private key
  *   INDEXER_URL         — base URL of the indexer (e.g. http://localhost:3001)
+ *   BUYER_PASSWORD      — plaintext password for the operator login screen.
+ *                         Single-operator gate: anyone who knows this password
+ *                         can drive the buyer (spend funds via /v1/submit-prompt
+ *                         etc). Treat with the same care as BUYER_PRIV_KEY_HEX.
+ *   SESSION_SECRET      — HMAC key for signing the buyer_session cookie.
+ *                         Must be ≥ 32 chars. Generate with `openssl rand -hex 32`.
  *
  * Optional:
  *   BUYER_PORT          — port to listen on (default 3002)
@@ -11,6 +17,9 @@
  *   OGMIOS_URL          — Ogmios HTTP endpoint (required iff LIVE_CHAIN=1)
  *   LIVE_CHAIN          — "1" opts in to LiveOgmiosProvider (real submitTx).
  *                         Default off → ReadOnlyOgmiosProvider (safe).
+ *   COOKIE_SECURE       — "1" (default) sets Secure on the session cookie so
+ *                         it's only sent over HTTPS. Set "0" for plain-HTTP
+ *                         local dev over loopback.
  *   TTS_PIPER_BASE_URL  — Base URL of the openedai-speech-min PiperTTS host.
  *                         When unset, /v1/synth-speech responds 503 (the
  *                         capability stays disabled — the rest of the
@@ -24,6 +33,7 @@
 
 const HEX64_RE = /^[0-9a-fA-F]{64}$/;
 const POS_INT_RE = /^[1-9]\d*$/;
+const SESSION_SECRET_MIN_LEN = 32;
 
 export interface BuyerConfig {
   privKeyHex: string;
@@ -34,6 +44,9 @@ export interface BuyerConfig {
   liveChain: boolean;
   ttsPiperBaseUrl: string;
   archiveDir: string;
+  password: string;
+  sessionSecret: string;
+  cookieSecure: boolean;
 }
 
 function requireField(env: Record<string, string | undefined>, name: string): string {
@@ -92,5 +105,38 @@ export function loadConfig(env: Record<string, string | undefined>): BuyerConfig
   // bind-mounted /repo/data/archive.
   const archiveDir = env.ARCHIVE_DIR ?? "./data/archive";
 
-  return { privKeyHex, indexerUrl, port, networkId, ogmiosUrl, liveChain, ttsPiperBaseUrl, archiveDir };
+  const password = requireField(env, "BUYER_PASSWORD");
+  const sessionSecret = requireField(env, "SESSION_SECRET");
+  if (sessionSecret.length < SESSION_SECRET_MIN_LEN) {
+    throw new Error(
+      `loadConfig: SESSION_SECRET must be at least ${SESSION_SECRET_MIN_LEN} chars (generate with: openssl rand -hex 32)`,
+    );
+  }
+
+  // COOKIE_SECURE: defaults to true. Operators running the buyer-app behind
+  // a plain-HTTP loopback for local dev set "0" so the cookie still rides
+  // along (browsers drop Secure cookies on http://). Accept only "0" / "1"
+  // to keep boot-time misconfig loud.
+  let cookieSecure = true;
+  const cookieSecureStr = env.COOKIE_SECURE;
+  if (cookieSecureStr !== undefined && cookieSecureStr !== "") {
+    if (cookieSecureStr !== "0" && cookieSecureStr !== "1") {
+      throw new Error('loadConfig: COOKIE_SECURE must be "0" or "1"');
+    }
+    cookieSecure = cookieSecureStr === "1";
+  }
+
+  return {
+    privKeyHex,
+    indexerUrl,
+    port,
+    networkId,
+    ogmiosUrl,
+    liveChain,
+    ttsPiperBaseUrl,
+    archiveDir,
+    password,
+    sessionSecret,
+    cookieSecure,
+  };
 }
