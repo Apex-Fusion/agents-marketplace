@@ -1,0 +1,81 @@
+# deploy/mainnet/docker-compose.supplier-tts.yml — TTS Supplier — MAINNET
+#
+# Third mainnet supplier, dedicated to capability `audio.synthesize.piper.v1`.
+# Reaches the colocated PRIVATE PiperTTS container at the docker-DNS name
+# `marketplace-mainnet-tts-piper:8000`. Traefik publishes it at
+# `mp-suppliers-tts.vector.apexfusion.org`. Coexists with the ollama-backed
+# (docker-compose.supplier.yml) and ChatGPT-backed (docker-compose.supplier-gpt.yml)
+# suppliers.
+#
+# Pre-flight networks (must already exist):
+#   docker network create marketplace-mainnet-net   # one-shot
+#   # traefik-net                                    is created by the Traefik project
+#
+# Pre-flight services:
+#   docker compose -f docker-compose.tts-piper.yml up -d
+#   bash deploy/mainnet/install-voice-extras.sh     # one-shot voice install
+#
+# Bring up:
+#   docker compose -f deploy/mainnet/docker-compose.supplier-tts.yml up -d --build
+
+name: marketplace-mainnet-supplier-tts
+
+services:
+  supplier:
+    build:
+      context: ../..
+      dockerfile: supplier/Dockerfile
+    container_name: marketplace-mainnet-supplier-tts
+    restart: unless-stopped
+    env_file:
+      # Self-contained env for the TTS variant — kept separate from the
+      # canonical ../../supplier/.env (ollama-backed) and ../../supplier/.env.gpt
+      # (ChatGPT-backed). Holds this supplier's distinct SUPPLIER_PRIV_KEY_HEX,
+      # ADVERT_REF, ADVERT_*, and the shared mainnet plumbing duplicated
+      # in full (NETWORK_ID, OGMIOS_URL, VECTOR_ZERO_TIME_MS, ref-script
+      # UTxOs, LIVE_CHAIN). No env_file ordering / override magic.
+      - path: ../../supplier/.env.tts
+        required: false
+    environment:
+      CAPABILITY_KIND: "tts"
+      # Internal docker-DNS — Piper is private on marketplace-mainnet-net,
+      # no public hostname for it.
+      PIPER_URL: "http://marketplace-mainnet-tts-piper:8000"
+      PORT: "8080"
+      # Enable LiveOgmiosProvider so submitTx/awaitTx actually broadcast.
+      # Mirrors the other mainnet supplier composes; without this the
+      # supplier silently falls back to ReadOnlyOgmiosProvider and
+      # Claim/Submit never reach chain.
+      LIVE_CHAIN: "1"
+      # NETWORK_ID and OGMIOS_URL intentionally not pinned here — they MUST
+      # come from the operator-provided supplier/.env.tts on a mainnet host.
+      # Setting them via compose would be a footgun: a stray re-up on
+      # testnet hardware could silently re-tag the supplier as mainnet.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz >/dev/null || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - marketplace-mainnet-net
+      - traefik-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-net"
+      - "traefik.http.routers.mp-suppliers-tts-mainnet.entrypoints=web"
+      - "traefik.http.routers.mp-suppliers-tts-mainnet.rule=Host(`mp-suppliers-tts.vector.apexfusion.org`)"
+      - "traefik.http.services.mp-suppliers-tts-mainnet.loadbalancer.server.port=8080"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  marketplace-mainnet-net:
+    external: true
+    name: marketplace-mainnet-net
+  traefik-net:
+    external: true
+    name: traefik-net

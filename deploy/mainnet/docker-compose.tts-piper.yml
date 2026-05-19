@@ -1,0 +1,61 @@
+# deploy/mainnet/docker-compose.tts-piper.yml — PiperTTS (PRIVATE) — MAINNET
+#
+# OpenAI-shape /v1/audio/speech served by openedai-speech-min, reachable
+# ONLY from inside marketplace-mainnet-net. No Traefik labels, no public
+# DNS — the colocated marketplace-mainnet-supplier-tts container hits it at
+#   http://marketplace-mainnet-tts-piper:8000
+#
+# Mirrors deploy/simulation/docker-compose.tts-piper.yml, but private:
+# the simulation host exposes Piper publicly via Traefik+Cloudflare;
+# mainnet keeps it on-net only since only the colocated TTS supplier
+# consumes it.
+#
+# Pre-flight networks (must already exist):
+#   docker network create marketplace-mainnet-net   # one-shot
+#
+# Bring up:
+#   docker compose -f deploy/mainnet/docker-compose.tts-piper.yml up -d
+#   bash deploy/mainnet/install-voice-extras.sh     # download voices + yaml mapping
+
+name: marketplace-mainnet-tts-piper
+
+services:
+  tts-piper:
+    image: ghcr.io/matatonic/openedai-speech-min:latest
+    container_name: marketplace-mainnet-tts-piper
+    restart: unless-stopped
+    environment:
+      # Pre-load Piper's highest-quality American-English voice so first
+      # /v1/audio/speech doesn't pay the model-download tax. Other voices
+      # can be added via install-voice-extras.sh + voice-mappings.py.
+      PRELOAD_MODEL: en_US-lessac-high
+      PORT: "8000"
+    volumes:
+      # Host bind mounts (not Docker named volumes) so the operator can
+      # ls/du/back up the downloaded Piper voices directly. Paths relative
+      # to THIS compose file, i.e. deploy/mainnet/data/tts-piper/{voices,config}
+      # from the repo root. install-voice-extras.sh creates them.
+      - ./data/tts-piper/voices:/app/voices
+      - ./data/tts-piper/config:/app/config
+    healthcheck:
+      # /v1/models is the OpenAI-shape model list; a 200 here proves the
+      # server is up and at least one voice is loaded. Image ships with
+      # curl (and python3) but NOT wget — using wget here marks the
+      # container unhealthy on every probe.
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/v1/models >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+    networks:
+      - marketplace-mainnet-net   # PRIVATE — no traefik-net join
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  marketplace-mainnet-net:
+    external: true
+    name: marketplace-mainnet-net
