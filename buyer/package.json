@@ -8,7 +8,9 @@
     "build:ui": "vite build --config vite.config.ts",
     "dev:ui": "vite --config vite.config.ts",
     "start": "node --enable-source-maps dist/index.js",
-    "tx:accept": "tsx src/cli/accept.ts"
+    "tx:accept": "tsx src/cli/accept.ts",
+    "cycle:once": "tsx src/cli/run-cycle.ts",
+    "reclaim:orphans": "tsx src/cli/reclaim-orphans.ts"
   },
   "dependencies": {
     "@marketplace/shared": "workspace:*",
