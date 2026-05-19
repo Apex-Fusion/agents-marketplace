@@ -1,15 +1,15 @@
 # deploy/mainnet/docker-compose.supplier.yml — Supplier — MAINNET
 #
-# Mirrors the testnet supplier compose, with three changes:
+# Mirrors the testnet supplier compose, with these differences:
 #   - container_name + project name use the marketplace-mainnet- prefix
-#   - apex-net is bound to apex-dashboard-mainnet_mainnet-net
-#     (created by the apex-dashboard-mainnet stack)
+#   - No apex-net join: the mainnet host reaches ogmios via the public HTTPS
+#     endpoint (https://ogmios.vector.mainnet.apexfusion.org) supplied by
+#     supplier/.env — same pattern as the mainnet buyer + indexer.
 #   - Traefik router name + Host rule drop the `testnet.` infix
 #
 # Pre-flight networks (must already exist):
-#   docker network create marketplace-mainnet-net                  # one-shot
-#   # apex-dashboard-mainnet_mainnet-net is created by apex-dashboard-mainnet
-#   # traefik-net                  is created by the Traefik project
+#   docker network create marketplace-mainnet-net   # one-shot
+#   # traefik-net                                    is created by the Traefik project
 
 name: marketplace-mainnet-supplier
 
@@ -25,17 +25,16 @@ services:
         required: false
     environment:
       OLLAMA_URL: http://marketplace-mainnet-ollama:11434
-      OGMIOS_URL: ws://ogmios:1337
       PORT: "8080"
       # Enable LiveOgmiosProvider so submitTx/awaitTx actually broadcast.
       # Mirrors the testnet supplier compose; without this the supplier
       # silently falls back to ReadOnlyOgmiosProvider and Claim/Submit
       # never reach chain.
       LIVE_CHAIN: "1"
-      # NETWORK_ID intentionally not pinned here — it MUST come from the
-      # operator-provided supplier/.env on a mainnet host. Setting it via
-      # compose would be a footgun: a stray re-up on testnet hardware could
-      # silently re-tag the supplier as mainnet.
+      # NETWORK_ID and OGMIOS_URL intentionally not pinned here — they MUST
+      # come from the operator-provided supplier/.env on a mainnet host.
+      # Setting them via compose would be a footgun: a stray re-up on
+      # testnet hardware could silently re-tag the supplier as mainnet.
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz >/dev/null || exit 1"]
       interval: 20s
@@ -44,7 +43,6 @@ services:
       start_period: 15s
     networks:
       - marketplace-mainnet-net
-      - apex-net
       - traefik-net
     labels:
       - "traefik.enable=true"
@@ -62,9 +60,6 @@ networks:
   marketplace-mainnet-net:
     external: true
     name: marketplace-mainnet-net
-  apex-net:
-    external: true
-    name: apex-dashboard-mainnet_mainnet-net
   traefik-net:
     external: true
     name: traefik-net
