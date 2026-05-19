@@ -109,6 +109,11 @@ async function main(argv: string[]): Promise<number> {
     return 1;
   }
   const networkId: 0 | 1 = env.NETWORK_ID === "1" ? 1 : 0;
+  // Inject loaded vars into process.env so shared tx builders see them
+  // (e.g. lucidContext.ts's VECTOR_ZERO_TIME_MS). See run-cycle.ts for context.
+  for (const key of ["VECTOR_ZERO_TIME_MS", "OGMIOS_URL", "INDEXER_URL", "NETWORK_ID"]) {
+    if (env[key] && !process.env[key]) process.env[key] = env[key];
+  }
 
   const wk = deriveWalletKey(env.BUYER_PRIV_KEY_HEX, networkId);
   const chain: ChainProvider = new LiveOgmiosProvider({ ogmiosUrl: env.OGMIOS_URL });

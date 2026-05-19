@@ -41,11 +41,15 @@ const HEX64_RE = /^[0-9a-fA-F]{64}$/;
 // idempotent — repeated calls leave the values identical. createLucidContext
 // invokes it before constructing the Lucid instance.
 
-const VECTOR_ZERO_TIME = Number(process.env.VECTOR_ZERO_TIME_MS) || 1_752_057_484_000;
 const VECTOR_ZERO_SLOT = 0;
 const VECTOR_SLOT_LENGTH = 1000;
 
 export function applyVectorSlotConfig(): void {
+  // Read VECTOR_ZERO_TIME_MS lazily so callers that populate process.env after
+  // module load (e.g. CLIs that read a .env file at runtime) still get the
+  // right value. Capturing this as a module-level const broke run-cycle.ts
+  // with the testnet default while pointing at mainnet.
+  const VECTOR_ZERO_TIME = Number(process.env.VECTOR_ZERO_TIME_MS) || 1_752_057_484_000;
   const cfg = SLOT_CONFIG_NETWORK["Mainnet"];
   if (
     cfg.zeroTime !== VECTOR_ZERO_TIME ||
