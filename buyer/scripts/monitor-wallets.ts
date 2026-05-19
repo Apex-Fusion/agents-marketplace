@@ -360,19 +360,19 @@ function padR(s: string, n: number): string {
 }
 
 function printTable(rows: Row[], indexerError: string | null): void {
-  const headers = ["kind", "label", "addr1...prefix", "AP3X", "min", "note"];
+  const headers = ["kind", "label", "AP3X", "min", "address", "note"];
   const cells: string[][] = [headers];
   for (const r of rows) {
     const ap3x = r.error ? "—" : fmtAp3x(r.lovelace);
     const min = r.minLovelace === null ? "—" : fmtAp3x(r.minLovelace);
-    const addr = r.address ? r.address.slice(0, 18) + "…" : "—";
+    const addr = r.address || "—";
     const note = r.error ? `ERROR: ${r.error}` : r.note;
     cells.push([
       r.kind === "operator" ? "operator" : "3rd-party",
       r.label,
-      addr,
       ap3x,
       min,
+      addr,
       note,
     ]);
   }
@@ -381,7 +381,7 @@ function printTable(rows: Row[], indexerError: string | null): void {
   );
   for (const r of cells) {
     const line = r
-      .map((cell, c) => (c === 3 || c === 4 ? padR(cell, widths[c]) : padL(cell, widths[c])))
+      .map((cell, c) => (c === 2 || c === 3 ? padR(cell, widths[c]) : padL(cell, widths[c])))
       .join("  ");
     console.log(line);
   }
