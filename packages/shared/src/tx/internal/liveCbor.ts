@@ -374,7 +374,7 @@ export async function buildLiveTxForEscrow(
       // lucid 0.4.30 under-estimates Conway fees by ~1K lovelace on
       // PostEscrow (Ogmios 3122). 500K is a comfortable floor; excess
       // becomes change. Same fix as Claim/Submit/Accept paths.
-      .setMinFee(200_000n);
+      .setMinFee(500_000n);
 
     const completed = await txBuilder.complete();
     signed = await completed.sign.withWallet().complete();
@@ -472,7 +472,7 @@ async function buildSpendOpenOrClaimedTx(opts: {
       // without masking the savings from CIP-33 ref-scripts (natural
       // ref-script tx fee is ~0.24 AP3X; inlined is ~0.34 AP3X — both above
       // the floor, so lucid's estimate wins and the size delta surfaces).
-      .setMinFee(200_000n);
+      .setMinFee(500_000n);
 
     // Let lucid pick coins + compute fee normally; production wallets have
     // multiple real UTxOs (no need for the test-side leftover-as-fee hack).
@@ -610,7 +610,7 @@ export async function buildLiveTxForAccept(params: LiveAcceptParams): Promise<Bu
       .addSignerKey(params.buyerKey.pubKeyHash)
       .validFrom(params.tipMs - 60_000)
       .validTo(params.windowEnd)
-      .setMinFee(200_000n);
+      .setMinFee(500_000n);
 
     // Same UPLC-eval delegation as Claim/Submit (see buildSpendOpenOrClaimedTx
     // for the rationale). lucid 0.4.30's CML WASM evaluator falsely rejects
@@ -678,7 +678,7 @@ export async function buildLiveTxForReclaim(params: LiveReclaimParams): Promise<
       // already verified tipMs >= deliver_by, so a 60s back-pad is safe.
       .validFrom(params.tipMs - 60_000)
       .validTo(params.tipMs + 60_000)
-      .setMinFee(200_000n);
+      .setMinFee(500_000n);
 
     // Same UPLC eval delegation as Accept — lucid's CML evaluator falsely
     // rejects valid Plutus V3 spends; route to Ogmios.
@@ -738,7 +738,7 @@ export async function buildLiveTxForAdvert(
       .addSignerKey(walletKey.pubKeyHash)
       .validFrom(advertisedAt - 60_000)
       .validTo(advertisedAt + 5 * 60_000)
-      .setMinFee(200_000n);
+      .setMinFee(500_000n);
 
     const completed = await txBuilder.complete();
     signed = await completed.sign.withWallet().complete();
@@ -801,7 +801,7 @@ export async function buildLiveTxForRetireAdvert(
       // propagation lag the same as sibling builders.
       .validFrom(nowMs - 60_000)
       .validTo(nowMs + 5 * 60_000)
-      .setMinFee(200_000n);
+      .setMinFee(500_000n);
 
     // Same UPLC-eval delegation as Claim/Submit/Accept — see
     // buildSpendOpenOrClaimedTx for the lucid 0.4.30 false-rejection rationale.
