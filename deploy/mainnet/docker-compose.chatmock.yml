@@ -1,0 +1,93 @@
+# deploy/mainnet/docker-compose.chatmock.yml — ChatMock — MAINNET
+#
+# ChatMock (RayBytes/ChatMock, MIT) is a localhost OpenAI-compatible proxy
+# that authenticates against a ChatGPT subscription via Codex OAuth. Used as
+# the upstream for the mainnet supplier when LLM_BACKEND=openai.
+#
+# Two services:
+#   - chatmock         long-running serve mode (port 8000), joins
+#                      marketplace-mainnet-net so the supplier can reach it
+#                      via http://marketplace-mainnet-chatmock:8000
+#   - chatmock-login   ONE-SHOT interactive OAuth flow, profile=login, binds
+#                      :1455 on the host. Run once on first deploy and again
+#                      whenever the refresh token is invalidated.
+#
+# Shared `chatmock_data` named volume persists OAuth tokens at /data inside
+# the container (CHATGPT_LOCAL_HOME=/data tells ChatMock to use that path).
+#
+# Pre-flight networks (must already exist):
+#   docker network create marketplace-mainnet-net   # one-shot
+#
+# First-run sequence (one-time, then never again unless tokens are revoked):
+#   docker compose -f docker-compose.chatmock.yml up -d chatmock
+#   docker compose -f docker-compose.chatmock.yml --profile login \
+#     run --rm --service-ports chatmock-login login
+#   # ChatMock prints an OAuth URL. Open it in your laptop browser, sign in
+#   # with the ChatGPT Pro account. When the browser hits the localhost:1455
+#   # callback (which it can't reach on a remote VPS), copy the full URL
+#   # from the browser address bar and paste it back into the SSH terminal.
+#   # ChatMock writes refresh tokens to chatmock_data:/data and exits.
+#
+# Smoke test after login:
+#   docker exec marketplace-mainnet-chatmock wget -qO- \
+#     --header='content-type: application/json' \
+#     --post-data='{"model":"gpt-5.4","messages":[{"role":"user","content":"hi"}]}' \
+#     http://localhost:8000/v1/chat/completions
+#
+# Image is pinned to a specific version — do NOT use :latest. A `docker
+# compose pull` against :latest could land a breaking upstream change while
+# you're not watching, and the supplier would start emitting openai_failure
+# on every claim (each one forfeits a 1 APEX supplier bond).
+
+name: marketplace-mainnet-chatmock
+
+services:
+  chatmock:
+    image: storagetime/chatmock:v1.35
+    container_name: marketplace-mainnet-chatmock
+    command: ["serve"]
+    restart: unless-stopped
+    environment:
+      CHATGPT_LOCAL_HOME: /data
+      PORT: "8000"
+    volumes:
+      - chatmock_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8000/health >/dev/null || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - marketplace-mainnet-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  chatmock-login:
+    image: storagetime/chatmock:v1.35
+    container_name: marketplace-mainnet-chatmock-login
+    profiles: ["login"]
+    command: ["login"]
+    environment:
+      CHATGPT_LOCAL_HOME: /data
+      CHATGPT_LOCAL_LOGIN_BIND: 0.0.0.0
+    volumes:
+      - chatmock_data:/data
+    ports:
+      - "1455:1455"
+    networks:
+      - marketplace-mainnet-net
+    stdin_open: true
+    tty: true
+
+volumes:
+  chatmock_data:
+    name: marketplace-mainnet-chatmock-data
+
+networks:
+  marketplace-mainnet-net:
+    external: true
+    name: marketplace-mainnet-net

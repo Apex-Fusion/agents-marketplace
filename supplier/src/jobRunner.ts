@@ -36,6 +36,7 @@ import { createHash } from "crypto";
 import type { SupplierState } from "./state.js";
 import type { SupplierConfig } from "./config.js";
 import * as ollama from "./ollama.js";
+import * as openai from "./openai.js";
 import * as piper from "./piper.js";
 import type {
   JobStore,
@@ -78,24 +79,42 @@ export async function runChatJob(params: RunChatJobParams): Promise<void> {
   deps.jobs.setRunning(jobId);
 
   try {
-    // ── 2. Call Ollama ─────────────────────────────────────────────────
-    let inference: ollama.OllamaResult;
+    // ── 2. Call upstream LLM ───────────────────────────────────────────
+    // Both backends return the same { content, prompt_tokens,
+    // completion_tokens, wallclock_ms } shape so receipt construction
+    // downstream is identical.
+    let inference: { content: string; prompt_tokens: number; completion_tokens: number; wallclock_ms: number };
     try {
-      inference = await ollama.callOllama({
-        ollamaUrl: deps.config.ollamaUrl,
-        model: advert.model,
-        messages: requestBody.messages,
-        timeoutMs: deps.config.ollamaTimeoutMs,
-      });
+      if (deps.config.llmBackend === "openai") {
+        inference = await openai.callOpenAi({
+          baseUrl: deps.config.openaiBaseUrl,
+          model: advert.model,
+          messages: requestBody.messages,
+          timeoutMs: deps.config.openaiTimeoutMs,
+        });
+      } else {
+        inference = await ollama.callOllama({
+          ollamaUrl: deps.config.ollamaUrl,
+          model: advert.model,
+          messages: requestBody.messages,
+          timeoutMs: deps.config.ollamaTimeoutMs,
+        });
+      }
     } catch (err) {
-      const reason = (err as ollama.OllamaError)?.reason ?? "ollama_failure";
+      const rawReason =
+        (err as ollama.OllamaError | openai.OpenAiError)?.reason ??
+        (deps.config.llmBackend === "openai" ? "openai_failure" : "ollama_failure");
       const message = err instanceof Error ? err.message : String(err);
-      // Even ollama_timeout maps to httpStatus 502 here per Caroline's pin
-      // (the runner failure-code table only enumerates 502/ollama_failure).
-      // The narrower ollama_timeout code is preserved for HTTP routing later.
+      // *_timeout maps to httpStatus 502 here per Caroline's pin (the runner
+      // failure-code table only enumerates 502/*_failure). The narrower
+      // timeout reason is collapsed to the failure reason for jobs.fail.
+      const collapsedReason =
+        rawReason === "ollama_timeout" ? "ollama_failure"
+          : rawReason === "openai_timeout" ? "openai_failure"
+            : rawReason;
       deps.jobs.fail(jobId, {
         httpStatus: 502,
-        reason: reason === "ollama_timeout" ? "ollama_failure" : reason,
+        reason: collapsedReason,
         message,
       });
       return;

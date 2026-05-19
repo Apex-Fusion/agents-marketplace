@@ -10,8 +10,12 @@
  *   ADVERT_REF             — "<64hex>#<int>" OutputReference to the supplier's advert UTxO
  *   NETWORK_ID             — "0" (testnet) or "1" (mainnet)
  *
- * Required for CAPABILITY_KIND="chat" (default):
+ * Required for CAPABILITY_KIND="chat" (default) + LLM_BACKEND="ollama" (default):
  *   OLLAMA_URL             — http:// URL for local Ollama
+ *
+ * Required for CAPABILITY_KIND="chat" + LLM_BACKEND="openai":
+ *   OPENAI_BASE_URL        — http(s):// URL for an OpenAI-compatible /v1/chat/completions
+ *                            host (e.g. ChatMock localhost proxy backed by Codex OAuth).
  *
  * Required for CAPABILITY_KIND="tts":
  *   PIPER_URL              — http(s):// URL for the openedai-speech-min PiperTTS host
@@ -22,8 +26,13 @@
  *                            The route handler still validates the on-chain
  *                            advert's capability_id; this env just decides
  *                            which dispatch lives in the process.
+ *   LLM_BACKEND            — "ollama" (default) or "openai". Selects which HTTP
+ *                            client the chat job runner uses. Only meaningful
+ *                            when CAPABILITY_KIND="chat".
  *   PORT                   — listen port (default 8080)
  *   OLLAMA_TIMEOUT_MS      — ollama request timeout in ms (default 120_000)
+ *   OPENAI_TIMEOUT_MS      — openai request timeout in ms (default 180_000 — GPT
+ *                            first-token latency is longer than local Ollama)
  *   PIPER_TIMEOUT_MS       — piper request timeout in ms (default 120_000)
  *   LIVE_CHAIN             — "1" opts in to live-chain submit/await (default off).
  *                            Any other value (including "true", "yes", "TRUE")
@@ -46,19 +55,26 @@ export interface AdvertRef {
 /** Capability the supplier is configured to serve. */
 export type CapabilityKind = "chat" | "tts";
 
+/** LLM backend selected for the chat capability. */
+export type LlmBackend = "ollama" | "openai";
+
 export interface SupplierConfig {
   supplierPrivKeyHex: string;
   ogmiosUrl: string;
-  /** Empty string when capabilityKind="tts". */
+  /** Empty string when capabilityKind="tts" or llmBackend="openai". */
   ollamaUrl: string;
+  /** Empty string when capabilityKind="tts" or llmBackend="ollama". */
+  openaiBaseUrl: string;
   /** Empty string when capabilityKind="chat". */
   piperUrl: string;
   advertRef: AdvertRef;
   networkId: 0 | 1;
   port: number;
   ollamaTimeoutMs: number;
+  openaiTimeoutMs: number;
   piperTimeoutMs: number;
   capabilityKind: CapabilityKind;
+  llmBackend: LlmBackend;
   /**
    * When true, the supplier boots a LiveOgmiosProvider (real submitTx/awaitTx).
    * Default false → ReadOnlyOgmiosProvider (safe; no chain writes).
@@ -110,18 +126,35 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
   }
   const capabilityKind: CapabilityKind = capKindStr;
 
+  // LLM_BACKEND selects which HTTP client the chat job runner uses. Only
+  // meaningful for capabilityKind="chat"; ignored when capabilityKind="tts".
+  // Default "ollama" so existing chat suppliers keep booting unchanged.
+  const llmBackendStr = env.LLM_BACKEND ?? "ollama";
+  if (llmBackendStr !== "ollama" && llmBackendStr !== "openai") {
+    throw new Error('loadConfig: LLM_BACKEND must be "ollama" or "openai"');
+  }
+  const llmBackend: LlmBackend = llmBackendStr;
+
   // Per-capability upstream URL — the OTHER capability's URL becomes
   // optional/unused. The route handler also validates the on-chain advert's
   // capability_id, so a misconfiguration here can't trick a TTS supplier into
   // serving chat traffic; this gate just keeps the process boot honest.
   let ollamaUrl = "";
+  let openaiBaseUrl = "";
   let piperUrl = "";
   if (capabilityKind === "chat") {
-    ollamaUrl = requireField(env, "OLLAMA_URL");
+    if (llmBackend === "openai") {
+      openaiBaseUrl = requireField(env, "OPENAI_BASE_URL");
+      ollamaUrl = env.OLLAMA_URL ?? "";
+    } else {
+      ollamaUrl = requireField(env, "OLLAMA_URL");
+      openaiBaseUrl = env.OPENAI_BASE_URL ?? "";
+    }
     piperUrl = env.PIPER_URL ?? "";
   } else {
     piperUrl = requireField(env, "PIPER_URL");
     ollamaUrl = env.OLLAMA_URL ?? "";
+    openaiBaseUrl = env.OPENAI_BASE_URL ?? "";
   }
 
   const advertRefStr = requireField(env, "ADVERT_REF");
@@ -151,6 +184,15 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
     ollamaTimeoutMs = Number(timeoutStr);
   }
 
+  const openaiTimeoutStr = env.OPENAI_TIMEOUT_MS;
+  let openaiTimeoutMs = 180_000;
+  if (openaiTimeoutStr !== undefined && openaiTimeoutStr !== "") {
+    if (!POS_INT_RE.test(openaiTimeoutStr)) {
+      throw new Error("loadConfig: OPENAI_TIMEOUT_MS must be a positive integer");
+    }
+    openaiTimeoutMs = Number(openaiTimeoutStr);
+  }
+
   const piperTimeoutStr = env.PIPER_TIMEOUT_MS;
   let piperTimeoutMs = 120_000;
   if (piperTimeoutStr !== undefined && piperTimeoutStr !== "") {
@@ -169,13 +211,16 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
     supplierPrivKeyHex,
     ogmiosUrl,
     ollamaUrl,
+    openaiBaseUrl,
     piperUrl,
     advertRef,
     networkId,
     port,
     ollamaTimeoutMs,
+    openaiTimeoutMs,
     piperTimeoutMs,
     capabilityKind,
+    llmBackend,
     liveChain,
   };
 }

@@ -1,15 +1,19 @@
-# deploy/mainnet/docker-compose.supplier.yml — Supplier — MAINNET
+# deploy/mainnet/docker-compose.supplier.yml — Supplier — MAINNET (ChatGPT/Codex backend)
 #
-# Mirrors the testnet supplier compose, with these differences:
-#   - container_name + project name use the marketplace-mainnet- prefix
-#   - No apex-net join: the mainnet host reaches ogmios via the public HTTPS
-#     endpoint (https://ogmios.vector.mainnet.apexfusion.org) supplied by
-#     supplier/.env — same pattern as the mainnet buyer + indexer.
-#   - Traefik router name + Host rule drop the `testnet.` infix
+# This compose runs the mainnet supplier with LLM_BACKEND=openai pointed at
+# the ChatMock localhost proxy (see docker-compose.chatmock.yml). Traefik
+# routes at mp-suppliers-gpt.vector.apexfusion.org so the unsuffixed
+# mp-suppliers.* slot remains free for a future supplier with a different
+# backend.
 #
 # Pre-flight networks (must already exist):
 #   docker network create marketplace-mainnet-net   # one-shot
 #   # traefik-net                                    is created by the Traefik project
+#
+# Pre-flight services:
+#   docker compose -f docker-compose.chatmock.yml up -d chatmock
+#   # then run the --profile login flow once to seed OAuth tokens in
+#   # the chatmock_data volume — see chatmock compose header for details
 
 name: marketplace-mainnet-supplier
 
@@ -24,7 +28,9 @@ services:
       - path: ../../supplier/.env
         required: false
     environment:
-      OLLAMA_URL: http://marketplace-mainnet-ollama:11434
+      LLM_BACKEND: openai
+      OPENAI_BASE_URL: http://marketplace-mainnet-chatmock:8000
+      OPENAI_TIMEOUT_MS: "180000"
       PORT: "8080"
       # Enable LiveOgmiosProvider so submitTx/awaitTx actually broadcast.
       # Mirrors the testnet supplier compose; without this the supplier
@@ -47,9 +53,9 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=traefik-net"
-      - "traefik.http.routers.mp-suppliers-mainnet.entrypoints=web"
-      - "traefik.http.routers.mp-suppliers-mainnet.rule=Host(`mp-suppliers.vector.apexfusion.org`)"
-      - "traefik.http.services.mp-suppliers-mainnet.loadbalancer.server.port=8080"
+      - "traefik.http.routers.mp-suppliers-gpt-mainnet.entrypoints=web"
+      - "traefik.http.routers.mp-suppliers-gpt-mainnet.rule=Host(`mp-suppliers-gpt.vector.apexfusion.org`)"
+      - "traefik.http.services.mp-suppliers-gpt-mainnet.loadbalancer.server.port=8080"
     logging:
       driver: json-file
       options:
