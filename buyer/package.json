@@ -10,7 +10,8 @@
     "start": "node --enable-source-maps dist/index.js",
     "tx:accept": "tsx src/cli/accept.ts",
     "cycle:once": "tsx src/cli/run-cycle.ts",
-    "reclaim:orphans": "tsx src/cli/reclaim-orphans.ts"
+    "reclaim:orphans": "tsx src/cli/reclaim-orphans.ts",
+    "monitor:wallets": "tsx scripts/monitor-wallets.ts"
   },
   "dependencies": {
     "@marketplace/shared": "workspace:*",
