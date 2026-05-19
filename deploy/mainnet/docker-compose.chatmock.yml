@@ -53,7 +53,10 @@ services:
     volumes:
       - chatmock_data:/data
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8000/health >/dev/null || exit 1"]
+      # chatmock image has neither curl nor wget — use the bundled Python's
+      # urllib to probe /health. /health returns 200 even before OAuth login
+      # so an unhealthy state here means the Flask server itself is down.
+      test: ["CMD-SHELL", "python3 -c 'import urllib.request,sys; sys.exit(0 if urllib.request.urlopen(\"http://localhost:8000/health\", timeout=3).status==200 else 1)' || exit 1"]
       interval: 20s
       timeout: 5s
       retries: 3
