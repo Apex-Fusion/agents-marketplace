@@ -43,7 +43,7 @@ name: marketplace-mainnet-chatmock
 
 services:
   chatmock:
-    image: storagetime/chatmock:v1.35
+    image: storagetime/chatmock:v1.36
     container_name: marketplace-mainnet-chatmock
     command: ["serve"]
     restart: unless-stopped
@@ -67,7 +67,7 @@ services:
         max-file: "3"
 
   chatmock-login:
-    image: storagetime/chatmock:v1.35
+    image: storagetime/chatmock:v1.36
     container_name: marketplace-mainnet-chatmock-login
     profiles: ["login"]
     command: ["login"]
