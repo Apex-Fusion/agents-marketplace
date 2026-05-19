@@ -1,11 +1,6 @@
-# MAINNET DEPLOYMENT — DEFERRED
-# Wired but not yet exercised. Mainnet rollout requires:
-#   - ARCHITECTURE.md §9 #5 (mainnet safety: env-gate, wallet allowlist, MAINNET=1 flag)
-#   - Real funded mainnet wallets
-#   - Vector mainnet ogmios stack (apex-dashboard-mainnet) running on the same host
-# Do NOT `docker compose up` until those land.
-#
 # deploy/mainnet/docker-compose.indexer.yml — Indexer (chain follower) — MAINNET
+#
+# Brought up on vector-marketplace at https://mp-indexer.vector.apexfusion.org.
 
 name: marketplace-mainnet-indexer
 
