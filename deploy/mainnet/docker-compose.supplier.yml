@@ -1,10 +1,3 @@
-# MAINNET DEPLOYMENT — DEFERRED
-# Wired but not yet exercised. Mainnet rollout requires:
-#   - ARCHITECTURE.md §9 #5 (mainnet safety: env-gate, wallet allowlist, MAINNET=1 flag)
-#   - Real funded mainnet wallets
-#   - Vector mainnet ogmios stack (apex-dashboard-mainnet) running on the same host
-# Do NOT `docker compose up` until those land.
-#
 # deploy/mainnet/docker-compose.supplier.yml — Supplier — MAINNET
 #
 # Mirrors the testnet supplier compose, with three changes:
@@ -34,6 +27,11 @@ services:
       OLLAMA_URL: http://marketplace-mainnet-ollama:11434
       OGMIOS_URL: ws://ogmios:1337
       PORT: "8080"
+      # Enable LiveOgmiosProvider so submitTx/awaitTx actually broadcast.
+      # Mirrors the testnet supplier compose; without this the supplier
+      # silently falls back to ReadOnlyOgmiosProvider and Claim/Submit
+      # never reach chain.
+      LIVE_CHAIN: "1"
       # NETWORK_ID intentionally not pinned here — it MUST come from the
       # operator-provided supplier/.env on a mainnet host. Setting it via
       # compose would be a footgun: a stray re-up on testnet hardware could
