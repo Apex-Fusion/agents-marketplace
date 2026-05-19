@@ -25,7 +25,13 @@ services:
     container_name: marketplace-mainnet-supplier-gpt
     restart: unless-stopped
     env_file:
-      - path: ../../supplier/.env
+      # Self-contained env for the GPT variant — kept separate from the
+      # canonical ../../supplier/.env (which the ollama-backed supplier
+      # reads). Holds this supplier's distinct SUPPLIER_PRIV_KEY_HEX,
+      # ADVERT_REF, ADVERT_*, and the shared mainnet plumbing duplicated
+      # in full (NETWORK_ID, OGMIOS_URL, VECTOR_ZERO_TIME_MS, ref-script
+      # UTxOs, LIVE_CHAIN). No env_file ordering / override magic.
+      - path: ../../supplier/.env.gpt
         required: false
     environment:
       LLM_BACKEND: openai
