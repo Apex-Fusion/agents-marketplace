@@ -9,10 +9,8 @@
  */
 
 import { useState, useRef, useEffect, type FormEvent } from "react";
-import { useAuth } from "../state/AuthContext.js";
 
 export default function Login() {
-  const { refresh } = useAuth();
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -35,8 +33,14 @@ export default function Login() {
         credentials: "same-origin",
       });
       if (res.status === 204) {
-        setPassword("");
-        await refresh();
+        // Full reload (rather than auth.refresh()) so the server re-renders
+        // the SPA shell with __BUYER_BOOT__ injected now that the session
+        // cookie is set. The Marketplace SDK instance in this page was
+        // constructed with an empty pubKeyHash because the pre-login HTML
+        // payload didn't carry the boot block; any page that reads
+        // marketplace.getWalletKey().pubKeyHash (e.g. TaskHistory) would
+        // otherwise fail until the operator manually refreshed.
+        window.location.reload();
         return;
       }
       if (res.status === 429) {
