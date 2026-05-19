@@ -50,6 +50,11 @@ export class MockChainSyncSource extends EventEmitter implements ChainSyncSource
     // Subclasses that need step-by-step control can override.
   }
 
+  updateIntersect(_point: { slot: number; id: string }): void {
+    // No-op in mock mode; the source has no reconnect path. Kept to satisfy
+    // the ChainSyncSource interface contract.
+  }
+
   private _drainAll(): void {
     while (this.eventIndex < this.events.length) {
       const ev = this.events[this.eventIndex++];

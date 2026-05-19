@@ -68,6 +68,9 @@ export interface ChainSyncSource extends EventEmitter {
   start(intersectAt?: { slot: number; id: string } | null): Promise<void>;
   stop(): void;
   requestNextBlock(): void;
+  /** Update the cached intersect point used on reconnect. Without this,
+   * Ogmios WebSocket disconnects rewind the cursor to the startup point. */
+  updateIntersect(point: { slot: number; id: string }): void;
 }
 
 /**

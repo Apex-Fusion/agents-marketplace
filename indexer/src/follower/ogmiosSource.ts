@@ -76,6 +76,10 @@ export class OgmiosSource extends EventEmitter implements ChainSyncSource {
     this.ws.send(JSON.stringify({ jsonrpc: "2.0", method: "nextBlock" }));
   }
 
+  updateIntersect(point: { slot: number; id: string }): void {
+    this.intersectAt = point;
+  }
+
   // ─── Internal ───────────────────────────────────────────────────────────
 
   private async connect(): Promise<void> {

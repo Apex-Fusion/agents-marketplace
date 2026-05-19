@@ -149,6 +149,10 @@ export class ChainSyncWorker extends EventEmitter {
     }
 
     this.cache.saveCursor(slot, block.id);
+    // Mirror the saved cursor into the source's reconnect-intersect so that
+    // a WebSocket drop+reconnect resumes from here rather than rewinding to
+    // the startup intersect point.
+    this.source.updateIntersect({ slot, id: block.id });
     this.currentSlot = slot;
     this.emit("sync-progress", { currentSlot: slot, tipSlot: this.tipSlot });
 
@@ -239,6 +243,11 @@ export class ChainSyncWorker extends EventEmitter {
     const slot = data.point?.slot ?? 0;
     this.cache.rollbackToSlot(slot);
     this.currentSlot = slot;
+    // Also slide the source's reconnect-intersect back so a subsequent WS
+    // drop doesn't resume past the rollback point.
+    if (data.point && typeof data.point.id === "string") {
+      this.source.updateIntersect({ slot, id: data.point.id });
+    }
     this.emit("sync-progress", { currentSlot: slot, tipSlot: this.tipSlot });
     this.source.requestNextBlock();
   }
