@@ -292,6 +292,34 @@ function chainUtxoToLucidScriptInput(
   };
 }
 
+/** Lucid 0.4.30's default `setCollateral` is 5_000_000n; its collateral
+ * selector needs a pure-AP3X UTxO ≥ this threshold. Mirror that floor
+ * here so we can fail fast with an actionable hint instead of waiting
+ * for lucid's deep "wallet must hold a pure-ADA UTxO ≥ 5 ADA" error. */
+const COLLATERAL_MIN_LOVELACE = 5_000_000n;
+
+/** Pre-check: assert the wallet has a UTxO that can serve as collateral.
+ * Called at the top of each script-spend builder so a fragmented wallet
+ * surfaces a clear "run tx:consolidate-wallet" message instead of the
+ * deeper lucid error caught downstream by rethrowAsTxError. */
+export function assertCollateralCandidate(utxos: LucidUTxO[]): void {
+  for (const u of utxos) {
+    if (u.assets.lovelace < COLLATERAL_MIN_LOVELACE) continue;
+    const onlyLovelace = Object.keys(u.assets).every((k) => k === "lovelace");
+    if (onlyLovelace) return;
+  }
+  const maxLovelace = utxos.reduce(
+    (m, u) => (u.assets.lovelace > m ? u.assets.lovelace : m),
+    0n,
+  );
+  throw new TxConstructionError(
+    "collateral_required",
+    `wallet has no UTxO ≥ ${COLLATERAL_MIN_LOVELACE} lovelace for collateral ` +
+      `(have ${utxos.length} UTxO(s), max ${maxLovelace} lovelace). ` +
+      `run \`pnpm --filter @marketplace/{supplier,buyer} tx:consolidate-wallet\` to re-shape the wallet.`,
+  );
+}
+
 /** TxConstructionError wrapping arbitrary lucid failures, surfacing
  * collateral mismatches with a stable substring so tests can assert.
  *
@@ -446,6 +474,7 @@ async function buildSpendOpenOrClaimedTx(opts: {
   // that held only 5 AP3X total; in production the real wallet has many UTxOs
   // and the ledger rejects unknown references. ARCHITECTURE.md §9 #14 cleanup.
   const realWalletUtxos = await lucid.wallet().getUtxos();
+  assertCollateralCandidate(realWalletUtxos);
 
   let signed;
   try {
@@ -595,6 +624,7 @@ export async function buildLiveTxForAccept(params: LiveAcceptParams): Promise<Bu
   // Real wallet UTxOs only; the test-side synthetic padding input is removed
   // (it caused unknownOutputReferences errors against the real ledger).
   const realWalletUtxos = await lucid.wallet().getUtxos();
+  assertCollateralCandidate(realWalletUtxos);
   const presetWalletInputs = realWalletUtxos;
 
   let signed;
@@ -660,6 +690,7 @@ export async function buildLiveTxForReclaim(params: LiveReclaimParams): Promise<
   const buyerAddress = pkhToEnterpriseAddress(params.datum.buyer_pkh, MAINNET_ID);
 
   const realWalletUtxos = await lucid.wallet().getUtxos();
+  assertCollateralCandidate(realWalletUtxos);
   const presetWalletInputs = realWalletUtxos;
 
   let signed;
@@ -785,6 +816,7 @@ export async function buildLiveTxForRetireAdvert(
     advertUtxo.lovelace < MIN_UTXO_LOVELACE ? MIN_UTXO_LOVELACE : advertUtxo.lovelace;
 
   const presetWalletInputs = await lucid.wallet().getUtxos();
+  assertCollateralCandidate(presetWalletInputs);
 
   let signed;
   try {

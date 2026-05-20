@@ -63,6 +63,13 @@ const OPERATOR_SOURCES: OperatorSource[] = [
     role: "supplier",
   },
   {
+    label: "supplier-tts@vector-marketplace",
+    host: "root@91.98.147.172",
+    envPath: "/root/agents-marketplace/supplier/.env.tts",
+    keyVar: "SUPPLIER_PRIV_KEY_HEX",
+    role: "supplier",
+  },
+  {
     label: "buyer@open-webui",
     host: "open-webui",
     envPath: "/root/marketplace-buyer-mainnet/.env",

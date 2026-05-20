@@ -8,7 +8,8 @@
     "tx:gen-keypair": "tsx src/cli/gen-keypair.ts",
     "tx:post-advert": "tsx src/cli/post-advert.ts",
     "tx:retire-advert": "tsx src/cli/retire-advert.ts",
-    "tx:publish-reference-scripts": "tsx src/cli/publish-reference-scripts.ts"
+    "tx:publish-reference-scripts": "tsx src/cli/publish-reference-scripts.ts",
+    "tx:consolidate-wallet": "tsx src/cli/consolidate-wallet.ts"
   },
   "dependencies": {
     "@marketplace/shared": "workspace:*",

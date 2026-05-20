@@ -16,3 +16,25 @@ export type {
   PublishRefScriptsBuildResult,
 } from "./internal/publishReferenceScripts.js";
 export { buildLiveTxForPublishReferenceScripts } from "./internal/publishReferenceScripts.js";
+
+// ── Wallet consolidate (one-shot operational tx; live-only) ─────────────
+export type {
+  ConsolidateWalletParams,
+  ConsolidateWalletBuildResult,
+} from "./wallet/consolidateWallet.js";
+export { buildConsolidateWalletTx } from "./wallet/consolidateWallet.js";
+export type {
+  ConsolidateReason,
+  PlannedConsolidate,
+  UtxoLike,
+} from "./wallet/planConsolidate.js";
+export {
+  DEFAULT_COLLATERAL_LOVELACE,
+  DEFAULT_FEE_RESERVE,
+  planConsolidate,
+} from "./wallet/planConsolidate.js";
+export type {
+  ConsolidateWalletFlowParams,
+  ConsolidateWalletFlowResult,
+} from "./wallet/runConsolidateWallet.js";
+export { runConsolidateWallet } from "./wallet/runConsolidateWallet.js";

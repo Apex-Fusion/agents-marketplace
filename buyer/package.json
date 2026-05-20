@@ -11,7 +11,8 @@
     "tx:accept": "tsx src/cli/accept.ts",
     "cycle:once": "tsx src/cli/run-cycle.ts",
     "reclaim:orphans": "tsx src/cli/reclaim-orphans.ts",
-    "monitor:wallets": "tsx scripts/monitor-wallets.ts"
+    "monitor:wallets": "tsx scripts/monitor-wallets.ts",
+    "tx:consolidate-wallet": "tsx src/cli/consolidate-wallet.ts"
   },
   "dependencies": {
     "@marketplace/shared": "workspace:*",
