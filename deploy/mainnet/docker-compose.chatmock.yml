@@ -45,7 +45,12 @@ services:
   chatmock:
     image: storagetime/chatmock:v1.36
     container_name: marketplace-mainnet-chatmock
-    command: ["serve"]
+    # --reasoning-effort low + --reasoning-summary none cap GPT-5 thinking
+    # tokens so a normal request returns well inside the supplier's
+    # OPENAI_TIMEOUT_MS budget. Default `medium`/`auto` produced 3-min
+    # timeouts in early mainnet testing (jobs bcc973bd / c85eaeec /
+    # 7e87afe6 on 2026-05-19).
+    command: ["serve", "--reasoning-effort", "low", "--reasoning-summary", "none"]
     restart: unless-stopped
     environment:
       CHATGPT_LOCAL_HOME: /data

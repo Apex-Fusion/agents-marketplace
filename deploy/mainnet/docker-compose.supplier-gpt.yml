@@ -36,7 +36,7 @@ services:
     environment:
       LLM_BACKEND: openai
       OPENAI_BASE_URL: http://marketplace-mainnet-chatmock:8000
-      OPENAI_TIMEOUT_MS: "180000"
+      OPENAI_TIMEOUT_MS: "300000"
       PORT: "8080"
       # Enable LiveOgmiosProvider so submitTx/awaitTx actually broadcast.
       # Mirrors the testnet supplier compose; without this the supplier

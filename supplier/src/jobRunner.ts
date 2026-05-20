@@ -112,6 +112,9 @@ export async function runChatJob(params: RunChatJobParams): Promise<void> {
         rawReason === "ollama_timeout" ? "ollama_failure"
           : rawReason === "openai_timeout" ? "openai_failure"
             : rawReason;
+      console.warn(
+        `[job_failed] jobId=${jobId} reason=${rawReason} httpStatus=502 msg=${message}`,
+      );
       deps.jobs.fail(jobId, {
         httpStatus: 502,
         reason: collapsedReason,
@@ -148,6 +151,9 @@ export async function runChatJob(params: RunChatJobParams): Promise<void> {
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      console.warn(
+        `[job_failed] jobId=${jobId} reason=submit_failed httpStatus=502 msg=${message}`,
+      );
       deps.jobs.fail(jobId, {
         httpStatus: 502,
         reason: "submit_failed",
@@ -161,6 +167,9 @@ export async function runChatJob(params: RunChatJobParams): Promise<void> {
       await deps.chain.awaitTx(buildResult.expectedTxHash, 60_000);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      console.warn(
+        `[job_failed] jobId=${jobId} reason=submit_timeout httpStatus=502 msg=${msg}`,
+      );
       deps.jobs.fail(jobId, {
         httpStatus: 502,
         reason: "submit_timeout",
@@ -250,6 +259,9 @@ export async function runTtsJob(params: RunTtsJobParams): Promise<void> {
     } catch (err) {
       const reason = (err as piper.PiperError)?.reason ?? "piper_failure";
       const message = err instanceof Error ? err.message : String(err);
+      console.warn(
+        `[job_failed] jobId=${jobId} reason=${reason} httpStatus=502 msg=${message}`,
+      );
       deps.jobs.fail(jobId, {
         httpStatus: 502,
         reason: reason === "piper_timeout" ? "piper_failure" : reason,
@@ -288,6 +300,9 @@ export async function runTtsJob(params: RunTtsJobParams): Promise<void> {
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      console.warn(
+        `[job_failed] jobId=${jobId} reason=submit_failed httpStatus=502 msg=${message}`,
+      );
       deps.jobs.fail(jobId, {
         httpStatus: 502,
         reason: "submit_failed",
@@ -301,6 +316,9 @@ export async function runTtsJob(params: RunTtsJobParams): Promise<void> {
       await deps.chain.awaitTx(buildResult.expectedTxHash, 60_000);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      console.warn(
+        `[job_failed] jobId=${jobId} reason=submit_timeout httpStatus=502 msg=${msg}`,
+      );
       deps.jobs.fail(jobId, {
         httpStatus: 502,
         reason: "submit_timeout",
