@@ -85,6 +85,20 @@ const OPERATOR_SOURCES: OperatorSource[] = [
     keyVar: "SUPPLIER_PRIV_KEY_HEX",
     role: "supplier",
   },
+  {
+    label: "buyer-a@vector-modules-simulation",
+    host: "user@178.105.3.133",
+    envPath: "/home/user/marketplace-agents/buyer-a.env",
+    keyVar: "BUYER_PRIV_KEY_HEX",
+    role: "buyer",
+  },
+  {
+    label: "buyer-b@vector-modules-simulation",
+    host: "user@178.105.3.133",
+    envPath: "/home/user/marketplace-agents/buyer-b.env",
+    keyVar: "BUYER_PRIV_KEY_HEX",
+    role: "buyer",
+  },
 ];
 
 // ── argv ──────────────────────────────────────────────────────────────
