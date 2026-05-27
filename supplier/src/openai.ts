@@ -33,6 +33,12 @@ export interface CallOpenAiParams {
   model: string;
   messages: ChatMessage[];
   timeoutMs: number;
+  /**
+   * Optional bearer token. When non-empty, an `authorization: Bearer <apiKey>`
+   * header is sent. Omit (or pass "") for endpoints that don't require auth,
+   * e.g. the ChatMock localhost proxy.
+   */
+  apiKey?: string;
 }
 
 export interface OpenAiResult {
@@ -62,9 +68,14 @@ function isAbortError(err: unknown): boolean {
 }
 
 export async function callOpenAi(params: CallOpenAiParams): Promise<OpenAiResult> {
-  const { baseUrl, model, messages, timeoutMs } = params;
+  const { baseUrl, model, messages, timeoutMs, apiKey } = params;
   const url = `${baseUrl}/v1/chat/completions`;
   const body = JSON.stringify({ model, messages, stream: false });
+
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (apiKey) {
+    headers.authorization = `Bearer ${apiKey}`;
+  }
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -74,7 +85,7 @@ export async function callOpenAi(params: CallOpenAiParams): Promise<OpenAiResult
   try {
     response = await fetch(url, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers,
       body,
       signal: controller.signal,
     });

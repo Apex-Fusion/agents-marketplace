@@ -91,6 +91,7 @@ export async function runChatJob(params: RunChatJobParams): Promise<void> {
           model: advert.model,
           messages: requestBody.messages,
           timeoutMs: deps.config.openaiTimeoutMs,
+          apiKey: deps.config.openaiApiKey,
         });
       } else {
         inference = await ollama.callOllama({

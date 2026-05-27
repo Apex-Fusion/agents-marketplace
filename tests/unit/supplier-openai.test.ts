@@ -102,6 +102,39 @@ describe("callOpenAi() — request shape", () => {
     const body = JSON.parse(init.body as string);
     expect(body.stream).toBe(false);
   });
+
+  it("omits authorization header when apiKey is not provided (ChatMock path)", async () => {
+    await callOpenAi({ baseUrl: BASE_URL, model: MODEL, messages: MESSAGES, timeoutMs: TIMEOUT_MS });
+    const [, init] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit];
+    const headers = init.headers as Record<string, string>;
+    expect(headers.authorization).toBeUndefined();
+  });
+
+  it("sends authorization: Bearer <apiKey> when apiKey is provided (DeepSeek/OpenAI path)", async () => {
+    await callOpenAi({
+      baseUrl: BASE_URL,
+      model: MODEL,
+      messages: MESSAGES,
+      timeoutMs: TIMEOUT_MS,
+      apiKey: "sk-test-deepseek-key",
+    });
+    const [, init] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit];
+    const headers = init.headers as Record<string, string>;
+    expect(headers.authorization).toBe("Bearer sk-test-deepseek-key");
+  });
+
+  it("omits authorization header when apiKey is empty string", async () => {
+    await callOpenAi({
+      baseUrl: BASE_URL,
+      model: MODEL,
+      messages: MESSAGES,
+      timeoutMs: TIMEOUT_MS,
+      apiKey: "",
+    });
+    const [, init] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit];
+    const headers = init.headers as Record<string, string>;
+    expect(headers.authorization).toBeUndefined();
+  });
 });
 
 // ─── Happy path ─────────────────────────────────────────────────────────────

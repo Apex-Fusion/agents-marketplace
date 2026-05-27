@@ -65,6 +65,12 @@ export interface SupplierConfig {
   ollamaUrl: string;
   /** Empty string when capabilityKind="tts" or llmBackend="ollama". */
   openaiBaseUrl: string;
+  /**
+   * Bearer token forwarded as `Authorization: Bearer <key>` when llmBackend="openai".
+   * Empty string means no header is sent (correct for ChatMock and other localhost
+   * proxies). Required for hosted OpenAI-compatible APIs (DeepSeek, OpenAI, etc.).
+   */
+  openaiApiKey: string;
   /** Empty string when capabilityKind="chat". */
   piperUrl: string;
   advertRef: AdvertRef;
@@ -193,6 +199,8 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
     openaiTimeoutMs = Number(openaiTimeoutStr);
   }
 
+  const openaiApiKey = env.OPENAI_API_KEY ?? "";
+
   const piperTimeoutStr = env.PIPER_TIMEOUT_MS;
   let piperTimeoutMs = 120_000;
   if (piperTimeoutStr !== undefined && piperTimeoutStr !== "") {
@@ -212,6 +220,7 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
     ogmiosUrl,
     ollamaUrl,
     openaiBaseUrl,
+    openaiApiKey,
     piperUrl,
     advertRef,
     networkId,
