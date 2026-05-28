@@ -16,9 +16,11 @@
  * "testnet"/"mainnet"). Legacy values are now rejected.
  *
  * Optional env vars (with defaults):
- *   INDEXER_PORT      — HTTP port (default 8090)
- *   STATUS_POLL_MS    — status poll interval in ms (default 20000)
- *   SKIP_BEFORE_SLOT  — skip blocks before this slot (default 0)
+ *   INDEXER_PORT                — HTTP port (default 8090)
+ *   STATUS_POLL_MS              — status poll interval in ms (default 20000)
+ *   SKIP_BEFORE_SLOT            — skip blocks before this slot (default 0)
+ *   OGMIOS_RESPONSE_TIMEOUT_MS  — watchdog timeout; reconnect Ogmios WS if no
+ *                                 response in this window (default 90000, 0 = off)
  */
 
 import type { NetworkId } from "@marketplace/shared";
@@ -30,6 +32,7 @@ export interface IndexerConfig {
   indexerPort: number;
   statusPollMs: number;
   skipBeforeSlot: number;
+  ogmiosResponseTimeoutMs: number;
   /**
    * Optional path to the bundled indexer-ui dist directory. When set, the
    * Express app mounts static assets + SPA catch-all so the same process
@@ -86,6 +89,10 @@ export function loadConfig(env: Record<string, string | undefined>): IndexerConf
     ? parseNonNegativeInt("SKIP_BEFORE_SLOT", env.SKIP_BEFORE_SLOT)
     : 0;
 
+  const ogmiosResponseTimeoutMs = env.OGMIOS_RESPONSE_TIMEOUT_MS !== undefined
+    ? parseNonNegativeInt("OGMIOS_RESPONSE_TIMEOUT_MS", env.OGMIOS_RESPONSE_TIMEOUT_MS)
+    : 90_000;
+
   // Optional INDEXER_UI_DIST: any non-empty string is accepted; directory
   // existence is checked at startup, not here. Absent → undefined (API-only).
   const uiDistDir = typeof env.INDEXER_UI_DIST === "string" && env.INDEXER_UI_DIST.length > 0
@@ -99,6 +106,7 @@ export function loadConfig(env: Record<string, string | undefined>): IndexerConf
     indexerPort,
     statusPollMs,
     skipBeforeSlot,
+    ogmiosResponseTimeoutMs,
     uiDistDir,
   };
 }

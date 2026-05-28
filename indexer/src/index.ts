@@ -38,7 +38,9 @@ async function main(): Promise<void> {
   }
 
   const cache = new SqliteCache(config.dbPath);
-  const source = new OgmiosSource(config.ogmiosUrl);
+  const source = new OgmiosSource(config.ogmiosUrl, {
+    responseTimeoutMs: config.ogmiosResponseTimeoutMs,
+  });
   const worker = new ChainSyncWorker({
     source,
     cache,

@@ -13,6 +13,7 @@ import type { ChainSyncSource, IndexerBlock, RollbackPoint } from "./types.js";
 
 const INITIAL_BACKOFF = 1_000;
 const MAX_BACKOFF = 30_000;
+const DEFAULT_RESPONSE_TIMEOUT_MS = 90_000;
 
 interface MinimalWebSocket {
   readyState: number;
@@ -35,6 +36,20 @@ async function loadWs(): Promise<WsCtor> {
   return _WsCtor;
 }
 
+export interface OgmiosSourceOpts {
+  /**
+   * Watchdog timeout (ms). If no response arrives from Ogmios within this
+   * window after a request was sent, the WebSocket is force-closed so the
+   * existing reconnect path can re-establish the chain-sync stream from the
+   * saved cursor. Defaults to 90_000. Set to 0 to disable.
+   *
+   * Rationale: Ogmios WebSockets can half-die (TCP socket alive, server
+   * stops pushing nextBlock responses). The indexer would otherwise sit
+   * idle indefinitely with `ogmios_status: "connected"` reported as true.
+   */
+  responseTimeoutMs?: number;
+}
+
 export class OgmiosSource extends EventEmitter implements ChainSyncSource {
   private url: string;
   private ws: MinimalWebSocket | null = null;
@@ -42,10 +57,13 @@ export class OgmiosSource extends EventEmitter implements ChainSyncSource {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private closed: boolean = false;
   private intersectAt: { slot: number; id: string } | null = null;
+  private responseTimeoutMs: number;
+  private responseWatchdog: ReturnType<typeof setTimeout> | null = null;
 
-  constructor(ogmiosUrl: string) {
+  constructor(ogmiosUrl: string, opts: OgmiosSourceOpts = {}) {
     super();
     this.url = ogmiosUrl;
+    this.responseTimeoutMs = opts.responseTimeoutMs ?? DEFAULT_RESPONSE_TIMEOUT_MS;
   }
 
   async start(intersectAt?: { slot: number; id: string } | null): Promise<void> {
@@ -57,6 +75,7 @@ export class OgmiosSource extends EventEmitter implements ChainSyncSource {
 
   stop(): void {
     this.closed = true;
+    this.clearWatchdog();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -74,6 +93,7 @@ export class OgmiosSource extends EventEmitter implements ChainSyncSource {
       return;
     }
     this.ws.send(JSON.stringify({ jsonrpc: "2.0", method: "nextBlock" }));
+    this.armWatchdog();
   }
 
   updateIntersect(point: { slot: number; id: string }): void {
@@ -104,6 +124,7 @@ export class OgmiosSource extends EventEmitter implements ChainSyncSource {
         }
       };
       socket.onclose = (ev) => {
+        this.clearWatchdog();
         this.emit("disconnected");
         if (!settled) {
           settled = true;
@@ -125,6 +146,7 @@ export class OgmiosSource extends EventEmitter implements ChainSyncSource {
       method: "findIntersection",
       params: { points },
     }));
+    this.armWatchdog();
   }
 
   private handleMessage(data: string): void {
@@ -132,12 +154,20 @@ export class OgmiosSource extends EventEmitter implements ChainSyncSource {
     try {
       msg = JSON.parse(data);
     } catch (err) {
+      // Watchdog stays armed — a stream of unparseable garbage triggers reconnect.
       this.emit("error", err);
       return;
     }
     if (msg.error) {
+      // Same: leave watchdog armed so a stuck Ogmios error path still recycles
+      // the connection rather than wedging the follower.
       this.emit("error", new Error(msg.error.message ?? "Ogmios error"));
       return;
+    }
+    // Well-formed protocol message received — clear the watchdog. It will be
+    // re-armed by the next requestNextBlock() / sendFindIntersection() send.
+    if (msg.method) {
+      this.clearWatchdog();
     }
     if (msg.method === "findIntersection") {
       this.emit("intersection", msg.result);
@@ -173,5 +203,32 @@ export class OgmiosSource extends EventEmitter implements ChainSyncSource {
         .catch((err) => this.emit("error", err));
     }, this.backoff);
     this.backoff = Math.min(this.backoff * 2, MAX_BACKOFF);
+  }
+
+  private armWatchdog(): void {
+    this.clearWatchdog();
+    if (this.responseTimeoutMs <= 0) return;
+    this.responseWatchdog = setTimeout(() => {
+      this.responseWatchdog = null;
+      console.warn(
+        `[OgmiosSource] no response from Ogmios in ${this.responseTimeoutMs}ms — forcing reconnect`,
+      );
+      // Closing the socket triggers onclose → scheduleReconnect, which
+      // re-runs findIntersection from the cached intersectAt point.
+      if (this.ws) {
+        try {
+          this.ws.close();
+        } catch {
+          // ignore — close() should be idempotent on any sane WebSocket impl
+        }
+      }
+    }, this.responseTimeoutMs);
+  }
+
+  private clearWatchdog(): void {
+    if (this.responseWatchdog) {
+      clearTimeout(this.responseWatchdog);
+      this.responseWatchdog = null;
+    }
   }
 }
