@@ -1,0 +1,89 @@
+# deploy/mainnet/docker-compose.supplier-kimi.yml — Supplier — MAINNET (OpenRouter / Kimi K2.6)
+#
+# Fourth mainnet supplier. LLM_BACKEND=openai pointed at OpenRouter's
+# OpenAI-compatible API (https://openrouter.ai/api), serving the
+# moonshotai/kimi-k2.6 model. No local proxy container — OpenRouter is
+# reachable over public HTTPS with a Bearer-token API key.
+#
+# Branded `kimi` (after the model), not `openrouter` (the provider): future
+# OpenRouter-backed suppliers serving different models can get their own
+# compose files (supplier-grok.yml, etc.) without naming collisions.
+#
+# Coexists with:
+#   - marketplace-mainnet-supplier           (ollama / qwen3.6:35b,     mp-suppliers.vector.apexfusion.org)
+#   - marketplace-mainnet-supplier-gpt       (openai / ChatMock,        mp-suppliers-gpt.vector.apexfusion.org)
+#   - marketplace-mainnet-supplier-deepseek  (openai / DeepSeek API,    mp-suppliers-deepseek.vector.apexfusion.org)
+#
+# Pre-flight:
+#   1. DNS A-record: mp-suppliers-kimi.vector.apexfusion.org → host IP
+#   2. supplier/.env.kimi written on host (chmod 600) with at minimum:
+#        SUPPLIER_PRIV_KEY_HEX, OPENAI_API_KEY, OGMIOS_URL, NETWORK_ID=1,
+#        VECTOR_ZERO_TIME_MS, ESCROW_REF_UTXO, ADVERT_REF_UTXO, ADVERT_REF,
+#        LIVE_CHAIN=1
+#   3. Networks already exist (created by the canonical supplier compose):
+#        docker network create marketplace-mainnet-net   # one-shot
+#        # traefik-net is created by the Traefik project
+
+name: marketplace-mainnet-supplier-kimi
+
+services:
+  supplier:
+    build:
+      context: ../..
+      dockerfile: supplier/Dockerfile
+    container_name: marketplace-mainnet-supplier-kimi
+    restart: unless-stopped
+    env_file:
+      # Self-contained env for the Kimi/OpenRouter variant — separate from
+      # ../../supplier/.env (ollama-backed), ../../supplier/.env.gpt
+      # (ChatMock-backed), and ../../supplier/.env.deepseek (DeepSeek-
+      # backed). Holds this supplier's distinct SUPPLIER_PRIV_KEY_HEX,
+      # ADVERT_REF, ADVERT_*, OPENAI_API_KEY, and the shared mainnet
+      # plumbing duplicated in full (NETWORK_ID, OGMIOS_URL,
+      # VECTOR_ZERO_TIME_MS, ref-script UTxOs, LIVE_CHAIN). No env_file
+      # ordering / override magic.
+      - path: ../../supplier/.env.kimi
+        required: false
+    environment:
+      LLM_BACKEND: openai
+      # No /v1 suffix — supplier/src/openai.ts appends /v1/chat/completions.
+      OPENAI_BASE_URL: https://openrouter.ai/api
+      # Kimi K2.6 generations can be slow; mirror the DeepSeek/GPT composes.
+      OPENAI_TIMEOUT_MS: "300000"
+      PORT: "8080"
+      # Enable LiveOgmiosProvider so submitTx/awaitTx actually broadcast.
+      # Without this the supplier silently falls back to ReadOnlyOgmiosProvider
+      # and Claim/Submit never reach chain.
+      LIVE_CHAIN: "1"
+      # NETWORK_ID and OGMIOS_URL intentionally not pinned here — they MUST
+      # come from the operator-provided supplier/.env.kimi on a mainnet host.
+      # Setting them via compose would be a footgun: a stray re-up on
+      # testnet hardware could silently re-tag the supplier as mainnet.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz >/dev/null || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - marketplace-mainnet-net
+      - traefik-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-net"
+      - "traefik.http.routers.mp-suppliers-kimi-mainnet.entrypoints=web"
+      - "traefik.http.routers.mp-suppliers-kimi-mainnet.rule=Host(`mp-suppliers-kimi.vector.apexfusion.org`)"
+      - "traefik.http.services.mp-suppliers-kimi-mainnet.loadbalancer.server.port=8080"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  marketplace-mainnet-net:
+    external: true
+    name: marketplace-mainnet-net
+  traefik-net:
+    external: true
+    name: traefik-net
