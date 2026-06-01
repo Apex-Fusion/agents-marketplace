@@ -45,6 +45,7 @@ import type { SupplierConfig } from "./config.js";
 import { JobStore } from "./jobs.js";
 import { runChatJob, runTtsJob } from "./jobRunner.js";
 import { healthzRouter } from "./routes/healthz.js";
+import { triggerOnFailureConsolidate } from "./walletHealth.js";
 
 export interface SupplierDeps {
   chain: ChainProvider;
@@ -307,6 +308,15 @@ function makeChatHandler(deps: ResolvedDeps) {
         });
       } catch (err) {
         deps.state.release();
+        // Backstop the periodic wallet-health ticker: most Claim build failures
+        // we see in practice are wallet-shape problems (fragmentation, dust).
+        // Fire-and-forget a debounced consolidate so the NEXT buyer retry
+        // finds a clean 2-UTxO wallet. Safe no-op if already healthy.
+        triggerOnFailureConsolidate({
+          chain: deps.chain,
+          state: deps.state,
+          supplierKey: deps.supplierKey,
+        });
         return jsonError(res, 503, "chain_submit_failed",
           `Claim tx submit failed: ${(err as Error).message}`);
       }

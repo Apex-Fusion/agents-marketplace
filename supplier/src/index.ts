@@ -21,6 +21,7 @@ import { SupplierState } from "./state.js";
 import { JobStore } from "./jobs.js";
 import { createApp, type SupplierDeps } from "./server.js";
 import { buildChainProvider } from "./chain.js";
+import { startWalletHealthTicker } from "./walletHealth.js";
 
 async function main(): Promise<void> {
   const cfg = loadConfig(process.env);
@@ -61,10 +62,22 @@ async function main(): Promise<void> {
   );
   evictInterval.unref();
 
+  // Wallet self-consolidation: only meaningful when chain writes are enabled.
+  // 0 disables. planConsolidate short-circuits to already-healthy in the
+  // common case so this is a no-op on a clean wallet.
+  const walletHealthTicker =
+    cfg.liveChain && cfg.walletHealthIntervalMs > 0
+      ? startWalletHealthTicker(
+          { chain, state, supplierKey },
+          { intervalMs: cfg.walletHealthIntervalMs },
+        )
+      : null;
+
   const shutdown = (signal: string) => {
     // eslint-disable-next-line no-console
     console.log(`received ${signal}, shutting down`);
     clearInterval(evictInterval);
+    walletHealthTicker?.stop();
     state.markOffline();
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(1), 5_000).unref();

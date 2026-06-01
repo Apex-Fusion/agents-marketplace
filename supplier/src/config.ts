@@ -37,6 +37,10 @@
  *   LIVE_CHAIN             — "1" opts in to live-chain submit/await (default off).
  *                            Any other value (including "true", "yes", "TRUE")
  *                            keeps the supplier in read-only mode for safety.
+ *   WALLET_HEALTH_INTERVAL_MS
+ *                          — periodic wallet self-consolidate tick interval
+ *                            (default 600_000 = 10 min). "0" disables the
+ *                            ticker. Only fires while LIVE_CHAIN=1.
  *
  * On error: throws Error whose message names the offending field (matches
  * supplier-config.test.ts assertion that error message mentions field name).
@@ -87,6 +91,11 @@ export interface SupplierConfig {
    * Only the literal env value "1" sets this to true.
    */
   liveChain: boolean;
+  /**
+   * Periodic wallet self-consolidate tick interval, ms. 0 disables the ticker.
+   * Default 600_000 (10 min). Only fires while liveChain=true.
+   */
+  walletHealthIntervalMs: number;
 }
 
 function requireField(env: Record<string, string | undefined>, name: string): string {
@@ -215,6 +224,16 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
   // in safe read-only mode. Real submissions require explicit opt-in.
   const liveChain = env.LIVE_CHAIN === "1";
 
+  // WALLET_HEALTH_INTERVAL_MS accepts any non-negative integer; "0" disables.
+  const whIntervalStr = env.WALLET_HEALTH_INTERVAL_MS;
+  let walletHealthIntervalMs = 600_000;
+  if (whIntervalStr !== undefined && whIntervalStr !== "") {
+    if (!NON_NEG_INT_RE.test(whIntervalStr)) {
+      throw new Error("loadConfig: WALLET_HEALTH_INTERVAL_MS must be a non-negative integer");
+    }
+    walletHealthIntervalMs = Number(whIntervalStr);
+  }
+
   return {
     supplierPrivKeyHex,
     ogmiosUrl,
@@ -231,5 +250,6 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
     capabilityKind,
     llmBackend,
     liveChain,
+    walletHealthIntervalMs,
   };
 }
