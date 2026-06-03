@@ -87,7 +87,12 @@ RUN apk add --no-cache tini
 # Vite bundle that the Express server will static-serve.
 COPY --from=builder /repo /repo
 
-RUN chown -R node:node /repo
+# Pre-create the archive dir (ARCHIVE_DIR / default ./data/archive) owned by
+# `node` BEFORE chown. When a fresh named volume is mounted here, Docker seeds
+# the empty volume from this image directory and inherits its node ownership —
+# otherwise the volume mounts root-owned and the non-root `node` process can't
+# open the SQLite archive / pdf-jobs.db.
+RUN mkdir -p /repo/data/archive && chown -R node:node /repo
 USER node
 
 ENV NODE_ENV=production
