@@ -64,7 +64,11 @@ export type JobPhase =
   | "running"
   | "completed"
   | "completed_with_gaps"
-  | "failed";
+  | "failed"
+  // A job that was mid-flight when the process died (persisted as running but
+  // no live worker on the next boot). Its partial summary/coverage is still
+  // openable; it cannot be resumed.
+  | "interrupted";
 
 /** Per-call result row, surfaced to the UI. */
 export interface ChunkResult {
@@ -90,6 +94,19 @@ export interface JobView {
   final_summary_md?: string;
   chunk_results: ChunkResult[];
   escrow_refs: string[];
+  created_at: number;
+}
+
+/** Compact row returned by GET /v1/pdf-jobs (the past-work list). */
+export interface JobListItem {
+  job_id: string;
+  filename: string;
+  status: JobPhase;
+  coverage: { done: number; total: number };
+  chunk_count: number;
+  running_cost_lovelace: string;
+  created_at: number;
+  has_summary: boolean;
 }
 
 /** Thrown by extractPdfText for unusable PDFs (e.g. scanned/image-only). */

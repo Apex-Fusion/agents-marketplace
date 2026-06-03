@@ -36,7 +36,16 @@ import type { ResponseArchive } from "../db/archive.js";
 import { runAccept } from "../cli/acceptFlow.js";
 import { SUMMARIZE_CAPABILITY_ID, buildSupplierPool, SupplierPool } from "./supplier-pool.js";
 import { estimateJob, feeHeadroomLovelace, type JobEstimate } from "./estimate.js";
-import type { Chunk, ChunkResult, JobPhase, JobView, PdfCaps, PoolSupplier } from "./types.js";
+import type {
+  Chunk,
+  ChunkResult,
+  JobListItem,
+  JobPhase,
+  JobView,
+  PdfCaps,
+  PoolSupplier,
+} from "./types.js";
+import type { PdfJobDb, JobRecord } from "./job-db.js";
 
 const ESCROW_REF_RE = /^([0-9a-f]{64})#(\d+)$/;
 const SUBMITTED_LOOKUP_TIMEOUT_MS = 30_000;
@@ -62,11 +71,16 @@ export interface JobDeps {
   indexerUrl: string;
   archive?: ResponseArchive;
   caps: PdfCaps;
+  /** Durable job store. When present, every job is persisted on each update
+   * so past work survives restarts and is listable/openable. */
+  db?: PdfJobDb;
   /** Override the per-call lifecycle (tests). Defaults to the real
    * submitPrompt → findSubmittedEscrowRef → runAccept sequence. */
   runCall?: RunCallFn;
   /** Override the wallet-balance read (tests). Defaults to chain query. */
   walletBalance?: () => Promise<bigint>;
+  /** Injectable clock (tests). Defaults to Date.now. */
+  now?: () => number;
 }
 
 export interface ProgressEvent {
@@ -193,11 +207,20 @@ async function runWithConcurrency<T>(
   await Promise.all(lanes);
 }
 
+function safeParse<T>(s: string, fallback: T): T {
+  try {
+    return JSON.parse(s) as T;
+  } catch {
+    return fallback;
+  }
+}
+
 export class Job {
   readonly jobId: string;
   readonly filename: string;
   readonly pageCount: number;
   readonly chunks: Chunk[];
+  readonly createdAt: number;
   status: JobPhase = "estimated";
   runningCost = 0n;
   finalSummary?: string;
@@ -206,15 +229,19 @@ export class Job {
   readonly escrowRefs: string[] = [];
   /** Map results indexed by chunk index; reduce results appended after. */
   readonly chunkResults: ChunkResult[];
+  /** Persistence hook — JobStore wires this to write the job to SQLite on
+   * every progress emit, so an interrupted/navigated-away job is recoverable. */
+  onUpdate?: () => void;
 
   private subscribers = new Set<(frame: string) => void>();
   private frames: string[] = [];
 
-  constructor(filename: string, pageCount: number, chunks: Chunk[]) {
+  constructor(filename: string, pageCount: number, chunks: Chunk[], createdAt: number) {
     this.jobId = `job_${randomUUID()}`;
     this.filename = filename;
     this.pageCount = pageCount;
     this.chunks = chunks;
+    this.createdAt = createdAt;
     this.chunkResults = chunks.map((c) => ({
       index: c.index,
       label: `map:${c.index}`,
@@ -238,6 +265,8 @@ export class Job {
         /* dropped client; route's close handler unsubscribes */
       }
     }
+    // Persist after fanning out so the durable record reflects the latest frame.
+    this.onUpdate?.();
   }
 
   /** Attach an SSE writer; replays buffered frames so reconnects catch up. */
@@ -261,6 +290,7 @@ export class Job {
       final_summary_md: this.finalSummary,
       chunk_results: this.chunkResults,
       escrow_refs: this.escrowRefs,
+      created_at: this.createdAt,
     };
   }
 }
@@ -272,14 +302,109 @@ export class JobStore {
 
   constructor(private readonly deps: JobDeps) {}
 
+  private now(): number {
+    return this.deps.now ? this.deps.now() : Date.now();
+  }
+
   createJob(filename: string, pageCount: number, chunks: Chunk[]): Job {
-    const job = new Job(filename, pageCount, chunks);
+    const job = new Job(filename, pageCount, chunks, this.now());
+    job.onUpdate = () => this.persist(job);
     this.jobs.set(job.jobId, job);
+    this.persist(job);
     return job;
   }
 
+  /** The live (in-memory) job — needed for estimate/start/SSE. */
   get(id: string): Job | undefined {
     return this.jobs.get(id);
+  }
+
+  /** Write the job's current state to the durable store (no-op without db). */
+  private persist(job: Job): void {
+    if (!this.deps.db) return;
+    this.deps.db.upsert(this.recordOf(job));
+  }
+
+  private recordOf(job: Job): JobRecord {
+    return {
+      job_id: job.jobId,
+      filename: job.filename,
+      status: job.status,
+      page_count: job.pageCount,
+      chunk_count: job.chunks.length,
+      coverage_done: job.coverageDone,
+      coverage_total: job.coverageTotal,
+      running_cost_lovelace: job.runningCost.toString(),
+      final_summary_md: job.finalSummary ?? null,
+      chunk_results_json: JSON.stringify(job.chunkResults),
+      escrow_refs_json: JSON.stringify(job.escrowRefs),
+      created_at: job.createdAt,
+      updated_at: this.now(),
+    };
+  }
+
+  /** A non-live persisted record whose status is non-terminal means the
+   * worker died mid-flight — surface it as "interrupted". */
+  private staleStatus(r: JobRecord): JobPhase {
+    const s = r.status as JobPhase;
+    return s === "estimated" || s === "running" ? "interrupted" : s;
+  }
+
+  private recordToView(r: JobRecord): JobView {
+    return {
+      job_id: r.job_id,
+      filename: r.filename,
+      status: this.staleStatus(r),
+      page_count: r.page_count,
+      chunk_count: r.chunk_count,
+      coverage: { done: r.coverage_done, total: r.coverage_total },
+      running_cost_lovelace: r.running_cost_lovelace,
+      final_summary_md: r.final_summary_md ?? undefined,
+      chunk_results: safeParse<ChunkResult[]>(r.chunk_results_json, []),
+      escrow_refs: safeParse<string[]>(r.escrow_refs_json, []),
+      created_at: r.created_at,
+    };
+  }
+
+  /** View for any job — live first, else the durable record (past work). */
+  viewOf(id: string): JobView | null {
+    const live = this.jobs.get(id);
+    if (live) return live.view();
+    const r = this.deps.db?.get(id);
+    return r ? this.recordToView(r) : null;
+  }
+
+  /** Newest-first list of all jobs (live + persisted), for the past-work UI. */
+  list(limit = 100): JobListItem[] {
+    const byId = new Map<string, JobListItem>();
+    if (this.deps.db) {
+      for (const r of this.deps.db.list(limit)) {
+        byId.set(r.job_id, {
+          job_id: r.job_id,
+          filename: r.filename,
+          status: this.staleStatus(r),
+          coverage: { done: r.coverage_done, total: r.coverage_total },
+          chunk_count: r.chunk_count,
+          running_cost_lovelace: r.running_cost_lovelace,
+          created_at: r.created_at,
+          has_summary: !!(r.final_summary_md && r.final_summary_md.length > 0),
+        });
+      }
+    }
+    // Live jobs win (most current status), even over their own db row.
+    for (const job of this.jobs.values()) {
+      byId.set(job.jobId, {
+        job_id: job.jobId,
+        filename: job.filename,
+        status: job.status,
+        coverage: { done: job.coverageDone, total: job.coverageTotal },
+        chunk_count: job.chunks.length,
+        running_cost_lovelace: job.runningCost.toString(),
+        created_at: job.createdAt,
+        has_summary: !!(job.finalSummary && job.finalSummary.length > 0),
+      });
+    }
+    return [...byId.values()].sort((a, b) => b.created_at - a.created_at).slice(0, limit);
   }
 
   /** Discover suppliers + read balance to produce the pre-spend estimate. */
@@ -309,6 +434,7 @@ export class JobStore {
     if (this.started.has(job.jobId)) return;
     this.started.add(job.jobId);
     job.status = "running";
+    this.persist(job);
     void this.run(job).catch((err) => {
       job.status = "failed";
       // Terminal: emit a `done` frame so SSE clients stop waiting; carries the

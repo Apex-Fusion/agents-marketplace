@@ -5,7 +5,11 @@
  */
 
 import { describe, it, expect } from "vitest";
+import { mkdtempSync, rmSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 import { JobStore, type RunCallFn } from "../../buyer/src/pdf/summarize-job.js";
+import { PdfJobDb } from "../../buyer/src/pdf/job-db.js";
 import { loadPdfCaps } from "../../buyer/src/pdf/caps.js";
 import type { Chunk } from "../../buyer/src/pdf/types.js";
 import type { Marketplace } from "../../buyer/src/sdk/Marketplace.js";
@@ -164,6 +168,66 @@ describe("JobStore orchestrator", () => {
     expect(job.failedCount).toBeGreaterThanOrEqual(1);
     expect(job.chunkResults[1].status).toBe("gap");
     expect(typeof job.finalSummary).toBe("string");
+  });
+
+  it("persists a completed job durably across a JobStore 'restart'", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pdfjobs-"));
+    try {
+      const canned: RunCallFn = async (sup) => ({
+        response: "S",
+        escrowRef: `${"f".repeat(64)}#${Math.floor(Math.random() * 1e9)}`,
+        supplierPkh: sup.supplierPkh,
+        model: sup.model,
+        receipt: {},
+        receiptSignature: "sig",
+      });
+      const db1 = new PdfJobDb(dir);
+      const store1 = new JobStore({
+        marketplace: MARKETPLACE, chain: CHAIN, walletKey: WALLET, indexerUrl: "http://i",
+        caps: loadPdfCaps({}), db: db1, runCall: canned, walletBalance: async () => 10_000_000_000n,
+      });
+      const job = store1.createJob("persist.pdf", 3, chunks(3));
+      await waitForDone(store1, job);
+      expect(job.status).toBe("completed");
+      db1.close();
+
+      // Fresh process: new db connection + new store (empty in-memory map).
+      const db2 = new PdfJobDb(dir);
+      const store2 = new JobStore({
+        marketplace: MARKETPLACE, chain: CHAIN, walletKey: WALLET, indexerUrl: "http://i",
+        caps: loadPdfCaps({}), db: db2,
+      });
+      const v = store2.viewOf(job.jobId);
+      expect(v).not.toBeNull();
+      expect(v?.status).toBe("completed");
+      expect(typeof v?.final_summary_md).toBe("string");
+      expect((v?.escrow_refs.length ?? 0)).toBeGreaterThan(0);
+      expect(store2.list().find((j) => j.job_id === job.jobId)?.has_summary).toBe(true);
+      db2.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports a persisted-but-not-live running job as interrupted", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pdfjobs-"));
+    try {
+      const db = new PdfJobDb(dir);
+      db.upsert({
+        job_id: "job_crashed", filename: "x.pdf", status: "running", page_count: 1, chunk_count: 2,
+        coverage_done: 1, coverage_total: 2, running_cost_lovelace: "200000", final_summary_md: null,
+        chunk_results_json: "[]", escrow_refs_json: "[]", created_at: 1, updated_at: 2,
+      });
+      const store = new JobStore({
+        marketplace: MARKETPLACE, chain: CHAIN, walletKey: WALLET, indexerUrl: "http://i",
+        caps: loadPdfCaps({}), db,
+      });
+      expect(store.viewOf("job_crashed")?.status).toBe("interrupted");
+      expect(store.list().find((j) => j.job_id === "job_crashed")?.status).toBe("interrupted");
+      db.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("fails cleanly when no capable suppliers exist", async () => {

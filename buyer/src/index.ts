@@ -17,6 +17,7 @@ import { buildChainProvider } from "./chain.js";
 import { Marketplace, MemoryTaskHistoryStore } from "./sdk/index.js";
 import { ResponseArchive } from "./db/archive.js";
 import { JobStore } from "./pdf/summarize-job.js";
+import { PdfJobDb } from "./pdf/job-db.js";
 import { loadPdfCaps } from "./pdf/caps.js";
 import type { WalletKey } from "@marketplace/shared/tx";
 
@@ -96,6 +97,19 @@ export async function runMain(env: Record<string, string | undefined>): Promise<
   // PDF book summarizer: one job registry, sharing the live marketplace SDK,
   // chain, wallet, and (optional) archive. Caps come from PDF_* env vars.
   const pdfCaps = loadPdfCaps(env);
+  // Durable job store (SQLite under ARCHIVE_DIR) so past summaries survive
+  // restarts and navigation. Best-effort: if it can't open, jobs fall back to
+  // in-memory only (lost on restart) but the feature still works.
+  let pdfJobDb: PdfJobDb | undefined;
+  try {
+    pdfJobDb = new PdfJobDb(config.archiveDir);
+    console.log(`[buyer] pdf job store at ${config.archiveDir}/pdf-jobs.db`);
+  } catch (err) {
+    console.error(
+      `[buyer] failed to open pdf job store at ${config.archiveDir}:`,
+      err instanceof Error ? err.message : String(err),
+    );
+  }
   const jobStore = new JobStore({
     marketplace,
     chain,
@@ -103,6 +117,7 @@ export async function runMain(env: Record<string, string | undefined>): Promise<
     indexerUrl: config.indexerUrl,
     archive,
     caps: pdfCaps,
+    db: pdfJobDb,
   });
 
   const app = createApp({

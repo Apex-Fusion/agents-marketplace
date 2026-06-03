@@ -21,7 +21,13 @@ services:
     environment:
       INDEXER_URL: http://marketplace-mainnet-indexer:8090
       BUYER_PORT: "8070"
+      # Pin the archive dir so it lands on the persistent volume below — keeps
+      # the response archive + PDF job store (past summaries) across container
+      # recreation/redeploys.
+      ARCHIVE_DIR: /repo/data/archive
       # NETWORK_ID intentionally not pinned — see supplier compose comment.
+    volumes:
+      - buyer-mainnet-archive:/repo/data/archive
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8070/healthz >/dev/null || exit 1"]
       interval: 20s
@@ -50,3 +56,6 @@ networks:
   traefik-net:
     external: true
     name: traefik-net
+
+volumes:
+  buyer-mainnet-archive:

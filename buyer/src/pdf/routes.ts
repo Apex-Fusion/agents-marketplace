@@ -113,6 +113,11 @@ export function registerPdfRoutes(
     });
   });
 
+  // ── GET /v1/pdf-jobs — past-work list (newest first) ────────────────
+  app.get("/v1/pdf-jobs", (_req: Request, res: Response) => {
+    return res.status(200).json({ jobs: jobStore.list(100) });
+  });
+
   // ── GET /v1/pdf-jobs/:id/estimate ───────────────────────────────────
   app.get("/v1/pdf-jobs/:id/estimate", async (req: Request, res: Response) => {
     const job = jobStore.get(String(req.params.id));
@@ -163,10 +168,14 @@ export function registerPdfRoutes(
   });
 
   // ── GET /v1/pdf-jobs/:id/events (SSE) ───────────────────────────────
+  // Live jobs stream real frames + replay; a finished/past (non-live) job
+  // emits a single terminal `done` frame so the client resolves immediately.
   app.get("/v1/pdf-jobs/:id/events", (req: Request, res: Response) => {
-    const job = jobStore.get(String(req.params.id));
-    if (!job) {
-      jsonError(res, 404, "job_not_found", `no job ${String(req.params.id)}`);
+    const id = String(req.params.id);
+    const job = jobStore.get(id);
+    const view = jobStore.viewOf(id);
+    if (!job && !view) {
+      jsonError(res, 404, "job_not_found", `no job ${id}`);
       return;
     }
     res.setHeader("Content-Type", "text/event-stream");
@@ -178,7 +187,23 @@ export function registerPdfRoutes(
       (res as Response & { flushHeaders: () => void }).flushHeaders();
     }
 
-    const unsubscribe = job.subscribe((frame) => res.write(frame));
+    if (!job && view) {
+      // Past/interrupted job: synthesize one terminal frame and end.
+      const frame = {
+        phase: "done",
+        completed: view.coverage.done,
+        failed: 0,
+        total: view.coverage.total,
+        running_cost_lovelace: view.running_cost_lovelace,
+        coverage: view.coverage,
+        status: view.status,
+      };
+      res.write(`event: done\ndata: ${JSON.stringify(frame)}\n\n`);
+      res.end();
+      return;
+    }
+
+    const unsubscribe = job!.subscribe((frame) => res.write(frame));
     const keepAlive = setInterval(() => res.write(": keep-alive\n\n"), 15_000);
     req.on("close", () => {
       clearInterval(keepAlive);
@@ -188,21 +213,21 @@ export function registerPdfRoutes(
 
   // ── GET /v1/pdf-jobs/:id/summary.md ─────────────────────────────────
   app.get("/v1/pdf-jobs/:id/summary.md", (req: Request, res: Response) => {
-    const job = jobStore.get(String(req.params.id));
-    if (!job) return jsonError(res, 404, "job_not_found", `no job ${String(req.params.id)}`);
-    if (!job.finalSummary) {
+    const view = jobStore.viewOf(String(req.params.id));
+    if (!view) return jsonError(res, 404, "job_not_found", `no job ${String(req.params.id)}`);
+    if (!view.final_summary_md) {
       return jsonError(res, 404, "not_ready", "summary not available yet");
     }
-    const safeName = job.filename.replace(/\.pdf$/i, "").replace(/[^A-Za-z0-9._-]+/g, "_") || "summary";
+    const safeName = view.filename.replace(/\.pdf$/i, "").replace(/[^A-Za-z0-9._-]+/g, "_") || "summary";
     res.setHeader("Content-Type", "text/markdown; charset=utf-8");
     res.setHeader("Content-Disposition", `attachment; filename="${safeName}-summary.md"`);
-    return res.send(job.finalSummary);
+    return res.send(view.final_summary_md);
   });
 
   // ── GET /v1/pdf-jobs/:id ────────────────────────────────────────────
   app.get("/v1/pdf-jobs/:id", (req: Request, res: Response) => {
-    const job = jobStore.get(String(req.params.id));
-    if (!job) return jsonError(res, 404, "job_not_found", `no job ${String(req.params.id)}`);
-    return res.status(200).json(job.view());
+    const view = jobStore.viewOf(String(req.params.id));
+    if (!view) return jsonError(res, 404, "job_not_found", `no job ${String(req.params.id)}`);
+    return res.status(200).json(view);
   });
 }
