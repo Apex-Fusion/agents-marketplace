@@ -28,6 +28,10 @@ import type { ChatMessage } from "@marketplace/shared/tx";
 import { canonicalize } from "@marketplace/shared/cbor";
 import { runAccept } from "./cli/acceptFlow.js";
 import type { ResponseArchive } from "./db/archive.js";
+import { registerPdfRoutes } from "./pdf/routes.js";
+import { defaultPdfCaps } from "./pdf/caps.js";
+import type { PdfCaps } from "./pdf/types.js";
+import type { JobStore } from "./pdf/summarize-job.js";
 import {
   SESSION_COOKIE_NAME,
   SESSION_MAX_AGE_MS,
@@ -99,6 +103,12 @@ export interface AppDeps {
    * brute-force rate-limit window. Defaults to Date.now. Tests use a fake
    * clock to drive expiry and rolling-renewal assertions deterministically. */
   nowMs?: () => number;
+  /** PDF book summarizer job registry. When provided, the /v1/pdf-* routes
+   * are live; when omitted they respond 503 (feature disabled). Built in
+   * runMain from the same marketplace/chain/wallet/archive deps. */
+  jobStore?: JobStore;
+  /** Sizing/safety knobs for the PDF summarizer. Defaults applied when absent. */
+  pdfCaps?: PdfCaps;
 }
 
 interface ResolvedDeps {
@@ -942,6 +952,12 @@ export function createApp(deps: AppDeps): Express {
       return res.send(r.bytes);
     });
   }
+
+  // ── PDF book summarizer (/v1/pdf-*) ─────────────────────────────────
+  // Registered after the other /v1/* routes (so it's behind the same auth
+  // gate) and before the SPA static fallback. When jobStore is absent the
+  // routes respond 503 (feature disabled).
+  registerPdfRoutes(app, deps.jobStore, deps.pdfCaps ?? defaultPdfCaps());
 
   if (deps.distPath) {
     let isDir = false;

@@ -16,6 +16,8 @@ import { createApp } from "./server.js";
 import { buildChainProvider } from "./chain.js";
 import { Marketplace, MemoryTaskHistoryStore } from "./sdk/index.js";
 import { ResponseArchive } from "./db/archive.js";
+import { JobStore } from "./pdf/summarize-job.js";
+import { loadPdfCaps } from "./pdf/caps.js";
 import type { WalletKey } from "@marketplace/shared/tx";
 
 // Wire ed25519 sha512 hook (idempotent — same as receipt/sign.ts).
@@ -91,6 +93,18 @@ export async function runMain(env: Record<string, string | undefined>): Promise<
     );
   }
 
+  // PDF book summarizer: one job registry, sharing the live marketplace SDK,
+  // chain, wallet, and (optional) archive. Caps come from PDF_* env vars.
+  const pdfCaps = loadPdfCaps(env);
+  const jobStore = new JobStore({
+    marketplace,
+    chain,
+    walletKey,
+    indexerUrl: config.indexerUrl,
+    archive,
+    caps: pdfCaps,
+  });
+
   const app = createApp({
     distPath,
     chain,
@@ -102,6 +116,8 @@ export async function runMain(env: Record<string, string | undefined>): Promise<
     password: config.password,
     sessionSecret: config.sessionSecret,
     cookieSecure: config.cookieSecure,
+    jobStore,
+    pdfCaps,
   });
 
   const server = app.listen(config.port, () => {
