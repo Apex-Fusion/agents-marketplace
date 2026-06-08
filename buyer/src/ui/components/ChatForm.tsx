@@ -21,7 +21,7 @@
  *   data: {"type":"error","message":"…"}\n\n
  */
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { OutputReference } from "@marketplace/shared/chain";
 
 export interface ChatFormProps {
@@ -104,6 +104,7 @@ async function streamChat(
 
 export default function ChatForm({ advertRef, payment_lovelace }: ChatFormProps = {}): JSX.Element {
   const isPaid = advertRef !== undefined && payment_lovelace !== undefined;
+  const advertRefStr = advertRef ? `${advertRef.txHash}#${advertRef.index}` : null;
 
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [streaming, setStreaming] = useState<string | null>(null); // in-progress assistant text
@@ -116,10 +117,42 @@ export default function ChatForm({ advertRef, payment_lovelace }: ChatFormProps 
   const [starting, setStarting] = useState(false);
   const [ending, setEnding] = useState(false);
   const [charged, setCharged] = useState<string | null>(null);
+  // Live supplier availability (paid mode): null = unknown/checking, true = free, false = busy/offline.
+  const [available, setAvailable] = useState<boolean | null>(null);
   const sessionRef = useRef<Session | null>(null);
   sessionRef.current = session;
 
   const active = isPaid ? session !== null && charged === null : true;
+
+  // Poll the supplier's status while the Start button is showing, so a second
+  // user can't start a chat while one is already active. The supplier is
+  // single-slot (status "working" between Claim and Submit); we disable Start
+  // until it's "free" again. (startChat also does an authoritative pre-flight
+  // /status check, so this is the UX layer over that guard.)
+  useEffect(() => {
+    if (!isPaid || !advertRefStr || session !== null || charged !== null) return;
+    let cancelled = false;
+    const check = async (): Promise<void> => {
+      try {
+        const r = await fetch("/v1/indexer/suppliers?capability_id=llm.chat.v1");
+        if (!r.ok) throw new Error(String(r.status));
+        const rows = (await r.json()) as Array<{ utxo_ref: string; status: string }>;
+        const row = rows.find((x) => x.utxo_ref === advertRefStr);
+        // Unknown (row missing / indexer hiccup) → null, which does NOT hard-block
+        // (the pre-flight check still guards funds); only an explicit non-free
+        // status disables the button.
+        if (!cancelled) setAvailable(row ? row.status === "free" : null);
+      } catch {
+        if (!cancelled) setAvailable(null);
+      }
+    };
+    void check();
+    const id = setInterval(check, 8000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [isPaid, advertRefStr, session, charged]);
 
   async function startChat(): Promise<void> {
     if (!advertRef || payment_lovelace === undefined) return;
@@ -226,15 +259,26 @@ export default function ChatForm({ advertRef, payment_lovelace }: ChatFormProps 
   return (
     <div className="space-y-4 rounded border border-gray-200 bg-white p-4" data-testid="chat-form">
       {isPaid && session === null && (
-        <button
-          type="button"
-          onClick={startChat}
-          disabled={starting}
-          className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:bg-gray-400"
-          data-testid="chat-start"
-        >
-          {starting ? "Opening escrow…" : "Start chat"}
-        </button>
+        <div className="space-y-2">
+          <button
+            type="button"
+            onClick={startChat}
+            disabled={starting || available === false}
+            className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:bg-gray-400"
+            data-testid="chat-start"
+          >
+            {starting
+              ? "Opening escrow…"
+              : available === false
+                ? "Supplier busy"
+                : "Start chat"}
+          </button>
+          {available === false && (
+            <p className="text-sm text-amber-700" data-testid="chat-busy">
+              Another chat is in progress on this supplier. The button re-enables when it ends.
+            </p>
+          )}
+        </div>
       )}
 
       {(active || streaming !== null || turns.length > 0) && (

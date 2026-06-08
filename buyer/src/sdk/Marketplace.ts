@@ -822,6 +822,30 @@ export class Marketplace extends EventEmitterBase {
     }
     const advertDatum = decodeAdvertDatum(advertUtxo.datumHex);
 
+    const supplierHttp = new HttpClient({ baseUrl: advertDatum.endpoint_url, fetch: this.fetchImpl });
+
+    // Pre-flight: refuse to lock any funds if the supplier is already serving
+    // another chat. The supplier is single-slot, so a second concurrent escrow
+    // would only 409 at Claim and be left stranded Open with funds locked.
+    // Checking /status first keeps the buyer's funds unlocked. Best-effort: if
+    // /status is unreachable we proceed, and the supplier's Claim still guards
+    // the slot.
+    try {
+      const statusRes = await supplierHttp.getJson("/status");
+      const liveStatus = statusRes.body && typeof statusRes.body === "object"
+        ? (statusRes.body as { status?: string }).status
+        : undefined;
+      if (liveStatus === "working") {
+        throw new SupplierError("supplier_busy", {
+          status: 409,
+          message: "supplier is busy with another chat session",
+        });
+      }
+    } catch (err) {
+      if (err instanceof SupplierError) throw err;
+      /* /status unreachable — proceed; Claim still enforces the single slot */
+    }
+
     const sessionNonce = randomNonce();
     let escrowResult;
     try {
@@ -850,7 +874,6 @@ export class Marketplace extends EventEmitterBase {
       /* mock providers / tests */
     }
 
-    const supplierHttp = new HttpClient({ baseUrl: advertDatum.endpoint_url, fetch: this.fetchImpl });
     let startRes;
     try {
       startRes = await supplierHttp.postJson(
