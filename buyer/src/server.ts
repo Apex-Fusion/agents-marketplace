@@ -379,6 +379,37 @@ export function createApp(deps: AppDeps): Express {
     }
   });
 
+  // ── GET /v1/wallet/balance — live buyer-wallet balance from Ogmios.
+  // Sums lovelace across all UTxOs at the buyer's address. The Wallet page
+  // renders this as AP3X (lovelace / 1e6).
+  app.get("/v1/wallet/balance", async (_req: Request, res: Response) => {
+    if (!resolved) {
+      return jsonError(
+        res,
+        503,
+        "service_unavailable",
+        "buyer-app booted without chain deps; /v1/wallet/balance disabled",
+      );
+    }
+    try {
+      const utxos = await resolved.chain.queryUtxosByAddress(resolved.walletKey.address);
+      let lovelace = 0n;
+      for (const u of utxos) lovelace += u.lovelace;
+      return res.status(200).json({
+        address: resolved.walletKey.address,
+        lovelace: lovelace.toString(),
+        utxo_count: utxos.length,
+      });
+    } catch (err) {
+      return jsonError(
+        res,
+        502,
+        "chain_unreachable",
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+  });
+
   // ── /v1/indexer/* — generic GET passthrough to the internal indexer.
   // The SPA's SDK is configured with `indexerUrl = ${origin}/v1/indexer`,
   // so calls like `/suppliers`, `/escrows?buyer=…`, `/capabilities` land
