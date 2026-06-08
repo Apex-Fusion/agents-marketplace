@@ -56,8 +56,12 @@ export interface AdvertRef {
   index: number;
 }
 
-/** Capability the supplier is configured to serve. */
-export type CapabilityKind = "chat" | "tts";
+/** Capability the supplier is configured to serve.
+ *   "chat"         — one-off `llm.text.generate.v1` (single prompt → single completion)
+ *   "tts"          — `audio.synthesize.piper.v1`
+ *   "chat-session" — multi-turn `llm.chat.v1` (escrow bookends, off-chain turns,
+ *                    streaming). Requires LLM_BACKEND="openai". */
+export type CapabilityKind = "chat" | "tts" | "chat-session";
 
 /** LLM backend selected for the chat capability. */
 export type LlmBackend = "ollama" | "openai";
@@ -85,6 +89,13 @@ export interface SupplierConfig {
   piperTimeoutMs: number;
   capabilityKind: CapabilityKind;
   llmBackend: LlmBackend;
+  /**
+   * Idle-timeout for an open chat session, ms. A session with no message
+   * activity for this long is auto-ended (supplier Submits the transcript
+   * receipt). Only meaningful for capabilityKind="chat-session". Default
+   * 300_000 (5 min).
+   */
+  chatIdleTimeoutMs: number;
   /**
    * When true, the supplier boots a LiveOgmiosProvider (real submitTx/awaitTx).
    * Default false → ReadOnlyOgmiosProvider (safe; no chain writes).
@@ -136,8 +147,8 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
   // CAPABILITY_KIND drives whether OLLAMA_URL or PIPER_URL is required.
   // Default to "chat" so existing chat suppliers keep booting unchanged.
   const capKindStr = env.CAPABILITY_KIND ?? "chat";
-  if (capKindStr !== "chat" && capKindStr !== "tts") {
-    throw new Error('loadConfig: CAPABILITY_KIND must be "chat" or "tts"');
+  if (capKindStr !== "chat" && capKindStr !== "tts" && capKindStr !== "chat-session") {
+    throw new Error('loadConfig: CAPABILITY_KIND must be "chat", "tts", or "chat-session"');
   }
   const capabilityKind: CapabilityKind = capKindStr;
 
@@ -157,7 +168,16 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
   let ollamaUrl = "";
   let openaiBaseUrl = "";
   let piperUrl = "";
-  if (capabilityKind === "chat") {
+  if (capabilityKind === "chat-session") {
+    // Multi-turn chat streams via callOpenAiStream, which only speaks the
+    // OpenAI-compatible wire format — so chat-session is openai-only.
+    if (llmBackend !== "openai") {
+      throw new Error('loadConfig: CAPABILITY_KIND="chat-session" requires LLM_BACKEND="openai"');
+    }
+    openaiBaseUrl = requireField(env, "OPENAI_BASE_URL");
+    ollamaUrl = env.OLLAMA_URL ?? "";
+    piperUrl = env.PIPER_URL ?? "";
+  } else if (capabilityKind === "chat") {
     if (llmBackend === "openai") {
       openaiBaseUrl = requireField(env, "OPENAI_BASE_URL");
       ollamaUrl = env.OLLAMA_URL ?? "";
@@ -210,6 +230,16 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
 
   const openaiApiKey = env.OPENAI_API_KEY ?? "";
 
+  // CHAT_IDLE_TIMEOUT_MS — idle auto-end window for chat sessions (default 5 min).
+  const chatIdleStr = env.CHAT_IDLE_TIMEOUT_MS;
+  let chatIdleTimeoutMs = 300_000;
+  if (chatIdleStr !== undefined && chatIdleStr !== "") {
+    if (!POS_INT_RE.test(chatIdleStr)) {
+      throw new Error("loadConfig: CHAT_IDLE_TIMEOUT_MS must be a positive integer");
+    }
+    chatIdleTimeoutMs = Number(chatIdleStr);
+  }
+
   const piperTimeoutStr = env.PIPER_TIMEOUT_MS;
   let piperTimeoutMs = 120_000;
   if (piperTimeoutStr !== undefined && piperTimeoutStr !== "") {
@@ -249,6 +279,7 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
     piperTimeoutMs,
     capabilityKind,
     llmBackend,
+    chatIdleTimeoutMs,
     liveChain,
     walletHealthIntervalMs,
   };

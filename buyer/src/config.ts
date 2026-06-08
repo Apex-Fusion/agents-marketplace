@@ -24,6 +24,13 @@
  *                         When unset, /v1/synth-speech responds 503 (the
  *                         capability stays disabled — the rest of the
  *                         buyer-app boots normally).
+ *   OPENROUTER_API_KEY  — Bearer token for the free Kimi K2.6 chat demo
+ *                         (/v1/chat-demo/message). When unset, the demo
+ *                         endpoint responds 503 (the paid chat path is
+ *                         unaffected — it talks to on-chain suppliers).
+ *   OPENROUTER_BASE_URL — Base URL for the demo proxy (default
+ *                         "https://openrouter.ai/api"; the "/v1/chat/completions"
+ *                         suffix is appended by the proxy).
  *   ARCHIVE_DIR         — Directory where the response archive (SQLite
  *                         metadata + per-escrow artefact files) lives.
  *                         Defaults to "./data/archive" relative to cwd.
@@ -43,6 +50,8 @@ export interface BuyerConfig {
   ogmiosUrl: string;
   liveChain: boolean;
   ttsPiperBaseUrl: string;
+  openrouterApiKey: string;
+  openrouterBaseUrl: string;
   archiveDir: string;
   password: string;
   sessionSecret: string;
@@ -99,6 +108,12 @@ export function loadConfig(env: Record<string, string | undefined>): BuyerConfig
   // shape here; an unreachable URL surfaces as a clear 502 from the proxy.
   const ttsPiperBaseUrl = env.TTS_PIPER_BASE_URL ?? "";
 
+  // OPENROUTER_API_KEY — optional. Empty string disables the free Kimi chat
+  // demo (/v1/chat-demo/message responds 503). The base URL defaults to the
+  // public OpenRouter host; the proxy appends "/v1/chat/completions".
+  const openrouterApiKey = env.OPENROUTER_API_KEY ?? "";
+  const openrouterBaseUrl = (env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api").replace(/\/+$/, "");
+
   // ARCHIVE_DIR — host path (typically a docker bind-mount) where the
   // response archive lives. Default is a per-process relative dir to keep
   // dev ergonomics; in production the compose file overrides to a
@@ -134,6 +149,8 @@ export function loadConfig(env: Record<string, string | undefined>): BuyerConfig
     ogmiosUrl,
     liveChain,
     ttsPiperBaseUrl,
+    openrouterApiKey,
+    openrouterBaseUrl,
     archiveDir,
     password,
     sessionSecret,

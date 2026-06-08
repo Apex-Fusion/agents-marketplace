@@ -82,6 +82,12 @@ export interface AppDeps {
    * `/v1/synth-speech` proxies to. Falls back to the public Vector-testnet
    * host when not set. Endpoint stays disabled (503) when this is empty. */
   ttsPiperBaseUrl?: string;
+  /** Bearer token + base URL for the free Kimi K2.6 chat demo. When
+   * `openrouterApiKey` is empty, `/v1/chat-demo/message` responds 503. The
+   * demo proxies straight to OpenRouter (no escrow, no payment), mirroring
+   * the `/v1/synth-speech` Piper demo. */
+  openrouterApiKey?: string;
+  openrouterBaseUrl?: string;
   /** Persistent off-chain audit trail. When provided, every successful
    * submitPrompt / submitTts call writes a row + on-disk artefacts and
    * /v1/responses* exposes the archive read-only. When undefined the
@@ -623,6 +629,272 @@ export function createApp(deps: AppDeps): Express {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[buyer] /v1/synth-speech failed: ${message}`);
       return jsonError(res, 502, "tts_unreachable", message);
+    }
+  });
+
+  // ── POST /v1/chat-demo/message — free Kimi K2.6 chat demo (streaming).
+  // Body: { messages: ChatMessage[] }  (full running transcript)
+  // Returns: an SSE stream of normalized frames the ChatForm understands:
+  //   data: {"type":"token","value":"<delta>"}\n\n   (repeated)
+  //   data: {"type":"done"}\n\n
+  //   data: {"type":"error","message":"…"}\n\n
+  //
+  // Mirrors /v1/synth-speech (Path B of the demo story): a direct proxy that
+  // bypasses escrow entirely so anyone can try the new chat capability for
+  // free. We re-shape OpenRouter's raw OpenAI SSE deltas into the uniform
+  // frame format so the browser parser is identical for demo and paid chat.
+  const openrouterApiKey = deps.openrouterApiKey ?? "";
+  const openrouterBaseUrl = (deps.openrouterBaseUrl ?? "https://openrouter.ai/api").replace(/\/+$/, "");
+  const demoFetch = deps.fetchImpl ?? globalThis.fetch;
+  const DEMO_CHAT_MODEL = "moonshotai/kimi-k2.6";
+
+  function isChatMessageArray(v: unknown): v is ChatMessage[] {
+    return Array.isArray(v) && v.length > 0 && v.every(
+      (m) => m && typeof m === "object"
+        && (["system", "user", "assistant"] as const).includes((m as ChatMessage).role)
+        && typeof (m as ChatMessage).content === "string",
+    );
+  }
+
+  app.post("/v1/chat-demo/message", async (req: Request, res: Response) => {
+    if (!openrouterApiKey) {
+      return jsonError(
+        res,
+        503,
+        "service_unavailable",
+        "buyer-app booted without OPENROUTER_API_KEY; /v1/chat-demo/message disabled",
+      );
+    }
+    const body = readBody(req.body);
+    if (!isChatMessageArray(body.messages)) {
+      return jsonError(
+        res,
+        400,
+        "messages_required",
+        "body must include a non-empty messages[] array of {role,content}",
+      );
+    }
+    const messages = body.messages as ChatMessage[];
+
+    // Open the SSE response to the browser up front so errors after the first
+    // byte are delivered as in-band `error` frames (the status line is already
+    // committed once we start streaming).
+    res.status(200);
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    if (typeof (res as Response & { flushHeaders?: () => void }).flushHeaders === "function") {
+      (res as Response & { flushHeaders: () => void }).flushHeaders();
+    }
+    const sse = (frame: Record<string, unknown>): void => {
+      res.write(`data: ${JSON.stringify(frame)}\n\n`);
+    };
+
+    try {
+      const upstream = await demoFetch(`${openrouterBaseUrl}/v1/chat/completions`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "text/event-stream",
+          authorization: `Bearer ${openrouterApiKey}`,
+        },
+        body: JSON.stringify({ model: DEMO_CHAT_MODEL, messages, stream: true }),
+      });
+      if (!upstream.ok || !upstream.body) {
+        const detail = await upstream.text().catch(() => "");
+        sse({ type: "error", message: `OpenRouter ${upstream.status}: ${detail.slice(0, 200)}` });
+        return res.end();
+      }
+
+      const reader = (upstream.body as ReadableStream<Uint8Array>).getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      const handleData = (payload: string): void => {
+        const trimmed = payload.trim();
+        if (trimmed.length === 0 || trimmed === "[DONE]") return;
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(trimmed);
+        } catch {
+          return;
+        }
+        const choices = (parsed as Record<string, unknown>)?.choices;
+        if (Array.isArray(choices) && choices.length > 0) {
+          const delta = (choices[0] as Record<string, unknown>)?.delta as
+            | Record<string, unknown>
+            | undefined;
+          const content = delta?.content;
+          if (typeof content === "string" && content.length > 0) {
+            sse({ type: "token", value: content });
+          }
+        }
+      };
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let sepIdx: number;
+        while ((sepIdx = buffer.indexOf("\n\n")) >= 0) {
+          const frame = buffer.slice(0, sepIdx);
+          buffer = buffer.slice(sepIdx + 2);
+          for (const line of frame.split("\n")) {
+            if (line.startsWith("data:")) handleData(line.slice(5));
+          }
+        }
+      }
+      sse({ type: "done" });
+      return res.end();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[buyer] /v1/chat-demo/message failed: ${message}`);
+      sse({ type: "error", message });
+      return res.end();
+    }
+  });
+
+  // ── Paid multi-turn chat (llm.chat.v1) ──────────────────────────────
+  // start → marketplace.startChat (PostEscrow + supplier Claim); message →
+  // SSE passthrough to the supplier (zero chain per turn); end →
+  // marketplace.endChat (supplier Submit + buyer Accept = charged).
+  //
+  // The supplier base URL discovered at start is cached so the per-turn
+  // message route doesn't re-query the chain. In-memory is fine: single
+  // operator, single active chat.
+  const chatRouteState = new Map<string, { supplierBaseUrl: string }>();
+  const chatFetch = deps.fetchImpl ?? globalThis.fetch;
+
+  function chatErrorResponse(res: Response, err: unknown): Response {
+    const message = err instanceof Error ? err.message : String(err);
+    const reason = err instanceof Error && "reason" in err
+      ? String((err as { reason: unknown }).reason)
+      : "chat_failed";
+    const status = err instanceof Error && "status" in err && typeof (err as { status?: unknown }).status === "number"
+      ? (err as { status: number }).status
+      : 502;
+    console.error(`[buyer] chat route failed reason=${reason} status=${status} message=${message}`);
+    return res.status(status).json({ error: reason, message });
+  }
+
+  app.post("/v1/chat/start", async (req: Request, res: Response) => {
+    if (!deps.marketplace) {
+      return jsonError(res, 503, "service_unavailable",
+        "buyer-app booted without Marketplace SDK; /v1/chat/start disabled");
+    }
+    const body = readBody(req.body);
+    const rawRef = body.advert_ref;
+    if (typeof rawRef !== "string" || !ESCROW_REF_RE.test(rawRef)) {
+      return jsonError(res, 400, "advert_ref_invalid",
+        'body must include { "advert_ref": "<64-hex-txhash>#<index>" }');
+    }
+    let payment_lovelace: bigint;
+    try {
+      payment_lovelace = BigInt(body.payment_lovelace as string | number);
+    } catch {
+      return jsonError(res, 400, "payment_lovelace_invalid", "body must include `payment_lovelace`");
+    }
+    const m = ESCROW_REF_RE.exec(rawRef)!;
+    const advertRef = { txHash: m[1], index: Number(m[2]) };
+    try {
+      const result = await deps.marketplace.startChat({ advertRef, payment_lovelace });
+      const escrowRefStr = `${result.escrowRef.txHash}#${result.escrowRef.index}`;
+      chatRouteState.set(escrowRefStr, { supplierBaseUrl: result.supplierBaseUrl });
+      return res.status(200).json({ escrow_ref: escrowRefStr, session_nonce: result.sessionNonce });
+    } catch (err) {
+      return chatErrorResponse(res, err);
+    }
+  });
+
+  app.post("/v1/chat/message", async (req: Request, res: Response) => {
+    const body = readBody(req.body);
+    const rawRef = body.escrow_ref;
+    if (typeof rawRef !== "string" || !ESCROW_REF_RE.test(rawRef)) {
+      return jsonError(res, 400, "escrow_ref_invalid",
+        'body must include { "escrow_ref": "<64-hex-txhash>#<index>" }');
+    }
+    const content = typeof body.content === "string" ? body.content : "";
+    if (content.length === 0) {
+      return jsonError(res, 400, "content_required", "body.content must be a non-empty string");
+    }
+    const state = chatRouteState.get(rawRef);
+    if (!state) {
+      return jsonError(res, 404, "chat_session_not_found", `no active chat session for ${rawRef}`);
+    }
+
+    res.status(200);
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    if (typeof (res as Response & { flushHeaders?: () => void }).flushHeaders === "function") {
+      (res as Response & { flushHeaders: () => void }).flushHeaders();
+    }
+    const sse = (frame: Record<string, unknown>): void => {
+      res.write(`data: ${JSON.stringify(frame)}\n\n`);
+    };
+
+    try {
+      const upstream = await chatFetch(`${state.supplierBaseUrl.replace(/\/+$/, "")}/v1/chat/message`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "text/event-stream",
+          "X-Escrow-Ref": rawRef,
+        },
+        body: JSON.stringify({ content }),
+      });
+      if (!upstream.ok || !upstream.body) {
+        const detail = await upstream.text().catch(() => "");
+        sse({ type: "error", message: `supplier ${upstream.status}: ${detail.slice(0, 200)}` });
+        return res.end();
+      }
+      // Pipe the supplier's SSE frames (already in {type:token|done|error}
+      // form) through verbatim.
+      const reader = (upstream.body as ReadableStream<Uint8Array>).getReader();
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        res.write(Buffer.from(value));
+      }
+      return res.end();
+    } catch (err) {
+      sse({ type: "error", message: err instanceof Error ? err.message : String(err) });
+      return res.end();
+    }
+  });
+
+  app.post("/v1/chat/end", async (req: Request, res: Response) => {
+    if (!deps.marketplace) {
+      return jsonError(res, 503, "service_unavailable",
+        "buyer-app booted without Marketplace SDK; /v1/chat/end disabled");
+    }
+    const body = readBody(req.body);
+    const rawRef = body.escrow_ref;
+    if (typeof rawRef !== "string" || !ESCROW_REF_RE.test(rawRef)) {
+      return jsonError(res, 400, "escrow_ref_invalid",
+        'body must include { "escrow_ref": "<64-hex-txhash>#<index>" }');
+    }
+    const sessionNonce = typeof body.session_nonce === "string" ? body.session_nonce : "";
+    if (sessionNonce.length === 0) {
+      return jsonError(res, 400, "session_nonce_required", "body.session_nonce is required");
+    }
+    const transcript = Array.isArray(body.transcript)
+      ? (body.transcript as ChatMessage[])
+      : undefined;
+    const m = ESCROW_REF_RE.exec(rawRef)!;
+    const escrowRef = { txHash: m[1], index: Number(m[2]) };
+    try {
+      const result = await deps.marketplace.endChat({ escrowRef, sessionNonce, transcript });
+      chatRouteState.delete(rawRef);
+      return res.status(200).json({
+        status: "accepted",
+        escrow_ref: rawRef,
+        accepted_ref: `${result.acceptedRef.txHash}#${result.acceptedRef.index}`,
+        receipt: result.receipt,
+        receipt_signature: result.receiptSignature,
+      });
+    } catch (err) {
+      return chatErrorResponse(res, err);
     }
   });
 

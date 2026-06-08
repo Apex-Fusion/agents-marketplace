@@ -167,3 +167,163 @@ export async function callOpenAi(params: CallOpenAiParams): Promise<OpenAiResult
     wallclock_ms: wallclockMs,
   };
 }
+
+/**
+ * callOpenAiStream — streaming variant of callOpenAi for the chat-session
+ * supplier. POSTs with `stream: true` and invokes `onToken(delta)` for each
+ * content delta as it arrives, then returns the SAME OpenAiResult shape
+ * (full accumulated content + token usage) so receipt-building code is shared.
+ *
+ * Parses the OpenAI/OpenRouter SSE wire format:
+ *   data: {"choices":[{"delta":{"content":"tok"}}]}\n\n
+ *   ...
+ *   data: {"choices":[],"usage":{prompt_tokens,completion_tokens,...}}\n\n   (include_usage)
+ *   data: [DONE]\n\n
+ *
+ * Error reasons match callOpenAi (openai_failure / openai_timeout / openai_malformed).
+ * The timeout bounds the WHOLE stream (AbortController), matching the non-stream path.
+ */
+export async function callOpenAiStream(
+  params: CallOpenAiParams,
+  onToken: (delta: string) => void,
+): Promise<OpenAiResult> {
+  const { baseUrl, model, messages, timeoutMs, apiKey } = params;
+  const url = `${baseUrl}/v1/chat/completions`;
+  const body = JSON.stringify({
+    model,
+    messages,
+    stream: true,
+    stream_options: { include_usage: true },
+  });
+
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    accept: "text/event-stream",
+  };
+  if (apiKey) {
+    headers.authorization = `Bearer ${apiKey}`;
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  const startedAt = Date.now();
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers,
+      body,
+      signal: controller.signal,
+    });
+  } catch (err) {
+    clearTimeout(timer);
+    if (isAbortError(err)) {
+      throw new OpenAiError("openai_timeout", `OpenAI request exceeded ${timeoutMs}ms`);
+    }
+    throw new OpenAiError(
+      "openai_failure",
+      `OpenAI fetch failed: ${(err as Error)?.message ?? String(err)}`,
+    );
+  }
+
+  if (!response.ok) {
+    clearTimeout(timer);
+    let detail = "";
+    try {
+      detail = await response.text();
+    } catch {
+      // ignore — body unavailable
+    }
+    throw new OpenAiError(
+      "openai_failure",
+      `OpenAI returned HTTP ${response.status}${detail ? `: ${detail.slice(0, 200)}` : ""}`,
+    );
+  }
+  if (!response.body) {
+    clearTimeout(timer);
+    throw new OpenAiError("openai_malformed", "OpenAI streaming response had no body");
+  }
+
+  let accumulated = "";
+  let promptTokens = 0;
+  let completionTokens = 0;
+  let buffer = "";
+
+  const handleData = (payload: string): void => {
+    const trimmed = payload.trim();
+    if (trimmed.length === 0 || trimmed === "[DONE]") return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      // Skip non-JSON keepalive/comment frames.
+      return;
+    }
+    if (!parsed || typeof parsed !== "object") return;
+    const obj = parsed as Record<string, unknown>;
+    const choices = obj.choices;
+    if (Array.isArray(choices) && choices.length > 0) {
+      const delta = (choices[0] as Record<string, unknown>)?.delta as
+        | Record<string, unknown>
+        | undefined;
+      const content = delta?.content;
+      if (typeof content === "string" && content.length > 0) {
+        accumulated += content;
+        onToken(content);
+      }
+    }
+    const usageRaw = obj.usage;
+    if (usageRaw && typeof usageRaw === "object") {
+      const usage = usageRaw as Record<string, unknown>;
+      if (typeof usage.prompt_tokens === "number") promptTokens = usage.prompt_tokens;
+      if (typeof usage.completion_tokens === "number") completionTokens = usage.completion_tokens;
+    }
+  };
+
+  try {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      // SSE frames are separated by a blank line.
+      let sepIdx: number;
+      while ((sepIdx = buffer.indexOf("\n\n")) >= 0) {
+        const frame = buffer.slice(0, sepIdx);
+        buffer = buffer.slice(sepIdx + 2);
+        for (const line of frame.split("\n")) {
+          if (line.startsWith("data:")) handleData(line.slice(5));
+        }
+      }
+    }
+    // Flush any trailing frame without a final blank line.
+    if (buffer.length > 0) {
+      for (const line of buffer.split("\n")) {
+        if (line.startsWith("data:")) handleData(line.slice(5));
+      }
+    }
+  } catch (err) {
+    if (isAbortError(err)) {
+      throw new OpenAiError("openai_timeout", `OpenAI stream exceeded ${timeoutMs}ms`);
+    }
+    throw new OpenAiError(
+      "openai_failure",
+      `OpenAI stream read failed: ${(err as Error)?.message ?? String(err)}`,
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (accumulated.length === 0) {
+    throw new OpenAiError("openai_malformed", "OpenAI stream produced no content");
+  }
+
+  return {
+    content: accumulated,
+    prompt_tokens: promptTokens,
+    completion_tokens: completionTokens,
+    wallclock_ms: Date.now() - startedAt,
+  };
+}

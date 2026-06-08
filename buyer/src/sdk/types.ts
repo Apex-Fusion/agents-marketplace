@@ -55,7 +55,9 @@ export type ProgressEventType =
   | "receipt_verified"
   | "accept_submitted"
   | "reclaim_submitted"
-  | "chain_submit_failed";
+  | "chain_submit_failed"
+  | "chat_started"
+  | "chat_ended";
 
 /**
  * ProgressEvent — payload emitted via EventEmitter on each step.
@@ -183,6 +185,43 @@ export interface SubmitTtsResult {
   receipt: Receipt;
   receiptSignature: string;
   escrowRef: OutputReference;
+}
+
+/**
+ * StartChatOptions / StartChatResult — Marketplace.startChat() for the
+ * `llm.chat.v1` capability. Opens the escrow (session-init prompt_hash) and
+ * tells the supplier to Claim, reserving its single slot. The conversation
+ * then runs off-chain via the buyer-app's /v1/chat/message SSE passthrough.
+ */
+export interface StartChatOptions {
+  advertRef: OutputReference;
+  payment_lovelace: bigint;
+}
+export interface StartChatResult {
+  escrowRef: OutputReference;
+  /** Random nonce committed into the escrow's session-init prompt_hash. The
+   * buyer-app must hold this to verify the receipt at End. */
+  sessionNonce: string;
+  /** Supplier endpoint_url, cached by the buyer-app for message routing. */
+  supplierBaseUrl: string;
+}
+
+/**
+ * EndChatOptions / EndChatResult — Marketplace.endChat(). Tells the supplier to
+ * Submit a transcript receipt, verifies it, then Accepts (charging the user).
+ */
+export interface EndChatOptions {
+  escrowRef: OutputReference;
+  sessionNonce: string;
+  /** The browser's local transcript mirror, used to verify response_hash. */
+  transcript?: import("@marketplace/shared/tx").ChatMessage[];
+}
+export interface EndChatResult {
+  receipt: Receipt;
+  receiptSignature: string;
+  escrowRef: OutputReference;
+  /** The Submitted escrow UTxO that was Accepted. */
+  acceptedRef: OutputReference;
 }
 
 /**

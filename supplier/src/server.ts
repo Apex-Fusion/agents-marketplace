@@ -38,12 +38,15 @@ import type { ChainProvider, OutputReference } from "@marketplace/shared/chain";
 import { decodeAdvertDatum, decodeEscrowDatum, canonicalize } from "@marketplace/shared/cbor";
 import type { AdvertDatum, EscrowDatum } from "@marketplace/shared/cbor";
 import type { WalletKey } from "@marketplace/shared/tx";
-import { buildClaimTx, mockSlotToWallclockMs, detectCborBackend } from "@marketplace/shared/tx";
+import { buildClaimTx, chatSessionPromptHash, mockSlotToWallclockMs, detectCborBackend } from "@marketplace/shared/tx";
 
 import type { SupplierState } from "./state.js";
 import type { SupplierConfig } from "./config.js";
 import { JobStore } from "./jobs.js";
 import { runChatJob, runTtsJob } from "./jobRunner.js";
+import { ChatSessionStore, type ChatSessionRecord } from "./chatSession.js";
+import { endChatSession, type EndChatSessionDeps } from "./chatSessionRunner.js";
+import { callOpenAiStream } from "./openai.js";
 import { healthzRouter } from "./routes/healthz.js";
 import { triggerOnFailureConsolidate } from "./walletHealth.js";
 
@@ -54,6 +57,8 @@ export interface SupplierDeps {
   supplierKey: WalletKey;
   /** Optional: defaults to a fresh JobStore. M1-F-async-chat. */
   jobs?: JobStore;
+  /** Optional: defaults to a fresh ChatSessionStore (chat-session capability). */
+  chatSessions?: ChatSessionStore;
 }
 
 const ESCROW_REF_RE = /^[0-9a-fA-F]{64}#(?:0|[1-9]\d*)$/;
@@ -83,6 +88,7 @@ interface ResolvedDeps {
   config: SupplierConfig;
   supplierKey: WalletKey;
   jobs: JobStore;
+  chatSessions: ChatSessionStore;
 }
 
 function makeCapabilityHandler(deps: ResolvedDeps) {
@@ -646,6 +652,272 @@ function makeGetTtsJobHandler(deps: ResolvedDeps) {
   };
 }
 
+// ─── /v1/chat/{start,message,end} — multi-turn chat session (llm.chat.v1) ───
+//
+// Escrow bookends with off-chain turns:
+//   start   → validate (mirror makeChatHandler 1-7, but no messages) → Claim
+//             (Open→Claimed) → create session + arm idle/hard-cap watchdog → 200
+//   message → SSE stream a turn via callOpenAiStream; zero chain interaction
+//   end     → endChatSession (Submit transcript receipt; Claimed→Submitted) → 200
+//
+// The buyer then Accepts off this route (server-side, in the buyer-app),
+// which is when the user is actually charged. Single-slot: the SupplierState
+// mutex is held from Claim (start) to Submit (end), so one paid chat at a time.
+
+interface ChatStartBody {
+  model?: unknown;
+  session_nonce?: unknown;
+}
+
+function makeChatSessionHandlers(deps: ResolvedDeps) {
+  const endDeps: EndChatSessionDeps = {
+    chain: deps.chain,
+    state: deps.state,
+    config: deps.config,
+    supplierKey: deps.supplierKey,
+    jobs: deps.jobs,
+    sessions: deps.chatSessions,
+  };
+
+  function armIdleTimer(record: ChatSessionRecord): void {
+    if (record.idleTimer) clearTimeout(record.idleTimer);
+    record.idleTimer = setTimeout(() => {
+      void endChatSession({ deps: endDeps, escrowRef: record.escrowRef, trigger: "idle" });
+    }, deps.config.chatIdleTimeoutMs);
+    record.idleTimer.unref?.();
+  }
+
+  function armHardCapTimer(record: ChatSessionRecord, nowMs: number): void {
+    // Force-end before deliver_by so the Submit tx (60s awaitTx budget) lands
+    // in time. 90s margin = Submit awaitTx + buffer.
+    const margin = 90_000;
+    const capMs = Math.max(1_000, record.escrowDatum.deliver_by - nowMs - margin);
+    record.hardCapTimer = setTimeout(() => {
+      void endChatSession({ deps: endDeps, escrowRef: record.escrowRef, trigger: "hard-cap" });
+    }, capMs);
+    record.hardCapTimer.unref?.();
+  }
+
+  const start = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      // ── 1. Header ───────────────────────────────────────────────────
+      const headerVal = req.header("X-Escrow-Ref");
+      if (!headerVal) {
+        return jsonError(res, 400, "escrow_ref_required", "X-Escrow-Ref header is required");
+      }
+      const escrowRef = parseEscrowRef(headerVal);
+      if (escrowRef === null) {
+        return jsonError(res, 400, "escrow_ref_malformed", 'X-Escrow-Ref must match "<64-hex>#<int>"');
+      }
+      const escrowRefStr = `${escrowRef.txHash}#${escrowRef.index}`;
+
+      // ── 2. Body (session_nonce; no messages) ─────────────────────────
+      const body = (req.body ?? {}) as ChatStartBody;
+      const sessionNonce = typeof body.session_nonce === "string" ? body.session_nonce : "";
+      if (sessionNonce.length === 0) {
+        return jsonError(res, 400, "session_nonce_required", "body.session_nonce must be a non-empty string");
+      }
+
+      // ── 3. Advert ───────────────────────────────────────────────────
+      const advertResult = await fetchActiveAdvert(deps);
+      if ("error" in advertResult) {
+        const e = advertResult.error;
+        return jsonError(res, e.status, e.reason, e.message);
+      }
+      const advert = advertResult.datum;
+
+      // ── 4. Escrow ───────────────────────────────────────────────────
+      const escrowUtxo = await deps.chain.queryUtxo(escrowRef);
+      if (escrowUtxo === null || !escrowUtxo.datumHex) {
+        return jsonError(res, 404, "escrow_not_found", `escrow UTxO ${escrowRefStr} not found on chain`);
+      }
+      let escrowDatum: EscrowDatum;
+      try {
+        escrowDatum = decodeEscrowDatum(escrowUtxo.datumHex);
+      } catch (err) {
+        return jsonError(res, 404, "escrow_decode_failed", (err as Error).message);
+      }
+
+      // ── 5. State / identity / capability ─────────────────────────────
+      if (escrowDatum.state !== "Open") {
+        return jsonError(res, 409, "escrow_not_claimable", `escrow state is ${escrowDatum.state}, expected Open`);
+      }
+      if (escrowDatum.supplier_pkh !== deps.supplierKey.pubKeyHash) {
+        return jsonError(res, 403, "wrong_supplier", "escrow supplier_pkh does not match this node");
+      }
+      if (escrowDatum.capability_id !== advert.capability_id) {
+        return jsonError(res, 409, "capability_mismatch",
+          `escrow capability ${escrowDatum.capability_id} != advert ${advert.capability_id}`);
+      }
+
+      // ── 6. Hash checks (request spec + session-init prompt) ──────────
+      const expectedRequestSpecHash = sha256Hex(canonicalize({
+        capability_id: advert.capability_id,
+        max_output_tokens: advert.max_output_tokens,
+        model: advert.model,
+      }));
+      if (escrowDatum.request_spec_hash !== expectedRequestSpecHash) {
+        return jsonError(res, 409, "request_spec_mismatch", "request_spec_hash in escrow does not match advert spec");
+      }
+      const expectedPromptHash = chatSessionPromptHash({ session_nonce: sessionNonce });
+      if (escrowDatum.prompt_hash !== expectedPromptHash) {
+        return jsonError(res, 409, "prompt_mismatch", "prompt_hash in escrow does not match session_nonce");
+      }
+
+      // ── 7. Deadline ──────────────────────────────────────────────────
+      const tipSlot = await deps.chain.tip();
+      const isLive = detectCborBackend(deps.chain) === "live";
+      const nowMs = isLive
+        ? Date.now()
+        : Math.max(mockSlotToWallclockMs(tipSlot), escrowDatum.posted_at);
+      if (nowMs >= escrowDatum.deliver_by) {
+        return jsonError(res, 408, "past_deliver_by", `now ${nowMs} >= deliver_by ${escrowDatum.deliver_by}`);
+      }
+
+      // ── 8. Single-slot lock ──────────────────────────────────────────
+      if (!deps.state.tryAcquire(escrowRefStr)) {
+        return jsonError(res, 409, "supplier_busy", "supplier is already working another chat");
+      }
+
+      // ── 9. Claim (Open → Claimed) — hold the lock on success ─────────
+      let claimResult;
+      try {
+        claimResult = await buildClaimTx({ chain: deps.chain, supplierKey: deps.supplierKey, escrowRef });
+      } catch (err) {
+        deps.state.release();
+        triggerOnFailureConsolidate({ chain: deps.chain, state: deps.state, supplierKey: deps.supplierKey });
+        return jsonError(res, 503, "chain_submit_failed", `Claim tx submit failed: ${(err as Error).message}`);
+      }
+      try {
+        await deps.chain.awaitTx(claimResult.expectedTxHash, 60_000);
+      } catch (err) {
+        deps.state.release();
+        return jsonError(res, 504, "claim_timeout", `Claim awaitTx failed: ${(err as Error).message}`);
+      }
+
+      // ── 10. Create session + arm watchdog ────────────────────────────
+      const claimedRef: OutputReference = { txHash: claimResult.expectedTxHash, index: 0 };
+      const record = deps.chatSessions.create({ escrowRef: escrowRefStr, claimedRef, advert, escrowDatum });
+      armIdleTimer(record);
+      armHardCapTimer(record, nowMs);
+
+      return res.status(200).json({ status: "claimed", escrow_ref: escrowRefStr });
+    } catch (err) {
+      try { deps.state.release(); } catch { /* ignore */ }
+      next(err);
+      return;
+    }
+  };
+
+  const message = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const headerVal = req.header("X-Escrow-Ref");
+      if (!headerVal) {
+        return jsonError(res, 400, "escrow_ref_required", "X-Escrow-Ref header is required");
+      }
+      const escrowRef = parseEscrowRef(headerVal);
+      if (escrowRef === null) {
+        return jsonError(res, 400, "escrow_ref_malformed", 'X-Escrow-Ref must match "<64-hex>#<int>"');
+      }
+      const escrowRefStr = `${escrowRef.txHash}#${escrowRef.index}`;
+      const record = deps.chatSessions.get(escrowRefStr);
+      if (!record || record.status !== "active") {
+        return jsonError(res, 404, "chat_session_not_found",
+          `no active chat session for ${escrowRefStr}`);
+      }
+      const body = (req.body ?? {}) as { content?: unknown };
+      const content = typeof body.content === "string" ? body.content : "";
+      if (content.length === 0) {
+        return jsonError(res, 400, "content_required", "body.content must be a non-empty string");
+      }
+
+      // Pause the idle timer while a turn is in flight; re-arm when it ends so
+      // a long generation never trips the auto-end mid-stream.
+      if (record.idleTimer) { clearTimeout(record.idleTimer); record.idleTimer = undefined; }
+      deps.chatSessions.appendUser(escrowRefStr, content);
+
+      res.status(200);
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache, no-transform");
+      res.setHeader("Connection", "keep-alive");
+      res.setHeader("X-Accel-Buffering", "no");
+      if (typeof (res as Response & { flushHeaders?: () => void }).flushHeaders === "function") {
+        (res as Response & { flushHeaders: () => void }).flushHeaders();
+      }
+      const sse = (frame: Record<string, unknown>): void => {
+        res.write(`data: ${JSON.stringify(frame)}\n\n`);
+      };
+
+      try {
+        const result = await callOpenAiStream(
+          {
+            baseUrl: deps.config.openaiBaseUrl,
+            model: record.advert.model,
+            messages: record.transcript,
+            timeoutMs: deps.config.openaiTimeoutMs,
+            apiKey: deps.config.openaiApiKey,
+          },
+          (delta) => sse({ type: "token", value: delta }),
+        );
+        deps.chatSessions.appendAssistant(escrowRefStr, result.content, {
+          prompt_tokens: result.prompt_tokens,
+          completion_tokens: result.completion_tokens,
+        });
+        sse({ type: "done" });
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        sse({ type: "error", message: errMsg });
+      } finally {
+        if (record.status === "active") armIdleTimer(record);
+        res.end();
+      }
+      return;
+    } catch (err) {
+      next(err);
+      return;
+    }
+  };
+
+  const end = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const headerVal = req.header("X-Escrow-Ref");
+      if (!headerVal) {
+        return jsonError(res, 400, "escrow_ref_required", "X-Escrow-Ref header is required");
+      }
+      const escrowRef = parseEscrowRef(headerVal);
+      if (escrowRef === null) {
+        return jsonError(res, 400, "escrow_ref_malformed", 'X-Escrow-Ref must match "<64-hex>#<int>"');
+      }
+      const escrowRefStr = `${escrowRef.txHash}#${escrowRef.index}`;
+      if (!deps.chatSessions.get(escrowRefStr)) {
+        return jsonError(res, 404, "chat_session_not_found", `no chat session for ${escrowRefStr}`);
+      }
+      const record = await endChatSession({ deps: endDeps, escrowRef: escrowRefStr, trigger: "end" });
+      if (!record) {
+        return jsonError(res, 404, "chat_session_not_found", `no chat session for ${escrowRefStr}`);
+      }
+      if (record.endFailure) {
+        return jsonError(res, 502, record.endFailure.reason, record.endFailure.message);
+      }
+      if (!record.endResult) {
+        return jsonError(res, 500, "chat_end_incomplete", "session ended without a receipt");
+      }
+      return res.status(200).json({
+        status: "submitted",
+        escrow_ref: escrowRefStr,
+        submitted_ref: record.endResult.submitted_ref,
+        receipt: record.endResult.receipt,
+        receipt_signature: record.endResult.receipt_signature,
+      });
+    } catch (err) {
+      next(err);
+      return;
+    }
+  };
+
+  return { start, message, end };
+}
+
 // ─── App factory ───────────────────────────────────────────────────────────
 
 export function createApp(deps: SupplierDeps): Application {
@@ -655,6 +927,7 @@ export function createApp(deps: SupplierDeps): Application {
     config: deps.config,
     supplierKey: deps.supplierKey,
     jobs: deps.jobs ?? new JobStore(),
+    chatSessions: deps.chatSessions ?? new ChatSessionStore(),
   };
 
   const app = express();
@@ -677,6 +950,11 @@ export function createApp(deps: SupplierDeps): Application {
   if (resolved.config.capabilityKind === "tts") {
     app.post("/v1/audio/synthesize", makeTtsHandler(resolved));
     app.get("/v1/audio/synthesize/:jobId", makeGetTtsJobHandler(resolved));
+  } else if (resolved.config.capabilityKind === "chat-session") {
+    const chat = makeChatSessionHandlers(resolved);
+    app.post("/v1/chat/start", chat.start);
+    app.post("/v1/chat/message", chat.message);
+    app.post("/v1/chat/end", chat.end);
   } else {
     app.post("/v1/chat/completions", makeChatHandler(resolved));
     app.get("/v1/chat/completions/:jobId", makeGetJobHandler(resolved));

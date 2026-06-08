@@ -1,0 +1,86 @@
+# deploy/mainnet/docker-compose.supplier-kimi-chat.yml — Supplier — MAINNET
+#   (OpenRouter / Kimi K2.6 — MULTI-TURN CHAT capability `llm.chat.v1`)
+#
+# The chat-session sibling of docker-compose.supplier-kimi.yml. Same image,
+# same OpenRouter backend (moonshotai/kimi-k2.6), but CAPABILITY_KIND=chat-session
+# so it mounts /v1/chat/{start,message,end} (escrow bookends, off-chain
+# streaming turns) instead of the one-off /v1/chat/completions route.
+#
+# A SEPARATE process/advert from the one-off Kimi supplier on purpose: the
+# chat session holds the supplier's single-slot lock for the whole conversation
+# (minutes), which would starve one-off traffic if co-hosted.
+#
+# Coexists with:
+#   - marketplace-mainnet-supplier-kimi  (one-off llm.text.generate.v1, mp-suppliers-kimi.vector.apexfusion.org)
+#
+# Pre-flight:
+#   1. DNS A-record: mp-suppliers-kimi-chat.vector.apexfusion.org → host IP
+#   2. supplier/.env.kimi-chat written on host (chmod 600) with at minimum:
+#        SUPPLIER_PRIV_KEY_HEX, OPENAI_API_KEY, OGMIOS_URL, NETWORK_ID=1,
+#        VECTOR_ZERO_TIME_MS, ESCROW_REF_UTXO, ADVERT_REF_UTXO, ADVERT_REF,
+#        LIVE_CHAIN=1
+#      The advert must be posted with --capability-id llm.chat.v1 and a large
+#      --max-processing-ms (~1800000) so Claim+Submit both land before deliver_by.
+#   3. Networks already exist (created by the canonical supplier compose):
+#        docker network create marketplace-mainnet-net   # one-shot
+#        # traefik-net is created by the Traefik project
+
+name: marketplace-mainnet-supplier-kimi-chat
+
+services:
+  supplier:
+    build:
+      context: ../..
+      dockerfile: supplier/Dockerfile
+    container_name: marketplace-mainnet-supplier-kimi-chat
+    restart: unless-stopped
+    env_file:
+      # Self-contained env for the Kimi-chat variant — separate from
+      # ../../supplier/.env.kimi (the one-off Kimi supplier). Holds this
+      # supplier's distinct SUPPLIER_PRIV_KEY_HEX, ADVERT_REF (an llm.chat.v1
+      # advert), OPENAI_API_KEY, and the shared mainnet plumbing.
+      - path: ../../supplier/.env.kimi-chat
+        required: false
+    environment:
+      # Multi-turn chat session capability (mounts /v1/chat/{start,message,end}).
+      CAPABILITY_KIND: chat-session
+      LLM_BACKEND: openai
+      # No /v1 suffix — supplier/src/openai.ts appends /v1/chat/completions.
+      OPENAI_BASE_URL: https://openrouter.ai/api
+      # Kimi K2.6 generations can be slow; mirror the one-off Kimi compose.
+      OPENAI_TIMEOUT_MS: "300000"
+      # Auto-end an idle session after 5 min (supplier Submits the transcript).
+      CHAT_IDLE_TIMEOUT_MS: "300000"
+      PORT: "8080"
+      # Enable LiveOgmiosProvider so Claim/Submit actually broadcast.
+      LIVE_CHAIN: "1"
+      # NETWORK_ID and OGMIOS_URL intentionally not pinned here — they MUST
+      # come from the operator-provided supplier/.env.kimi-chat on a mainnet host.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz >/dev/null || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - marketplace-mainnet-net
+      - traefik-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-net"
+      - "traefik.http.routers.mp-suppliers-kimi-chat-mainnet.entrypoints=web"
+      - "traefik.http.routers.mp-suppliers-kimi-chat-mainnet.rule=Host(`mp-suppliers-kimi-chat.vector.apexfusion.org`)"
+      - "traefik.http.services.mp-suppliers-kimi-chat-mainnet.loadbalancer.server.port=8080"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  marketplace-mainnet-net:
+    external: true
+    name: marketplace-mainnet-net
+  traefik-net:
+    external: true
+    name: traefik-net

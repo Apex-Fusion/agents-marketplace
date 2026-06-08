@@ -127,6 +127,8 @@ export async function runMain(env: Record<string, string | undefined>): Promise<
     indexerUrl: config.indexerUrl,
     marketplace,
     ttsPiperBaseUrl: config.ttsPiperBaseUrl,
+    openrouterApiKey: config.openrouterApiKey,
+    openrouterBaseUrl: config.openrouterBaseUrl,
     archive,
     password: config.password,
     sessionSecret: config.sessionSecret,

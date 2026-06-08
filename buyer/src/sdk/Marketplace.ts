@@ -72,12 +72,15 @@ import type { WalletKey } from "@marketplace/shared/tx";
 import {
   buildPostEscrowTx,
   buildPostTtsEscrowTx,
+  buildPostChatEscrowTx,
   ttsPromptHash,
+  chatSessionPromptHash,
   buildAcceptTx,
   buildReclaimTx,
   TxConstructionError,
 } from "@marketplace/shared/tx";
 import { decodeAdvertDatum, decodeEscrowDatum, canonicalize } from "@marketplace/shared/cbor";
+import { verifyReceipt } from "@marketplace/shared/receipt";
 import type { AdvertDatum } from "@marketplace/shared/cbor";
 import type {
   SupplierView,
@@ -86,6 +89,10 @@ import type {
   SubmitPromptResult,
   SubmitTtsOptions,
   SubmitTtsResult,
+  StartChatOptions,
+  StartChatResult,
+  EndChatOptions,
+  EndChatResult,
   AcceptResultOptions,
   ReclaimOptions,
   TaskRecord,
@@ -142,6 +149,25 @@ function browserSha256Hex(s: string): string {
 
 function refToString(ref: OutputReference): string {
   return `${ref.txHash}#${ref.index}`;
+}
+
+function parseRef(s: string): OutputReference | null {
+  const m = /^([0-9a-fA-F]{64})#(0|[1-9]\d*)$/.exec(s);
+  if (!m) return null;
+  return { txHash: m[1], index: Number(m[2]) };
+}
+
+/** Random 32-hex session nonce. Works in both Node and the browser. */
+function randomNonce(): string {
+  const g = globalThis as {
+    crypto?: { randomUUID?: () => string; getRandomValues?: (a: Uint8Array) => Uint8Array };
+  };
+  if (g.crypto?.randomUUID) return g.crypto.randomUUID().replace(/-/g, "");
+  const bytes = new Uint8Array(16);
+  g.crypto?.getRandomValues?.(bytes);
+  let out = "";
+  for (let i = 0; i < bytes.length; i++) out += bytes[i].toString(16).padStart(2, "0");
+  return out;
 }
 
 function previewMessages(messages: { role: string; content: string }[]): string {
@@ -779,6 +805,202 @@ export class Marketplace extends EventEmitterBase {
       receiptSignature,
       escrowRef: escrowOutputRef,
     };
+  }
+
+  // ─── startChat / endChat — multi-turn llm.chat.v1 lifecycle ────────────
+
+  /**
+   * Open a chat session: post the escrow with a session-init prompt_hash, wait
+   * for it to confirm, then tell the supplier to Claim (reserving its slot).
+   * The conversation then runs off-chain via the buyer-app's SSE passthrough.
+   */
+  async startChat(opts: StartChatOptions): Promise<StartChatResult> {
+    const { advertRef, payment_lovelace } = opts;
+
+    const advertUtxo = await this.chain.queryUtxo(advertRef);
+    if (!advertUtxo || !advertUtxo.datumHex) {
+      throw new TxConstructionError("advert ref not on chain", `no advert UTxO at ${refToString(advertRef)}`);
+    }
+    const advertDatum = decodeAdvertDatum(advertUtxo.datumHex);
+
+    const sessionNonce = randomNonce();
+    let escrowResult;
+    try {
+      escrowResult = await buildPostChatEscrowTx({
+        chain: this.chain,
+        buyerKey: this.walletKey,
+        advertRef,
+        session_nonce: sessionNonce,
+        payment_lovelace,
+      });
+    } catch (err) {
+      if (!(err instanceof TxConstructionError)) {
+        this.emitProgress({ type: "chain_submit_failed", detail: (err as Error).message });
+      }
+      throw err;
+    }
+
+    const escrowOutputRef = escrowResult.escrowOutputRef;
+    const escrowRefStr = refToString(escrowOutputRef);
+    this.emitProgress({ type: "escrow_posted", escrow_ref: escrowRefStr });
+
+    // Wait for the PostEscrow tx to confirm before the supplier Claims.
+    try {
+      await this.chain.awaitTx(escrowResult.expectedTxHash, 120_000);
+    } catch {
+      /* mock providers / tests */
+    }
+
+    const supplierHttp = new HttpClient({ baseUrl: advertDatum.endpoint_url, fetch: this.fetchImpl });
+    let startRes;
+    try {
+      startRes = await supplierHttp.postJson(
+        "/v1/chat/start",
+        { session_nonce: sessionNonce, model: advertDatum.model },
+        { headers: { "X-Escrow-Ref": escrowRefStr } },
+      );
+    } catch (err) {
+      if (err instanceof HttpError) {
+        const reason = err.kind === "timeout" ? "timeout" : "network_error";
+        throw new SupplierError(reason, { message: err.message });
+      }
+      throw err;
+    }
+    if (!startRes.ok) {
+      const bodyReason = startRes.body && typeof startRes.body === "object"
+        ? ((startRes.body as { reason?: string }).reason ?? "supplier_http_error")
+        : "supplier_http_error";
+      throw new SupplierError(bodyReason, {
+        status: startRes.status,
+        message: `supplier /v1/chat/start returned ${startRes.status}`,
+      });
+    }
+
+    this.emitProgress({ type: "chat_started", escrow_ref: escrowRefStr });
+    return { escrowRef: escrowOutputRef, sessionNonce, supplierBaseUrl: advertDatum.endpoint_url };
+  }
+
+  /**
+   * End a chat session: ask the supplier to Submit a transcript receipt, verify
+   * it (structural + crypto + session-init prompt_hash), then Accept the
+   * Submitted escrow — which is when the user is actually charged.
+   */
+  async endChat(opts: EndChatOptions): Promise<EndChatResult> {
+    const { escrowRef, sessionNonce, transcript } = opts;
+    const escrowRefStr = refToString(escrowRef);
+
+    // Resolve escrow → advert for endpoint_url, supplier_pkh, model, pub key.
+    const escrowUtxo = await this.chain.queryUtxo(escrowRef);
+    if (!escrowUtxo || !escrowUtxo.datumHex) {
+      throw new TxConstructionError("escrow ref not on chain", `no escrow UTxO at ${escrowRefStr}`);
+    }
+    const escrowDatum = decodeEscrowDatum(escrowUtxo.datumHex);
+    const advertUtxo = await this.chain.queryUtxo(escrowDatum.advert_ref);
+    if (!advertUtxo || !advertUtxo.datumHex) {
+      throw new TxConstructionError("advert ref not on chain", "advert UTxO for this escrow is missing");
+    }
+    const advertDatum = decodeAdvertDatum(advertUtxo.datumHex);
+
+    const supplierHttp = new HttpClient({ baseUrl: advertDatum.endpoint_url, fetch: this.fetchImpl });
+    let endRes;
+    try {
+      endRes = await supplierHttp.postJson("/v1/chat/end", {}, { headers: { "X-Escrow-Ref": escrowRefStr } });
+    } catch (err) {
+      if (err instanceof HttpError) {
+        const reason = err.kind === "timeout" ? "timeout" : "network_error";
+        throw new SupplierError(reason, { message: err.message });
+      }
+      throw err;
+    }
+    if (!endRes.ok || !endRes.body || typeof endRes.body !== "object") {
+      const bodyReason = endRes.body && typeof endRes.body === "object"
+        ? ((endRes.body as { reason?: string }).reason ?? "supplier_http_error")
+        : "supplier_http_error";
+      throw new SupplierError(bodyReason, {
+        status: endRes.status,
+        message: `supplier /v1/chat/end returned ${endRes.status}`,
+      });
+    }
+    const endBody = endRes.body as {
+      receipt?: import("@marketplace/shared/receipt").Receipt;
+      receipt_signature?: string;
+      submitted_ref?: string;
+    };
+    if (!endBody.receipt || !endBody.receipt_signature) {
+      throw new SupplierError("malformed_response", { message: "supplier end response missing receipt" });
+    }
+    const receipt = endBody.receipt;
+    const receiptSignature = endBody.receipt_signature;
+
+    // ── Verify receipt ───────────────────────────────────────────────────
+    if (receipt.supplier_pkh !== escrowDatum.supplier_pkh) {
+      throw new ReceiptVerificationError("wrong_supplier");
+    }
+    if (receipt.escrow_ref !== escrowRefStr) {
+      throw new ReceiptVerificationError("wrong_escrow_ref");
+    }
+    // prompt_hash is the session-init placeholder, NOT sha256(messages).
+    if (receipt.prompt_hash !== chatSessionPromptHash({ session_nonce: sessionNonce })) {
+      throw new ReceiptVerificationError("prompt_hash_mismatch");
+    }
+    if (receipt.model !== advertDatum.model) {
+      throw new ReceiptVerificationError("request_spec_hash_mismatch");
+    }
+    if (typeof receiptSignature !== "string" || !SIG_RE.test(receiptSignature) || receiptSignature === ZERO_SIGNATURE) {
+      throw new ReceiptVerificationError("invalid_signature");
+    }
+    if (!HEX64_RE.test(receipt.prompt_hash) || !HEX64_RE.test(receipt.response_hash)) {
+      throw new ReceiptVerificationError("malformed_receipt");
+    }
+    // Optional: recompute the transcript hash from the browser's mirror.
+    if (transcript && transcript.length > 0) {
+      const localHash = sha256Hex(canonicalize(transcript));
+      if (localHash !== receipt.response_hash) {
+        console.warn(
+          `[marketplace] endChat transcript hash mismatch for ${escrowRefStr}: local ${localHash} != receipt ${receipt.response_hash}`,
+        );
+      }
+    }
+    // Cryptographic verification via the supplier's published pub key (best-effort).
+    try {
+      const capRes = await supplierHttp.getJson("/capability");
+      const pubKeyHex = capRes.body && typeof capRes.body === "object"
+        ? (capRes.body as { pub_key_hex?: string }).pub_key_hex
+        : undefined;
+      if (typeof pubKeyHex === "string" && /^[0-9a-fA-F]{64}$/.test(pubKeyHex)) {
+        if (!verifyReceipt({ receipt, signature: receiptSignature }, pubKeyHex)) {
+          throw new ReceiptVerificationError("invalid_signature");
+        }
+      }
+    } catch (err) {
+      if (err instanceof ReceiptVerificationError) throw err;
+      /* /capability unreachable — structural verification stands */
+    }
+
+    this.emitProgress({ type: "receipt_verified", escrow_ref: escrowRefStr });
+
+    // ── Accept the Submitted escrow — the user is charged here ────────────
+    const acceptedRef = parseRef(typeof endBody.submitted_ref === "string" ? endBody.submitted_ref : "");
+    if (!acceptedRef) {
+      throw new SupplierError("malformed_response", { message: "supplier end response missing/invalid submitted_ref" });
+    }
+    let acceptBuilt;
+    try {
+      acceptBuilt = await buildAcceptTx({ chain: this.chain, buyerKey: this.walletKey, escrowRef: acceptedRef });
+    } catch (err) {
+      if (err instanceof TxConstructionError) throw err;
+      this.emitProgress({ type: "chain_submit_failed", detail: (err as Error).message });
+      throw err;
+    }
+    try {
+      await this.chain.awaitTx(acceptBuilt.expectedTxHash, 120_000);
+    } catch {
+      /* mock providers / tests — Accept tx already submitted */
+    }
+    this.emitProgress({ type: "accept_submitted", escrow_ref: refToString(acceptedRef) });
+    this.emitProgress({ type: "chat_ended", escrow_ref: escrowRefStr });
+
+    return { receipt, receiptSignature, escrowRef, acceptedRef };
   }
 
   // ─── acceptResult / reclaim ───────────────────────────────────────────

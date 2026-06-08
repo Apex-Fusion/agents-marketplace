@@ -126,17 +126,22 @@ describe("<Dashboard /> smoke", () => {
     ]);
     render(wrap(<Dashboard />, mp));
     // Wait for async discover to complete and cards to render. Dashboard
-    // appends a synthetic Piper-TTS demo card to whatever the indexer
-    // returned, so the count is N+1 until the on-chain TTS supplier ships.
+    // appends two synthetic demo cards (Piper-TTS + Kimi K2.6 chat) to whatever
+    // the indexer returned, so the count is N+2 until on-chain suppliers ship.
     await waitFor(() => {
       const cards = document.querySelectorAll("[data-testid='supplier-card']");
-      expect(cards.length).toBe(3);
+      expect(cards.length).toBe(4);
     });
     // Sanity: one of the cards is the demo Piper supplier.
     const piperBadges = Array.from(
       document.querySelectorAll("[data-testid='supplier-card']"),
     ).filter((c) => c.textContent?.includes("audio.synthesize.piper.v1"));
     expect(piperBadges.length).toBe(1);
+    // Sanity: one of the cards is the demo Kimi K2.6 chat supplier.
+    const kimiBadges = Array.from(
+      document.querySelectorAll("[data-testid='supplier-card']"),
+    ).filter((c) => c.textContent?.includes("llm.chat.v1"));
+    expect(kimiBadges.length).toBe(1);
   });
 });
 

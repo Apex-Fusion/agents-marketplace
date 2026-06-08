@@ -34,6 +34,8 @@ export {
   ALLOWED_TTS_VOICES,
   ALLOWED_TTS_FORMATS,
 } from "./escrow/postTtsEscrow.js";
+export type { PostChatEscrowParams } from "./escrow/postChatEscrow.js";
+export { buildPostChatEscrowTx, chatSessionPromptHash } from "./escrow/postChatEscrow.js";
 export type { ClaimParams } from "./escrow/claim.js";
 export { buildClaimTx } from "./escrow/claim.js";
 export type { SubmitParams } from "./escrow/submit.js";

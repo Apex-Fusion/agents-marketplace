@@ -23,6 +23,7 @@ import { useMarketplace } from "../state/MarketplaceContext.js";
 import SupplierCard from "../components/SupplierCard.js";
 import PromptForm from "../components/PromptForm.js";
 import PiperTTSForm from "../components/PiperTTSForm.js";
+import ChatForm from "../components/ChatForm.js";
 import type { SupplierView } from "../../sdk/types.js";
 
 function parseUtxoRef(ref: string): { txHash: string; index: number } | null {
@@ -61,6 +62,32 @@ const PIPER_DEMO_SUPPLIER: SupplierView = {
   created_slot: 0,
 };
 
+// Synthetic free chat demo — same pattern as PIPER_DEMO_SUPPLIER. The
+// "demo:kimi-chat" ref fails parseUtxoRef → advertRef null → ChatForm runs in
+// demo mode (streams from OpenRouter via /v1/chat-demo/message, no escrow).
+// Delete this constant once a real `llm.chat.v1` supplier with price=0 posts
+// an on-chain advert; the discovered entry then wins selection.
+const KIMI_DEMO_SUPPLIER: SupplierView = {
+  utxo_ref: "demo:kimi-chat",
+  supplier_pkh: "",
+  capability_id: "llm.chat.v1",
+  model: "Kimi K2.6 (demo)",
+  max_output_tokens: 0,
+  max_processing_ms: 0,
+  price_lovelace: "0",
+  supplier_bond_lovelace: "0",
+  buyer_bond_lovelace: "0",
+  endpoint_url: "https://openrouter.ai/api",
+  detail_uri: "",
+  detail_hash: "",
+  advertised_at: 0,
+  status: "demo",
+  advert_status: "demo",
+  current_escrow_ref: null,
+  last_seen_iso: null,
+  created_slot: 0,
+};
+
 export default function Dashboard() {
   const marketplace = useMarketplace();
   const [suppliers, setSuppliers] = useState<SupplierView[]>([]);
@@ -77,15 +104,15 @@ export default function Dashboard() {
           // If a real audio.synthesize.piper.v1 supplier appears in `list`,
           // the synthetic entry still shows but the real one wins selection
           // (cards are deduped by utxo_ref, and "demo:..." can't collide).
-          setSuppliers([...list, PIPER_DEMO_SUPPLIER]);
+          setSuppliers([...list, PIPER_DEMO_SUPPLIER, KIMI_DEMO_SUPPLIER]);
         }
       })
       .catch((err: Error) => {
         if (!cancelled) {
           setError(err.message);
-          // Even when the indexer is unreachable, expose the demo so the
+          // Even when the indexer is unreachable, expose the demos so the
           // capability path is testable in isolation.
-          setSuppliers([PIPER_DEMO_SUPPLIER]);
+          setSuppliers([PIPER_DEMO_SUPPLIER, KIMI_DEMO_SUPPLIER]);
         }
       });
     return () => {
@@ -160,6 +187,15 @@ function renderCapabilityForm(
         return <PiperTTSForm advertRef={advertRef} payment_lovelace={payment_lovelace} />;
       }
       return <PiperTTSForm />;
+
+    case "llm.chat.v1":
+      // Real on-chain chat supplier → paid mode (escrow bookends). The
+      // synthetic demo supplier has utxo_ref="demo:kimi-chat" which fails
+      // parseUtxoRef → advertRef is null → ChatForm runs in free demo mode.
+      if (advertRef) {
+        return <ChatForm advertRef={advertRef} payment_lovelace={payment_lovelace} />;
+      }
+      return <ChatForm />;
 
     default:
       return <UnsupportedCapability capabilityId={supplier.capability_id} />;
