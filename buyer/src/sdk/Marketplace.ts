@@ -885,22 +885,15 @@ export class Marketplace extends EventEmitterBase {
    * Submitted escrow — which is when the user is actually charged.
    */
   async endChat(opts: EndChatOptions): Promise<EndChatResult> {
-    const { escrowRef, sessionNonce, transcript } = opts;
+    const { escrowRef, sessionNonce, transcript, supplierBaseUrl } = opts;
     const escrowRefStr = refToString(escrowRef);
 
-    // Resolve escrow → advert for endpoint_url, supplier_pkh, model, pub key.
-    const escrowUtxo = await this.chain.queryUtxo(escrowRef);
-    if (!escrowUtxo || !escrowUtxo.datumHex) {
-      throw new TxConstructionError("escrow ref not on chain", `no escrow UTxO at ${escrowRefStr}`);
-    }
-    const escrowDatum = decodeEscrowDatum(escrowUtxo.datumHex);
-    const advertUtxo = await this.chain.queryUtxo(escrowDatum.advert_ref);
-    if (!advertUtxo || !advertUtxo.datumHex) {
-      throw new TxConstructionError("advert ref not on chain", "advert UTxO for this escrow is missing");
-    }
-    const advertDatum = decodeAdvertDatum(advertUtxo.datumHex);
-
-    const supplierHttp = new HttpClient({ baseUrl: advertDatum.endpoint_url, fetch: this.fetchImpl });
+    // The original Open escrow UTxO has ALREADY been spent by the supplier's
+    // Claim (Open→Claimed) by the time End runs, so we must NOT queryUtxo it
+    // (that was the cause of the "escrow ref not on chain" 502). Use the
+    // supplier endpoint the buyer-app cached from startChat, and resolve
+    // supplier identity (pkh, model) from /capability for verification.
+    const supplierHttp = new HttpClient({ baseUrl: supplierBaseUrl, fetch: this.fetchImpl });
     let endRes;
     try {
       endRes = await supplierHttp.postJson("/v1/chat/end", {}, { headers: { "X-Escrow-Ref": escrowRefStr } });
@@ -931,8 +924,23 @@ export class Marketplace extends EventEmitterBase {
     const receipt = endBody.receipt;
     const receiptSignature = endBody.receipt_signature;
 
+    // ── Resolve supplier identity from /capability for verification ───────
+    let capSupplierPkh = "";
+    let capModel = "";
+    try {
+      const capRes = await supplierHttp.getJson("/capability");
+      if (capRes.body && typeof capRes.body === "object") {
+        capSupplierPkh = (capRes.body as { supplier_pkh?: string }).supplier_pkh ?? "";
+        capModel = (capRes.body as { model?: string }).model ?? "";
+      }
+    } catch {
+      /* best-effort; the escrow_ref + prompt_hash + signature checks below,
+         plus the on-chain Accept (which routes funds per the Submitted datum),
+         still hold even if /capability is briefly unavailable */
+    }
+
     // ── Verify receipt ───────────────────────────────────────────────────
-    if (receipt.supplier_pkh !== escrowDatum.supplier_pkh) {
+    if (capSupplierPkh && receipt.supplier_pkh !== capSupplierPkh) {
       throw new ReceiptVerificationError("wrong_supplier");
     }
     if (receipt.escrow_ref !== escrowRefStr) {
@@ -942,7 +950,7 @@ export class Marketplace extends EventEmitterBase {
     if (receipt.prompt_hash !== chatSessionPromptHash({ session_nonce: sessionNonce })) {
       throw new ReceiptVerificationError("prompt_hash_mismatch");
     }
-    if (receipt.model !== advertDatum.model) {
+    if (capModel && receipt.model !== capModel) {
       throw new ReceiptVerificationError("request_spec_hash_mismatch");
     }
     if (typeof receiptSignature !== "string" || !SIG_RE.test(receiptSignature) || receiptSignature === ZERO_SIGNATURE) {

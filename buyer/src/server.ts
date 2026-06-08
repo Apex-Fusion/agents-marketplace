@@ -881,10 +881,20 @@ export function createApp(deps: AppDeps): Express {
     const transcript = Array.isArray(body.transcript)
       ? (body.transcript as ChatMessage[])
       : undefined;
+    const state = chatRouteState.get(rawRef);
+    if (!state) {
+      return jsonError(res, 404, "chat_session_not_found",
+        "no active chat session for this escrow (the buyer-app may have restarted); please start a new chat");
+    }
     const m = ESCROW_REF_RE.exec(rawRef)!;
     const escrowRef = { txHash: m[1], index: Number(m[2]) };
     try {
-      const result = await deps.marketplace.endChat({ escrowRef, sessionNonce, transcript });
+      const result = await deps.marketplace.endChat({
+        escrowRef,
+        sessionNonce,
+        transcript,
+        supplierBaseUrl: state.supplierBaseUrl,
+      });
       chatRouteState.delete(rawRef);
       return res.status(200).json({
         status: "accepted",

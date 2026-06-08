@@ -213,6 +213,10 @@ export interface StartChatResult {
 export interface EndChatOptions {
   escrowRef: OutputReference;
   sessionNonce: string;
+  /** Supplier endpoint_url cached by the buyer-app from startChat. Required
+   * because the Open escrow UTxO is already spent (Claimed) by End time, so we
+   * resolve the supplier via its cached URL + /capability rather than chain. */
+  supplierBaseUrl: string;
   /** The browser's local transcript mirror, used to verify response_hash. */
   transcript?: import("@marketplace/shared/tx").ChatMessage[];
 }
