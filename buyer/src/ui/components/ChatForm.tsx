@@ -102,6 +102,25 @@ async function streamChat(
   }
 }
 
+/** Animated "Thinking …" placeholder shown while waiting for the model's
+ * first token (the assistant bubble exists but no content has streamed yet). */
+function ThinkingDots(): JSX.Element {
+  return (
+    <span className="inline-flex items-center gap-1 text-gray-500" data-testid="chat-thinking">
+      Thinking
+      <span className="inline-flex items-end gap-0.5 pb-0.5">
+        {[0, 150, 300].map((d) => (
+          <span
+            key={d}
+            className="h-1.5 w-1.5 animate-bounce rounded-full bg-gray-400"
+            style={{ animationDelay: `${d}ms` }}
+          />
+        ))}
+      </span>
+    </span>
+  );
+}
+
 export default function ChatForm({ advertRef, payment_lovelace }: ChatFormProps = {}): JSX.Element {
   const isPaid = advertRef !== undefined && payment_lovelace !== undefined;
   const advertRefStr = advertRef ? `${advertRef.txHash}#${advertRef.index}` : null;
@@ -301,7 +320,7 @@ export default function ChatForm({ advertRef, payment_lovelace }: ChatFormProps 
             {streaming !== null && (
               <div className="text-left">
                 <span className="inline-block max-w-[85%] whitespace-pre-wrap rounded bg-gray-100 px-3 py-2 text-sm text-gray-900">
-                  {streaming.length > 0 ? streaming : "…"}
+                  {streaming.length > 0 ? streaming : <ThinkingDots />}
                 </span>
               </div>
             )}
