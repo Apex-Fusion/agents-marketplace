@@ -80,7 +80,6 @@ import {
   TxConstructionError,
 } from "@marketplace/shared/tx";
 import { decodeAdvertDatum, decodeEscrowDatum, canonicalize } from "@marketplace/shared/cbor";
-import { verifyReceipt } from "@marketplace/shared/receipt";
 import type { AdvertDatum } from "@marketplace/shared/cbor";
 import type {
   SupplierView,
@@ -961,21 +960,13 @@ export class Marketplace extends EventEmitterBase {
         );
       }
     }
-    // Cryptographic verification via the supplier's published pub key (best-effort).
-    try {
-      const capRes = await supplierHttp.getJson("/capability");
-      const pubKeyHex = capRes.body && typeof capRes.body === "object"
-        ? (capRes.body as { pub_key_hex?: string }).pub_key_hex
-        : undefined;
-      if (typeof pubKeyHex === "string" && /^[0-9a-fA-F]{64}$/.test(pubKeyHex)) {
-        if (!verifyReceipt({ receipt, signature: receiptSignature }, pubKeyHex)) {
-          throw new ReceiptVerificationError("invalid_signature");
-        }
-      }
-    } catch (err) {
-      if (err instanceof ReceiptVerificationError) throw err;
-      /* /capability unreachable — structural verification stands */
-    }
+    // NOTE: cryptographic Ed25519 verifyReceipt is intentionally NOT called
+    // here. It lives in @marketplace/shared/receipt/sign.ts, whose top-level
+    // `import { createHash } from "crypto"` cannot be bundled into the browser
+    // SPA (Vite externalizes `crypto`). The one-off submitPrompt/submitTts
+    // paths take the same structural-only stance (see the M1-E/M1-F note at the
+    // top of this file). The structural checks above + the on-chain
+    // result_receipt_hash commitment are the v1 verification surface.
 
     this.emitProgress({ type: "receipt_verified", escrow_ref: escrowRefStr });
 
