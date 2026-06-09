@@ -21,6 +21,10 @@ services:
     environment:
       INDEXER_URL: http://marketplace-mainnet-indexer:8090
       BUYER_PORT: "8070"
+      # PiperTTS demo (Path B): direct-proxy target for /v1/synth-speech. Piper is
+      # private on marketplace-mainnet-net (no public host), so use internal DNS.
+      # Without this the demo TTS tile 503s ("booted without TTS_PIPER_BASE_URL").
+      TTS_PIPER_BASE_URL: http://marketplace-mainnet-tts-piper:8000
       # Pin the archive dir so it lands on the persistent volume below — keeps
       # the response archive + PDF job store (past summaries) across container
       # recreation/redeploys.
