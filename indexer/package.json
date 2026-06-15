@@ -10,7 +10,7 @@
     "@marketplace/shared": "workspace:*",
     "better-sqlite3": "^11.9.1",
     "express": "^4.21.2",
-    "ws": "^8.18.0"
+    "ws": "^8.20.1"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",
