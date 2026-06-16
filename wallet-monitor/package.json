@@ -1,0 +1,16 @@
+{
+  "name": "@marketplace/wallet-monitor",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "check": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@marketplace/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2"
+  }
+}

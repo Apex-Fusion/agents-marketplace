@@ -1,0 +1,40 @@
+# deploy/mainnet/docker-compose.wallet-monitor.yml — Wallet-balance Slack alerter — MAINNET
+#
+# A ONE-SHOT, not a long-running server: it checks every wallet listed in
+# wallet-monitor/wallets.json, posts a Slack alert for any below threshold,
+# then exits. There is no port, healthcheck, or restart policy.
+#
+# Invoked hourly by cron (see /etc/cron.d/wallet-monitor):
+#   cd /root/agents-marketplace && \
+#   docker compose -f deploy/mainnet/docker-compose.wallet-monitor.yml run --rm wallet-monitor
+#
+# One-time setup on the box:
+#   1) populate wallet-monitor/wallets.json (the 7 addresses — see the package README)
+#   2) create wallet-monitor/.env with SLACK_WEBHOOK_URL=...
+#   3) docker compose -f deploy/mainnet/docker-compose.wallet-monitor.yml build
+#   4) smoke test: docker compose -f ... run --rm -e TEST=1 wallet-monitor
+
+name: marketplace-mainnet-wallet-monitor
+
+services:
+  wallet-monitor:
+    build:
+      context: ../..
+      dockerfile: wallet-monitor/Dockerfile
+    env_file:
+      - path: ../../wallet-monitor/.env
+        required: false
+    environment:
+      # Mainnet-only service; pin the public Ogmios endpoint explicitly.
+      # (config.ts also defaults to this, but this compose is mainnet-specific.)
+      OGMIOS_URL: https://ogmios.vector.mainnet.apexfusion.org
+    volumes:
+      # The wallet list is read-only. The dedup state dir is writable and
+      # persists across runs (data/ is gitignored).
+      - ../../wallet-monitor/wallets.json:/repo/wallet-monitor/wallets.json:ro
+      - ../../wallet-monitor/data:/repo/wallet-monitor/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

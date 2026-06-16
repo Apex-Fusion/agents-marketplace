@@ -11,9 +11,13 @@ coverage
 !.env.*.example
 
 # Local data / caches (matches at any depth — covers
-# deploy/simulation/data/, indexer/data/, etc.)
+# deploy/simulation/data/, indexer/data/, wallet-monitor/data/, etc.)
 data/
 *.log
+
+# wallet-monitor: the real wallet list holds production mainnet addresses —
+# keep it out of git; only wallets.example.json is committed.
+wallet-monitor/wallets.json
 .vitest-cache
 .DS_Store
 

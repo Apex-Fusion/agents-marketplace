@@ -4,3 +4,4 @@ packages:
   - "supplier"
   - "indexer"
   - "indexer-ui"
+  - "wallet-monitor"

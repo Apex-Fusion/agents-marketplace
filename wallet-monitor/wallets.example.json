@@ -1,0 +1,13 @@
+{
+  "default_min_ap3x": 10,
+  "reminder_hours": 6,
+  "wallets": [
+    { "name": "buyer",             "address": "addr1_REPLACE_ME" },
+    { "name": "supplier-ollama",   "address": "addr1_REPLACE_ME" },
+    { "name": "supplier-gpt",      "address": "addr1_REPLACE_ME" },
+    { "name": "supplier-deepseek", "address": "addr1_REPLACE_ME" },
+    { "name": "supplier-kimi",     "address": "addr1_REPLACE_ME" },
+    { "name": "supplier-kimi-chat","address": "addr1_REPLACE_ME" },
+    { "name": "supplier-tts",      "address": "addr1_REPLACE_ME", "min_ap3x": 8 }
+  ]
+}
