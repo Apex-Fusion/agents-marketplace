@@ -50,10 +50,6 @@ function fmtAp3x(lovelace: bigint): string {
   return (Number(lovelace) / LOVELACE_PER_AP3X).toFixed(2);
 }
 
-function shortAddr(a: string): string {
-  return a.length <= 18 ? a : `${a.slice(0, 10)}…${a.slice(-6)}`;
-}
-
 function loadState(path: string): StateFile {
   try {
     const obj: unknown = JSON.parse(readFileSync(path, "utf-8"));
@@ -123,8 +119,13 @@ async function main(): Promise<void> {
   const now = Date.now();
   const nextState: StateFile = { ...prevState };
 
-  const lowLines: string[] = [];
-  const recoveredLines: string[] = [];
+  // Classify each successfully-queried wallet, advancing dedup state. The
+  // decision to POST is driven only by transitions (a newly-low wallet, a low
+  // wallet past its reminder window, or a recovery). But when we DO post, the
+  // message lists EVERY monitored wallet for full context (built below).
+  let anyDueLow = false;
+  let anyRecovered = false;
+  const recoveredNames = new Set<string>();
 
   for (const c of checked) {
     // Skip wallets we couldn't query — leave their state untouched so we don't
@@ -138,9 +139,7 @@ async function main(): Promise<void> {
       const wasLow = prev?.status === "low";
       const due = !wasLow || now - (prev?.lastAlertMs ?? 0) >= reminderMs;
       if (due) {
-        lowLines.push(
-          `🔴 ${c.name}  ${fmtAp3x(c.lovelace)} / ${fmtAp3x(c.minLovelace)} APEX  ${shortAddr(c.address)}`,
-        );
+        anyDueLow = true;
         nextState[c.name] = { status: "low", lastAlertMs: now };
       } else {
         // Still low but the reminder window hasn't elapsed — keep prev as-is.
@@ -148,20 +147,42 @@ async function main(): Promise<void> {
       }
     } else {
       if (prev?.status === "low") {
-        recoveredLines.push(`✅ ${c.name}  ${fmtAp3x(c.lovelace)} APEX (recovered)`);
+        anyRecovered = true;
+        recoveredNames.add(c.name);
       }
       nextState[c.name] = { status: "ok", lastAlertMs: prev?.lastAlertMs ?? 0 };
     }
   }
 
-  const needPost = lowLines.length > 0 || recoveredLines.length > 0;
+  const needPost = anyDueLow || anyRecovered;
 
   if (needPost) {
-    const title =
-      lowLines.length > 0
-        ? "⚠️ *Wallet balance alert* — vector-marketplace"
-        : "✅ *Wallet balance recovered* — vector-marketplace";
-    const text = [title, ...lowLines, ...recoveredLines].join("\n");
+    const anyLow = checked.some(
+      (c) => c.error === null && c.lovelace !== null && c.lovelace < c.minLovelace,
+    );
+    const title = anyLow
+      ? "⚠️ *Wallet balance alert* — vector-marketplace"
+      : "✅ *Wallet balance recovered* — vector-marketplace";
+
+    // Full roster — every monitored wallet (low first, then healthy, then any
+    // that failed to query), each with its FULL address backticked so it's
+    // copy-pasteable in Slack.
+    const low: string[] = [];
+    const ok: string[] = [];
+    const failed: string[] = [];
+    for (const c of checked) {
+      if (c.error !== null || c.lovelace === null) {
+        failed.push(`⚠️ ${c.name}  query failed\n   \`${c.address}\``);
+      } else if (c.lovelace < c.minLovelace) {
+        low.push(
+          `🔴 ${c.name}  ${fmtAp3x(c.lovelace)} / ${fmtAp3x(c.minLovelace)} APEX\n   \`${c.address}\``,
+        );
+      } else {
+        const tag = recoveredNames.has(c.name) ? " (recovered)" : "";
+        ok.push(`🟢 ${c.name}  ${fmtAp3x(c.lovelace)} APEX${tag}\n   \`${c.address}\``);
+      }
+    }
+    const text = [title, ...low, ...ok, ...failed].join("\n");
 
     const r = await postSlack(cfg.slackWebhookUrl, text);
     if (!r.ok) {
@@ -170,7 +191,9 @@ async function main(): Promise<void> {
       process.exitCode = 1;
       return;
     }
-    console.log(`[wallet-monitor] posted: ${lowLines.length} low, ${recoveredLines.length} recovered`);
+    console.log(
+      `[wallet-monitor] posted roster: ${low.length} low, ${ok.length} ok, ${failed.length} failed`,
+    );
   } else {
     console.log("[wallet-monitor] all wallets healthy — no Slack post");
   }
