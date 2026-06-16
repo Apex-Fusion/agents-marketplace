@@ -195,7 +195,14 @@ async function main(): Promise<void> {
       `[wallet-monitor] posted roster: ${low.length} low, ${ok.length} ok, ${failed.length} failed`,
     );
   } else {
-    console.log("[wallet-monitor] all wallets healthy — no Slack post");
+    const lowCount = checked.filter(
+      (c) => c.error === null && c.lovelace !== null && c.lovelace < c.minLovelace,
+    ).length;
+    console.log(
+      lowCount > 0
+        ? `[wallet-monitor] ${lowCount} wallet(s) low but already alerted within the reminder window — no Slack post`
+        : "[wallet-monitor] all wallets healthy — no Slack post",
+    );
   }
 
   // Persist the new state (records ok/low statuses + advanced reminder stamps).
