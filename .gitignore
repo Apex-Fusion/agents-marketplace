@@ -18,6 +18,14 @@ data/
 # wallet-monitor: the real wallet list holds production mainnet addresses —
 # keep it out of git; only wallets.example.json is committed.
 wallet-monitor/wallets.json
+
+# Generated wallet key dumps (e.g. tx:gen-keypair output, supplier/.deepseek-wallet.json)
+# — these contain privateKeyHex. Never commit.
+*-wallet.json
+
+# Operator local file backups (e.g. docker-compose.buyer.yml.bak-20260609)
+*.bak
+*.bak-*
 .vitest-cache
 .DS_Store
 
