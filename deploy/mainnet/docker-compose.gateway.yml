@@ -34,6 +34,10 @@ services:
       # Accept/Reclaim/Submit. Same values the buyer/suppliers use on mainnet.
       ESCROW_REF_UTXO: c8d84c6d67ec67a1efe5e9c6c06d53020e05d1bb96d1c55ecb1eb7d5010c4d54#0
       ADVERT_REF_UTXO: c8d84c6d67ec67a1efe5e9c6c06d53020e05d1bb96d1c55ecb1eb7d5010c4d54#1
+      # Browser Origins allowed to call the gateway cross-origin. The buyer
+      # frontend's "API Keys" page (served from marketplace.vector…) POSTs to
+      # /signup here. Comma-separated; empty disables CORS entirely.
+      GATEWAY_CORS_ORIGINS: https://marketplace.vector.apexfusion.org
     volumes:
       - gateway-mainnet-data:/repo/data/gateway
     healthcheck:

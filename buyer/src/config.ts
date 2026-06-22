@@ -36,6 +36,12 @@
  *                         Defaults to "./data/archive" relative to cwd.
  *                         When unset, archive is disabled (responses are
  *                         not persisted; /v1/responses* return 503).
+ *   GATEWAY_PUBLIC_URL  — Public base URL of the OpenAI-compatible gateway
+ *                         (e.g. https://api.marketplace.vector.apexfusion.org).
+ *                         Injected into the SPA boot block so the "Generate
+ *                         API key" page knows where to POST /signup. When
+ *                         unset, the SPA falls back to deriving "api." +
+ *                         current host.
  */
 
 const HEX64_RE = /^[0-9a-fA-F]{64}$/;
@@ -56,6 +62,7 @@ export interface BuyerConfig {
   password: string;
   sessionSecret: string;
   cookieSecure: boolean;
+  gatewayPublicUrl: string;
 }
 
 function requireField(env: Record<string, string | undefined>, name: string): string {
@@ -141,6 +148,11 @@ export function loadConfig(env: Record<string, string | undefined>): BuyerConfig
     cookieSecure = cookieSecureStr === "1";
   }
 
+  // GATEWAY_PUBLIC_URL — optional. Public base URL of the gateway, surfaced to
+  // the SPA via the boot block (no trailing slash). Empty string means the SPA
+  // derives the URL from its own host ("api." + location.host).
+  const gatewayPublicUrl = (env.GATEWAY_PUBLIC_URL ?? "").trim().replace(/\/+$/, "");
+
   return {
     privKeyHex,
     indexerUrl,
@@ -155,5 +167,6 @@ export function loadConfig(env: Record<string, string | undefined>): BuyerConfig
     password,
     sessionSecret,
     cookieSecure,
+    gatewayPublicUrl,
   };
 }

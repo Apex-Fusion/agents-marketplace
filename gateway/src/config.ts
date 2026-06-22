@@ -20,6 +20,10 @@
  *   KEY_RATE_MAX / KEY_RATE_WINDOW_MS        — per-key request limiter.
  *   SWEEPER_INTERVAL_MS / WALLET_HEALTH_INTERVAL_MS — background tick cadences.
  *   SDK_REGISTRY_MAX    — max cached per-key Marketplace instances (LRU).
+ *   GATEWAY_CORS_ORIGINS — comma-separated allowlist of browser Origins that may
+ *                         call the gateway cross-origin (e.g. the marketplace
+ *                         frontend's "Generate API key" page). Default empty =
+ *                         CORS off (no Access-Control-* headers emitted).
  */
 
 const HEX64_RE = /^[0-9a-fA-F]{64}$/;
@@ -38,6 +42,7 @@ export interface GatewayConfig {
   sweeperIntervalMs: number;
   walletHealthIntervalMs: number;
   sdkRegistryMax: number;
+  corsOrigins: string[];
 }
 
 function requireField(env: Record<string, string | undefined>, name: string): string {
@@ -109,5 +114,9 @@ export function loadConfig(env: Record<string, string | undefined>): GatewayConf
     sweeperIntervalMs: posInt(env, "SWEEPER_INTERVAL_MS", 60 * 1000),
     walletHealthIntervalMs: posInt(env, "WALLET_HEALTH_INTERVAL_MS", 10 * 60 * 1000),
     sdkRegistryMax: posInt(env, "SDK_REGISTRY_MAX", 500),
+    corsOrigins: (env.GATEWAY_CORS_ORIGINS ?? "")
+      .split(",")
+      .map((o) => o.trim().replace(/\/+$/, ""))
+      .filter((o) => o !== ""),
   };
 }

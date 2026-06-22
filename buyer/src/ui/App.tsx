@@ -6,6 +6,7 @@
  *   /tasks    → <TaskHistory />
  *   /pending  → <PendingReceipts />     UX-1: buyer-side Accept button
  *   /wallet   → <Wallet />
+ *   /api-keys → <ApiKeys />             self-serve gateway API key generation
  */
 
 import { Routes, Route, Link } from "react-router-dom";
@@ -14,6 +15,7 @@ import TaskHistory from "./pages/TaskHistory.js";
 import Wallet from "./pages/Wallet.js";
 import PendingReceipts from "./pages/PendingReceipts.js";
 import BookSummarizer from "./pages/BookSummarizer.js";
+import ApiKeys from "./pages/ApiKeys.js";
 import { RequireAuth, useAuth } from "./state/AuthContext.js";
 
 function SignOutButton() {
@@ -39,6 +41,7 @@ export default function App() {
           <Link to="/tasks" className="font-medium hover:underline">Tasks</Link>
           <Link to="/pending" className="font-medium hover:underline">Pending</Link>
           <Link to="/wallet" className="font-medium hover:underline">Wallet</Link>
+          <Link to="/api-keys" className="font-medium hover:underline">API Keys</Link>
           <SignOutButton />
         </nav>
         <main className="p-6">
@@ -48,6 +51,7 @@ export default function App() {
             <Route path="/tasks" element={<TaskHistory />} />
             <Route path="/pending" element={<PendingReceipts />} />
             <Route path="/wallet" element={<Wallet />} />
+            <Route path="/api-keys" element={<ApiKeys />} />
           </Routes>
         </main>
       </div>

@@ -133,6 +133,7 @@ export async function runMain(env: Record<string, string | undefined>): Promise<
     password: config.password,
     sessionSecret: config.sessionSecret,
     cookieSecure: config.cookieSecure,
+    gatewayPublicUrl: config.gatewayPublicUrl,
     jobStore,
     pdfCaps,
   });

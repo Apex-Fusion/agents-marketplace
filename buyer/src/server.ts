@@ -109,6 +109,11 @@ export interface AppDeps {
    * brute-force rate-limit window. Defaults to Date.now. Tests use a fake
    * clock to drive expiry and rolling-renewal assertions deterministically. */
   nowMs?: () => number;
+  /** Public base URL of the OpenAI-compatible gateway, injected into the SPA
+   * boot block so the "Generate API key" page can POST cross-origin to
+   * `${gatewayUrl}/signup`. Public, non-secret value. When empty/omitted the
+   * SPA derives "api." + its own host. */
+  gatewayPublicUrl?: string;
   /** PDF book summarizer job registry. When provided, the /v1/pdf-* routes
    * are live; when omitted they respond 503 (feature disabled). Built in
    * runMain from the same marketplace/chain/wallet/archive deps. */
@@ -1310,6 +1315,9 @@ export function createApp(deps: AppDeps): Express {
               pubKeyHash: resolved.walletKey.pubKeyHash,
               address: displayAddress,
             },
+            // Public gateway base URL for the "Generate API key" page. Empty
+            // string when unconfigured — the SPA then derives "api." + host.
+            gatewayUrl: deps.gatewayPublicUrl ?? "",
           })};</script>`
         : "";
       const indexWithBoot = cachedTemplate.replace(

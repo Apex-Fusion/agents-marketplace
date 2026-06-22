@@ -29,6 +29,11 @@ services:
       # the response archive + PDF job store (past summaries) across container
       # recreation/redeploys.
       ARCHIVE_DIR: /repo/data/archive
+      # Public base URL of the OpenAI gateway, surfaced to the SPA boot block so
+      # the "API Keys" page can POST cross-origin to ${gatewayUrl}/signup. The
+      # gateway must CORS-allow https://marketplace.vector.apexfusion.org (see
+      # GATEWAY_CORS_ORIGINS in docker-compose.gateway.yml).
+      GATEWAY_PUBLIC_URL: https://api.marketplace.vector.apexfusion.org
       # NETWORK_ID intentionally not pinned — see supplier compose comment.
     volumes:
       - buyer-mainnet-archive:/repo/data/archive
