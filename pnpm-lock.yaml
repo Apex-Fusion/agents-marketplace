@@ -160,6 +160,46 @@ importers:
         specifier: ^5.4.0
         version: 5.4.21(@types/node@25.6.0)
 
+  gateway:
+    dependencies:
+      '@marketplace/buyer':
+        specifier: workspace:*
+        version: link:../buyer
+      '@marketplace/shared':
+        specifier: workspace:*
+        version: link:../packages/shared
+      '@noble/ed25519':
+        specifier: ^2.3.0
+        version: 2.3.0
+      '@noble/hashes':
+        specifier: ^1.8.0
+        version: 1.8.0
+      bech32:
+        specifier: ^2.0.0
+        version: 2.0.0
+      better-sqlite3:
+        specifier: ^11.9.1
+        version: 11.10.0
+      express:
+        specifier: ^4.21.2
+        version: 4.22.1
+    devDependencies:
+      '@types/better-sqlite3':
+        specifier: ^7.6.12
+        version: 7.6.13
+      '@types/express':
+        specifier: ^5.0.3
+        version: 5.0.6
+      supertest:
+        specifier: ^7.0.0
+        version: 7.2.2
+      tsx:
+        specifier: ^4.19.0
+        version: 4.21.0
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+
   indexer:
     dependencies:
       '@marketplace/shared':

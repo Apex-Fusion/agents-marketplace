@@ -41,6 +41,7 @@ export default defineConfig({
       "packages/**/*.{test,spec}.ts",
       "buyer/**/*.{test,spec}.ts",
       "buyer/**/*.{test,spec}.tsx",
+      "gateway/**/*.{test,spec}.ts",
       "supplier/**/*.{test,spec}.ts",
       "indexer/**/*.{test,spec}.ts",
     ],

@@ -1,0 +1,62 @@
+# deploy/mainnet/docker-compose.gateway.yml — OpenAI-compatible Gateway — MAINNET
+#
+# Multi-tenant, custodial OpenAI gateway. Each API key is its own buyer wallet;
+# every request posts an on-chain escrow from that user's wallet. See docs/gateway.md.
+#
+# Secrets live in gateway/.env (NOT committed):
+#   GATEWAY_MASTER_KEY=<openssl rand -hex 32>   # losing this locks ALL user funds
+# Back up BOTH gateway/.env (the master key) AND the gateway-mainnet-data volume
+# (the gateway.db holds every user's encrypted wallet key + usage).
+
+name: marketplace-mainnet-gateway
+
+services:
+  gateway:
+    build:
+      context: ../..
+      dockerfile: gateway/Dockerfile
+    container_name: marketplace-mainnet-gateway
+    restart: unless-stopped
+    env_file:
+      - path: ../../gateway/.env
+        required: true
+    environment:
+      INDEXER_URL: http://marketplace-mainnet-indexer:8090
+      OGMIOS_URL: https://ogmios.vector.mainnet.apexfusion.org
+      LIVE_CHAIN: "1"
+      NETWORK_ID: "1"
+      GATEWAY_PORT: "8080"
+      GATEWAY_DB_DIR: /repo/data/gateway
+    volumes:
+      - gateway-mainnet-data:/repo/data/gateway
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz >/dev/null || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - marketplace-mainnet-net
+      - traefik-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-net"
+      - "traefik.http.routers.mp-gateway-mainnet.entrypoints=web"
+      - "traefik.http.routers.mp-gateway-mainnet.rule=Host(`api.marketplace.vector.apexfusion.org`)"
+      - "traefik.http.services.mp-gateway-mainnet.loadbalancer.server.port=8080"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  marketplace-mainnet-net:
+    external: true
+    name: marketplace-mainnet-net
+  traefik-net:
+    external: true
+    name: traefik-net
+
+volumes:
+  gateway-mainnet-data:

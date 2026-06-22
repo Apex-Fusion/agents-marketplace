@@ -38,3 +38,10 @@ export type {
   ConsolidateWalletFlowResult,
 } from "./wallet/runConsolidateWallet.js";
 export { runConsolidateWallet } from "./wallet/runConsolidateWallet.js";
+
+// ── Wallet withdraw (custodial exit; live-only) ─────────────────────────
+export type {
+  WithdrawWalletParams,
+  WithdrawWalletBuildResult,
+} from "./wallet/withdrawWallet.js";
+export { buildWithdrawTx } from "./wallet/withdrawWallet.js";

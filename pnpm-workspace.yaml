@@ -1,6 +1,7 @@
 packages:
   - "packages/*"
   - "buyer"
+  - "gateway"
   - "supplier"
   - "indexer"
   - "indexer-ui"
