@@ -358,6 +358,45 @@ function rethrowAsTxError(err: unknown, fallback: string): never {
   throw new TxConstructionError(fallback, msg);
 }
 
+/** Choose PostEscrow inputs that PRESERVE a pure-ADA collateral UTxO for the
+ * later Accept/Reclaim script-spend. PostEscrow is NOT a script spend, so lucid
+ * is otherwise free to consume the dedicated ≥5-ADA collateral UTxO as an
+ * ordinary input — leaving the wallet with no collateral candidate and
+ * stranding the escrow when Accept later runs (the fragmentation bug observed
+ * on back-to-back requests).
+ *
+ * Reserve the SMALLEST pure-ADA UTxO ≥ collateral floor and fund the escrow
+ * from the remaining UTxOs. Returns null (→ default lucid coin selection) when
+ * reservation isn't possible or needed:
+ *   - a single UTxO (nothing to reserve),
+ *   - no qualifying pure-ADA collateral UTxO, or
+ *   - excluding it would underfund the escrow. The large-single-UTxO case is
+ *     safe under default selection anyway: the change output is itself a
+ *     pure-ADA UTxO well above the collateral floor. */
+export function reserveCollateralInputs(
+  utxos: LucidUTxO[],
+  lockedLovelace: bigint,
+): LucidUTxO[] | null {
+  if (utxos.length < 2) return null;
+  const candidates = utxos
+    .filter(
+      (u) =>
+        u.assets.lovelace >= COLLATERAL_MIN_LOVELACE &&
+        Object.keys(u.assets).every((k) => k === "lovelace"),
+    )
+    .sort((a, b) => (a.assets.lovelace < b.assets.lovelace ? -1 : 1));
+  if (candidates.length === 0) return null;
+  const reserved = candidates[0];
+  const remaining = utxos.filter(
+    (u) => !(u.txHash === reserved.txHash && u.outputIndex === reserved.outputIndex),
+  );
+  if (remaining.length === 0) return null;
+  const remainingLovelace = remaining.reduce((s, u) => s + u.assets.lovelace, 0n);
+  // Cover the locked output + tx fee + a min-change cushion; else fall back.
+  if (remainingLovelace < lockedLovelace + 2_000_000n) return null;
+  return remaining;
+}
+
 // ─── PostEscrow ──────────────────────────────────────────────────────
 
 export async function buildLiveTxForEscrow(
@@ -382,6 +421,12 @@ export async function buildLiveTxForEscrow(
 
   const lockedLovelace = totalLocked < MIN_UTXO_LOVELACE ? MIN_UTXO_LOVELACE : totalLocked;
 
+  // Preserve a pure-ADA collateral UTxO so the buyer's later Accept/Reclaim
+  // script-spend can find collateral. Without this, PostEscrow coin selection
+  // can consume the 5-ADA collateral UTxO and strand the escrow at Accept.
+  const walletUtxos = await lucid.wallet().getUtxos();
+  const reservedInputs = reserveCollateralInputs(walletUtxos, lockedLovelace);
+
   let signed;
   try {
     const txBuilder = lucid
@@ -404,7 +449,12 @@ export async function buildLiveTxForEscrow(
       // becomes change. Same fix as Claim/Submit/Accept paths.
       .setMinFee(500_000n);
 
-    const completed = await txBuilder.complete();
+    // When we can reserve collateral, restrict coin selection to the remaining
+    // (working) UTxOs so the collateral candidate survives for Accept. Else
+    // fall back to lucid's default selection (single/large-UTxO cases are safe).
+    const completed = reservedInputs
+      ? await txBuilder.complete({ presetWalletInputs: reservedInputs, localUPLCEval: false })
+      : await txBuilder.complete();
     signed = await completed.sign.withWallet().complete();
   } catch (err) {
     rethrowAsTxError(err, "post-escrow build failed");
