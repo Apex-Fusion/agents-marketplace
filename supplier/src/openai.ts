@@ -39,6 +39,20 @@ export interface CallOpenAiParams {
    * e.g. the ChatMock localhost proxy.
    */
   apiKey?: string;
+  /**
+   * Forwarded as `max_tokens` when a positive number; omitted otherwise. The
+   * caller is responsible for keeping prompt+max_tokens within the model's
+   * context window (some providers 400 when it exceeds context).
+   */
+  maxTokens?: number;
+  /**
+   * When true, sends `reasoning: { enabled: false }` to disable OpenRouter
+   * "thinking" tokens — faster/cheaper straight answers, and avoids reasoning
+   * starving the completion budget into a length-truncated (empty) answer.
+   * Only valid for OpenRouter endpoints; leave false for ChatMock / direct
+   * DeepSeek, which don't accept the param.
+   */
+  disableReasoning?: boolean;
 }
 
 export interface OpenAiResult {
@@ -68,9 +82,12 @@ function isAbortError(err: unknown): boolean {
 }
 
 export async function callOpenAi(params: CallOpenAiParams): Promise<OpenAiResult> {
-  const { baseUrl, model, messages, timeoutMs, apiKey } = params;
+  const { baseUrl, model, messages, timeoutMs, apiKey, maxTokens, disableReasoning } = params;
   const url = `${baseUrl}/v1/chat/completions`;
-  const body = JSON.stringify({ model, messages, stream: false });
+  const payload: Record<string, unknown> = { model, messages, stream: false };
+  if (typeof maxTokens === "number" && maxTokens > 0) payload.max_tokens = maxTokens;
+  if (disableReasoning) payload.reasoning = { enabled: false };
+  const body = JSON.stringify(payload);
 
   const headers: Record<string, string> = { "content-type": "application/json" };
   if (apiKey) {
@@ -187,14 +204,17 @@ export async function callOpenAiStream(
   params: CallOpenAiParams,
   onToken: (delta: string) => void,
 ): Promise<OpenAiResult> {
-  const { baseUrl, model, messages, timeoutMs, apiKey } = params;
+  const { baseUrl, model, messages, timeoutMs, apiKey, maxTokens, disableReasoning } = params;
   const url = `${baseUrl}/v1/chat/completions`;
-  const body = JSON.stringify({
+  const payload: Record<string, unknown> = {
     model,
     messages,
     stream: true,
     stream_options: { include_usage: true },
-  });
+  };
+  if (typeof maxTokens === "number" && maxTokens > 0) payload.max_tokens = maxTokens;
+  if (disableReasoning) payload.reasoning = { enabled: false };
+  const body = JSON.stringify(payload);
 
   const headers: Record<string, string> = {
     "content-type": "application/json",

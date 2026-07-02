@@ -79,6 +79,19 @@ export interface SupplierConfig {
    * proxies). Required for hosted OpenAI-compatible APIs (DeepSeek, OpenAI, etc.).
    */
   openaiApiKey: string;
+  /**
+   * When true, upstream OpenAI/OpenRouter calls send `reasoning:{enabled:false}`
+   * to disable "thinking" tokens (faster/cheaper straight answers; avoids
+   * reasoning starving the completion into a length-truncated empty answer).
+   * Set via OPENAI_REASONING=off. Default false. OpenRouter-only.
+   */
+  openaiReasoningDisabled: boolean;
+  /**
+   * Optional `max_tokens` ceiling forwarded on upstream calls. 0 = omit (the
+   * provider then grants the max available = context − prompt). Must stay below
+   * the model context or the provider 400s (e.g. kimi context = 262144).
+   */
+  openaiMaxTokens: number;
   /** Empty string when capabilityKind="chat". */
   piperUrl: string;
   advertRef: AdvertRef;
@@ -230,6 +243,31 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
 
   const openaiApiKey = env.OPENAI_API_KEY ?? "";
 
+  // OPENAI_REASONING — "off"/"false"/"0"/"no" disables OpenRouter reasoning
+  // ("thinking") by sending reasoning:{enabled:false} on every upstream call.
+  // Unset/any other value leaves the model's own default untouched (no param
+  // sent). Only valid for OpenRouter-backed suppliers — do NOT set for
+  // ChatMock/DeepSeek-direct, which reject the param.
+  const reasoningRaw = (env.OPENAI_REASONING ?? "").trim().toLowerCase();
+  const openaiReasoningDisabled =
+    reasoningRaw === "off" ||
+    reasoningRaw === "false" ||
+    reasoningRaw === "0" ||
+    reasoningRaw === "no";
+
+  // OPENAI_MAX_TOKENS — optional hard ceiling forwarded as `max_tokens`. Unset
+  // or non-positive omits it (provider grants max available = context − prompt).
+  // Keep it below the model context (kimi 262144) or the provider 400s when
+  // prompt+max_tokens exceeds context.
+  const maxTokStr = env.OPENAI_MAX_TOKENS;
+  let openaiMaxTokens = 0;
+  if (maxTokStr !== undefined && maxTokStr !== "") {
+    if (!POS_INT_RE.test(maxTokStr)) {
+      throw new Error("loadConfig: OPENAI_MAX_TOKENS must be a positive integer");
+    }
+    openaiMaxTokens = Number(maxTokStr);
+  }
+
   // CHAT_IDLE_TIMEOUT_MS — idle auto-end window for chat sessions (default 5 min).
   const chatIdleStr = env.CHAT_IDLE_TIMEOUT_MS;
   let chatIdleTimeoutMs = 300_000;
@@ -270,6 +308,8 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
     ollamaUrl,
     openaiBaseUrl,
     openaiApiKey,
+    openaiReasoningDisabled,
+    openaiMaxTokens,
     piperUrl,
     advertRef,
     networkId,

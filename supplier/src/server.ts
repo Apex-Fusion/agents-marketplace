@@ -856,6 +856,8 @@ function makeChatSessionHandlers(deps: ResolvedDeps) {
             messages: record.transcript,
             timeoutMs: deps.config.openaiTimeoutMs,
             apiKey: deps.config.openaiApiKey,
+            maxTokens: deps.config.openaiMaxTokens,
+            disableReasoning: deps.config.openaiReasoningDisabled,
           },
           (delta) => sse({ type: "token", value: delta }),
         );
