@@ -84,6 +84,27 @@ const OPERATOR_SOURCES: OperatorSource[] = [
     role: "supplier",
   },
   {
+    label: "supplier-kimi-2@vector-marketplace",
+    host: "root@91.98.147.172",
+    envPath: "/root/agents-marketplace/supplier/.env.kimi-2",
+    keyVar: "SUPPLIER_PRIV_KEY_HEX",
+    role: "supplier",
+  },
+  {
+    label: "supplier-kimi-3@vector-marketplace",
+    host: "root@91.98.147.172",
+    envPath: "/root/agents-marketplace/supplier/.env.kimi-3",
+    keyVar: "SUPPLIER_PRIV_KEY_HEX",
+    role: "supplier",
+  },
+  {
+    label: "supplier-kimi-4@vector-marketplace",
+    host: "root@91.98.147.172",
+    envPath: "/root/agents-marketplace/supplier/.env.kimi-4",
+    keyVar: "SUPPLIER_PRIV_KEY_HEX",
+    role: "supplier",
+  },
+  {
     label: "buyer@open-webui",
     host: "open-webui",
     envPath: "/root/marketplace-buyer-mainnet/.env",

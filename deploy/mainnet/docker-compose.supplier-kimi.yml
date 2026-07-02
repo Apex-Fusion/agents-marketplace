@@ -48,8 +48,10 @@ services:
       LLM_BACKEND: openai
       # No /v1 suffix — supplier/src/openai.ts appends /v1/chat/completions.
       OPENAI_BASE_URL: https://openrouter.ai/api
-      # Kimi K2.6 generations can be slow; mirror the DeepSeek/GPT composes.
-      OPENAI_TIMEOUT_MS: "300000"
+      # Raised to match the advert's max_processing_ms=3600000 (60 min) so the
+      # upstream call isn't aborted before the advertised processing deadline
+      # (matches the kimi-2/3/4 replicas).
+      OPENAI_TIMEOUT_MS: "3600000"
       PORT: "8080"
       # Enable LiveOgmiosProvider so submitTx/awaitTx actually broadcast.
       # Without this the supplier silently falls back to ReadOnlyOgmiosProvider
