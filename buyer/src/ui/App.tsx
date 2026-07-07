@@ -37,7 +37,9 @@ export default function App() {
       <div className="min-h-screen bg-gray-50 text-gray-900">
         <nav className="bg-white border-b border-gray-200 px-6 py-3 flex items-center gap-6">
           <Link to="/" className="font-medium hover:underline">Dashboard</Link>
-          <Link to="/book" className="font-medium hover:underline">Book Summarizer</Link>
+          {/* Book Summarizer tab hidden for now — the /book route and all PDF
+              summarize code remain intact; restore by re-adding this link:
+          <Link to="/book" className="font-medium hover:underline">Book Summarizer</Link> */}
           <Link to="/tasks" className="font-medium hover:underline">Tasks</Link>
           <Link to="/pending" className="font-medium hover:underline">Pending</Link>
           <Link to="/wallet" className="font-medium hover:underline">Wallet</Link>
