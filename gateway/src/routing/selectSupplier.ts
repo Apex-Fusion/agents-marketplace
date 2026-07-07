@@ -101,19 +101,27 @@ export async function selectCandidates(opts: SelectSupplierOpts): Promise<Suppli
   return candidates;
 }
 
-/** Distinct models across Active suppliers (for GET /openai/v1/models). */
+/** Distinct models across Active suppliers (for GET /openai/v1/models).
+ * Pass capabilityId to list only models under one capability (demo keys see
+ * only llm.chat.v1 models — the session-backed executor's routing target). */
 export async function listModels(opts: {
   indexerUrl: string;
+  capabilityId?: string;
   fetchFn?: typeof globalThis.fetch;
 }): Promise<string[]> {
   const fetchFn = opts.fetchFn ?? globalThis.fetch;
-  const res = await fetchFn(`${opts.indexerUrl}/suppliers`);
+  const url = opts.capabilityId
+    ? `${opts.indexerUrl}/suppliers?capability_id=${encodeURIComponent(opts.capabilityId)}`
+    : `${opts.indexerUrl}/suppliers`;
+  const res = await fetchFn(url);
   if (!res.ok) throw new Error(`indexer /suppliers returned ${res.status}`);
   const body = (await res.json()) as unknown;
   if (!Array.isArray(body)) throw new Error("indexer /suppliers did not return an array");
   const models = new Set<string>();
   for (const raw of body as SupplierView[]) {
-    if (raw.advert_status === "Active" && typeof raw.model === "string") models.add(raw.model);
+    if (raw.advert_status !== "Active" || typeof raw.model !== "string") continue;
+    if (opts.capabilityId !== undefined && raw.capability_id !== opts.capabilityId) continue;
+    models.add(raw.model);
   }
   return [...models].sort();
 }

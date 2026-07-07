@@ -15,7 +15,7 @@ import { seal } from "../crypto/seal.js";
 import { hashApiKey, requireKey } from "../middleware/apiKeyAuth.js";
 import { asyncHandler } from "../middleware/http.js";
 import { totalLovelace, hasCollateral } from "../onchain/preflight.js";
-import { badRequest } from "../openai/errors.js";
+import { badRequest, forbidden } from "../openai/errors.js";
 
 const ACTIVE_ESCROW_STATES = new Set(["Open", "Claimed", "Submitted"]);
 
@@ -89,7 +89,10 @@ export function makeAccountHandler(deps: GatewayDeps) {
 
     res.status(200).json({
       key_prefix: keyRow.key_prefix,
-      deposit_address: keyRow.deposit_address,
+      // The shared demo key's wallet is operator-funded; hiding the deposit
+      // address keeps strangers from confusing it with their own wallet.
+      deposit_address: keyRow.demo ? null : keyRow.deposit_address,
+      ...(keyRow.demo ? { demo: true } : {}),
       balance: {
         available_lovelace: available.toString(),
         locked_in_escrow_lovelace: lockedInEscrow.toString(),
@@ -118,6 +121,11 @@ export function makeAccountHandler(deps: GatewayDeps) {
 export function makeWithdrawHandler(deps: GatewayDeps) {
   return asyncHandler(async (req: Request, res: Response) => {
     const keyRow = requireKey(req);
+    if (keyRow.demo) {
+      // The demo key is shared publicly; without this, anyone holding it
+      // could drain the operator-funded wallet to their own address.
+      throw forbidden("demo_key_restricted", "withdrawals are disabled for the shared demo key");
+    }
     const body = (req.body ?? {}) as Record<string, unknown>;
 
     const toAddress = body.to_address;

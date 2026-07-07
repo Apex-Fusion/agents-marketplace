@@ -7,7 +7,8 @@
     "typecheck": "tsc --noEmit",
     "start": "tsx src/index.ts",
     "dev": "tsx src/index.ts",
-    "rotate-master-key": "tsx src/cli/rotate-master-key.ts"
+    "rotate-master-key": "tsx src/cli/rotate-master-key.ts",
+    "create-demo-key": "tsx src/cli/create-demo-key.ts"
   },
   "dependencies": {
     "@marketplace/buyer": "workspace:*",

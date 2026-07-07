@@ -24,6 +24,8 @@ export interface ApiKeyRow {
   master_key_version: number;
   created_at: number;
   disabled: number;
+  /** 1 = shared demo key: withdraw blocked, session-backed completions, per-IP limits. */
+  demo: number;
 }
 
 export interface UsageRow {
@@ -81,13 +83,20 @@ export class GatewayStore {
     this.db.pragma("journal_mode = WAL");
     this.db.exec(CREATE_TABLES_SQL);
 
+    // Additive migration for DBs created before the demo flag existed
+    // (CREATE TABLE IF NOT EXISTS won't alter an existing table).
+    const keyCols = this.db.pragma("table_info(api_keys)") as Array<{ name: string }>;
+    if (!keyCols.some((c) => c.name === "demo")) {
+      this.db.exec("ALTER TABLE api_keys ADD COLUMN demo INTEGER NOT NULL DEFAULT 0");
+    }
+
     this.sInsertKey = this.db.prepare(`
       INSERT INTO api_keys (
         id, key_hash, key_prefix, label, wallet_pkh, deposit_address,
-        enc_priv_nonce, enc_priv_ct, enc_priv_tag, master_key_version, created_at, disabled
+        enc_priv_nonce, enc_priv_ct, enc_priv_tag, master_key_version, created_at, disabled, demo
       ) VALUES (
         @id, @key_hash, @key_prefix, @label, @wallet_pkh, @deposit_address,
-        @enc_priv_nonce, @enc_priv_ct, @enc_priv_tag, @master_key_version, @created_at, 0
+        @enc_priv_nonce, @enc_priv_ct, @enc_priv_tag, @master_key_version, @created_at, 0, @demo
       )
     `);
     this.sGetKeyByHash = this.db.prepare(`SELECT * FROM api_keys WHERE key_hash = @key_hash`);
@@ -133,8 +142,8 @@ export class GatewayStore {
     this.sListOpenSessions = this.db.prepare(`SELECT * FROM sessions WHERE state = 'open'`);
   }
 
-  insertKey(row: Omit<ApiKeyRow, "disabled">): void {
-    this.sInsertKey.run({ ...row, label: row.label ?? null });
+  insertKey(row: Omit<ApiKeyRow, "disabled" | "demo"> & { demo?: number }): void {
+    this.sInsertKey.run({ ...row, label: row.label ?? null, demo: row.demo ?? 0 });
   }
 
   getKeyByHash(keyHash: string): ApiKeyRow | undefined {
@@ -192,5 +201,9 @@ export class GatewayStore {
 
   listOpenSessions(): SessionRow[] {
     return this.sListOpenSessions.all() as SessionRow[];
+  }
+
+  listOpenSessionsByKey(keyId: string): SessionRow[] {
+    return this.listOpenSessions().filter((s) => s.key_id === keyId);
   }
 }

@@ -1,0 +1,76 @@
+# deploy/mainnet/docker-compose.supplier-kimi-chat-3.yml — Supplier — MAINNET
+#   (OpenRouter / Kimi K2.6 — MULTI-TURN CHAT capability `llm.chat.v1`, REPLICA 3)
+#
+# Third llm.chat.v1 replica: a chat session holds a supplier's single slot for
+# the whole conversation, so concurrent chat users = number of chat suppliers.
+# Deployed for the shared-demo-key endpoint (session-backed /chat/completions).
+# Identical to docker-compose.supplier-kimi-chat.yml except for its own wallet,
+# advert, env file and hostname.
+#
+# Pre-flight:
+#   1. DNS A-record: mp-suppliers-kimi-chat-3.vector.apexfusion.org → host IP
+#   2. New supplier wallet (gen-keypair), funded with advert bond + fee float.
+#   3. Post a fresh llm.chat.v1 advert for this wallet:
+#        --capability-id llm.chat.v1 --model moonshotai/kimi-k2.6
+#        --max-processing-ms 1800000  (same price as the primary chat advert)
+#   4. supplier/.env.kimi-chat-3 written on host (chmod 600) with at minimum:
+#        SUPPLIER_PRIV_KEY_HEX, OPENAI_API_KEY, OGMIOS_URL, NETWORK_ID=1,
+#        VECTOR_ZERO_TIME_MS, ESCROW_REF_UTXO, ADVERT_REF_UTXO, ADVERT_REF,
+#        LIVE_CHAIN=1
+
+name: marketplace-mainnet-supplier-kimi-chat-3
+
+services:
+  supplier:
+    build:
+      context: ../..
+      dockerfile: supplier/Dockerfile
+    container_name: marketplace-mainnet-supplier-kimi-chat-3
+    restart: unless-stopped
+    env_file:
+      - path: ../../supplier/.env.kimi-chat-3
+        required: false
+    environment:
+      # Multi-turn chat session capability (mounts /v1/chat/{start,message,end}).
+      CAPABILITY_KIND: chat-session
+      LLM_BACKEND: openai
+      # No /v1 suffix — supplier/src/openai.ts appends /v1/chat/completions.
+      OPENAI_BASE_URL: https://openrouter.ai/api
+      # Kimi K2.6 generations can be slow; mirror the one-off Kimi compose.
+      OPENAI_TIMEOUT_MS: "300000"
+      # 2.5 min idle end: single-slot suppliers must free up quickly for the
+      # shared demo endpoint (the gateway transparently reopens on next turn).
+      CHAT_IDLE_TIMEOUT_MS: "150000"
+      PORT: "8080"
+      # Enable LiveOgmiosProvider so Claim/Submit actually broadcast.
+      LIVE_CHAIN: "1"
+      # NETWORK_ID and OGMIOS_URL intentionally not pinned here — they MUST
+      # come from the operator-provided supplier/.env.kimi-chat-3 on a mainnet host.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz >/dev/null || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - marketplace-mainnet-net
+      - traefik-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-net"
+      - "traefik.http.routers.mp-suppliers-kimi-chat-3-mainnet.entrypoints=web"
+      - "traefik.http.routers.mp-suppliers-kimi-chat-3-mainnet.rule=Host(`mp-suppliers-kimi-chat-3.vector.apexfusion.org`)"
+      - "traefik.http.services.mp-suppliers-kimi-chat-3-mainnet.loadbalancer.server.port=8080"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  marketplace-mainnet-net:
+    external: true
+    name: marketplace-mainnet-net
+  traefik-net:
+    external: true
+    name: traefik-net

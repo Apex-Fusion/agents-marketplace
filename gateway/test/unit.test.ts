@@ -84,6 +84,10 @@ describe("routing/selectSupplier", () => {
     expect(await listModels({ indexerUrl: "http://ix", fetchFn: jsonResponse(rows) })).toEqual(["m", "other"]);
   });
 
+  it("lists only one capability's models when capabilityId is given", async () => {
+    expect(await listModels({ indexerUrl: "http://ix", capabilityId: "llm.chat.v1", fetchFn: jsonResponse(rows) })).toEqual(["m"]);
+  });
+
   it("parseRef", () => {
     expect(parseRef("aa".repeat(32) + "#3")).toEqual({ txHash: "aa".repeat(32), index: 3 });
     expect(parseRef("nope")).toBeNull();
@@ -104,6 +108,37 @@ describe("openai/validate", () => {
     expect(() => parseChatRequest({ model: "m", messages: [] })).toThrow();
     expect(() => parseChatRequest({ messages: [{ role: "user", content: "x" }] })).toThrow();
   });
+
+  const TOOL_CALL = { id: "call_1", type: "function", function: { name: "get_time", arguments: "{}" } };
+
+  it("allowTools accepts tools, tool role, null content and assistant tool_calls", () => {
+    const p = parseChatRequest(
+      {
+        model: "m",
+        messages: [
+          { role: "user", content: "hi" },
+          { role: "assistant", content: null, tool_calls: [TOOL_CALL] },
+          { role: "tool", content: "3pm", tool_call_id: "call_1" },
+        ],
+        tools: [{ type: "function", function: { name: "get_time", parameters: {} } }],
+        tool_choice: "auto",
+      },
+      { allowTools: true },
+    );
+    expect(p.tools).toHaveLength(1);
+    expect(p.toolChoice).toBe("auto");
+    expect(p.messages[1]).toEqual({ role: "assistant", content: "", tool_calls: [TOOL_CALL] });
+    expect(p.messages[2]).toEqual({ role: "tool", content: "3pm", tool_call_id: "call_1" });
+  });
+
+  it("allowTools still rejects legacy functions and the default path still rejects tool role", () => {
+    expect(() =>
+      parseChatRequest({ model: "m", messages: [{ role: "user", content: "x" }], functions: [] }, { allowTools: true }),
+    ).toThrow(GatewayError);
+    expect(() =>
+      parseChatRequest({ model: "m", messages: [{ role: "tool", content: "x", tool_call_id: "c" }] }),
+    ).toThrow(GatewayError);
+  });
 });
 
 describe("openai/shapes", () => {
@@ -120,6 +155,24 @@ describe("openai/shapes", () => {
     const ch = buildChunk({ id: "id", model: "m", delta: { content: "tok" }, finishReason: null });
     expect(ch.object).toBe("chat.completion.chunk");
     expect((ch.choices as any)[0].delta.content).toBe("tok");
+  });
+  it("tool_calls chunk + finish_reason tool_calls", () => {
+    const tc = { index: 0, id: "call_1", type: "function" as const, function: { name: "f", arguments: "{}" } };
+    const ch = buildChunk({ id: "id", model: "m", delta: { tool_calls: [tc] }, finishReason: "tool_calls" });
+    expect((ch.choices as any)[0].delta.tool_calls).toEqual([tc]);
+    expect((ch.choices as any)[0].finish_reason).toBe("tool_calls");
+  });
+  it("completion with tool_calls and finish_reason", () => {
+    const cc = buildChatCompletion({
+      id: "id",
+      model: "m",
+      content: "",
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      toolCalls: [{ id: "call_1", type: "function", function: { name: "f", arguments: "{}" } }],
+      finishReason: "tool_calls",
+    });
+    expect((cc.choices as any)[0].message.tool_calls).toHaveLength(1);
+    expect((cc.choices as any)[0].finish_reason).toBe("tool_calls");
   });
   it("renderMessages folds roles", () => {
     expect(renderMessages([{ role: "system", content: "be nice" }, { role: "user", content: "hi" }])).toBe("System: be nice\n\nUser: hi");

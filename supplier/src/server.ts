@@ -37,8 +37,14 @@ import { createHash } from "crypto";
 import type { ChainProvider, OutputReference } from "@marketplace/shared/chain";
 import { decodeAdvertDatum, decodeEscrowDatum, canonicalize } from "@marketplace/shared/cbor";
 import type { AdvertDatum, EscrowDatum } from "@marketplace/shared/cbor";
-import type { WalletKey } from "@marketplace/shared/tx";
-import { buildClaimTx, chatSessionPromptHash, mockSlotToWallclockMs, detectCborBackend } from "@marketplace/shared/tx";
+import type { ChatMessage, WalletKey } from "@marketplace/shared/tx";
+import {
+  buildClaimTx,
+  chatSessionPromptHash,
+  mockSlotToWallclockMs,
+  detectCborBackend,
+  normalizeChatMessage,
+} from "@marketplace/shared/tx";
 
 import type { SupplierState } from "./state.js";
 import type { SupplierConfig } from "./config.js";
@@ -825,16 +831,46 @@ function makeChatSessionHandlers(deps: ResolvedDeps) {
         return jsonError(res, 404, "chat_session_not_found",
           `no active chat session for ${escrowRefStr}`);
       }
-      const body = (req.body ?? {}) as { content?: unknown };
-      const content = typeof body.content === "string" ? body.content : "";
-      if (content.length === 0) {
-        return jsonError(res, 400, "content_required", "body.content must be a non-empty string");
+      // Two body shapes: legacy {content} (single user turn) and
+      // {messages, tools?, tool_choice?} (multi-message delta — e.g. tool
+      // results — appended to the transcript as one turn).
+      const body = (req.body ?? {}) as {
+        content?: unknown;
+        messages?: unknown;
+        tools?: unknown;
+        tool_choice?: unknown;
+      };
+      let delta: ChatMessage[];
+      if (Array.isArray(body.messages)) {
+        const normalized: ChatMessage[] = [];
+        for (const raw of body.messages) {
+          const msg = normalizeChatMessage(raw);
+          if (!msg) {
+            return jsonError(res, 400, "invalid_messages",
+              "body.messages must be OpenAI-shaped {role, content, tool_calls?, tool_call_id?} objects");
+          }
+          normalized.push(msg);
+        }
+        const last = normalized[normalized.length - 1];
+        if (!last || (last.role !== "user" && last.role !== "tool")) {
+          return jsonError(res, 400, "invalid_messages",
+            "body.messages must end with a user or tool message");
+        }
+        delta = normalized;
+      } else {
+        const content = typeof body.content === "string" ? body.content : "";
+        if (content.length === 0) {
+          return jsonError(res, 400, "content_required", "body.content must be a non-empty string");
+        }
+        delta = [{ role: "user", content }];
       }
+      const tools = Array.isArray(body.tools) && body.tools.length > 0 ? body.tools : undefined;
+      const toolChoice = tools !== undefined ? body.tool_choice : undefined;
 
       // Pause the idle timer while a turn is in flight; re-arm when it ends so
       // a long generation never trips the auto-end mid-stream.
       if (record.idleTimer) { clearTimeout(record.idleTimer); record.idleTimer = undefined; }
-      deps.chatSessions.appendUser(escrowRefStr, content);
+      deps.chatSessions.appendMessages(escrowRefStr, delta);
 
       res.status(200);
       res.setHeader("Content-Type", "text/event-stream");
@@ -858,14 +894,30 @@ function makeChatSessionHandlers(deps: ResolvedDeps) {
             apiKey: deps.config.openaiApiKey,
             maxTokens: deps.config.openaiMaxTokens,
             disableReasoning: deps.config.openaiReasoningDisabled,
+            tools,
+            toolChoice,
           },
-          (delta) => sse({ type: "token", value: delta }),
+          (tok) => sse({ type: "token", value: tok }),
         );
-        deps.chatSessions.appendAssistant(escrowRefStr, result.content, {
+        // Build the assistant message once and send it VERBATIM in the done
+        // frame: the gateway mirrors this object so both transcripts stay
+        // hash-identical for the receipt (field presence matters).
+        const assistantMsg: ChatMessage = { role: "assistant", content: result.content };
+        if (result.tool_calls && result.tool_calls.length > 0) assistantMsg.tool_calls = result.tool_calls;
+        deps.chatSessions.appendAssistant(escrowRefStr, assistantMsg, {
           prompt_tokens: result.prompt_tokens,
           completion_tokens: result.completion_tokens,
         });
-        sse({ type: "done" });
+        const finishReason =
+          result.finish_reason === "tool_calls" || (result.tool_calls?.length ?? 0) > 0
+            ? "tool_calls"
+            : "stop";
+        sse({
+          type: "done",
+          message: assistantMsg,
+          finish_reason: finishReason,
+          usage: { prompt_tokens: result.prompt_tokens, completion_tokens: result.completion_tokens },
+        });
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err);
         sse({ type: "error", message: errMsg });

@@ -15,8 +15,9 @@
 
 import { randomUUID } from "crypto";
 import type { Request, Response } from "express";
-import { TxConstructionError, type ChatMessage } from "@marketplace/shared/tx";
+import { TxConstructionError, normalizeChatMessage, type ChatMessage } from "@marketplace/shared/tx";
 import { SupplierError } from "@marketplace/buyer/sdk";
+import { transcripts, getSessionLock, dropSessionState } from "./transcripts.js";
 import type { GatewayDeps } from "../deps.js";
 import type { ApiKeyRow, GatewayStore, SessionRow } from "../db/store.js";
 import type { KeyContext } from "../sdk/registry.js";
@@ -36,10 +37,15 @@ import {
   type Usage,
 } from "./shapes.js";
 
-const CAPABILITY = "llm.chat.v1";
+export const CAPABILITY = "llm.chat.v1";
 
-/** In-memory per-session transcript mirror (sessionId → messages). */
-const transcripts = new Map<string, ChatMessage[]>();
+/** Thrown when the supplier no longer knows the session (idle-closed/restart). */
+export class SessionGoneError extends Error {
+  constructor(sessionId: string) {
+    super(`supplier no longer has session ${sessionId}`);
+    this.name = "SessionGoneError";
+  }
+}
 
 function refStr(ref: { txHash: string; index: number }): string {
   return `${ref.txHash}#${ref.index}`;
@@ -56,17 +62,22 @@ export function makeOpenSessionHandler(deps: GatewayDeps) {
       throw badRequest("invalid_model", "`model` is required");
     }
     const ctx = deps.registry.getContext(keyRow);
-    await ctx.mutex.run(() => openSession(deps, keyRow, ctx, model, res));
+    const session = await ctx.mutex.run(() => openSessionCore(deps, keyRow, ctx, model));
+    res.status(200).json({ id: session.id, object: "chat.session", model, created: nowSec() });
   });
 }
 
-async function openSession(
+/**
+ * Select a supplier, preflight the wallet, post+claim the session escrow and
+ * persist the SessionRow. Chain work — the CALLER must hold the key mutex
+ * (concurrent PostEscrow from one wallet double-spends the same UTxO).
+ */
+export async function openSessionCore(
   deps: GatewayDeps,
   keyRow: ApiKeyRow,
   ctx: KeyContext,
   model: string,
-  res: Response,
-): Promise<void> {
+): Promise<SessionRow> {
   const candidates = await selectCandidates({
     indexerUrl: deps.config.indexerUrl,
     model,
@@ -127,7 +138,9 @@ async function openSession(
   });
   transcripts.set(sessionId, []);
 
-  res.status(200).json({ id: sessionId, object: "chat.session", model, created: nowSec() });
+  const session = deps.store.getSession(sessionId);
+  if (!session) throw new Error(`session ${sessionId} vanished after insert`);
+  return session;
 }
 
 // ─── messages (one streamed turn) ────────────────────────────────────────────
@@ -144,8 +157,12 @@ export function makeSessionMessageHandler(deps: GatewayDeps) {
     const content = resolveTurnContent(session.id, body);
     if (content === "") throw badRequest("content_required", "no user content in this turn");
 
-    const ctx = deps.registry.getContext(keyRow);
-    await ctx.mutex.run(() => streamTurn(deps, session, content, stream, res));
+    // Turns are chain-free (one HTTP POST to the supplier + SSE relay), so the
+    // per-key mutex — which exists to serialize wallet UTxO spends — is NOT
+    // held here. What needs serialization is this session's transcript:
+    // concurrent turns would interleave supplier appends and corrupt both the
+    // mirror and the receipt hash. Hence a per-session lock.
+    await getSessionLock(session.id).run(() => streamTurn(deps, session, content, stream, res));
   });
 }
 
@@ -176,6 +193,88 @@ function foldSystem(sessionId: string, content: string, body: Record<string, unk
   return content;
 }
 
+/** One turn's payload to the supplier: legacy single user string, or a
+ * multi-message delta (e.g. tool results) with optional tools passthrough. */
+export type TurnPayload =
+  | { content: string }
+  | { messages: ChatMessage[]; tools?: unknown[]; tool_choice?: unknown };
+
+export interface TurnResult {
+  assistantMessage: ChatMessage;
+  finishReason: "stop" | "tool_calls";
+  usage: { prompt_tokens: number; completion_tokens: number };
+}
+
+/**
+ * Drive one off-chain turn against the session's supplier and mirror the
+ * result into the session transcript. Caller must hold the session lock.
+ * Throws SessionGoneError when the supplier no longer knows the session
+ * (idle-closed or restarted) so callers can transparently reopen.
+ */
+export async function streamSupplierTurn(
+  deps: GatewayDeps,
+  session: SessionRow,
+  payload: TurnPayload,
+  onToken?: (token: string) => void,
+): Promise<TurnResult> {
+  const upstream = await deps.fetchFn(`${session.supplier_base_url.replace(/\/+$/, "")}/v1/chat/message`, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "text/event-stream", "X-Escrow-Ref": session.escrow_ref },
+    body: JSON.stringify(payload),
+  });
+  if (upstream.status === 404) {
+    await upstream.text().catch(() => "");
+    throw new SessionGoneError(session.id);
+  }
+  if (!upstream.ok || !upstream.body) {
+    const detail = await upstream.text().catch(() => "");
+    throw toGatewayError(new SupplierError("supplier_http_error", { status: upstream.status, message: detail.slice(0, 200) }));
+  }
+
+  let assistant = "";
+  let errored: string | undefined;
+  let doneMessage: ChatMessage | null = null;
+  let doneFinish: string | undefined;
+  let usage = { prompt_tokens: 0, completion_tokens: 0 };
+  await readSupplierSse(upstream.body as ReadableStream<Uint8Array>, (frame) => {
+    if (frame.type === "token" && typeof frame.value === "string") {
+      assistant += frame.value;
+      onToken?.(frame.value);
+    } else if (frame.type === "done") {
+      // Upgraded suppliers echo the final assistant message verbatim; mirror
+      // that exact object so both transcripts stay hash-identical.
+      doneMessage = normalizeChatMessage(frame.message);
+      if (typeof frame.finish_reason === "string") doneFinish = frame.finish_reason;
+      if (frame.usage && typeof frame.usage === "object") {
+        const u = frame.usage as Record<string, unknown>;
+        usage = {
+          prompt_tokens: typeof u.prompt_tokens === "number" ? u.prompt_tokens : 0,
+          completion_tokens: typeof u.completion_tokens === "number" ? u.completion_tokens : 0,
+        };
+      }
+    } else if (frame.type === "error") {
+      errored = typeof frame.message === "string" ? frame.message : "supplier stream error";
+    }
+  });
+
+  if (errored !== undefined) {
+    throw toGatewayError(new SupplierError("upstream_error", { message: errored }));
+  }
+
+  const assistantMessage: ChatMessage = doneMessage ?? { role: "assistant", content: assistant };
+  const finishReason: TurnResult["finishReason"] =
+    doneFinish === "tool_calls" || (assistantMessage.tool_calls?.length ?? 0) > 0 ? "tool_calls" : "stop";
+
+  // Mirror the turn for endChat's response_hash verification / affinity matching.
+  const mirror = transcripts.get(session.id) ?? [];
+  if ("content" in payload) mirror.push({ role: "user", content: payload.content });
+  else mirror.push(...payload.messages);
+  mirror.push(assistantMessage);
+  transcripts.set(session.id, mirror);
+
+  return { assistantMessage, finishReason, usage };
+}
+
 async function streamTurn(
   deps: GatewayDeps,
   session: SessionRow,
@@ -184,15 +283,6 @@ async function streamTurn(
   res: Response,
 ): Promise<void> {
   const id = genId();
-  const upstream = await deps.fetchFn(`${session.supplier_base_url.replace(/\/+$/, "")}/v1/chat/message`, {
-    method: "POST",
-    headers: { "content-type": "application/json", accept: "text/event-stream", "X-Escrow-Ref": session.escrow_ref },
-    body: JSON.stringify({ content }),
-  });
-  if (!upstream.ok || !upstream.body) {
-    const detail = await upstream.text().catch(() => "");
-    throw toGatewayError(new SupplierError("supplier_http_error", { status: upstream.status, message: detail.slice(0, 200) }));
-  }
 
   if (stream) {
     res.status(200);
@@ -203,46 +293,43 @@ async function streamTurn(
     res.write(sseData(buildChunk({ id, model: session.model, delta: { role: "assistant" }, finishReason: null })));
   }
 
-  let assistant = "";
-  let errored: string | undefined;
-  await readSupplierSse(upstream.body as ReadableStream<Uint8Array>, (frame) => {
-    if (frame.type === "token" && typeof frame.value === "string") {
-      assistant += frame.value;
-      if (stream) res.write(sseData(buildChunk({ id, model: session.model, delta: { content: frame.value }, finishReason: null })));
-    } else if (frame.type === "error") {
-      errored = typeof frame.message === "string" ? frame.message : "supplier stream error";
+  let result: TurnResult;
+  try {
+    result = await streamSupplierTurn(deps, session, { content }, (token) => {
+      if (stream) res.write(sseData(buildChunk({ id, model: session.model, delta: { content: token }, finishReason: null })));
+    });
+  } catch (err) {
+    if (err instanceof SessionGoneError) {
+      err = toGatewayError(new SupplierError("supplier_http_error", { status: 404, message: err.message }));
     }
-  });
-
-  if (errored !== undefined) {
     if (stream) {
-      res.write(sseData(toErrorBody(toGatewayError(new SupplierError("upstream_error", { message: errored })))));
+      res.write(sseData(toErrorBody(toGatewayError(err))));
       res.end();
       return;
     }
-    throw toGatewayError(new SupplierError("upstream_error", { message: errored }));
+    throw toGatewayError(err);
   }
 
-  // Mirror the transcript for endChat's response_hash verification.
-  const mirror = transcripts.get(session.id) ?? [];
-  mirror.push({ role: "user", content });
-  mirror.push({ role: "assistant", content: assistant });
-  transcripts.set(session.id, mirror);
-
   if (stream) {
-    res.write(sseData(buildChunk({ id, model: session.model, delta: {}, finishReason: "stop" })));
+    res.write(sseData(buildChunk({ id, model: session.model, delta: {}, finishReason: result.finishReason })));
     res.write(SSE_DONE);
     res.end();
   } else {
-    const usage: Usage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
-    res.status(200).json(buildChatCompletion({ id, model: session.model, content: assistant, usage }));
+    const usage: Usage = {
+      prompt_tokens: result.usage.prompt_tokens,
+      completion_tokens: result.usage.completion_tokens,
+      total_tokens: result.usage.prompt_tokens + result.usage.completion_tokens,
+    };
+    res.status(200).json(buildChatCompletion({ id, model: session.model, content: result.assistantMessage.content, usage }));
   }
 }
 
 interface SupplierFrame {
   type?: string;
   value?: string;
-  message?: string;
+  message?: unknown;
+  finish_reason?: unknown;
+  usage?: unknown;
 }
 
 /** Read a supplier SSE stream of {type:token|done|error} frames. */
@@ -308,7 +395,7 @@ async function closeSession(
   });
 
   deps.store.setSessionState(session.id, "closed", Date.now());
-  transcripts.delete(session.id);
+  dropSessionState(session.id);
 
   const prompt = result.receipt.prompt_tokens ?? 0;
   const completion = result.receipt.completion_tokens ?? 0;

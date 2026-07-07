@@ -92,14 +92,22 @@ export class ChatSessionStore {
     r.lastActivityMs = Date.now();
   }
 
+  /** Append a whole turn delta (e.g. user msg, or tool results) verbatim. */
+  appendMessages(escrowRef: string, messages: ChatMessage[]): void {
+    const r = this.records.get(escrowRef);
+    if (!r) return;
+    r.transcript.push(...messages);
+    r.lastActivityMs = Date.now();
+  }
+
   appendAssistant(
     escrowRef: string,
-    content: string,
+    message: ChatMessage,
     usage: { prompt_tokens: number; completion_tokens: number },
   ): void {
     const r = this.records.get(escrowRef);
     if (!r) return;
-    r.transcript.push({ role: "assistant", content });
+    r.transcript.push(message);
     r.promptTokens += usage.prompt_tokens;
     r.completionTokens += usage.completion_tokens;
     r.lastActivityMs = Date.now();

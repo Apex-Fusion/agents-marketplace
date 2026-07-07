@@ -26,13 +26,20 @@
  *   - Empty-string content is treated as malformed (matches ollama.ts).
  */
 
-import type { ChatMessage } from "@marketplace/shared/tx";
+import type { ChatMessage, ToolCall } from "@marketplace/shared/tx";
 
 export interface CallOpenAiParams {
   baseUrl: string;
   model: string;
   messages: ChatMessage[];
   timeoutMs: number;
+  /**
+   * OpenAI-compatible `tools` / `tool_choice` passthrough (chat-session
+   * capability only). Forwarded verbatim when present; the upstream provider
+   * validates the schema.
+   */
+  tools?: unknown[];
+  toolChoice?: unknown;
   /**
    * Optional bearer token. When non-empty, an `authorization: Bearer <apiKey>`
    * header is sent. Omit (or pass "") for endpoints that don't require auth,
@@ -60,6 +67,10 @@ export interface OpenAiResult {
   prompt_tokens: number;
   completion_tokens: number;
   wallclock_ms: number;
+  /** Present when the model requested tool calls (streaming path only). */
+  tool_calls?: ToolCall[];
+  /** Upstream finish_reason when reported (e.g. "stop", "tool_calls"). */
+  finish_reason?: string;
 }
 
 export type OpenAiErrorReason = "openai_failure" | "openai_timeout" | "openai_malformed";
@@ -204,7 +215,7 @@ export async function callOpenAiStream(
   params: CallOpenAiParams,
   onToken: (delta: string) => void,
 ): Promise<OpenAiResult> {
-  const { baseUrl, model, messages, timeoutMs, apiKey, maxTokens, disableReasoning } = params;
+  const { baseUrl, model, messages, timeoutMs, apiKey, maxTokens, disableReasoning, tools, toolChoice } = params;
   const url = `${baseUrl}/v1/chat/completions`;
   const payload: Record<string, unknown> = {
     model,
@@ -214,6 +225,10 @@ export async function callOpenAiStream(
   };
   if (typeof maxTokens === "number" && maxTokens > 0) payload.max_tokens = maxTokens;
   if (disableReasoning) payload.reasoning = { enabled: false };
+  if (Array.isArray(tools) && tools.length > 0) {
+    payload.tools = tools;
+    if (toolChoice !== undefined) payload.tool_choice = toolChoice;
+  }
   const body = JSON.stringify(payload);
 
   const headers: Record<string, string> = {
@@ -268,7 +283,28 @@ export async function callOpenAiStream(
   let accumulated = "";
   let promptTokens = 0;
   let completionTokens = 0;
+  let finishReason: string | undefined;
   let buffer = "";
+  // delta.tool_calls arrives as indexed fragments (id/name once, arguments in
+  // pieces) — accumulate per index, emit complete calls after the stream ends.
+  const toolCallParts = new Map<number, { id: string; name: string; arguments: string }>();
+
+  const handleToolCallDeltas = (raw: unknown): void => {
+    if (!Array.isArray(raw)) return;
+    for (const item of raw) {
+      if (!item || typeof item !== "object") continue;
+      const frag = item as Record<string, unknown>;
+      const index = typeof frag.index === "number" ? frag.index : 0;
+      const part = toolCallParts.get(index) ?? { id: "", name: "", arguments: "" };
+      if (typeof frag.id === "string" && frag.id.length > 0) part.id = frag.id;
+      const fn = frag.function as Record<string, unknown> | undefined;
+      if (fn && typeof fn === "object") {
+        if (typeof fn.name === "string" && fn.name.length > 0) part.name = fn.name;
+        if (typeof fn.arguments === "string") part.arguments += fn.arguments;
+      }
+      toolCallParts.set(index, part);
+    }
+  };
 
   const handleData = (payload: string): void => {
     const trimmed = payload.trim();
@@ -284,14 +320,15 @@ export async function callOpenAiStream(
     const obj = parsed as Record<string, unknown>;
     const choices = obj.choices;
     if (Array.isArray(choices) && choices.length > 0) {
-      const delta = (choices[0] as Record<string, unknown>)?.delta as
-        | Record<string, unknown>
-        | undefined;
+      const choice = choices[0] as Record<string, unknown>;
+      const delta = choice?.delta as Record<string, unknown> | undefined;
       const content = delta?.content;
       if (typeof content === "string" && content.length > 0) {
         accumulated += content;
         onToken(content);
       }
+      handleToolCallDeltas(delta?.tool_calls);
+      if (typeof choice?.finish_reason === "string") finishReason = choice.finish_reason;
     }
     const usageRaw = obj.usage;
     if (usageRaw && typeof usageRaw === "object") {
@@ -336,14 +373,24 @@ export async function callOpenAiStream(
     clearTimeout(timer);
   }
 
-  if (accumulated.length === 0) {
+  const toolCalls: ToolCall[] = [...toolCallParts.entries()]
+    .sort(([a], [b]) => a - b)
+    .filter(([, p]) => p.id.length > 0 && p.name.length > 0)
+    .map(([, p]) => ({ id: p.id, type: "function" as const, function: { name: p.name, arguments: p.arguments } }));
+
+  // A pure tool-call turn legitimately has no content; only an empty stream
+  // with neither content nor tool calls is malformed.
+  if (accumulated.length === 0 && toolCalls.length === 0) {
     throw new OpenAiError("openai_malformed", "OpenAI stream produced no content");
   }
 
-  return {
+  const result: OpenAiResult = {
     content: accumulated,
     prompt_tokens: promptTokens,
     completion_tokens: completionTokens,
     wallclock_ms: Date.now() - startedAt,
   };
+  if (toolCalls.length > 0) result.tool_calls = toolCalls;
+  if (finishReason !== undefined) result.finish_reason = finishReason;
+  return result;
 }

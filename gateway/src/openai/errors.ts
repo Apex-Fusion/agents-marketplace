@@ -36,6 +36,8 @@ export const unauthorized = (message = "invalid API key"): GatewayError =>
   new GatewayError(401, "authentication_error", "invalid_api_key", message);
 export const paymentRequired = (message: string, extra?: Record<string, unknown>): GatewayError =>
   new GatewayError(402, "invalid_request_error", "insufficient_funds", message, extra);
+export const forbidden = (code: string, message: string): GatewayError =>
+  new GatewayError(403, "invalid_request_error", code, message);
 export const notFound = (code: string, message: string): GatewayError =>
   new GatewayError(404, "invalid_request_error", code, message);
 export const rateLimited = (message: string): GatewayError =>

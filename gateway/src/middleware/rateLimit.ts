@@ -60,7 +60,28 @@ export function ipRateLimit(opts: { max: number; windowMs: number }) {
   return makeLimiter(opts, (req) => req.ip ?? "unknown");
 }
 
-/** Per-API-key limiter (apply AFTER apiKeyAuth). */
+/** Per-API-key limiter (apply AFTER apiKeyAuth). Demo keys are exempt: the
+ * shared demo key would let one abusive IP exhaust everyone's budget — the
+ * per-IP demoIpRateLimit is the demo control instead. */
 export function keyRateLimit(opts: { max: number; windowMs: number }) {
-  return makeLimiter(opts, (req) => requireKey(req).id);
+  const limit = makeLimiter(opts, (req) => requireKey(req).id);
+  return (req: Request, res: Response, next: NextFunction): void => {
+    if (requireKey(req).demo) {
+      next();
+      return;
+    }
+    limit(req, res, next);
+  };
+}
+
+/** Per-IP limiter that applies ONLY to demo-key requests (after apiKeyAuth). */
+export function demoIpRateLimit(opts: { max: number; windowMs: number }) {
+  const limit = makeLimiter(opts, (req) => req.ip ?? "unknown");
+  return (req: Request, res: Response, next: NextFunction): void => {
+    if (!requireKey(req).demo) {
+      next();
+      return;
+    }
+    limit(req, res, next);
+  };
 }

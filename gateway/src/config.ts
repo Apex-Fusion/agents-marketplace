@@ -39,6 +39,7 @@ export interface GatewayConfig {
   dbDir: string;
   signupRate: { max: number; windowMs: number };
   keyRate: { max: number; windowMs: number };
+  demoIpRate: { max: number; windowMs: number };
   sweeperIntervalMs: number;
   walletHealthIntervalMs: number;
   sdkRegistryMax: number;
@@ -110,6 +111,10 @@ export function loadConfig(env: Record<string, string | undefined>): GatewayConf
     keyRate: {
       max: posInt(env, "KEY_RATE_MAX", 60),
       windowMs: posInt(env, "KEY_RATE_WINDOW_MS", 60 * 1000),
+    },
+    demoIpRate: {
+      max: posInt(env, "DEMO_IP_RATE_MAX", 20),
+      windowMs: posInt(env, "DEMO_IP_RATE_WINDOW_MS", 60 * 1000),
     },
     sweeperIntervalMs: posInt(env, "SWEEPER_INTERVAL_MS", 60 * 1000),
     walletHealthIntervalMs: posInt(env, "WALLET_HEALTH_INTERVAL_MS", 10 * 60 * 1000),

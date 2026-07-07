@@ -23,7 +23,8 @@ CREATE TABLE IF NOT EXISTS api_keys (
   enc_priv_tag       TEXT NOT NULL,
   master_key_version INTEGER NOT NULL DEFAULT 1,
   created_at         INTEGER NOT NULL,
-  disabled           INTEGER NOT NULL DEFAULT 0
+  disabled           INTEGER NOT NULL DEFAULT 0,
+  demo               INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_keys_hash ON api_keys(key_hash);
 

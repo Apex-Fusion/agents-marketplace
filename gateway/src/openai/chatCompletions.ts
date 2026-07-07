@@ -21,6 +21,7 @@ import { preflight } from "../onchain/preflight.js";
 import { resolveSubmittedRef, acceptAndConfirm } from "../onchain/settle.js";
 import { ensureWalletHealthy } from "../walletHealth.js";
 import { parseChatRequest, type ParsedChatRequest } from "./validate.js";
+import { runDemoChat } from "./demoChat.js";
 import {
   genId,
   buildChatCompletion,
@@ -67,8 +68,17 @@ function recordUsage(
 export function makeChatCompletionsHandler(deps: GatewayDeps) {
   return asyncHandler(async (req: Request, res: Response) => {
     const keyRow = requireKey(req);
-    const parsed = parseChatRequest(req.body);
     const ctx = deps.registry.getContext(keyRow);
+    if (keyRow.demo) {
+      // Demo keys run session-backed with tools passthrough, and never fall
+      // back to one-shot (its settle path assumes ≤1 in-flight escrow per
+      // wallet; the demo wallet holds one escrow per concurrent session).
+      // Not under the key mutex — runDemoChat takes it only for session opens.
+      const parsed = parseChatRequest(req.body, { allowTools: true });
+      await runDemoChat(deps, keyRow, ctx, parsed, res);
+      return;
+    }
+    const parsed = parseChatRequest(req.body);
     await ctx.mutex.run(() => runOneShot(deps, keyRow, ctx, parsed, res));
   });
 }

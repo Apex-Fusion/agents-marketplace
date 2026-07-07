@@ -12,13 +12,28 @@
 import type { OutputReference } from "../chain/ChainProvider.js";
 
 /**
+ * ToolCall — OpenAI-compatible function tool call emitted by an assistant turn.
+ * `function.arguments` is the raw JSON string as produced by the model.
+ */
+export interface ToolCall {
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string };
+}
+
+/**
  * ChatMessage — OpenAI-compatible chat message.
- * v1 supports user/system/assistant roles. The wire shape is intentionally
- * narrow; future capabilities (tools, multimodal) will extend or replace it.
+ * `content` is always a string ("" for tool-call-only assistant messages —
+ * OpenAI's `content: null` is normalized on ingest). `tool_calls` /
+ * `tool_call_id` MUST be omitted (not set to undefined) when absent: the
+ * receipt hash canonicalizes the transcript objects, so field presence is
+ * part of the identity shared between supplier transcript and gateway mirror.
  */
 export interface ChatMessage {
-  role: "system" | "user" | "assistant";
+  role: "system" | "user" | "assistant" | "tool";
   content: string;
+  tool_calls?: ToolCall[];
+  tool_call_id?: string;
 }
 
 /**

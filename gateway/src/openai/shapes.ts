@@ -7,6 +7,7 @@
 
 import { randomBytes } from "crypto";
 import type { Receipt } from "@marketplace/shared/receipt";
+import type { ToolCall } from "@marketplace/shared/tx";
 
 export function genId(): string {
   return `chatcmpl-${randomBytes(16).toString("hex")}`;
@@ -40,6 +41,8 @@ export function buildChatCompletion(args: {
   model: string;
   content: string;
   usage: Usage;
+  toolCalls?: ToolCall[];
+  finishReason?: "stop" | "tool_calls";
   vector?: VectorReceipt;
 }): Record<string, unknown> {
   return {
@@ -50,8 +53,12 @@ export function buildChatCompletion(args: {
     choices: [
       {
         index: 0,
-        message: { role: "assistant", content: args.content },
-        finish_reason: "stop",
+        message: {
+          role: "assistant",
+          content: args.content,
+          ...(args.toolCalls?.length ? { tool_calls: args.toolCalls } : {}),
+        },
+        finish_reason: args.finishReason ?? "stop",
       },
     ],
     usage: args.usage,
@@ -63,8 +70,10 @@ export function buildChatCompletion(args: {
 export function buildChunk(args: {
   id: string;
   model: string;
-  delta: { role?: string; content?: string } | Record<string, never>;
-  finishReason: "stop" | null;
+  delta:
+    | { role?: string; content?: string; tool_calls?: Array<{ index: number } & ToolCall> }
+    | Record<string, never>;
+  finishReason: "stop" | "tool_calls" | null;
   usage?: Usage;
   vector?: VectorReceipt;
 }): Record<string, unknown> {

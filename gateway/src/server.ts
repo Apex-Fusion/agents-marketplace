@@ -10,7 +10,7 @@
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
 import type { GatewayDeps } from "./deps.js";
 import { makeApiKeyAuth } from "./middleware/apiKeyAuth.js";
-import { ipRateLimit, keyRateLimit } from "./middleware/rateLimit.js";
+import { ipRateLimit, keyRateLimit, demoIpRateLimit } from "./middleware/rateLimit.js";
 import { sendError } from "./middleware/http.js";
 import { notFound } from "./openai/errors.js";
 import { makeChatCompletionsHandler } from "./openai/chatCompletions.js";
@@ -69,10 +69,12 @@ export function createApp(deps: GatewayDeps): Express {
   // Public signup, rate-limited per IP.
   app.post("/signup", ipRateLimit(deps.config.signupRate), makeSignupHandler(deps));
 
-  // Bearer-gated routes: auth → per-key rate limit → handler.
+  // Bearer-gated routes: auth → per-key rate limit (skips demo keys) →
+  // per-IP demo limit (demo keys only) → handler.
   const auth = makeApiKeyAuth(deps.store);
   const krl = keyRateLimit(deps.config.keyRate);
-  const gated = [auth, krl] as const;
+  const dirl = demoIpRateLimit(deps.config.demoIpRate);
+  const gated = [auth, krl, dirl] as const;
 
   app.get("/account", auth, makeAccountHandler(deps));
   app.post("/account/withdraw", auth, makeWithdrawHandler(deps));

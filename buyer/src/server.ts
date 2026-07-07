@@ -685,9 +685,11 @@ export function createApp(deps: AppDeps): Express {
   const DEMO_CHAT_MODEL = "moonshotai/kimi-k2.6";
 
   function isChatMessageArray(v: unknown): v is ChatMessage[] {
+    // The free chat demo stays text-only: the `tool` role (added to
+    // ChatMessage for the gateway demo endpoint) is not accepted here.
     return Array.isArray(v) && v.length > 0 && v.every(
       (m) => m && typeof m === "object"
-        && (["system", "user", "assistant"] as const).includes((m as ChatMessage).role)
+        && ["system", "user", "assistant"].includes((m as ChatMessage).role)
         && typeof (m as ChatMessage).content === "string",
     );
   }

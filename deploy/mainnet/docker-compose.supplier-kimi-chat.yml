@@ -49,8 +49,10 @@ services:
       OPENAI_BASE_URL: https://openrouter.ai/api
       # Kimi K2.6 generations can be slow; mirror the one-off Kimi compose.
       OPENAI_TIMEOUT_MS: "300000"
-      # Auto-end an idle session after 5 min (supplier Submits the transcript).
-      CHAT_IDLE_TIMEOUT_MS: "300000"
+      # 2.5 min idle end (supplier Submits the transcript): single-slot
+      # suppliers must free up quickly for the shared demo endpoint (the
+      # gateway transparently reopens a session on the next turn).
+      CHAT_IDLE_TIMEOUT_MS: "150000"
       PORT: "8080"
       # Enable LiveOgmiosProvider so Claim/Submit actually broadcast.
       LIVE_CHAIN: "1"

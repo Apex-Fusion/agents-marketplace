@@ -2,8 +2,9 @@
  * tx/index.ts — public exports for M1-B tx builders.
  */
 
-export type { ChatMessage, WalletKey, BuildResult, PostAdvertBuildResult, PostEscrowBuildResult } from "./types.js";
+export type { ChatMessage, ToolCall, WalletKey, BuildResult, PostAdvertBuildResult, PostEscrowBuildResult } from "./types.js";
 export { TxConstructionError } from "./types.js";
+export { normalizeChatMessage, chatMessagesEquivalent } from "./chatMessage.js";
 export { mockSlotToWallclockMs, mockWallclockMsToSlot, NETWORK_BUFFER_MS } from "./internal/constants.js";
 export { detectCborBackend, type CborBackend } from "./internal/cborBackend.js";
 export type { Signer } from "./signer.js";
