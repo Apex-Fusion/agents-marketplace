@@ -62,7 +62,7 @@ export function normalizeChatMessage(raw: unknown): ChatMessage | null {
   return msg;
 }
 
-function toolCallsEqual(a?: ToolCall[], b?: ToolCall[]): boolean {
+export function toolCallsEqual(a?: ToolCall[], b?: ToolCall[]): boolean {
   const la = a ?? [];
   const lb = b ?? [];
   if (la.length !== lb.length) return false;

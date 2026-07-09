@@ -92,6 +92,23 @@ describe("routing/selectSupplier", () => {
     expect(parseRef("aa".repeat(32) + "#3")).toEqual({ txHash: "aa".repeat(32), index: 3 });
     expect(parseRef("nope")).toBeNull();
   });
+
+  it("ignoreStatusFor readmits a busy supplier by pkh (stale indexer status)", async () => {
+    const busy = [
+      { ...rows[0], status: "working" },
+      { ...rows[1], status: "offline" },
+    ];
+    const base = { indexerUrl: "http://ix", model: "m", capabilityId: "llm.text.generate.v1" };
+    const excluded = await selectCandidates({ ...base, fetchFn: jsonResponse(busy) });
+    expect(excluded).toEqual([]);
+
+    const readmitted = await selectCandidates({
+      ...base,
+      fetchFn: jsonResponse(busy),
+      ignoreStatusFor: new Set(["s1"]),
+    });
+    expect(readmitted.map((c) => c.supplierPkh)).toEqual(["s1"]);
+  });
 });
 
 describe("openai/validate", () => {

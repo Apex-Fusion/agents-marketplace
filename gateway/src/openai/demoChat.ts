@@ -22,7 +22,7 @@ import type { GatewayDeps } from "../deps.js";
 import type { ApiKeyRow, SessionRow } from "../db/store.js";
 import type { KeyContext } from "../sdk/registry.js";
 import { transcripts, getSessionLock, dropSessionState } from "./transcripts.js";
-import { matchSessionPrefix, type AffinityCandidate } from "./affinity.js";
+import { matchSessionPrefix, trimToRespondable, type AffinityCandidate } from "./affinity.js";
 import {
   CAPABILITY,
   SessionGoneError,
@@ -32,7 +32,7 @@ import {
 } from "./sessions.js";
 import type { ParsedChatRequest } from "./validate.js";
 import { genId, buildChatCompletion, buildChunk, sseData, SSE_DONE, type Usage } from "./shapes.js";
-import { badRequest, toGatewayError, toErrorBody } from "./errors.js";
+import { GatewayError, badRequest, toGatewayError, toErrorBody } from "./errors.js";
 
 interface DemoSessionMeta {
   keyId: string;
@@ -87,6 +87,127 @@ function markSessionGone(deps: GatewayDeps, session: SessionRow): void {
   recordSessionCost(deps, session);
 }
 
+/** Ask the supplier to settle (Submit) the session. NO gateway chain work —
+ * the sweeper Accepts the resulting Submitted escrow. The supplier releases
+ * its single slot as part of ending, so a truthy return means the supplier is
+ * free again. Best-effort: on failure the sweeper reclaims later. */
+async function requestSupplierEnd(deps: GatewayDeps, session: SessionRow): Promise<boolean> {
+  try {
+    const res = await deps.fetchFn(`${session.supplier_base_url.replace(/\/+$/, "")}/v1/chat/end`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "X-Escrow-Ref": session.escrow_ref },
+      body: JSON.stringify({}),
+      signal: AbortSignal.timeout(90_000),
+    });
+    await res.text().catch(() => "");
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Close one demo session (evicted for capacity, or idle-janitored). Runs
+ * under the session lock so an in-flight turn finishes first; takes NO key
+ * mutex (no chain work here — see requestSupplierEnd). Returns the freed
+ * supplier_pkh, or null when the session was already gone or (janitor) was
+ * used again while we waited for the lock. */
+async function closeDemoSession(
+  deps: GatewayDeps,
+  sessionId: string,
+  opts: { reason: "evicted" | "idle"; idleCutoffMs?: number; nowMs?: number },
+): Promise<string | null> {
+  if (!demoSessions.has(sessionId)) return null;
+  return getSessionLock(sessionId).run(async () => {
+    const meta = demoSessions.get(sessionId);
+    if (!meta) return null; // lost a race with another closer
+    // Re-check idleness inside the lock: a turn that won the lock first has
+    // bumped lastUsedAt past the sweep's reference clock.
+    if (opts.idleCutoffMs !== undefined && (opts.nowMs ?? Date.now()) - meta.lastUsedAt < opts.idleCutoffMs) {
+      return null;
+    }
+    const session = deps.store.getSession(sessionId);
+    if (!session || session.state !== "open") {
+      dropDemoSession(sessionId);
+      return null;
+    }
+    await requestSupplierEnd(deps, session);
+    markSessionGone(deps, session);
+    // eslint-disable-next-line no-console
+    console.log(`[gateway:demo] closed session ${sessionId} (${opts.reason}), freed supplier ${session.supplier_pkh}`);
+    return session.supplier_pkh;
+  });
+}
+
+/** Least-recently-used open demo session for (key, model), excluding prior
+ * victims. Same-model scoping doubles as a guard: a bogus model name has no
+ * demo sessions, so eviction can never loop on a genuine model_not_found. */
+function pickLruDemoSession(keyId: string, model: string, exclude: ReadonlySet<string>): string | null {
+  let lruId: string | null = null;
+  let lruAt = Infinity;
+  for (const [sessionId, meta] of demoSessions) {
+    if (meta.keyId !== keyId || meta.model !== model || exclude.has(sessionId)) continue;
+    if (meta.lastUsedAt < lruAt) {
+      lruAt = meta.lastUsedAt;
+      lruId = sessionId;
+    }
+  }
+  return lruId;
+}
+
+/** Close demo sessions idle past deps.config.demoSessionIdleMs so abandoned
+ * conversations (client gone, title-gen one-offs) release their single-slot
+ * suppliers. Called from the sweeper tick; sequential to keep supplier
+ * /v1/chat/end calls orderly. */
+export async function sweepIdleDemoSessions(deps: GatewayDeps, nowMs = Date.now()): Promise<void> {
+  const idleMs = deps.config.demoSessionIdleMs;
+  for (const [sessionId, meta] of [...demoSessions]) {
+    if (nowMs - meta.lastUsedAt < idleMs) continue;
+    try {
+      await closeDemoSession(deps, sessionId, { reason: "idle", idleCutoffMs: idleMs, nowMs });
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(`[gateway:demo] idle close of ${sessionId} failed:`, err instanceof Error ? err.message : err);
+    }
+  }
+}
+
+const MAX_EVICTIONS = 2;
+
+function isNoSupplierError(err: unknown): boolean {
+  return err instanceof GatewayError && (err.code === "model_not_found" || err.code === "overloaded");
+}
+
+/** Open a session, evicting up to MAX_EVICTIONS LRU demo sessions when every
+ * supplier is pinned. Eviction frees the supplier immediately (its slot
+ * releases at Submit) but the indexer's status poll lags, so the retry passes
+ * the freed pkhs through selectCandidates' ignoreStatusFor. Lock ordering is
+ * safe: eviction holds only the session lock, the open holds only the key
+ * mutex — never nested. */
+async function openSessionWithEviction(
+  deps: GatewayDeps,
+  keyRow: ApiKeyRow,
+  ctx: KeyContext,
+  model: string,
+): Promise<SessionRow> {
+  const freedPkhs = new Set<string>();
+  const evicted = new Set<string>();
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await ctx.mutex.run(() =>
+        openSessionCore(deps, keyRow, ctx, model, freedPkhs.size > 0 ? { ignoreStatusFor: freedPkhs } : undefined),
+      );
+    } catch (err) {
+      if (attempt >= MAX_EVICTIONS || !isNoSupplierError(err)) throw err;
+      const victimId = pickLruDemoSession(keyRow.id, model, evicted);
+      if (!victimId) throw err;
+      evicted.add(victimId);
+      const pkh = await closeDemoSession(deps, victimId, { reason: "evicted" });
+      if (!pkh) throw err; // nothing actually freed — don't loop
+      freedPkhs.add(pkh);
+    }
+  }
+}
+
 type LockedTurnOutcome =
   | { kind: "done"; result: TurnResult }
   | { kind: "retry" } // candidate no longer valid — re-run the match
@@ -105,12 +226,17 @@ export async function runDemoChat(
   parsed: ParsedChatRequest,
   res: Response,
 ): Promise<void> {
-  const last = parsed.messages[parsed.messages.length - 1];
-  if (last.role !== "user" && last.role !== "tool") {
-    // Reject before any chain work — opening an escrow for an unanswerable
-    // request would burn a session fee for a guaranteed supplier 400.
-    throw badRequest("invalid_messages", "the last message must have role user or tool");
+  // Clients sometimes send histories ending in an assistant (continue/retry
+  // flows) or system message; the chat.v1 supplier can only respond to a
+  // user/tool-terminated turn. Trim trailing unrespondable messages
+  // (regenerate semantics) and reject — before any chain work — only when
+  // nothing respondable remains.
+  const trimmed = trimToRespondable(parsed.messages);
+  if (trimmed.length === 0) {
+    throw badRequest("invalid_messages", "no user or tool message to respond to");
   }
+  const effective: ParsedChatRequest =
+    trimmed.length === parsed.messages.length ? parsed : { ...parsed, messages: trimmed };
 
   const id = genId();
   let keepalive: ReturnType<typeof setInterval> | undefined;
@@ -159,7 +285,7 @@ export async function runDemoChat(
   };
 
   try {
-    const result = await runWithAffinity(deps, keyRow, ctx, parsed, sink);
+    const result = await runWithAffinity(deps, keyRow, ctx, effective, sink);
     if (keepalive) clearInterval(keepalive);
 
     const usage: Usage = {
@@ -255,18 +381,24 @@ async function runWithAffinity(
     // retry: candidate vanished/advanced — re-match against current state.
   }
 
-  // Miss: open a new session (chain work → key mutex) and replay the full
-  // history as its first turn.
-  const session = await ctx.mutex.run(() => openSessionCore(deps, keyRow, ctx, parsed.model));
+  // Miss: open a new session (chain work → key mutex; evicts an LRU demo
+  // session when every supplier is pinned) and replay the full history as its
+  // first turn.
+  const session = await openSessionWithEviction(deps, keyRow, ctx, parsed.model);
   demoSessions.set(session.id, { keyId: keyRow.id, model: parsed.model, lastUsedAt: Date.now() });
   return getSessionLock(session.id).run(async () => {
     try {
-      return await streamSupplierTurn(
+      const result = await streamSupplierTurn(
         deps,
         session,
         { messages: parsed.messages, tools: parsed.tools, tool_choice: parsed.toolChoice },
         sink.onToken,
       );
+      // Refresh recency after the (possibly long) first stream so this live
+      // thread isn't the LRU/janitor's first victim.
+      const meta = demoSessions.get(session.id);
+      if (meta) meta.lastUsedAt = Date.now();
+      return result;
     } catch (err) {
       if (err instanceof SessionGoneError) {
         // Freshly opened yet already gone (supplier crashed mid-claim).

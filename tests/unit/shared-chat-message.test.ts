@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { normalizeChatMessage, chatMessagesEquivalent } from "../../packages/shared/src/tx/chatMessage.js";
+import { normalizeChatMessage, chatMessagesEquivalent, toolCallsEqual } from "../../packages/shared/src/tx/chatMessage.js";
 import { canonicalize } from "../../packages/shared/src/cbor/canonical.js";
 
 const TOOL_CALL = { id: "call_1", type: "function", function: { name: "get_time", arguments: "{}" } };
@@ -92,5 +92,21 @@ describe("chatMessagesEquivalent", () => {
     const c = normalizeChatMessage({ role: "tool", content: "3pm", tool_call_id: "call_2" })!;
     expect(chatMessagesEquivalent(a, b)).toBe(true);
     expect(chatMessagesEquivalent(a, c)).toBe(false);
+  });
+});
+
+describe("toolCallsEqual", () => {
+  const CALL = { id: "call_1", type: "function" as const, function: { name: "get_time", arguments: "{}" } };
+
+  it("treats missing and empty lists as equal (exported for the affinity matcher)", () => {
+    expect(toolCallsEqual(undefined, undefined)).toBe(true);
+    expect(toolCallsEqual(undefined, [])).toBe(true);
+    expect(toolCallsEqual([CALL], [{ ...CALL }])).toBe(true);
+  });
+
+  it("rejects id/name/arguments differences and length mismatches", () => {
+    expect(toolCallsEqual([CALL], [])).toBe(false);
+    expect(toolCallsEqual([CALL], [{ ...CALL, id: "call_2" }])).toBe(false);
+    expect(toolCallsEqual([CALL], [{ ...CALL, function: { name: "get_time", arguments: '{"tz":"utc"}' } }])).toBe(false);
   });
 });

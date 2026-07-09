@@ -41,6 +41,10 @@ export interface GatewayConfig {
   keyRate: { max: number; windowMs: number };
   demoIpRate: { max: number; windowMs: number };
   sweeperIntervalMs: number;
+  /** Close demo chat sessions idle this long (frees the single-slot supplier).
+   * Keep below the supplier's CHAT_IDLE_TIMEOUT_MS (default 5 min) so the
+   * gateway closes first and records usage. */
+  demoSessionIdleMs: number;
   walletHealthIntervalMs: number;
   sdkRegistryMax: number;
   corsOrigins: string[];
@@ -117,6 +121,7 @@ export function loadConfig(env: Record<string, string | undefined>): GatewayConf
       windowMs: posInt(env, "DEMO_IP_RATE_WINDOW_MS", 60 * 1000),
     },
     sweeperIntervalMs: posInt(env, "SWEEPER_INTERVAL_MS", 60 * 1000),
+    demoSessionIdleMs: posInt(env, "DEMO_SESSION_IDLE_MS", 3 * 60 * 1000),
     walletHealthIntervalMs: posInt(env, "WALLET_HEALTH_INTERVAL_MS", 10 * 60 * 1000),
     sdkRegistryMax: posInt(env, "SDK_REGISTRY_MAX", 500),
     corsOrigins: (env.GATEWAY_CORS_ORIGINS ?? "")

@@ -113,6 +113,16 @@ export class ChatSessionStore {
     r.lastActivityMs = Date.now();
   }
 
+  /** Roll back a failed turn: truncate the transcript to `length`. The gateway
+   * mirror only appends after a successful turn, so the delta appended at turn
+   * start must be removed on LLM failure to keep both sides hash-identical. */
+  truncateTranscript(escrowRef: string, length: number): void {
+    const r = this.records.get(escrowRef);
+    if (!r || length < 0 || r.transcript.length <= length) return;
+    r.transcript.length = length;
+    r.lastActivityMs = Date.now();
+  }
+
   touch(escrowRef: string): void {
     const r = this.records.get(escrowRef);
     if (r) r.lastActivityMs = Date.now();

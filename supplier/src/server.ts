@@ -870,6 +870,7 @@ function makeChatSessionHandlers(deps: ResolvedDeps) {
       // Pause the idle timer while a turn is in flight; re-arm when it ends so
       // a long generation never trips the auto-end mid-stream.
       if (record.idleTimer) { clearTimeout(record.idleTimer); record.idleTimer = undefined; }
+      const transcriptLenBefore = record.transcript.length;
       deps.chatSessions.appendMessages(escrowRefStr, delta);
 
       res.status(200);
@@ -919,6 +920,9 @@ function makeChatSessionHandlers(deps: ResolvedDeps) {
           usage: { prompt_tokens: result.prompt_tokens, completion_tokens: result.completion_tokens },
         });
       } catch (err) {
+        // Failed turn: the gateway mirror never saw this delta, so drop it here
+        // too — otherwise a retry re-sends it and the transcripts diverge.
+        deps.chatSessions.truncateTranscript(escrowRefStr, transcriptLenBefore);
         const errMsg = err instanceof Error ? err.message : String(err);
         sse({ type: "error", message: errMsg });
       } finally {

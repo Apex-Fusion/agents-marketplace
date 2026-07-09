@@ -77,12 +77,14 @@ export async function openSessionCore(
   keyRow: ApiKeyRow,
   ctx: KeyContext,
   model: string,
+  opts?: { ignoreStatusFor?: ReadonlySet<string> },
 ): Promise<SessionRow> {
   const candidates = await selectCandidates({
     indexerUrl: deps.config.indexerUrl,
     model,
     capabilityId: CAPABILITY,
     fetchFn: deps.fetchFn,
+    ignoreStatusFor: opts?.ignoreStatusFor,
   });
   if (candidates.length === 0) {
     throw notFound("model_not_found", `no available chat (llm.chat.v1) supplier for model "${model}"`);

@@ -3,7 +3,12 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { matchSessionPrefix, type AffinityCandidate } from "../src/openai/affinity.js";
+import {
+  matchSessionPrefix,
+  normalizeAssistantContent,
+  trimToRespondable,
+  type AffinityCandidate,
+} from "../src/openai/affinity.js";
 import type { ChatMessage } from "@marketplace/shared/tx";
 
 const u = (content: string): ChatMessage => ({ role: "user", content });
@@ -77,5 +82,62 @@ describe("matchSessionPrefix", () => {
     // Client echoes the assistant message back with content:"" (normalized from null upstream).
     const incoming = [u("hi"), { role: "assistant" as const, content: "", tool_calls: [{ ...TOOL_CALL }] }, { role: "tool" as const, content: "x", tool_call_id: "call_1" }];
     expect(matchSessionPrefix([cand("s1", mirror)], incoming, "m")?.sessionId).toBe("s1");
+  });
+
+  it("matches leniently when the client reshapes the assistant echo (think-strip + whitespace)", () => {
+    const mirror = [u("hi"), a("<think>plan it</think>Hello  there\n")];
+    const got = matchSessionPrefix([cand("s1", mirror)], [u("hi"), a("Hello there"), u("more")], "m");
+    expect(got).toEqual({ sessionId: "s1", delta: [u("more")] });
+  });
+
+  it("stays strict on user/tool divergence even with lenient assistant matching", () => {
+    const mirror = [u("hi "), a("Hello")];
+    // User content differs by whitespace — client-authored roles must be byte-exact.
+    expect(matchSessionPrefix([cand("s1", mirror)], [u("hi"), a("Hello"), u("more")], "m")).toBeNull();
+  });
+
+  it("rejects assistant tool_calls divergence under lenient matching", () => {
+    const mirror = [u("hi"), { role: "assistant" as const, content: "x", tool_calls: [TOOL_CALL] }];
+    const changed = { ...TOOL_CALL, function: { name: "get_time", arguments: '{"tz":"utc"}' } };
+    const incoming = [u("hi"), { role: "assistant" as const, content: "x ", tool_calls: [changed] }, { role: "tool" as const, content: "t", tool_call_id: "call_1" }];
+    expect(matchSessionPrefix([cand("s1", mirror)], incoming, "m")).toBeNull();
+  });
+
+  it("prefers a strict match over a lenient one regardless of recency", () => {
+    const incoming = [u("hi"), a("Hello"), u("more")];
+    const got = matchSessionPrefix(
+      [
+        cand("lenient", [u("hi"), a("Hello   ")], 99),
+        cand("strict", [u("hi"), a("Hello")], 1),
+      ],
+      incoming,
+      "m",
+    );
+    expect(got?.sessionId).toBe("strict");
+  });
+});
+
+describe("normalizeAssistantContent", () => {
+  it("strips think blocks, collapses whitespace and trims", () => {
+    expect(normalizeAssistantContent("<think>a\nb</think> Hi\n\nthere  friend ")).toBe("Hi there friend");
+    expect(normalizeAssistantContent("<THINK>x</THINK>ok")).toBe("ok");
+    expect(normalizeAssistantContent("plain")).toBe("plain");
+  });
+});
+
+describe("trimToRespondable", () => {
+  it("drops trailing assistant/system messages", () => {
+    expect(trimToRespondable([u("hi"), a("partial")])).toEqual([u("hi")]);
+    expect(trimToRespondable([u("hi"), a("x"), { role: "system" as const, content: "nudge" }])).toEqual([u("hi")]);
+  });
+
+  it("returns empty when nothing respondable remains", () => {
+    expect(trimToRespondable([a("hello")])).toEqual([]);
+    expect(trimToRespondable([])).toEqual([]);
+  });
+
+  it("keeps already-respondable histories unchanged", () => {
+    const msgs = [u("hi"), a("x"), u("more")];
+    expect(trimToRespondable(msgs)).toEqual(msgs);
   });
 });

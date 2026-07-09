@@ -4,6 +4,7 @@ import { join } from "path";
 import { randomBytes, randomUUID } from "crypto";
 import request from "supertest";
 import { createApp } from "../src/server.js";
+import { sweepIdleDemoSessions } from "../src/openai/demoChat.js";
 import { GatewayStore } from "../src/db/store.js";
 import { SdkRegistry } from "../src/sdk/registry.js";
 import { genPrivKeyHex, deriveWalletKey } from "../src/wallet.js";
@@ -37,6 +38,7 @@ function makeDeps(
     keyRate: { max: 1000, windowMs: 60_000 },
     demoIpRate: overrides?.demoIpRate ?? { max: 1000, windowMs: 60_000 },
     sweeperIntervalMs: 60_000,
+    demoSessionIdleMs: 180_000,
     walletHealthIntervalMs: 600_000,
     sdkRegistryMax: 100,
     corsOrigins: [],
@@ -136,11 +138,14 @@ function doneFrame(message: Record<string, unknown>, finishReason: string, usage
   return { type: "done", message, finish_reason: finishReason, usage };
 }
 
-/** fetchFn serving the indexer supplier list and scripted /v1/chat/message responses. */
-function demoFetch(messageResponses: Array<() => Response>) {
+/** fetchFn serving the indexer supplier list and scripted /v1/chat/message
+ * responses. Pass `suppliers` to serve a mutable list (eviction tests flip
+ * status mid-test); /v1/chat/end calls are recorded and 200-acked. */
+function demoFetch(messageResponses: Array<() => Response>, suppliers?: () => unknown[]) {
   const messageCalls: Array<Record<string, unknown>> = [];
+  const endCalls: string[] = [];
   let i = 0;
-  const fetchFn = (async (url: unknown, init?: { body?: string }) => {
+  const fetchFn = (async (url: unknown, init?: { body?: string; headers?: Record<string, string> }) => {
     const u = String(url);
     if (u.includes("/v1/chat/message")) {
       messageCalls.push(init?.body ? (JSON.parse(init.body) as Record<string, unknown>) : {});
@@ -148,10 +153,14 @@ function demoFetch(messageResponses: Array<() => Response>) {
       i += 1;
       return make();
     }
-    if (u.includes("/suppliers")) return new Response(JSON.stringify(SUPPLIERS), { status: 200 });
+    if (u.includes("/v1/chat/end")) {
+      endCalls.push(init?.headers?.["X-Escrow-Ref"] ?? "");
+      return new Response(JSON.stringify({ status: "submitted" }), { status: 200 });
+    }
+    if (u.includes("/suppliers")) return new Response(JSON.stringify(suppliers ? suppliers() : SUPPLIERS), { status: 200 });
     return new Response("[]", { status: 200 });
   }) as unknown as typeof globalThis.fetch;
-  return { fetchFn, messageCalls };
+  return { fetchFn, messageCalls, endCalls };
 }
 
 /** Insert a demo-flagged key directly (public signup can't mint one) and stub
@@ -284,7 +293,7 @@ describe("gateway demo key", () => {
     expect(usage.some((u) => u.kind === "chat_session" && u.cost_lovelace === "1000000")).toBe(true);
   });
 
-  it("rejects histories that do not end with user/tool before any chain work", async () => {
+  it("rejects histories with nothing respondable before any chain work", async () => {
     const deps = makeDeps(undefined, { chain: fundedChain });
     const { rawKey, startChat } = setupDemoKey(deps);
     const res = await request(createApp(deps))
@@ -292,7 +301,158 @@ describe("gateway demo key", () => {
       .set("authorization", `Bearer ${rawKey}`)
       .send({ model: "kimi", messages: [{ role: "assistant", content: "hello" }] });
     expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe("invalid_messages");
     expect(startChat).not.toHaveBeenCalled();
+  });
+
+  it("answers a trailing-assistant history by trimming to the last user message (regenerate)", async () => {
+    const { fetchFn, messageCalls } = demoFetch([
+      () => supplierSse([{ type: "token", value: "Again" }, doneFrame({ role: "assistant", content: "Again" }, "stop")]),
+    ]);
+    const deps = makeDeps(fetchFn, { chain: fundedChain });
+    const { rawKey, startChat } = setupDemoKey(deps);
+    const res = await request(createApp(deps))
+      .post("/openai/v1/chat/completions")
+      .set("authorization", `Bearer ${rawKey}`)
+      .send({
+        model: "kimi",
+        messages: [
+          { role: "user", content: "hi" },
+          { role: "assistant", content: "partial answer" },
+        ],
+      });
+    expect(res.status).toBe(200);
+    expect(res.body.choices[0].message.content).toBe("Again");
+    expect(startChat).toHaveBeenCalledTimes(1);
+    // The trailing assistant message is dropped from the replay.
+    expect((messageCalls[0].messages as Array<{ role: string }>).map((m) => m.role)).toEqual(["user"]);
+  });
+
+  it("keeps the session when the client reshapes the assistant echo (lenient affinity)", async () => {
+    const { fetchFn, messageCalls } = demoFetch([
+      () => supplierSse([{ type: "token", value: "<think>hm</think>Hi  there" }, doneFrame({ role: "assistant", content: "<think>hm</think>Hi  there" }, "stop")]),
+      () => supplierSse([{ type: "token", value: "Sure" }, doneFrame({ role: "assistant", content: "Sure" }, "stop")]),
+    ]);
+    const deps = makeDeps(fetchFn, { chain: fundedChain });
+    const { rawKey, startChat } = setupDemoKey(deps);
+    const app = createApp(deps);
+
+    const res1 = await request(app)
+      .post("/openai/v1/chat/completions")
+      .set("authorization", `Bearer ${rawKey}`)
+      .send({ model: "kimi", messages: [{ role: "user", content: "hi" }] });
+    expect(res1.status).toBe(200);
+
+    // Client echoes the assistant reply with the think block stripped and
+    // whitespace collapsed — still the same session, delta only.
+    const res2 = await request(app)
+      .post("/openai/v1/chat/completions")
+      .set("authorization", `Bearer ${rawKey}`)
+      .send({
+        model: "kimi",
+        messages: [
+          { role: "user", content: "hi" },
+          { role: "assistant", content: "Hi there" },
+          { role: "user", content: "more" },
+        ],
+      });
+    expect(res2.status).toBe(200);
+    expect(res2.body.choices[0].message.content).toBe("Sure");
+    expect(startChat).toHaveBeenCalledTimes(1);
+    expect((messageCalls[1].messages as unknown[]).length).toBe(1);
+  });
+
+  it("evicts the LRU demo session when every supplier is pinned", async () => {
+    const suppliers = [{ ...SUPPLIERS[1] }]; // single chat supplier, mutable status
+    const { fetchFn, messageCalls, endCalls } = demoFetch(
+      [
+        () => supplierSse([{ type: "token", value: "Hi" }, doneFrame({ role: "assistant", content: "Hi" }, "stop")]),
+        () => supplierSse([{ type: "token", value: "New" }, doneFrame({ role: "assistant", content: "New" }, "stop")]),
+      ],
+      () => suppliers,
+    );
+    const deps = makeDeps(fetchFn, { chain: fundedChain });
+    const { rawKey, startChat } = setupDemoKey(deps);
+    const app = createApp(deps);
+
+    const res1 = await request(app)
+      .post("/openai/v1/chat/completions")
+      .set("authorization", `Bearer ${rawKey}`)
+      .send({ model: "kimi", messages: [{ role: "user", content: "hi" }] });
+    expect(res1.status).toBe(200);
+
+    // The lone supplier is now pinned by session 1 (indexer sees it working).
+    suppliers[0] = { ...suppliers[0], status: "working" };
+
+    // Unrelated history → affinity miss → no free supplier → evict session 1
+    // (supplier /v1/chat/end) and retry, bypassing the stale indexer status.
+    const res2 = await request(app)
+      .post("/openai/v1/chat/completions")
+      .set("authorization", `Bearer ${rawKey}`)
+      .send({ model: "kimi", messages: [{ role: "user", content: "different topic" }] });
+    expect(res2.status).toBe(200);
+    expect(res2.body.choices[0].message.content).toBe("New");
+    expect(startChat).toHaveBeenCalledTimes(2);
+    expect(endCalls).toHaveLength(1);
+    expect((messageCalls[1].messages as unknown[]).length).toBe(1);
+    // Evicted session closed + billed.
+    const keyId = deps.store.listAllKeys().find((k) => k.demo === 1)!.id;
+    const usage = deps.store.listUsage(keyId, 10);
+    expect(usage.some((u) => u.kind === "chat_session" && u.cost_lovelace === "1000000")).toBe(true);
+    expect(deps.store.listOpenSessionsByKey(keyId)).toHaveLength(1); // only session 2
+  });
+
+  it("surfaces the original no-supplier error when there is nothing to evict", async () => {
+    const suppliers = [{ ...SUPPLIERS[1], status: "working" }];
+    const { fetchFn, endCalls } = demoFetch([() => new Response("unused", { status: 500 })], () => suppliers);
+    const deps = makeDeps(fetchFn, { chain: fundedChain });
+    const { rawKey, startChat } = setupDemoKey(deps);
+    const res = await request(createApp(deps))
+      .post("/openai/v1/chat/completions")
+      .set("authorization", `Bearer ${rawKey}`)
+      .send({ model: "kimi", messages: [{ role: "user", content: "hi" }] });
+    expect(res.status).toBe(404);
+    expect(res.body.error.code).toBe("model_not_found");
+    expect(startChat).not.toHaveBeenCalled();
+    expect(endCalls).toHaveLength(0);
+  });
+
+  it("janitor closes idle demo sessions so the next request opens fresh", async () => {
+    const { fetchFn, messageCalls, endCalls } = demoFetch([
+      () => supplierSse([{ type: "token", value: "Hi" }, doneFrame({ role: "assistant", content: "Hi" }, "stop")]),
+      () => supplierSse([{ type: "token", value: "Fresh" }, doneFrame({ role: "assistant", content: "Fresh" }, "stop")]),
+    ]);
+    const deps = makeDeps(fetchFn, { chain: fundedChain });
+    const { rawKey, startChat } = setupDemoKey(deps);
+    const app = createApp(deps);
+
+    const res1 = await request(app)
+      .post("/openai/v1/chat/completions")
+      .set("authorization", `Bearer ${rawKey}`)
+      .send({ model: "kimi", messages: [{ role: "user", content: "hi" }] });
+    expect(res1.status).toBe(200);
+
+    // Pretend demoSessionIdleMs elapsed: the sweeper tick closes the session.
+    await sweepIdleDemoSessions(deps, Date.now() + deps.config.demoSessionIdleMs + 1);
+    expect(endCalls).toHaveLength(1);
+    const keyId = deps.store.listAllKeys().find((k) => k.demo === 1)!.id;
+    expect(deps.store.listOpenSessionsByKey(keyId)).toHaveLength(0);
+
+    // Continuing the thread now misses affinity and reopens with full replay.
+    const res2 = await request(app)
+      .post("/openai/v1/chat/completions")
+      .set("authorization", `Bearer ${rawKey}`)
+      .send({
+        model: "kimi",
+        messages: [
+          { role: "user", content: "hi" },
+          { role: "assistant", content: "Hi" },
+          { role: "user", content: "more" },
+        ],
+      });
+    expect(res2.status).toBe(200);
+    expect(startChat).toHaveBeenCalledTimes(2);
+    expect((messageCalls[1].messages as unknown[]).length).toBe(3);
   });
 
   it("blocks withdraw and hides the deposit address for demo keys", async () => {

@@ -33,7 +33,7 @@ import type { SessionRow } from "./db/store.js";
 import { fetchEscrows, acceptAndConfirm, reclaimAndConfirm, type EscrowRow } from "./onchain/settle.js";
 import { parseRef } from "./routing/selectSupplier.js";
 import { dropSessionState } from "./openai/transcripts.js";
-import { dropDemoSession } from "./openai/demoChat.js";
+import { dropDemoSession, sweepIdleDemoSessions } from "./openai/demoChat.js";
 import { CAPABILITY as CHAT_CAPABILITY } from "./openai/sessions.js";
 
 // Don't touch escrows newer than this — an in-flight request is settling them.
@@ -78,6 +78,12 @@ function closeSessionRow(
 }
 
 export async function runSweepOnce(deps: GatewayDeps): Promise<void> {
+  // Idle demo sessions first: closing them makes the supplier Submit, so this
+  // sweep (or the next) can Accept the escrow right after.
+  await sweepIdleDemoSessions(deps).catch((err) =>
+    log(`demo idle janitor: ${err instanceof Error ? err.message : String(err)}`),
+  );
+
   const now = Date.now();
   for (const keyRow of deps.store.listKeys()) {
     let rows: EscrowRow[];

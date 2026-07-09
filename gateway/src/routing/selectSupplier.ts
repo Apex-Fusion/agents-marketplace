@@ -56,6 +56,11 @@ export interface SelectSupplierOpts {
   model: string;
   capabilityId: string;
   fetchFn?: typeof globalThis.fetch;
+  /** supplier_pkhs eligible regardless of polled status — used after the demo
+   * executor frees a supplier the indexer poller (~20 s cadence) still reports
+   * busy. sdk.startChat's live /status pre-check still guards genuinely-busy
+   * suppliers. */
+  ignoreStatusFor?: ReadonlySet<string>;
 }
 
 /**
@@ -79,7 +84,9 @@ export async function selectCandidates(opts: SelectSupplierOpts): Promise<Suppli
     if (raw.capability_id !== opts.capabilityId) continue;
     if (raw.model !== opts.model) continue;
     if (raw.advert_status !== "Active") continue;
-    if (raw.status !== "free" && raw.status !== "unknown") continue;
+    if (raw.status !== "free" && raw.status !== "unknown" && !opts.ignoreStatusFor?.has(raw.supplier_pkh)) {
+      continue;
+    }
     const advertRef = parseRef(raw.utxo_ref);
     if (!advertRef) continue;
     candidates.push({
