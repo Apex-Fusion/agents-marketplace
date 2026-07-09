@@ -934,6 +934,14 @@ export function createApp(deps: AppDeps): Express {
         supplierBaseUrl: state.supplierBaseUrl,
       });
       chatRouteState.delete(rawRef);
+      if (result.settleMode === "ticket") {
+        // Ticket session: no receipt/Accept — funds return via reclaim.
+        return res.status(200).json({
+          status: "ended",
+          escrow_ref: rawRef,
+          settle_mode: "ticket",
+        });
+      }
       return res.status(200).json({
         status: "accepted",
         escrow_ref: rawRef,

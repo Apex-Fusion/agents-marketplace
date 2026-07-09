@@ -42,7 +42,8 @@ async function main(): Promise<void> {
   // M1-F-2: provider selection is driven by cfg.liveChain (LIVE_CHAIN=1).
   // ReadOnly is the safe default; live mode is explicit opt-in.
   const chain = buildChainProvider(cfg);
-  const state = new SupplierState();
+  // chat-session kind serves N concurrent sessions; one-shot kinds stay 1.
+  const state = new SupplierState(cfg.capabilityKind === "chat-session" ? cfg.maxChatSessions : 1);
   const jobs = new JobStore();
 
   const deps: SupplierDeps = { chain, state, config: cfg, supplierKey, jobs };

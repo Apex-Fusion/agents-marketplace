@@ -8,9 +8,10 @@
  * turns that run fully OFF-CHAIN, and is settled at /v1/chat/end (or by the
  * idle watchdog) when the supplier Submits a receipt over the whole transcript.
  *
- * Single-slot: the supplier serves one paid chat at a time (SupplierState
- * mutex), so at most one record is "active". Ended records are retained so
- * /v1/chat/end is idempotent (returns the same receipt).
+ * Concurrency: up to MAX_CHAT_SESSIONS records are "active" at once
+ * (SupplierState slot admission). Ended records are retained so /v1/chat/end
+ * is idempotent (returns the same receipt) and so a used ticket-mode escrow
+ * ref can never open a second session.
  *
  * Timer handles (idle + hard-cap) live on the record; server.ts arms them and
  * endChatSession clears them.
@@ -31,7 +32,11 @@ export interface ChatSessionEndResult {
 
 export interface ChatSessionRecord {
   escrowRef: string;
-  claimedRef: OutputReference;
+  /** Absent in ticket mode (the escrow is never Claimed). */
+  claimedRef?: OutputReference;
+  /** "full" = Claim/Submit lifecycle; "ticket" = no chain ops after the
+   * buyer's escrow post. */
+  settleMode: "full" | "ticket";
   advert: AdvertDatum;
   escrowDatum: EscrowDatum;
   /** Full ordered conversation (user + assistant turns). Hashed at End. */
@@ -49,7 +54,8 @@ export interface ChatSessionRecord {
 
 export interface CreateChatSessionParams {
   escrowRef: string;
-  claimedRef: OutputReference;
+  claimedRef?: OutputReference;
+  settleMode?: "full" | "ticket";
   advert: AdvertDatum;
   escrowDatum: EscrowDatum;
 }
@@ -62,6 +68,7 @@ export class ChatSessionStore {
     const record: ChatSessionRecord = {
       escrowRef: params.escrowRef,
       claimedRef: params.claimedRef,
+      settleMode: params.settleMode ?? "full",
       advert: params.advert,
       escrowDatum: params.escrowDatum,
       transcript: [],

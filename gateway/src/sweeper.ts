@@ -25,6 +25,17 @@
  * (terminal spends update nothing), and the validator preserves posted_at
  * across states — so a session's lineage is "rows sharing the posted_at of the
  * session's original Open ref row".
+ *
+ * Because terminal spends never update indexer rows, every settled escrow
+ * would be retried (one doomed chain query each) on every sweep forever. The
+ * in-process `settledRefs` memory skips refs this process has already settled
+ * or found spent; a restart just causes one harmless retry burst.
+ *
+ * Ticket mode (config.chatSettleMode === "ticket"): session escrows are never
+ * Claimed — they sit Open until reclaimed here after deliver_by. Reclaiming
+ * an Open ticket does NOT close a still-open session row: nothing re-checks
+ * the escrow after /v1/chat/start, so the conversation (and its affinity
+ * mirror) lives on, bounded only by the idle janitor.
  */
 
 import { randomUUID } from "crypto";
@@ -42,6 +53,23 @@ const MIN_AGE_MS = 90_000;
 const RECLAIM_AFTER_MS = 11 * 60 * 1000;
 // Chat-session escrows: deliver_by ≈ posted_at + 30 min, so wait longer.
 const CHAT_RECLAIM_AFTER_MS = 35 * 60 * 1000;
+// Reclaim only fires once the validator allows it (validity lower bound >=
+// deliver_by); attempting earlier is a guaranteed-doomed tx build.
+const DELIVER_BY_BUFFER_MS = 60_000;
+
+/** Refs this process already settled (Accepted/Reclaimed) or found spent.
+ * The indexer never updates terminal rows, so without this every historical
+ * escrow is retried each sweep. Bounded FIFO; restart = one retry burst. */
+const settledRefs = new Set<string>();
+const SETTLED_REFS_MAX = 5_000;
+
+function markSettled(ref: string): void {
+  settledRefs.add(ref);
+  if (settledRefs.size > SETTLED_REFS_MAX) {
+    const first = settledRefs.values().next().value;
+    if (first !== undefined) settledRefs.delete(first);
+  }
+}
 
 function log(msg: string): void {
   // eslint-disable-next-line no-console
@@ -77,7 +105,16 @@ function closeSessionRow(
   log(`closed abandoned session ${session.id} (${outcome.status})`);
 }
 
-export async function runSweepOnce(deps: GatewayDeps): Promise<void> {
+/** Chain-settle functions, injectable for tests. */
+export interface SweepSettleFns {
+  accept: typeof acceptAndConfirm;
+  reclaim: typeof reclaimAndConfirm;
+}
+
+export async function runSweepOnce(
+  deps: GatewayDeps,
+  settle: SweepSettleFns = { accept: acceptAndConfirm, reclaim: reclaimAndConfirm },
+): Promise<void> {
   // Idle demo sessions first: closing them makes the supplier Submit, so this
   // sweep (or the next) can Accept the escrow right after.
   await sweepIdleDemoSessions(deps).catch((err) =>
@@ -106,6 +143,7 @@ export async function runSweepOnce(deps: GatewayDeps): Promise<void> {
     for (const row of rows) {
       const ref = parseRef(row.utxo_ref);
       if (!ref) continue;
+      if (settledRefs.has(row.utxo_ref)) continue;
       const ageMs = now - (row.posted_at ?? 0);
       if (ageMs < MIN_AGE_MS) continue;
       const chatSession = sessionByPostedAt.get(row.posted_at);
@@ -113,8 +151,9 @@ export async function runSweepOnce(deps: GatewayDeps): Promise<void> {
       try {
         if (row.state === "Submitted") {
           try {
-            await ctx.mutex.run(() => acceptAndConfirm(deps.chain, ctx.walletKey, ref));
+            await ctx.mutex.run(() => settle.accept(deps.chain, ctx.walletKey, ref));
             log(`accepted stranded Submitted escrow ${row.utxo_ref}`);
+            markSettled(row.utxo_ref);
             if (chatSession) {
               closeSessionRow(deps, chatSession, { status: "completed", costLovelace: chatSession.price_lovelace });
             }
@@ -124,8 +163,11 @@ export async function runSweepOnce(deps: GatewayDeps): Promise<void> {
             // For session lineages, confirm the spend on-chain before closing
             // the row — an Accept that failed for another reason (timeout)
             // must leave the session open for the next sweep.
-            if (chatSession && (await deps.chain.queryUtxo(ref)) === null) {
-              closeSessionRow(deps, chatSession, { status: "completed", costLovelace: chatSession.price_lovelace });
+            if ((await deps.chain.queryUtxo(ref)) === null) {
+              markSettled(row.utxo_ref);
+              if (chatSession) {
+                closeSessionRow(deps, chatSession, { status: "completed", costLovelace: chatSession.price_lovelace });
+              }
             } else if (!chatSession) {
               // Preserve the historical quiet-skip for one-shot escrows.
               void err;
@@ -133,12 +175,25 @@ export async function runSweepOnce(deps: GatewayDeps): Promise<void> {
           }
         } else if (row.state === "Open" || row.state === "Claimed") {
           const reclaimAfterMs = chatSession ? CHAT_RECLAIM_AFTER_MS : RECLAIM_AFTER_MS;
-          if (ageMs > reclaimAfterMs) {
-            await ctx.mutex.run(() => reclaimAndConfirm(deps.chain, ctx.walletKey, ref));
+          // The validator only allows Reclaim at/after deliver_by — skip
+          // attempts that cannot succeed yet (early-closed ticket sessions).
+          const pastDeliverBy =
+            typeof row.deliver_by === "number" ? now > row.deliver_by + DELIVER_BY_BUFFER_MS : true;
+          if (ageMs > reclaimAfterMs && pastDeliverBy) {
+            await ctx.mutex.run(() => settle.reclaim(deps.chain, ctx.walletKey, ref));
             log(`reclaimed stranded ${row.state} escrow ${row.utxo_ref}`);
+            markSettled(row.utxo_ref);
             if (chatSession) {
-              // Funds returned — the session never settled; record no cost.
-              closeSessionRow(deps, chatSession, { status: "reclaimed", costLovelace: null });
+              const ticketOpen = deps.config.chatSettleMode === "ticket" && row.state === "Open";
+              if (ticketOpen) {
+                // Ticket escrow reclaimed out from under a LIVE session —
+                // by design. Keep the session row + mirror; only the idle
+                // janitor / close paths end ticket sessions.
+                log(`ticket mode: escrow reclaimed, session ${chatSession.id} stays open`);
+              } else {
+                // Funds returned — the session never settled; record no cost.
+                closeSessionRow(deps, chatSession, { status: "reclaimed", costLovelace: null });
+              }
             }
           }
         }

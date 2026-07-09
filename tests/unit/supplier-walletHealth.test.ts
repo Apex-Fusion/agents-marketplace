@@ -4,11 +4,11 @@
  *
  * Coverage:
  *   - Ticker calls consolidate when idle, logs already-healthy
- *   - Ticker skips when the supplier state is busy
- *   - Ticker releases the lock around runConsolidateWallet (success + failure)
+ *   - Consolidation runs even while session slots are held (wallet ops don't
+ *     consume session slots) but queues behind a held walletMutex
+ *   - Failure paths never leave the walletMutex poisoned
  *   - On-failure trigger fires consolidate the first time
  *   - On-failure trigger debounces back-to-back invocations
- *   - On-failure trigger respects the state lock
  *
  * The consolidate function is injected via deps so the test never touches
  * a real Ogmios.
@@ -91,7 +91,7 @@ describe("walletHealth — ticker", () => {
     ticker.stop();
   });
 
-  it("skips when supplier state is busy", async () => {
+  it("runs even while a session slot is held (wallet ops don't consume slots)", async () => {
     state.tryAcquire(ESCROW_REF);
     consolidate.mockResolvedValue(healthyResult);
 
@@ -101,16 +101,39 @@ describe("walletHealth — ticker", () => {
     );
 
     await vi.advanceTimersByTimeAsync(1_000);
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.waitFor(() => expect(consolidate).toHaveBeenCalledTimes(1));
 
-    expect(consolidate).not.toHaveBeenCalled();
-    expect(logLines).toContain("skip: supplier busy");
+    // The held session slot is untouched.
     expect(state.snapshot().status).toBe("working");
+    expect(state.snapshot().activeEscrowRefs).toEqual([ESCROW_REF]);
 
     ticker.stop();
   });
 
-  it("releases the lock after a successful consolidate", async () => {
+  it("queues behind a held walletMutex instead of racing it", async () => {
+    consolidate.mockResolvedValue(healthyResult);
+    let releaseChainOp: () => void = () => undefined;
+    const chainOp = state.walletMutex.run(
+      () => new Promise<void>((resolve) => { releaseChainOp = resolve; }),
+    );
+
+    const ticker = startWalletHealthTicker(
+      { chain: FAKE_CHAIN, state, supplierKey: FAKE_KEY, consolidate },
+      { intervalMs: 1_000, log },
+    );
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    // The mutex is held by the fake chain op — consolidate must wait.
+    expect(consolidate).not.toHaveBeenCalled();
+
+    releaseChainOp();
+    await chainOp;
+    await vi.waitFor(() => expect(consolidate).toHaveBeenCalledTimes(1));
+
+    ticker.stop();
+  });
+
+  it("logs success after a real consolidate", async () => {
     consolidate.mockResolvedValue(consolidatedResult);
 
     const ticker = startWalletHealthTicker(
@@ -127,7 +150,7 @@ describe("walletHealth — ticker", () => {
     ticker.stop();
   });
 
-  it("releases the lock when consolidate throws", async () => {
+  it("does not poison the walletMutex when consolidate throws", async () => {
     consolidate.mockRejectedValue(new Error("ogmios unreachable"));
 
     const ticker = startWalletHealthTicker(
@@ -138,8 +161,9 @@ describe("walletHealth — ticker", () => {
     await vi.advanceTimersByTimeAsync(1_000);
     await vi.waitFor(() => expect(consolidate).toHaveBeenCalledTimes(1));
 
-    expect(state.snapshot().status).toBe("free");
     expect(logLines.some((l) => l.includes("consolidate failed"))).toBe(true);
+    // The mutex still serves the next wallet op.
+    expect(await state.walletMutex.run(async () => "ok")).toBe("ok");
 
     ticker.stop();
   });
@@ -202,7 +226,7 @@ describe("walletHealth — triggerOnFailureConsolidate", () => {
     expect(consolidate).toHaveBeenCalledTimes(1);
   });
 
-  it("does not throw when supplier is busy — just skips", async () => {
+  it("runs even when session slots are held (queues on the wallet mutex)", async () => {
     state.tryAcquire(ESCROW_REF);
     consolidate.mockResolvedValue(healthyResult);
 
@@ -213,9 +237,8 @@ describe("walletHealth — triggerOnFailureConsolidate", () => {
       ),
     ).not.toThrow();
 
-    await Promise.resolve();
-    expect(consolidate).not.toHaveBeenCalled();
-    expect(logLines).toContain("skip: supplier busy");
+    await vi.waitFor(() => expect(consolidate).toHaveBeenCalledTimes(1));
+    // The held session slot is untouched.
     expect(state.snapshot().status).toBe("working");
   });
 });

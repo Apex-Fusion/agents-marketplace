@@ -60,8 +60,10 @@ function candidatesFor(keyId: string, model: string): AffinityCandidate[] {
   return out;
 }
 
-/** Record the session's flat fee when the demo executor closes its row (the
- * supplier already Submitted; the sweeper Accepts the escrow afterwards). */
+/** Record the session's cost when the demo executor closes its row. Full
+ * mode: the flat session fee (supplier Submitted; the sweeper Accepts the
+ * escrow afterwards). Ticket mode: 0 — nothing settles, the sweeper reclaims
+ * the escrow and the wallet is made whole minus fees. */
 function recordSessionCost(deps: GatewayDeps, session: SessionRow): void {
   deps.store.insertUsage({
     id: randomUUID(),
@@ -72,7 +74,7 @@ function recordSessionCost(deps: GatewayDeps, session: SessionRow): void {
     capability_id: CAPABILITY,
     supplier_pkh: session.supplier_pkh,
     escrow_ref: session.escrow_ref,
-    cost_lovelace: session.price_lovelace,
+    cost_lovelace: deps.config.chatSettleMode === "ticket" ? "0" : session.price_lovelace,
     prompt_tokens: 0,
     completion_tokens: 0,
     status: "completed",

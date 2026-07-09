@@ -197,6 +197,11 @@ export interface StartChatOptions {
   advertRef: OutputReference;
   payment_lovelace: bigint;
 }
+/** Chain settlement mode a chat session runs under (reported by the supplier
+ * at /v1/chat/start): "full" = Claim/Submit/Accept lifecycle; "ticket" = the
+ * buyer's escrow post is the only chain op (reclaimed after deliver_by). */
+export type ChatSettleMode = "full" | "ticket";
+
 export interface StartChatResult {
   escrowRef: OutputReference;
   /** Random nonce committed into the escrow's session-init prompt_hash. The
@@ -204,6 +209,8 @@ export interface StartChatResult {
   sessionNonce: string;
   /** Supplier endpoint_url, cached by the buyer-app for message routing. */
   supplierBaseUrl: string;
+  /** How the supplier settles this session ("full" when it Claimed). */
+  settleMode: ChatSettleMode;
 }
 
 /**
@@ -220,13 +227,21 @@ export interface EndChatOptions {
   /** The browser's local transcript mirror, used to verify response_hash. */
   transcript?: import("@marketplace/shared/tx").ChatMessage[];
 }
-export interface EndChatResult {
-  receipt: Receipt;
-  receiptSignature: string;
-  escrowRef: OutputReference;
-  /** The Submitted escrow UTxO that was Accepted. */
-  acceptedRef: OutputReference;
-}
+export type EndChatResult =
+  | {
+      settleMode: "full";
+      receipt: Receipt;
+      receiptSignature: string;
+      escrowRef: OutputReference;
+      /** The Submitted escrow UTxO that was Accepted. */
+      acceptedRef: OutputReference;
+    }
+  | {
+      /** Ticket session: nothing was Submitted/Accepted — no receipt exists.
+       * The Open escrow returns to the buyer via reclaim after deliver_by. */
+      settleMode: "ticket";
+      escrowRef: OutputReference;
+    };
 
 /**
  * AcceptResultOptions — arguments to Marketplace.acceptResult().

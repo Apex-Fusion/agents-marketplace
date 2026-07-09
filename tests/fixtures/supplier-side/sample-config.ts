@@ -31,6 +31,8 @@ export function buildSampleConfig(): SupplierConfig {
     piperUrl: "",
     piperTimeoutMs: 120_000,
     capabilityKind: "chat",
+    maxChatSessions: 1,
+    chatSettleMode: "full",
     liveChain: false,
   };
 }

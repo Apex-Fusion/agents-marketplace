@@ -22,6 +22,8 @@ export interface EscrowRow {
   utxo_ref: string;
   state: string;
   posted_at: number;
+  /** Validator reclaim floor (indexer serves it; absent on very old rows). */
+  deliver_by?: number;
 }
 
 export async function fetchEscrows(

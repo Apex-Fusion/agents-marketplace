@@ -1,20 +1,22 @@
 /**
- * supplier/src/chatSessionRunner.ts — settles an open chat session.
+ * supplier/src/chatSessionRunner.ts — ends an open chat session.
  *
- * endChatSession is the chat-session analogue of runChatJob's receipt+Submit
- * tail (jobRunner.ts steps 3-7). It is invoked from BOTH /v1/chat/end (user
- * clicked "End chat") and the idle/hard-cap watchdog (abandoned session). It:
- *   1. atomically flips the session "active" → "ending" (idempotent re-entry)
- *   2. clears the idle + hard-cap timers
- *   3. builds + signs a receipt over the FULL transcript
- *      (response_hash = sha256(canonical(transcript)); the buyer recomputes
- *       this from its local transcript mirror to verify)
- *   4. buildSubmitTx against the Claimed UTxO → awaitTx (60s)
- *   5. stores the terminal result and ALWAYS releases the supplier lock
+ * endChatSession is invoked from BOTH /v1/chat/end (user clicked "End chat")
+ * and the idle/hard-cap watchdog (abandoned session). Behavior branches on
+ * the record's settleMode:
+ *
+ *   full   — chat-session analogue of runChatJob's receipt+Submit tail:
+ *            build + sign a receipt over the FULL transcript
+ *            (response_hash = sha256(canonical(transcript))), then
+ *            buildSubmitTx against the Claimed UTxO → awaitTx (60s), inside
+ *            the wallet mutex (never race another wallet spend).
+ *   ticket — no chain work at all: mark ended and free the slot. The escrow
+ *            was never Claimed; the buyer's sweeper Reclaims it after
+ *            deliver_by.
  *
  * Never throws. On any failure the session is marked "ended" with endFailure
- * and the lock is released (the escrow then lingers Claimed until the buyer
- * Reclaims after deliver_by — same fate as a failed one-off job).
+ * and the slot is released (a full-mode escrow then lingers Claimed until the
+ * buyer Reclaims after deliver_by — same fate as a failed one-off job).
  */
 
 import { canonicalize } from "@marketplace/shared/cbor";
@@ -41,7 +43,7 @@ export interface EndChatSessionParams {
 }
 
 /**
- * Settle a chat session. Returns the (now terminal) record, or null if no
+ * End a chat session. Returns the (now terminal) record, or null if no
  * session exists for the ref. Idempotent: a second call returns the same
  * record without re-submitting.
  */
@@ -59,6 +61,21 @@ export async function endChatSession(
   deps.sessions.clearTimers(record);
 
   try {
+    if (record.settleMode === "ticket") {
+      // No chain work: the un-Claimed escrow is the buyer's to reclaim.
+      record.status = "ended";
+      return record;
+    }
+    const claimedRef = record.claimedRef;
+    if (!claimedRef) {
+      // Full-mode record without a Claim ref should be impossible; end
+      // defensively rather than throw (this path must never leak the slot).
+      console.warn(`[chat_end_failed] escrow=${escrowRef} trigger=${trigger ?? "end"} reason=missing_claimed_ref`);
+      record.endFailure = { reason: "missing_claimed_ref", message: "full-mode session has no claimedRef" };
+      record.status = "ended";
+      return record;
+    }
+
     // ── Receipt over the full transcript ──────────────────────────────────
     const transcriptHash = sha256Hex(canonicalize(record.transcript));
     const receipt = buildReceipt({
@@ -74,27 +91,35 @@ export async function endChatSession(
     const signed = signReceipt(receipt, deps.supplierKey.privateKeyHex);
     const resultHash = receiptResultHash(signed);
 
-    // ── Submit (Claimed → Submitted) ──────────────────────────────────────
-    let buildResult: { txCborHex: string; expectedTxHash: string };
-    try {
-      buildResult = await buildSubmitTx({
-        chain: deps.chain,
-        supplierKey: deps.supplierKey,
-        escrowRef: record.claimedRef,
-        receiptHash: resultHash,
-      });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+    // ── Submit (Claimed → Submitted): one wallet critical section ─────────
+    const submitOutcome = await deps.state.walletMutex.run(async () => {
+      let built: { txCborHex: string; expectedTxHash: string };
+      try {
+        built = await buildSubmitTx({
+          chain: deps.chain,
+          supplierKey: deps.supplierKey,
+          escrowRef: claimedRef,
+          receiptHash: resultHash,
+        });
+      } catch (err) {
+        return { kind: "build_failed" as const, err };
+      }
+      try {
+        await deps.chain.awaitTx(built.expectedTxHash, 60_000);
+      } catch (err) {
+        return { kind: "await_failed" as const, err };
+      }
+      return { kind: "ok" as const, built };
+    });
+    if (submitOutcome.kind === "build_failed") {
+      const message = submitOutcome.err instanceof Error ? submitOutcome.err.message : String(submitOutcome.err);
       console.warn(`[chat_end_failed] escrow=${escrowRef} trigger=${trigger ?? "end"} reason=submit_failed msg=${message}`);
       record.endFailure = { reason: "submit_failed", message: `Submit tx failed: ${message}` };
       record.status = "ended";
       return record;
     }
-
-    try {
-      await deps.chain.awaitTx(buildResult.expectedTxHash, 60_000);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+    if (submitOutcome.kind === "await_failed") {
+      const message = submitOutcome.err instanceof Error ? submitOutcome.err.message : String(submitOutcome.err);
       console.warn(`[chat_end_failed] escrow=${escrowRef} trigger=${trigger ?? "end"} reason=submit_timeout msg=${message}`);
       record.endFailure = { reason: "submit_timeout", message: `Submit awaitTx failed: ${message}` };
       record.status = "ended";
@@ -105,14 +130,14 @@ export async function endChatSession(
       receipt: signed.receipt as unknown as Record<string, unknown>,
       receipt_signature: signed.signature,
       // The Submit tx output (index 0) is the new Submitted UTxO the buyer Accepts.
-      submitted_ref: `${buildResult.expectedTxHash}#0`,
+      submitted_ref: `${submitOutcome.built.expectedTxHash}#0`,
     };
     record.status = "ended";
     return record;
   } finally {
-    // Always release the single-slot lock so the next chat can start.
+    // Always release this session's slot so the next chat can start.
     try {
-      deps.state.release();
+      deps.state.release(record.escrowRef);
     } catch {
       /* never let lock-release escape */
     }

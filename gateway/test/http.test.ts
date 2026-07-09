@@ -22,7 +22,11 @@ const SUPPLIERS = [
 
 function makeDeps(
   fetchFn?: typeof globalThis.fetch,
-  overrides?: { demoIpRate?: { max: number; windowMs: number }; chain?: GatewayDeps["chain"] },
+  overrides?: {
+    demoIpRate?: { max: number; windowMs: number };
+    chain?: GatewayDeps["chain"];
+    chatSettleMode?: "full" | "ticket";
+  },
 ): GatewayDeps {
   const dbDir = join(tmpdir(), `gw-test-${randomUUID()}`);
   const store = new GatewayStore(dbDir);
@@ -39,6 +43,7 @@ function makeDeps(
     demoIpRate: overrides?.demoIpRate ?? { max: 1000, windowMs: 60_000 },
     sweeperIntervalMs: 60_000,
     demoSessionIdleMs: 180_000,
+    chatSettleMode: overrides?.chatSettleMode ?? "full",
     walletHealthIntervalMs: 600_000,
     sdkRegistryMax: 100,
     corsOrigins: [],
@@ -415,6 +420,60 @@ describe("gateway demo key", () => {
     expect(res.body.error.code).toBe("model_not_found");
     expect(startChat).not.toHaveBeenCalled();
     expect(endCalls).toHaveLength(0);
+  });
+
+  it("ticket mode: session close settles nothing and bills zero", async () => {
+    const { fetchFn } = demoFetch([
+      () => supplierSse([{ type: "token", value: "Hi" }, doneFrame({ role: "assistant", content: "Hi" }, "stop")]),
+    ]);
+    const deps = makeDeps(fetchFn, { chain: fundedChain, chatSettleMode: "ticket" });
+    const { rawKey, keyRow } = setupDemoKey(deps);
+    const ctx = deps.registry.getContext(keyRow);
+    const endChat = vi.fn(async (opts: { escrowRef: unknown }) => ({
+      settleMode: "ticket" as const,
+      escrowRef: opts.escrowRef,
+    }));
+    (ctx.sdk as { endChat: unknown }).endChat = endChat;
+    const app = createApp(deps);
+
+    const res1 = await request(app)
+      .post("/openai/v1/chat/completions")
+      .set("authorization", `Bearer ${rawKey}`)
+      .send({ model: "kimi", messages: [{ role: "user", content: "hi" }] });
+    expect(res1.status).toBe(200);
+
+    const session = deps.store.listOpenSessionsByKey(keyRow.id)[0];
+    const close = await request(app)
+      .post(`/openai/v1/chat/sessions/${session.id}/close`)
+      .set("authorization", `Bearer ${rawKey}`)
+      .send({});
+    expect(close.status).toBe(200);
+    expect(close.body.settle_mode).toBe("ticket");
+    expect(close.body.accepted_ref).toBeUndefined();
+    expect(endChat).toHaveBeenCalledTimes(1);
+
+    const usage = deps.store.listUsage(keyRow.id, 10);
+    expect(usage.some((u) => u.kind === "chat_session" && u.cost_lovelace === "0")).toBe(true);
+  });
+
+  it("ticket mode: janitor-closed demo sessions bill zero", async () => {
+    const { fetchFn, endCalls } = demoFetch([
+      () => supplierSse([{ type: "token", value: "Hi" }, doneFrame({ role: "assistant", content: "Hi" }, "stop")]),
+    ]);
+    const deps = makeDeps(fetchFn, { chain: fundedChain, chatSettleMode: "ticket" });
+    const { rawKey, keyRow } = setupDemoKey(deps);
+    const app = createApp(deps);
+
+    const res = await request(app)
+      .post("/openai/v1/chat/completions")
+      .set("authorization", `Bearer ${rawKey}`)
+      .send({ model: "kimi", messages: [{ role: "user", content: "hi" }] });
+    expect(res.status).toBe(200);
+
+    await sweepIdleDemoSessions(deps, Date.now() + deps.config.demoSessionIdleMs + 1);
+    expect(endCalls.length).toBeGreaterThan(0);
+    const usage = deps.store.listUsage(keyRow.id, 10);
+    expect(usage.some((u) => u.kind === "chat_session" && u.cost_lovelace === "0")).toBe(true);
   });
 
   it("janitor closes idle demo sessions so the next request opens fresh", async () => {

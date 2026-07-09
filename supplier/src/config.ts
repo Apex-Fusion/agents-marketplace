@@ -66,6 +66,13 @@ export type CapabilityKind = "chat" | "tts" | "chat-session";
 /** LLM backend selected for the chat capability. */
 export type LlmBackend = "ollama" | "openai";
 
+/** Chain settlement mode for chat sessions.
+ *   "full"   — Claim at start, Submit receipt at end (buyer Accepts). Default.
+ *   "ticket" — the buyer's escrow post is the only chain op; the supplier
+ *              verifies it as an entry ticket but never Claims/Submits, and
+ *              the buyer's sweeper Reclaims the Open escrow after deliver_by. */
+export type ChatSettleMode = "full" | "ticket";
+
 export interface SupplierConfig {
   supplierPrivKeyHex: string;
   ogmiosUrl: string;
@@ -109,6 +116,13 @@ export interface SupplierConfig {
    * 300_000 (5 min).
    */
   chatIdleTimeoutMs: number;
+  /**
+   * Concurrent chat-session slots (capabilityKind="chat-session" only).
+   * Default 1 = legacy single-slot behavior.
+   */
+  maxChatSessions: number;
+  /** Chain settlement mode for chat sessions. Default "full". */
+  chatSettleMode: ChatSettleMode;
   /**
    * When true, the supplier boots a LiveOgmiosProvider (real submitTx/awaitTx).
    * Default false → ReadOnlyOgmiosProvider (safe; no chain writes).
@@ -278,6 +292,32 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
     chatIdleTimeoutMs = Number(chatIdleStr);
   }
 
+  // MAX_CHAT_SESSIONS — concurrent chat-session slots (default 1 = legacy
+  // single-slot). Only meaningful for capabilityKind="chat-session".
+  const maxSessionsStr = env.MAX_CHAT_SESSIONS;
+  let maxChatSessions = 1;
+  if (maxSessionsStr !== undefined && maxSessionsStr !== "") {
+    if (!POS_INT_RE.test(maxSessionsStr)) {
+      throw new Error("loadConfig: MAX_CHAT_SESSIONS must be a positive integer");
+    }
+    maxChatSessions = Number(maxSessionsStr);
+  }
+  if (maxChatSessions > 1 && capabilityKind !== "chat-session") {
+    throw new Error('loadConfig: MAX_CHAT_SESSIONS > 1 requires CAPABILITY_KIND="chat-session"');
+  }
+
+  // CHAT_SETTLE_MODE — "full" (default; Claim at start, Submit receipt at end)
+  // or "ticket" (the buyer's escrow post is the only chain op; the supplier
+  // never Claims/Submits and the buyer reclaims the escrow after deliver_by).
+  const settleModeStr = env.CHAT_SETTLE_MODE ?? "full";
+  if (settleModeStr !== "full" && settleModeStr !== "ticket") {
+    throw new Error('loadConfig: CHAT_SETTLE_MODE must be "full" or "ticket"');
+  }
+  if (settleModeStr === "ticket" && capabilityKind !== "chat-session") {
+    throw new Error('loadConfig: CHAT_SETTLE_MODE="ticket" requires CAPABILITY_KIND="chat-session"');
+  }
+  const chatSettleMode: ChatSettleMode = settleModeStr;
+
   const piperTimeoutStr = env.PIPER_TIMEOUT_MS;
   let piperTimeoutMs = 120_000;
   if (piperTimeoutStr !== undefined && piperTimeoutStr !== "") {
@@ -320,6 +360,8 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
     capabilityKind,
     llmBackend,
     chatIdleTimeoutMs,
+    maxChatSessions,
+    chatSettleMode,
     liveChain,
     walletHealthIntervalMs,
   };

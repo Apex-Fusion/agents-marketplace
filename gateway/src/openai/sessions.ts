@@ -125,6 +125,16 @@ export async function openSessionCore(
   }
   if (!started || !used) throw toGatewayError(lastErr ?? new Error("no chat supplier could be engaged"));
 
+  // Deployment sanity: supplier and gateway must agree on the settle mode.
+  // Close behavior is driven per-session by the supplier's /end response, so
+  // a mismatch (rollout window) still settles correctly — just warn.
+  if ((started.settleMode === "ticket") !== (deps.config.chatSettleMode === "ticket")) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[gateway] settle-mode mismatch: supplier ${used.supplierPkh.slice(0, 8)} ran "${started.settleMode}" but gateway is configured "${deps.config.chatSettleMode}"`,
+    );
+  }
+
   const sessionId = randomUUID();
   deps.store.insertSession({
     id: sessionId,
@@ -398,6 +408,33 @@ async function closeSession(
 
   deps.store.setSessionState(session.id, "closed", Date.now());
   dropSessionState(session.id);
+
+  if (result.settleMode === "ticket") {
+    // Nothing was Submitted/Accepted: no receipt, no charge (the escrow
+    // returns via the sweeper's reclaim), and no wallet churn to tidy up.
+    deps.store.insertUsage({
+      id: randomUUID(),
+      key_id: keyRow.id,
+      created_at: Date.now(),
+      kind: "chat_session",
+      model: session.model,
+      capability_id: CAPABILITY,
+      supplier_pkh: session.supplier_pkh,
+      escrow_ref: session.escrow_ref,
+      cost_lovelace: "0",
+      prompt_tokens: 0,
+      completion_tokens: 0,
+      status: "completed",
+      failure_reason: null,
+    });
+    res.status(200).json({
+      status: "ended",
+      escrow_ref: session.escrow_ref,
+      settle_mode: "ticket",
+      model: session.model,
+    });
+    return;
+  }
 
   const prompt = result.receipt.prompt_tokens ?? 0;
   const completion = result.receipt.completion_tokens ?? 0;

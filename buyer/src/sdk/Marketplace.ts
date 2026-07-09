@@ -90,6 +90,7 @@ import type {
   SubmitTtsResult,
   StartChatOptions,
   StartChatResult,
+  ChatSettleMode,
   EndChatOptions,
   EndChatResult,
   AcceptResultOptions,
@@ -899,7 +900,13 @@ export class Marketplace extends EventEmitterBase {
     }
 
     this.emitProgress({ type: "chat_started", escrow_ref: escrowRefStr });
-    return { escrowRef: escrowOutputRef, sessionNonce, supplierBaseUrl: advertDatum.endpoint_url };
+    // Ticket-mode suppliers answer {status:"ticket"} (no Claim); anything else
+    // — "claimed" or an older supplier without the field — is full settlement.
+    const startStatus = startRes.body && typeof startRes.body === "object"
+      ? (startRes.body as { status?: string }).status
+      : undefined;
+    const settleMode: ChatSettleMode = startStatus === "ticket" ? "ticket" : "full";
+    return { escrowRef: escrowOutputRef, sessionNonce, supplierBaseUrl: advertDatum.endpoint_url, settleMode };
   }
 
   /**
@@ -937,10 +944,20 @@ export class Marketplace extends EventEmitterBase {
       });
     }
     const endBody = endRes.body as {
+      status?: string;
+      settle_mode?: string;
       receipt?: import("@marketplace/shared/receipt").Receipt;
       receipt_signature?: string;
       submitted_ref?: string;
     };
+    // Ticket sessions produce no receipt and nothing to Accept — the Open
+    // escrow returns via reclaim after deliver_by. Trusting the supplier's
+    // response is incentive-safe: lying in either direction only forfeits the
+    // supplier's own payout (the buyer's sweeper reclaims unsettled escrows).
+    if (endBody.settle_mode === "ticket") {
+      this.emitProgress({ type: "chat_ended", escrow_ref: escrowRefStr });
+      return { settleMode: "ticket", escrowRef };
+    }
     if (!endBody.receipt || !endBody.receipt_signature) {
       throw new SupplierError("malformed_response", { message: "supplier end response missing receipt" });
     }
@@ -1022,7 +1039,7 @@ export class Marketplace extends EventEmitterBase {
     this.emitProgress({ type: "accept_submitted", escrow_ref: refToString(acceptedRef) });
     this.emitProgress({ type: "chat_ended", escrow_ref: escrowRefStr });
 
-    return { receipt, receiptSignature, escrowRef, acceptedRef };
+    return { settleMode: "full", receipt, receiptSignature, escrowRef, acceptedRef };
   }
 
   // ─── acceptResult / reclaim ───────────────────────────────────────────

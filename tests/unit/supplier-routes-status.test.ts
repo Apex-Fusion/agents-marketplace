@@ -117,6 +117,25 @@ describe("GET /status — response body when offline", () => {
   });
 });
 
+describe("GET /status — session slot fields", () => {
+  it("reports active_sessions/max_sessions when free", async () => {
+    const state = new SupplierState();
+    const res = await request(makeApp(state)).get("/status");
+    expect(res.body.active_sessions).toBe(0);
+    expect(res.body.max_sessions).toBe(1);
+  });
+
+  it("stays free with slots remaining and reports the active count", async () => {
+    const state = new SupplierState(3);
+    state.tryAcquire(ESCROW_REF);
+    const res = await request(makeApp(state)).get("/status");
+    expect(res.body.status).toBe("free");
+    expect(res.body.active_sessions).toBe(1);
+    expect(res.body.max_sessions).toBe(3);
+    expect(res.body.current_escrow_ref).toBeUndefined();
+  });
+});
+
 describe("GET /status — does not touch chain", () => {
   it("returns 200 even when chain has no UTxOs seeded", async () => {
     // If the handler incorrectly touches chain, it would throw because

@@ -113,6 +113,12 @@ All on-chain steps run inside the per-key `mutex.run(...)`.
 - **close** → `endChat` (Submit + Accept, awaits) → settle + bond refund; record usage; wallet-health.
 - Sessions are reclaimable by the sweeper if abandoned before close.
 
+### Settle modes (`CHAT_SETTLE_MODE`, gateway + supplier, default `full`)
+- **full** — the lifecycle above: supplier Claims at start, Submits a transcript receipt at end, gateway Accepts (buyer charged).
+- **ticket** — the buyer's escrow post at open is the ONLY chain op. The supplier verifies the Open escrow as an entry ticket (`/v1/chat/start` → `{status:"ticket"}`) but never Claims/Submits; `/v1/chat/end` → `{status:"ended", settle_mode:"ticket"}` with no receipt; the sweeper Reclaims the Open escrow after `deliver_by`, returning all locked funds (net cost ≈ tx fees). Usage rows record `cost_lovelace: 0`. Sessions may outlive `deliver_by` (no hard-cap) — a live session whose ticket got reclaimed keeps running; only the idle janitor/close ends it. Close behavior is driven per-session by the supplier's `/end` response, so mixed-mode rollout windows settle correctly.
+- Ticket caveats (accepted, demo-grade): a supplier restart forgets used tickets, so an unexpired un-reclaimed escrow ref could reopen a session (bounded by `deliver_by` + the sweep); `/account.locked_in_escrow_lovelace` over-reports because the indexer never updates spent rows.
+- Suppliers additionally take `MAX_CHAT_SESSIONS` (default 1) — concurrent session slots; `/status` reports `active_sessions`/`max_sessions` and stays `free` until all slots are taken.
+
 ## Sweeper & wallet-health
 - **Sweeper** (interval ~60s): per key, classify escrows. Open/Claimed past `deliver_by` → `reclaim`. Submitted **with a verified receipt** still in accept-window → retry `acceptResult`. Submitted past accept-window → leave for supplier Release (log). Never blind-`reclaim` Submitted.
 - **Wallet-health tick**: periodically + after each settle, `planConsolidate` → `consolidateWallet` so every wallet keeps a ≥5 ADA collateral UTxO. Skip if already healthy.

@@ -218,3 +218,39 @@ describe("parseAdvertRef()", () => {
     expect(() => parseAdvertRef(`${"a".repeat(64)}#-1`)).toThrow();
   });
 });
+
+// ─── loadConfig — chat-session concurrency + settle mode ─────────────────────
+
+describe("loadConfig() — MAX_CHAT_SESSIONS / CHAT_SETTLE_MODE", () => {
+  const chatSessionEnv = () => ({
+    ...buildSampleEnv(),
+    CAPABILITY_KIND: "chat-session",
+    LLM_BACKEND: "openai",
+    OPENAI_BASE_URL: "http://up",
+  });
+
+  it("defaults to 1 slot and full settle mode", () => {
+    const cfg = loadConfig(buildSampleEnv());
+    expect(cfg.maxChatSessions).toBe(1);
+    expect(cfg.chatSettleMode).toBe("full");
+  });
+
+  it("parses MAX_CHAT_SESSIONS and CHAT_SETTLE_MODE for chat-session kind", () => {
+    const cfg = loadConfig({ ...chatSessionEnv(), MAX_CHAT_SESSIONS: "8", CHAT_SETTLE_MODE: "ticket" });
+    expect(cfg.maxChatSessions).toBe(8);
+    expect(cfg.chatSettleMode).toBe("ticket");
+  });
+
+  it("rejects MAX_CHAT_SESSIONS > 1 for non-chat-session kinds", () => {
+    expect(() => loadConfig({ ...buildSampleEnv(), MAX_CHAT_SESSIONS: "4" })).toThrow();
+  });
+
+  it("rejects CHAT_SETTLE_MODE=ticket for non-chat-session kinds", () => {
+    expect(() => loadConfig({ ...buildSampleEnv(), CHAT_SETTLE_MODE: "ticket" })).toThrow();
+  });
+
+  it("rejects invalid values", () => {
+    expect(() => loadConfig({ ...chatSessionEnv(), MAX_CHAT_SESSIONS: "0" })).toThrow();
+    expect(() => loadConfig({ ...chatSessionEnv(), CHAT_SETTLE_MODE: "nope" })).toThrow();
+  });
+});

@@ -267,7 +267,18 @@ export default function ChatForm({ advertRef, payment_lovelace }: ChatFormProps 
         } catch { /* keep fallback */ }
         throw new Error(msg);
       }
-      setCharged(payment_lovelace !== undefined ? ap3x(payment_lovelace) : "0");
+      let endBody: { settle_mode?: string } = {};
+      try {
+        endBody = (await resp.json()) as { settle_mode?: string };
+      } catch { /* older buyer-app responses stay full-settle */ }
+      // Ticket sessions never charge — the escrow returns via reclaim.
+      setCharged(
+        endBody.settle_mode === "ticket"
+          ? "0 (ticket session — escrow reclaimed)"
+          : payment_lovelace !== undefined
+            ? ap3x(payment_lovelace)
+            : "0",
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {

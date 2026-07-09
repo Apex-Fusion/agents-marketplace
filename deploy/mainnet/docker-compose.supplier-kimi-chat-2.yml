@@ -40,7 +40,9 @@ services:
       OPENAI_TIMEOUT_MS: "300000"
       # 2.5 min idle end: single-slot suppliers must free up quickly for the
       # shared demo endpoint (the gateway transparently reopens on next turn).
-      CHAT_IDLE_TIMEOUT_MS: "150000"
+      CHAT_IDLE_TIMEOUT_MS: "900000"
+      CHAT_SETTLE_MODE: ticket
+      MAX_CHAT_SESSIONS: "8"
       PORT: "8080"
       # Enable LiveOgmiosProvider so Claim/Submit actually broadcast.
       LIVE_CHAIN: "1"

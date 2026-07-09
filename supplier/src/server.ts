@@ -147,6 +147,8 @@ function makeStatusHandler(deps: ResolvedDeps) {
     const payload: Record<string, unknown> = {
       status: snap.status,
       last_seen: snap.lastSeenIso,
+      active_sessions: snap.activeSessions,
+      max_sessions: snap.maxSessions,
     };
     if (snap.status === "working" && snap.currentEscrowRef) {
       payload.current_escrow_ref = snap.currentEscrowRef;
@@ -190,6 +192,9 @@ async function fetchActiveAdvert(deps: ResolvedDeps): Promise<AdvertResult> {
 
 function makeChatHandler(deps: ResolvedDeps) {
   return async (req: Request, res: Response, next: NextFunction) => {
+    // Slot held by THIS request (null until acquired / after hand-off to the
+    // job runner) — the catch-all must only release its own acquisition.
+    let acquiredRef: string | null = null;
     try {
       // ── 1. Header validation ──────────────────────────────────────────
       const headerVal = req.header("X-Escrow-Ref");
@@ -303,23 +308,37 @@ function makeChatHandler(deps: ResolvedDeps) {
           `now ${nowMs} >= deliver_by ${escrowDatum.deliver_by}`);
       }
 
-      // ── 8. Acquire single-slot lock ──────────────────────────────────
+      // ── 8. Acquire session slot ──────────────────────────────────────
       if (!deps.state.tryAcquire(escrowRefStr)) {
         return jsonError(res, 409, "supplier_busy", "supplier is already working another job");
       }
-      // From here on, every error path MUST release the lock until the
-      // runner takes ownership of the lock.
+      acquiredRef = escrowRefStr;
+      // From here on, every error path MUST release the slot until the
+      // runner takes ownership of it.
 
-      // ── 9. Submit Claim tx ───────────────────────────────────────────
-      let claimResult;
-      try {
-        claimResult = await buildClaimTx({
-          chain: deps.chain,
-          supplierKey: deps.supplierKey,
-          escrowRef,
-        });
-      } catch (err) {
-        deps.state.release();
+      // ── 9+10. Claim tx: build + confirm as ONE wallet critical section ─
+      // (splitting them would let another wallet spend coin-select mid-flight)
+      const claimOutcome = await deps.state.walletMutex.run(async () => {
+        let built;
+        try {
+          built = await buildClaimTx({
+            chain: deps.chain,
+            supplierKey: deps.supplierKey,
+            escrowRef,
+          });
+        } catch (err) {
+          return { kind: "build_failed" as const, err };
+        }
+        try {
+          await deps.chain.awaitTx(built.expectedTxHash, 60_000);
+        } catch (err) {
+          return { kind: "await_failed" as const, err };
+        }
+        return { kind: "ok" as const, built };
+      });
+      if (claimOutcome.kind === "build_failed") {
+        deps.state.release(escrowRefStr);
+        acquiredRef = null;
         // Backstop the periodic wallet-health ticker: most Claim build failures
         // we see in practice are wallet-shape problems (fragmentation, dust).
         // Fire-and-forget a debounced consolidate so the NEXT buyer retry
@@ -330,17 +349,15 @@ function makeChatHandler(deps: ResolvedDeps) {
           supplierKey: deps.supplierKey,
         });
         return jsonError(res, 503, "chain_submit_failed",
-          `Claim tx submit failed: ${(err as Error).message}`);
+          `Claim tx submit failed: ${(claimOutcome.err as Error).message}`);
       }
-
-      // ── 10. Await Claim confirmation ─────────────────────────────────
-      try {
-        await deps.chain.awaitTx(claimResult.expectedTxHash, 60_000);
-      } catch (err) {
-        deps.state.release();
+      if (claimOutcome.kind === "await_failed") {
+        deps.state.release(escrowRefStr);
+        acquiredRef = null;
         return jsonError(res, 504, "claim_timeout",
-          `Claim awaitTx failed: ${(err as Error).message}`);
+          `Claim awaitTx failed: ${(claimOutcome.err as Error).message}`);
       }
+      const claimResult = claimOutcome.built;
 
       // ── 11. Continuing-output ref + create job + fire-and-forget ─────
       const claimedRef: OutputReference = {
@@ -349,7 +366,8 @@ function makeChatHandler(deps: ResolvedDeps) {
       };
       const jobId = deps.jobs.create(escrowRefStr);
 
-      // Lock release now happens inside runChatJob's finally.
+      // Slot release now happens inside runChatJob's finally.
+      acquiredRef = null;
       void runChatJob({
         deps: {
           chain: deps.chain,
@@ -373,7 +391,9 @@ function makeChatHandler(deps: ResolvedDeps) {
         escrow_ref: escrowRefStr,
       });
     } catch (err) {
-      try { deps.state.release(); } catch { /* ignore */ }
+      if (acquiredRef) {
+        try { deps.state.release(acquiredRef); } catch { /* ignore */ }
+      }
       next(err);
       return;
     }
@@ -447,6 +467,8 @@ const ALLOWED_TTS_FORMATS = new Set(["mp3", "wav", "opus", "aac", "flac"]);
 
 function makeTtsHandler(deps: ResolvedDeps) {
   return async (req: Request, res: Response, next: NextFunction) => {
+    // Slot held by THIS request (null until acquired / after hand-off).
+    let acquiredRef: string | null = null;
     try {
       // ── 1. Header ───────────────────────────────────────────────────
       const headerVal = req.header("X-Escrow-Ref");
@@ -550,39 +572,53 @@ function makeTtsHandler(deps: ResolvedDeps) {
           `now ${nowMs} >= deliver_by ${escrowDatum.deliver_by}`);
       }
 
-      // ── 8. Lock ─────────────────────────────────────────────────────
+      // ── 8. Acquire session slot ─────────────────────────────────────
       if (!deps.state.tryAcquire(escrowRefStr)) {
         return jsonError(res, 409, "supplier_busy", "supplier is already working another job");
       }
+      acquiredRef = escrowRefStr;
 
-      // ── 9. Claim tx ─────────────────────────────────────────────────
-      let claimResult;
-      try {
-        claimResult = await buildClaimTx({
-          chain: deps.chain,
-          supplierKey: deps.supplierKey,
-          escrowRef,
-        });
-      } catch (err) {
-        deps.state.release();
+      // ── 9. Claim tx: build + confirm as ONE wallet critical section ──
+      const claimOutcome = await deps.state.walletMutex.run(async () => {
+        let built;
+        try {
+          built = await buildClaimTx({
+            chain: deps.chain,
+            supplierKey: deps.supplierKey,
+            escrowRef,
+          });
+        } catch (err) {
+          return { kind: "build_failed" as const, err };
+        }
+        try {
+          await deps.chain.awaitTx(built.expectedTxHash, 60_000);
+        } catch (err) {
+          return { kind: "await_failed" as const, err };
+        }
+        return { kind: "ok" as const, built };
+      });
+      if (claimOutcome.kind === "build_failed") {
+        deps.state.release(escrowRefStr);
+        acquiredRef = null;
         return jsonError(res, 503, "chain_submit_failed",
-          `Claim tx submit failed: ${(err as Error).message}`);
+          `Claim tx submit failed: ${(claimOutcome.err as Error).message}`);
       }
-      try {
-        await deps.chain.awaitTx(claimResult.expectedTxHash, 60_000);
-      } catch (err) {
-        deps.state.release();
+      if (claimOutcome.kind === "await_failed") {
+        deps.state.release(escrowRefStr);
+        acquiredRef = null;
         return jsonError(res, 504, "claim_timeout",
-          `Claim awaitTx failed: ${(err as Error).message}`);
+          `Claim awaitTx failed: ${(claimOutcome.err as Error).message}`);
       }
 
       // ── 10. Spawn runner + 202 ──────────────────────────────────────
       const claimedRef: OutputReference = {
-        txHash: claimResult.expectedTxHash,
+        txHash: claimOutcome.built.expectedTxHash,
         index: 0,
       };
       const jobId = deps.jobs.create(escrowRefStr);
 
+      // Slot release now happens inside runTtsJob's finally.
+      acquiredRef = null;
       void runTtsJob({
         deps: {
           chain: deps.chain,
@@ -605,7 +641,9 @@ function makeTtsHandler(deps: ResolvedDeps) {
         escrow_ref: escrowRefStr,
       });
     } catch (err) {
-      try { deps.state.release(); } catch { /* ignore */ }
+      if (acquiredRef) {
+        try { deps.state.release(acquiredRef); } catch { /* ignore */ }
+      }
       next(err);
       return;
     }
@@ -705,6 +743,9 @@ function makeChatSessionHandlers(deps: ResolvedDeps) {
   }
 
   const start = async (req: Request, res: Response, next: NextFunction) => {
+    // Slot held by THIS request (null until acquired / after the session
+    // record takes ownership) — the catch-all only releases its own.
+    let acquiredRef: string | null = null;
     try {
       // ── 1. Header ───────────────────────────────────────────────────
       const headerVal = req.header("X-Escrow-Ref");
@@ -716,6 +757,15 @@ function makeChatSessionHandlers(deps: ResolvedDeps) {
         return jsonError(res, 400, "escrow_ref_malformed", 'X-Escrow-Ref must match "<64-hex>#<int>"');
       }
       const escrowRefStr = `${escrowRef.txHash}#${escrowRef.index}`;
+
+      // ── 1.5 Duplicate-session guard ───────────────────────────────────
+      // Ended records are retained, so this also blocks replaying a used
+      // ticket-mode escrow (which stays Open on-chain — the state check below
+      // wouldn't catch it). In full mode the on-chain Claim already prevents
+      // reuse; this check just fails faster.
+      if (deps.chatSessions.get(escrowRefStr)) {
+        return jsonError(res, 409, "session_exists", "a chat session already exists for this escrow ref");
+      }
 
       // ── 2. Body (session_nonce; no messages) ─────────────────────────
       const body = (req.body ?? {}) as ChatStartBody;
@@ -780,36 +830,68 @@ function makeChatSessionHandlers(deps: ResolvedDeps) {
         return jsonError(res, 408, "past_deliver_by", `now ${nowMs} >= deliver_by ${escrowDatum.deliver_by}`);
       }
 
-      // ── 8. Single-slot lock ──────────────────────────────────────────
+      // ── 8. Acquire session slot ──────────────────────────────────────
       if (!deps.state.tryAcquire(escrowRefStr)) {
         return jsonError(res, 409, "supplier_busy", "supplier is already working another chat");
       }
+      acquiredRef = escrowRefStr;
 
-      // ── 9. Claim (Open → Claimed) — hold the lock on success ─────────
-      let claimResult;
-      try {
-        claimResult = await buildClaimTx({ chain: deps.chain, supplierKey: deps.supplierKey, escrowRef });
-      } catch (err) {
-        deps.state.release();
-        triggerOnFailureConsolidate({ chain: deps.chain, state: deps.state, supplierKey: deps.supplierKey });
-        return jsonError(res, 503, "chain_submit_failed", `Claim tx submit failed: ${(err as Error).message}`);
+      if (deps.config.chatSettleMode === "ticket") {
+        // ── 9-ticket. No Claim: the verified Open escrow IS the entry
+        // ticket. No hard-cap timer either — there is no Submit deadline, so
+        // the session may outlive deliver_by (the buyer reclaims the escrow
+        // independently). The idle timer is the only lifetime bound.
+        const record = deps.chatSessions.create({
+          escrowRef: escrowRefStr,
+          settleMode: "ticket",
+          advert,
+          escrowDatum,
+        });
+        acquiredRef = null; // record owns the slot; endChatSession releases it
+        armIdleTimer(record);
+        return res.status(200).json({ status: "ticket", escrow_ref: escrowRefStr, settle_mode: "ticket" });
       }
-      try {
-        await deps.chain.awaitTx(claimResult.expectedTxHash, 60_000);
-      } catch (err) {
-        deps.state.release();
-        return jsonError(res, 504, "claim_timeout", `Claim awaitTx failed: ${(err as Error).message}`);
+
+      // ── 9-full. Claim (Open → Claimed): build + confirm as ONE wallet
+      // critical section — hold the slot on success through Submit at end.
+      const claimOutcome = await deps.state.walletMutex.run(async () => {
+        let built;
+        try {
+          built = await buildClaimTx({ chain: deps.chain, supplierKey: deps.supplierKey, escrowRef });
+        } catch (err) {
+          return { kind: "build_failed" as const, err };
+        }
+        try {
+          await deps.chain.awaitTx(built.expectedTxHash, 60_000);
+        } catch (err) {
+          return { kind: "await_failed" as const, err };
+        }
+        return { kind: "ok" as const, built };
+      });
+      if (claimOutcome.kind === "build_failed") {
+        deps.state.release(escrowRefStr);
+        acquiredRef = null;
+        triggerOnFailureConsolidate({ chain: deps.chain, state: deps.state, supplierKey: deps.supplierKey });
+        return jsonError(res, 503, "chain_submit_failed", `Claim tx submit failed: ${(claimOutcome.err as Error).message}`);
+      }
+      if (claimOutcome.kind === "await_failed") {
+        deps.state.release(escrowRefStr);
+        acquiredRef = null;
+        return jsonError(res, 504, "claim_timeout", `Claim awaitTx failed: ${(claimOutcome.err as Error).message}`);
       }
 
       // ── 10. Create session + arm watchdog ────────────────────────────
-      const claimedRef: OutputReference = { txHash: claimResult.expectedTxHash, index: 0 };
-      const record = deps.chatSessions.create({ escrowRef: escrowRefStr, claimedRef, advert, escrowDatum });
+      const claimedRef: OutputReference = { txHash: claimOutcome.built.expectedTxHash, index: 0 };
+      const record = deps.chatSessions.create({ escrowRef: escrowRefStr, claimedRef, settleMode: "full", advert, escrowDatum });
+      acquiredRef = null; // record owns the slot; endChatSession releases it
       armIdleTimer(record);
       armHardCapTimer(record, nowMs);
 
       return res.status(200).json({ status: "claimed", escrow_ref: escrowRefStr });
     } catch (err) {
-      try { deps.state.release(); } catch { /* ignore */ }
+      if (acquiredRef) {
+        try { deps.state.release(acquiredRef); } catch { /* ignore */ }
+      }
       next(err);
       return;
     }
@@ -953,6 +1035,11 @@ function makeChatSessionHandlers(deps: ResolvedDeps) {
       const record = await endChatSession({ deps: endDeps, escrowRef: escrowRefStr, trigger: "end" });
       if (!record) {
         return jsonError(res, 404, "chat_session_not_found", `no chat session for ${escrowRefStr}`);
+      }
+      if (record.settleMode === "ticket") {
+        // No receipt/Submit in ticket mode — the buyer reclaims the escrow.
+        // Idempotent: a re-end returns the same shape.
+        return res.status(200).json({ status: "ended", escrow_ref: escrowRefStr, settle_mode: "ticket" });
       }
       if (record.endFailure) {
         return jsonError(res, 502, record.endFailure.reason, record.endFailure.message);

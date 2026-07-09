@@ -41,10 +41,15 @@ export interface GatewayConfig {
   keyRate: { max: number; windowMs: number };
   demoIpRate: { max: number; windowMs: number };
   sweeperIntervalMs: number;
-  /** Close demo chat sessions idle this long (frees the single-slot supplier).
-   * Keep below the supplier's CHAT_IDLE_TIMEOUT_MS (default 5 min) so the
-   * gateway closes first and records usage. */
+  /** Close demo chat sessions idle this long (frees the supplier slot).
+   * Keep below the supplier's CHAT_IDLE_TIMEOUT_MS so the gateway closes
+   * first and records usage. */
   demoSessionIdleMs: number;
+  /** Chat-session settlement mode this deployment runs. "full" = suppliers
+   * Claim/Submit and the gateway Accepts; "ticket" = the escrow post at open
+   * is the only chain op and the sweeper Reclaims it after deliver_by.
+   * Must agree with the suppliers' CHAT_SETTLE_MODE. */
+  chatSettleMode: "full" | "ticket";
   walletHealthIntervalMs: number;
   sdkRegistryMax: number;
   corsOrigins: string[];
@@ -54,6 +59,14 @@ function requireField(env: Record<string, string | undefined>, name: string): st
   const v = env[name];
   if (v === undefined || v === null || v === "") {
     throw new Error(`loadConfig: missing required env var ${name}`);
+  }
+  return v;
+}
+
+function chatSettleMode(env: Record<string, string | undefined>): "full" | "ticket" {
+  const v = env.CHAT_SETTLE_MODE ?? "full";
+  if (v !== "full" && v !== "ticket") {
+    throw new Error('loadConfig: CHAT_SETTLE_MODE must be "full" or "ticket"');
   }
   return v;
 }
@@ -122,6 +135,7 @@ export function loadConfig(env: Record<string, string | undefined>): GatewayConf
     },
     sweeperIntervalMs: posInt(env, "SWEEPER_INTERVAL_MS", 60 * 1000),
     demoSessionIdleMs: posInt(env, "DEMO_SESSION_IDLE_MS", 3 * 60 * 1000),
+    chatSettleMode: chatSettleMode(env),
     walletHealthIntervalMs: posInt(env, "WALLET_HEALTH_INTERVAL_MS", 10 * 60 * 1000),
     sdkRegistryMax: posInt(env, "SDK_REGISTRY_MAX", 500),
     corsOrigins: (env.GATEWAY_CORS_ORIGINS ?? "")

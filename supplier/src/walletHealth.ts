@@ -16,9 +16,10 @@
  *     multiple consolidates. Returns 503 to the buyer for THIS request; the
  *     next buyer retry (~30-60s later) finds the wallet healthy.
  *
- * State-lock discipline: both layers use state.tryAcquire with a synthetic
- * escrowRef so they share the existing single-slot lock with real Claims.
- * If a Claim is in flight, the consolidation skips this tick.
+ * Wallet-lock discipline: consolidation spends EVERY wallet UTxO, so it runs
+ * inside state.walletMutex — the same mutex that serializes Claims/Submits —
+ * queueing behind any in-flight chain op instead of skipping. Session slots
+ * are not consumed: consolidation is a wallet op, not a session.
  */
 
 import type { ChainProvider } from "@marketplace/shared/chain";
@@ -31,7 +32,6 @@ import {
 
 import type { SupplierState } from "./state.js";
 
-const WALLET_HEALTH_LOCK_REF = "__wallet_consolidate__";
 const DEFAULT_COLLATERAL_LOVELACE = 5_000_000n;
 const DEFAULT_AWAIT_TIMEOUT_MS = 90_000;
 const DEFAULT_ON_FAILURE_DEBOUNCE_MS = 5 * 60_000;
@@ -77,20 +77,20 @@ async function consolidateOnce(
     opts.log("skip: another consolidate already in flight");
     return;
   }
-  if (!state.tryAcquire(WALLET_HEALTH_LOCK_REF)) {
-    opts.log("skip: supplier busy");
-    return;
-  }
   inFlight.add(state);
   const consolidate: ConsolidateFn = deps.consolidate ?? runConsolidateWallet;
   try {
-    const result = await consolidate({
-      chain: deps.chain,
-      walletKey: deps.supplierKey,
-      collateralLovelace: opts.collateralLovelace,
-      awaitTimeoutMs: opts.awaitTimeoutMs,
-      log: opts.log,
-    });
+    // Queue behind any in-flight Claim/Submit — consolidation reshapes the
+    // whole wallet and must never race another wallet spend.
+    const result = await state.walletMutex.run(() =>
+      consolidate({
+        chain: deps.chain,
+        walletKey: deps.supplierKey,
+        collateralLovelace: opts.collateralLovelace,
+        awaitTimeoutMs: opts.awaitTimeoutMs,
+        log: opts.log,
+      }),
+    );
     if (result.reason === "already-healthy") {
       opts.log("already-healthy");
     } else {
@@ -100,7 +100,6 @@ async function consolidateOnce(
     opts.log(`consolidate failed: ${(err as Error).message}`);
   } finally {
     inFlight.delete(state);
-    state.release();
   }
 }
 

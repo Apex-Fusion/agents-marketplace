@@ -16,6 +16,9 @@ export type {
   AcceptResultOptions,
   ReclaimOptions,
   GetTaskHistoryOptions,
+  ChatSettleMode,
+  StartChatResult,
+  EndChatResult,
 } from "./types.js";
 export { ReceiptVerificationError, IndexerError, SupplierError } from "./types.js";
 export type { TaskHistoryStore } from "./history.js";

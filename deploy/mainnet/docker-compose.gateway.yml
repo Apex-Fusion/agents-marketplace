@@ -38,6 +38,13 @@ services:
       # frontend's "API Keys" page (served from marketplace.vector…) POSTs to
       # /signup here. Comma-separated; empty disables CORS entirely.
       GATEWAY_CORS_ORIGINS: https://marketplace.vector.apexfusion.org
+      # Ticket mode: the escrow post at session open is the only chain op;
+      # the sweeper reclaims Open escrows after deliver_by. Must match the
+      # kimi-chat suppliers' CHAT_SETTLE_MODE.
+      CHAT_SETTLE_MODE: ticket
+      # Demo janitor closes idle sessions BEFORE the suppliers' 15 min
+      # CHAT_IDLE_TIMEOUT_MS backstop.
+      DEMO_SESSION_IDLE_MS: "600000"
     volumes:
       - gateway-mainnet-data:/repo/data/gateway
     healthcheck:

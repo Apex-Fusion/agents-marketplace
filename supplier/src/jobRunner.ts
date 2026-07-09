@@ -143,17 +143,28 @@ export async function runChatJob(params: RunChatJobParams): Promise<void> {
     const signed = signReceipt(receipt, deps.supplierKey.privateKeyHex);
     const resultHash = receiptResultHash(signed);
 
-    // ── 4. Build + submit Submit tx ─────────────────────────────────────
-    let buildResult: { txCborHex: string; expectedTxHash: string };
-    try {
-      buildResult = await buildSubmitTx({
-        chain: deps.chain,
-        supplierKey: deps.supplierKey,
-        escrowRef: claimedRef,
-        receiptHash: resultHash,
-      });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+    // ── 4+5. Submit tx: build + confirm as ONE wallet critical section ──
+    const submitOutcome = await deps.state.walletMutex.run(async () => {
+      let built: { txCborHex: string; expectedTxHash: string };
+      try {
+        built = await buildSubmitTx({
+          chain: deps.chain,
+          supplierKey: deps.supplierKey,
+          escrowRef: claimedRef,
+          receiptHash: resultHash,
+        });
+      } catch (err) {
+        return { kind: "build_failed" as const, err };
+      }
+      try {
+        await deps.chain.awaitTx(built.expectedTxHash, 60_000);
+      } catch (err) {
+        return { kind: "await_failed" as const, err };
+      }
+      return { kind: "ok" as const };
+    });
+    if (submitOutcome.kind === "build_failed") {
+      const message = submitOutcome.err instanceof Error ? submitOutcome.err.message : String(submitOutcome.err);
       console.warn(
         `[job_failed] jobId=${jobId} reason=submit_failed httpStatus=502 msg=${message}`,
       );
@@ -164,12 +175,8 @@ export async function runChatJob(params: RunChatJobParams): Promise<void> {
       });
       return;
     }
-
-    // ── 5. Submit confirmation (awaitTx, 60s budget) ───────────────────
-    try {
-      await deps.chain.awaitTx(buildResult.expectedTxHash, 60_000);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+    if (submitOutcome.kind === "await_failed") {
+      const msg = submitOutcome.err instanceof Error ? submitOutcome.err.message : String(submitOutcome.err);
       console.warn(
         `[job_failed] jobId=${jobId} reason=submit_timeout httpStatus=502 msg=${msg}`,
       );
@@ -201,9 +208,9 @@ export async function runChatJob(params: RunChatJobParams): Promise<void> {
     };
     deps.jobs.complete(jobId, payload);
   } finally {
-    // ── 7. Always release the lock ──────────────────────────────────────
+    // ── 7. Always release this job's slot ───────────────────────────────
     try {
-      deps.state.release();
+      deps.state.release(escrowRef);
     } catch {
       // never let a lock-release error escape the runner
     }
@@ -292,17 +299,28 @@ export async function runTtsJob(params: RunTtsJobParams): Promise<void> {
     const signed = signReceipt(receipt, deps.supplierKey.privateKeyHex);
     const resultHash = receiptResultHash(signed);
 
-    // ── 4. Build + submit Submit tx ───────────────────────────────────
-    let buildResult: { txCborHex: string; expectedTxHash: string };
-    try {
-      buildResult = await buildSubmitTx({
-        chain: deps.chain,
-        supplierKey: deps.supplierKey,
-        escrowRef: claimedRef,
-        receiptHash: resultHash,
-      });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+    // ── 4+5. Submit tx: build + confirm as ONE wallet critical section ──
+    const submitOutcome = await deps.state.walletMutex.run(async () => {
+      let built: { txCborHex: string; expectedTxHash: string };
+      try {
+        built = await buildSubmitTx({
+          chain: deps.chain,
+          supplierKey: deps.supplierKey,
+          escrowRef: claimedRef,
+          receiptHash: resultHash,
+        });
+      } catch (err) {
+        return { kind: "build_failed" as const, err };
+      }
+      try {
+        await deps.chain.awaitTx(built.expectedTxHash, 60_000);
+      } catch (err) {
+        return { kind: "await_failed" as const, err };
+      }
+      return { kind: "ok" as const };
+    });
+    if (submitOutcome.kind === "build_failed") {
+      const message = submitOutcome.err instanceof Error ? submitOutcome.err.message : String(submitOutcome.err);
       console.warn(
         `[job_failed] jobId=${jobId} reason=submit_failed httpStatus=502 msg=${message}`,
       );
@@ -313,12 +331,8 @@ export async function runTtsJob(params: RunTtsJobParams): Promise<void> {
       });
       return;
     }
-
-    // ── 5. Submit confirmation ────────────────────────────────────────
-    try {
-      await deps.chain.awaitTx(buildResult.expectedTxHash, 60_000);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+    if (submitOutcome.kind === "await_failed") {
+      const msg = submitOutcome.err instanceof Error ? submitOutcome.err.message : String(submitOutcome.err);
       console.warn(
         `[job_failed] jobId=${jobId} reason=submit_timeout httpStatus=502 msg=${msg}`,
       );
@@ -344,7 +358,7 @@ export async function runTtsJob(params: RunTtsJobParams): Promise<void> {
     deps.jobs.complete(jobId, payload);
   } finally {
     try {
-      deps.state.release();
+      deps.state.release(escrowRef);
     } catch {
       /* never let lock-release escape */
     }
