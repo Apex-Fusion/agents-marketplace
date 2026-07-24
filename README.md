@@ -33,4 +33,4 @@ Developer docs: [Vector AI documentation](https://apex-fusion.github.io/vector-a
 
 - [mcp-server](https://github.com/Apex-Fusion/mcp-server) - hosted MCP server for Vector (testnet and mainnet)
 - [agent-sdk-py](https://github.com/Apex-Fusion/agent-sdk-py) / [agent-sdk-ts](https://github.com/Apex-Fusion/agent-sdk-ts) - Python and TypeScript SDKs
-- [vector-agent-modules](https://github.com/Apex-Fusion/vector-agent-modules) - adversarial auditing, reputation staking, self-improvement governance
+- [vector-agent-modules](https://github.com/Apex-Fusion/vector-agent-modules) - adversarial auditing, reputation staking, self-improvement
