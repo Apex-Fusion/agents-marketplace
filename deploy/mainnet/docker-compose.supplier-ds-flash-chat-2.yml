@@ -1,0 +1,74 @@
+# deploy/mainnet/docker-compose.supplier-ds-flash-chat-2.yml — Supplier — MAINNET
+#   (OpenRouter / deepseek-v4-flash — MULTI-TURN CHAT capability `llm.chat.v1`, REPLICA 2)
+#
+# Chat-session sibling of the deepseek-flash one-off suppliers. Same OpenRouter
+# backend (deepseek/deepseek-v4-flash) but CAPABILITY_KIND=chat-session so it
+# mounts /v1/chat/{start,message,end}. Ticket settle mode (matches the mainnet
+# gateway): the buyer's Open escrow post is the only chain op; the supplier
+# never Claims/Submits; the gateway sweeper reclaims after deliver_by.
+#
+# Pre-flight:
+#   1. DNS A-record: mp-suppliers-ds-flash-chat-2.vector.apexfusion.org -> host IP
+#   2. New supplier wallet (gen-keypair), funded (advert post + fee float).
+#   3. Post a fresh llm.chat.v1 advert for this wallet:
+#        --capability-id llm.chat.v1 --model deepseek/deepseek-v4-flash
+#        --max-processing-ms 1800000 --price-lovelace 200000
+#   4. supplier/.env.ds-flash-chat-2 written on host (chmod 600) with at least:
+#        SUPPLIER_PRIV_KEY_HEX, OPENAI_API_KEY, OGMIOS_URL, NETWORK_ID=1,
+#        VECTOR_ZERO_TIME_MS, ESCROW_REF_UTXO, ADVERT_REF_UTXO, ADVERT_REF,
+#        LIVE_CHAIN=1, OPENAI_REASONING=off, OPENAI_MAX_TOKENS=131072
+
+name: marketplace-mainnet-supplier-ds-flash-chat-2
+
+services:
+  supplier:
+    build:
+      context: ../..
+      dockerfile: supplier/Dockerfile
+    container_name: marketplace-mainnet-supplier-ds-flash-chat-2
+    restart: unless-stopped
+    env_file:
+      - path: ../../supplier/.env.ds-flash-chat-2
+        required: false
+    environment:
+      # Multi-turn chat session capability (mounts /v1/chat/{start,message,end}).
+      CAPABILITY_KIND: chat-session
+      LLM_BACKEND: openai
+      # No /v1 suffix — supplier/src/openai.ts appends /v1/chat/completions.
+      OPENAI_BASE_URL: https://openrouter.ai/api
+      OPENAI_TIMEOUT_MS: "300000"
+      CHAT_IDLE_TIMEOUT_MS: "900000"
+      CHAT_SETTLE_MODE: ticket
+      MAX_CHAT_SESSIONS: "8"
+      PORT: "8080"
+      # Enable LiveOgmiosProvider so wallet-health/consolidate can broadcast.
+      LIVE_CHAIN: "1"
+      # NETWORK_ID and OGMIOS_URL come from supplier/.env.ds-flash-chat-2.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz >/dev/null || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - marketplace-mainnet-net
+      - traefik-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-net"
+      - "traefik.http.routers.mp-suppliers-ds-flash-chat-2-mainnet.entrypoints=web"
+      - "traefik.http.routers.mp-suppliers-ds-flash-chat-2-mainnet.rule=Host(`mp-suppliers-ds-flash-chat-2.vector.apexfusion.org`)"
+      - "traefik.http.services.mp-suppliers-ds-flash-chat-2-mainnet.loadbalancer.server.port=8080"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  marketplace-mainnet-net:
+    external: true
+    name: marketplace-mainnet-net
+  traefik-net:
+    external: true
+    name: traefik-net
