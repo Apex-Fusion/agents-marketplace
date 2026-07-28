@@ -69,6 +69,31 @@ function saveState(path: string, state: StateFile): void {
   renameSync(tmp, path); // atomic replace
 }
 
+const QUERY_ATTEMPTS = 2;
+const QUERY_RETRY_DELAY_MS = 2_000;
+
+async function checkWallet(
+  provider: ReadOnlyOgmiosProvider,
+  w: WalletEntry,
+  minLovelace: bigint,
+): Promise<CheckedWallet> {
+  let lastError = "unknown error";
+  for (let attempt = 1; attempt <= QUERY_ATTEMPTS; attempt++) {
+    try {
+      const utxos = await provider.queryUtxosByAddress(w.address);
+      const lovelace = utxos.reduce((a, u) => a + BigInt(u.lovelace), 0n);
+      return { name: w.name, address: w.address, minLovelace, lovelace, error: null };
+    } catch (e) {
+      lastError = e instanceof Error ? e.message : String(e);
+      if (attempt < QUERY_ATTEMPTS) {
+        await new Promise((r) => setTimeout(r, QUERY_RETRY_DELAY_MS));
+      }
+    }
+  }
+  console.error(`[wallet-monitor] query failed for ${w.name} (${w.address}): ${lastError}`);
+  return { name: w.name, address: w.address, minLovelace, lovelace: null, error: lastError };
+}
+
 // ── main ────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -96,20 +121,13 @@ async function main(): Promise<void> {
 
   const provider = new ReadOnlyOgmiosProvider({ ogmiosUrl: cfg.ogmiosUrl });
 
-  const checked: CheckedWallet[] = await Promise.all(
-    walletsFile.wallets.map(async (w: WalletEntry): Promise<CheckedWallet> => {
-      const minLovelace = ap3xToLovelace(w.minAp3x ?? defaultMinAp3x);
-      try {
-        const utxos = await provider.queryUtxosByAddress(w.address);
-        const lovelace = utxos.reduce((a, u) => a + BigInt(u.lovelace), 0n);
-        return { name: w.name, address: w.address, minLovelace, lovelace, error: null };
-      } catch (e) {
-        const error = e instanceof Error ? e.message : String(e);
-        console.error(`[wallet-monitor] query failed for ${w.name} (${w.address}): ${error}`);
-        return { name: w.name, address: w.address, minLovelace, lovelace: null, error };
-      }
-    }),
-  );
+  // Query SEQUENTIALLY, not Promise.all: the public Ogmios endpoint only
+  // serves a few concurrent ledger-state queries and 500s the rest, so a
+  // burst over the full wallet list reliably fails several wallets.
+  const checked: CheckedWallet[] = [];
+  for (const w of walletsFile.wallets) {
+    checked.push(await checkWallet(provider, w, ap3xToLovelace(w.minAp3x ?? defaultMinAp3x)));
+  }
 
   const anyQueryFailed = checked.some((c) => c.error !== null);
 
