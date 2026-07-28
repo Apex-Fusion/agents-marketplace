@@ -3,9 +3,9 @@
  *
  * Runs once and exits (invoked hourly by cron via `docker compose run --rm`).
  * For each wallet in wallets.json: query its on-chain balance via Ogmios, and
- * if it's below threshold post a combined Slack alert. A persisted state file
- * dedups so a still-low wallet only re-alerts every `reminder_hours`, and a
- * recovery message fires when a wallet climbs back above its threshold.
+ * post a combined Slack alert ONLY when something changed since the last run —
+ * a wallet newly dropped below threshold, or climbed back above it. A wallet
+ * that merely stays low never re-posts (state persisted across runs).
  *
  * Reuses ReadOnlyOgmiosProvider from @marketplace/shared/chain — the same
  * client behind the buyer's /v1/wallet/balance and buyer/scripts/monitor-wallets.ts.
@@ -19,7 +19,6 @@ import { loadConfig, parseWalletsFile, type WalletEntry } from "./config.js";
 import { postSlack } from "./slack.js";
 
 const LOVELACE_PER_AP3X = 1_000_000;
-const MS_PER_HOUR = 3_600_000;
 
 type Status = "ok" | "low";
 
@@ -94,7 +93,6 @@ async function main(): Promise<void> {
     JSON.parse(readFileSync(cfg.walletsPath, "utf-8")) as unknown,
   );
   const defaultMinAp3x = cfg.defaultMinAp3xOverride ?? walletsFile.defaultMinAp3x;
-  const reminderMs = (cfg.reminderHoursOverride ?? walletsFile.reminderHours) * MS_PER_HOUR;
 
   const provider = new ReadOnlyOgmiosProvider({ ogmiosUrl: cfg.ogmiosUrl });
 
@@ -119,11 +117,11 @@ async function main(): Promise<void> {
   const now = Date.now();
   const nextState: StateFile = { ...prevState };
 
-  // Classify each successfully-queried wallet, advancing dedup state. The
-  // decision to POST is driven only by transitions (a newly-low wallet, a low
-  // wallet past its reminder window, or a recovery). But when we DO post, the
-  // message lists EVERY monitored wallet for full context (built below).
-  let anyDueLow = false;
+  // Classify each successfully-queried wallet. The decision to POST is driven
+  // only by state CHANGES (a wallet newly dropping low, or recovering) — a
+  // wallet that stays low never re-posts. But when we DO post, the message
+  // lists EVERY monitored wallet for full context (built below).
+  let anyNewlyLow = false;
   let anyRecovered = false;
   const recoveredNames = new Set<string>();
 
@@ -136,14 +134,12 @@ async function main(): Promise<void> {
     const isLow = c.lovelace < c.minLovelace;
 
     if (isLow) {
-      const wasLow = prev?.status === "low";
-      const due = !wasLow || now - (prev?.lastAlertMs ?? 0) >= reminderMs;
-      if (due) {
-        anyDueLow = true;
-        nextState[c.name] = { status: "low", lastAlertMs: now };
+      if (prev?.status === "low") {
+        // Still low — already alerted when it dropped; stay silent.
+        nextState[c.name] = prev;
       } else {
-        // Still low but the reminder window hasn't elapsed — keep prev as-is.
-        nextState[c.name] = prev ?? { status: "low", lastAlertMs: now };
+        anyNewlyLow = true;
+        nextState[c.name] = { status: "low", lastAlertMs: now };
       }
     } else {
       if (prev?.status === "low") {
@@ -154,7 +150,7 @@ async function main(): Promise<void> {
     }
   }
 
-  const needPost = anyDueLow || anyRecovered;
+  const needPost = anyNewlyLow || anyRecovered;
 
   if (needPost) {
     const anyLow = checked.some(
@@ -200,12 +196,12 @@ async function main(): Promise<void> {
     ).length;
     console.log(
       lowCount > 0
-        ? `[wallet-monitor] ${lowCount} wallet(s) low but already alerted within the reminder window — no Slack post`
+        ? `[wallet-monitor] ${lowCount} wallet(s) still low (already alerted) — no change, no Slack post`
         : "[wallet-monitor] all wallets healthy — no Slack post",
     );
   }
 
-  // Persist the new state (records ok/low statuses + advanced reminder stamps).
+  // Persist the new state (records ok/low statuses + alert stamps).
   // Only reached when there was nothing to post or the post succeeded.
   saveState(cfg.statePath, nextState);
 

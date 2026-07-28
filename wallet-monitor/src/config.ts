@@ -8,12 +8,11 @@
  *   STATE_PATH         — path to the dedup state file (read/written each run).
  *                        Default /repo/wallet-monitor/data/state.json.
  *   DEFAULT_MIN_AP3X   — (optional) overrides wallets.json default_min_ap3x.
- *   REMINDER_HOURS     — (optional) overrides wallets.json reminder_hours.
  *   TEST               — "1" posts a one-line "configured" message to Slack and exits.
  *
- * wallets.json owns the wallet list + the default threshold / reminder cadence;
- * the env overrides exist only so an operator can retune without editing the
- * mounted wallets file.
+ * wallets.json owns the wallet list + the default threshold; the env override
+ * exists only so an operator can retune without editing the mounted wallets
+ * file.
  */
 
 const DEFAULT_OGMIOS_URL = "https://ogmios.vector.mainnet.apexfusion.org";
@@ -21,7 +20,6 @@ const DEFAULT_WALLETS_PATH = "/repo/wallet-monitor/wallets.json";
 const DEFAULT_STATE_PATH = "/repo/wallet-monitor/data/state.json";
 
 const FALLBACK_DEFAULT_MIN_AP3X = 10;
-const FALLBACK_REMINDER_HOURS = 6;
 
 export interface EnvConfig {
   slackWebhookUrl: string;
@@ -30,8 +28,6 @@ export interface EnvConfig {
   statePath: string;
   /** When set, overrides the wallets-file default_min_ap3x. */
   defaultMinAp3xOverride: number | null;
-  /** When set, overrides the wallets-file reminder_hours. */
-  reminderHoursOverride: number | null;
   testMode: boolean;
 }
 
@@ -44,7 +40,6 @@ export interface WalletEntry {
 
 export interface WalletsFile {
   defaultMinAp3x: number;
-  reminderHours: number;
   wallets: WalletEntry[];
 }
 
@@ -81,7 +76,6 @@ export function loadConfig(env: Record<string, string | undefined>): EnvConfig {
     walletsPath: nonEmpty(env, "WALLETS_PATH", DEFAULT_WALLETS_PATH),
     statePath: nonEmpty(env, "STATE_PATH", DEFAULT_STATE_PATH),
     defaultMinAp3xOverride: parseOptionalPositiveNumber(env.DEFAULT_MIN_AP3X, "DEFAULT_MIN_AP3X"),
-    reminderHoursOverride: parseOptionalPositiveNumber(env.REMINDER_HOURS, "REMINDER_HOURS"),
     testMode: env.TEST === "1",
   };
 }
@@ -112,11 +106,6 @@ export function parseWalletsFile(raw: unknown): WalletsFile {
     raw.default_min_ap3x,
     "default_min_ap3x",
     FALLBACK_DEFAULT_MIN_AP3X,
-  );
-  const reminderHours = parsePositiveNumberField(
-    raw.reminder_hours,
-    "reminder_hours",
-    FALLBACK_REMINDER_HOURS,
   );
 
   const walletsRaw = raw.wallets;
@@ -152,5 +141,5 @@ export function parseWalletsFile(raw: unknown): WalletsFile {
     return entry;
   });
 
-  return { defaultMinAp3x, reminderHours, wallets };
+  return { defaultMinAp3x, wallets };
 }

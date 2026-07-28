@@ -2,12 +2,12 @@
 
 One-shot wallet-balance Slack alerter for the `vector-marketplace` mainnet box.
 
-Checks every wallet in `wallets.json` against a threshold (default **10 APEX**),
-posts a combined Slack message when any wallet is below it, re-reminds every
-`reminder_hours` while a wallet stays low, and posts a recovery message when it
-climbs back above. Each alert lists **every** monitored wallet — low (🔴) and
-healthy (🟢) — with its full, copy-pasteable address; it stays fully silent
-when all wallets are healthy. Balances are read from Ogmios via
+Checks every wallet in `wallets.json` against a threshold (default **10 APEX**)
+and posts a combined Slack message only when something **changed** since the
+last run — a wallet newly dropped below its threshold, or climbed back above
+it. A wallet that merely stays low never re-posts. Each alert lists **every**
+monitored wallet — low (🔴) and healthy (🟢) — with its full, copy-pasteable
+address; it stays fully silent while nothing changes. Balances are read from Ogmios via
 `ReadOnlyOgmiosProvider` (`@marketplace/shared/chain`) — the same client behind
 the buyer's `/v1/wallet/balance` and `buyer/scripts/monitor-wallets.ts`.
 
