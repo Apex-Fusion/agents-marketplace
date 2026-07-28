@@ -24,8 +24,8 @@ The audit confirmed 39 holes in the first draft (10 distinct themes). This docum
 | One-shot | `/openai/v1/chat/completions` → `llm.text.generate.v1`, 1 escrow/call, buffered (+ pseudo-stream) |
 | Chat session | `/openai/v1/chat/sessions*` → `llm.chat.v1`, 1 escrow/**session**, real SSE per turn, settle at close |
 | Routing | match `model` + required capability; pick an available supplier (status `free`\|`unknown`); **not cheapest**; fallback to next match on busy/offline |
-| Pricing | cost = matched supplier `price_lovelace`; **required balance = price + buyer_bond + supplier_bond + 5 ADA collateral + fee reserve** |
-| Wallet health | gateway **auto-consolidates** each wallet to `{5-ADA collateral, working}` after settle / on a tick |
+| Pricing | cost = matched supplier `price_lovelace`; **required balance = price + buyer_bond + supplier_bond + 5 AP3X collateral + fee reserve** |
+| Wallet health | gateway **auto-consolidates** each wallet to `{5-AP3X collateral, working}` after settle / on a tick |
 | Settlement | resolve the **Submitted** ref via indexer, `acceptResult`, **await confirm** before returning success; sweeper is backstop |
 | Sweeper | state-aware: Open/Claimed past `deliver_by` → reclaim; Submitted → retry Accept in-window; never blind-reclaim Submitted |
 | Response | OpenAI object `{id, object, created, model, choices, usage}` + `x_vector:{receipt, receipt_signature, escrow_ref}`; full streaming chunk transform + final usage chunk |
@@ -41,7 +41,7 @@ New standalone pnpm package `gateway/` (add to `pnpm-workspace.yaml`). Boots **o
 - SDK methods: `discoverSuppliers`, `submitPrompt` (`Marketplace.ts:242`, verifies receipt but **does not settle**), `startChat`/`endChat` (chat session; `endChat` returns `acceptedRef` and awaits Accept), `acceptResult`, `reclaim`.
 - Escrow value/bonds: buyer funds `totalLocked = price + buyer_bond + supplier_bond` at PostEscrow — `packages/shared/src/tx/escrow/postEscrow.ts:132-200`. On Accept supplier gets `payment+supplier_bond`, buyer gets `buyer_bond` back.
 - Submitted-ref resolution: the buyer `/v1/accept` queries the indexer and matches the Submitted row by `posted_at` — `buyer/src/server.ts` `/v1/accept`. Gateway must mirror this.
-- Wallet health: `planConsolidate` / `consolidateWallet` (`{collateral, working}` shape, `DEFAULT_COLLATERAL_LOVELACE = 5 ADA`) — `packages/shared/src/tx/wallet/`. Collateral assertion: `assertCollateralCandidate` — `packages/shared/src/tx/internal/liveCbor.ts`.
+- Wallet health: `planConsolidate` / `consolidateWallet` (`{collateral, working}` shape, `DEFAULT_COLLATERAL_LOVELACE = 5 AP3X`) — `packages/shared/src/tx/wallet/`. Collateral assertion: `assertCollateralCandidate` — `packages/shared/src/tx/internal/liveCbor.ts`.
 - Supplier chat-session SSE `{type:"token"|"done"|"error"}` + headers — `supplier/src/server.ts` `makeChatSessionHandlers`; buyer relay in `buyer/src/server.ts` `/v1/chat/message` (note: **verbatim** passthrough — the gateway must transform to OpenAI chunks).
 - SQLite pattern (`better-sqlite3`, WAL) — `buyer/src/db/archive.ts`. Auth helpers `timingSafeCompareStrings`, `createRateLimiter` — `buyer/src/auth.ts`.
 - Indexer `SupplierView` (`model`, `capability_id`, `price_lovelace`, `buyer_bond_lovelace`, `supplier_bond_lovelace`, `status` free/working/offline/unknown, `advert_status`) — `indexer/src/routes/suppliers.ts`.
@@ -100,7 +100,7 @@ Raw API key never persisted (only `sha256(key)`); `key_prefix` for display. `mas
 ## Request lifecycle — one-shot `/chat/completions`
 All on-chain steps run inside the per-key `mutex.run(...)`.
 1. **Route** (`selectSupplier`): indexer rows where `model` matches, `capability_id==="llm.text.generate.v1"`, `advert_status==="Active"`, live `status ∈ {free, unknown}`. Pick an available one (not cheapest). No match → 404 `model_not_found` (`type: invalid_request_error`).
-2. **Pre-flight**: required = `price + buyer_bond + supplier_bond + 5_000_000 (collateral) + ~2 AP3X fee`. Verify total balance **and** a pure-ADA UTxO ≥5 ADA exists (`assertCollateralCandidate`-style). Else 402 `insufficient_funds` + `x_vector:{required_lovelace, available_lovelace, collateral_ok, deposit_address}`.
+2. **Pre-flight**: required = `price + buyer_bond + supplier_bond + 5_000_000 (collateral) + ~2 AP3X fee`. Verify total balance **and** a pure-AP3X UTxO ≥5 AP3X exists (`assertCollateralCandidate`-style). Else 402 `insufficient_funds` + `x_vector:{required_lovelace, available_lovelace, collateral_ok, deposit_address}`.
 3. **Execute**: `submitPrompt({advertRef, messages, payment_lovelace:price, max_output_tokens})` (posts escrow → supplier → verifies receipt).
 4. **Settle**: resolve the **Submitted** escrow ref via the indexer (mirror buyer `/v1/accept`: match by buyer pkh + `posted_at`), `acceptResult(submittedRef)`, **await confirmation**. On 409/offline mid-route, retry next matching supplier (bounded). On any post-escrow failure, record + leave for the sweeper (don't block the response on reclaim).
 5. **Respond**: `{id:"chatcmpl-…", object:"chat.completion", created:<sec>, model, choices:[{index:0,message:{role:"assistant",content},finish_reason:"stop"}], usage:{prompt_tokens,completion_tokens,total_tokens}, x_vector:{receipt,receipt_signature,escrow_ref}}`. Record `usage`.
@@ -121,7 +121,7 @@ All on-chain steps run inside the per-key `mutex.run(...)`.
 
 ## Sweeper & wallet-health
 - **Sweeper** (interval ~60s): per key, classify escrows. Open/Claimed past `deliver_by` → `reclaim`. Submitted **with a verified receipt** still in accept-window → retry `acceptResult`. Submitted past accept-window → leave for supplier Release (log). Never blind-`reclaim` Submitted.
-- **Wallet-health tick**: periodically + after each settle, `planConsolidate` → `consolidateWallet` so every wallet keeps a ≥5 ADA collateral UTxO. Skip if already healthy.
+- **Wallet-health tick**: periodically + after each settle, `planConsolidate` → `consolidateWallet` so every wallet keeps a ≥5 AP3X collateral UTxO. Skip if already healthy.
 
 ## Errors (OpenAI shape `{error:{message, type, code, param:null}}`)
 no supplier → 404 `invalid_request_error`/`model_not_found`; underfunded/no-collateral → 402 `invalid_request_error`/`insufficient_funds`; bad/missing key → 401 `authentication_error`/`invalid_api_key`; rate limit → 429 `rate_limit_error` + `Retry-After`; supplier timeout → 504 `server_error`; supplier busy race (after retries) → 503 `server_error`/`overloaded`; receipt verify → 502 `server_error`/`receipt_verification_failed`; tx build → 409/502 `server_error`/`escrow_failed`; unsupported `tools`/`functions` → 400 `invalid_request_error`/`unsupported_parameter`.
@@ -145,7 +145,7 @@ Real billing/markup & fee hook; trustless/self-custody recovery; multi-funding-U
 ## Verification (testnet, end-to-end)
 1. Indexer + Ogmios + ≥1 `llm.text.generate.v1` and ≥1 `llm.chat.v1` supplier for the same `model`, Active.
 2. Boot gateway: `LIVE_CHAIN=1`, `GATEWAY_MASTER_KEY=$(openssl rand -hex 32)`, `OGMIOS_URL`, `INDEXER_URL`, `NETWORK_ID`, `GATEWAY_DB_DIR`, `GATEWAY_PORT`.
-3. `POST /signup` → key + deposit address. Fund ≥ price + both bonds + 5 ADA collateral + ~2 ADA fees; confirm via `GET /account` (`collateral_ok:true`).
+3. `POST /signup` → key + deposit address. Fund ≥ price + both bonds + 5 AP3X collateral + ~2 AP3X fees; confirm via `GET /account` (`collateral_ok:true`).
 4. One-shot non-stream via curl and via the OpenAI Python/JS SDK (`base_url=…/openai/v1`) → valid `chat.completion` + `x_vector`; confirm the escrow **settled (Accepted)** and a `usage` row exists.
 5. **Run a 2nd and 3rd request** → confirm wallet-health kept `collateral_ok` and they succeed (the audit's request-#2 failure must not reproduce).
 6. One-shot `stream:true` → chunks + final usage + `[DONE]`.

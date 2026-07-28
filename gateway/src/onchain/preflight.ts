@@ -3,9 +3,9 @@
  *
  * The buyer wallet funds the FULL escrow at PostEscrow: price + buyer_bond +
  * supplier_bond (postEscrow.ts:132). Accept/Reclaim are Plutus script-spends
- * that also need a pure-ADA collateral UTxO ≥ 5 ADA (assertCollateralCandidate).
+ * that also need a pure-AP3X collateral UTxO ≥ 5 AP3X (assertCollateralCandidate).
  * So required = price + buyer_bond + supplier_bond + collateral + fee reserve,
- * AND the wallet must currently hold a pure-ADA UTxO ≥ collateral. We check both
+ * AND the wallet must currently hold a pure-AP3X UTxO ≥ collateral. We check both
  * up front and return a clean 402 instead of failing mid-flight.
  */
 
@@ -18,7 +18,7 @@ export function totalLovelace(utxos: Utxo[]): bigint {
   return utxos.reduce((sum, u) => sum + u.lovelace, 0n);
 }
 
-/** True iff some UTxO is pure-ADA (no native assets) and ≥ collateral floor. */
+/** True iff some UTxO is pure-AP3X (no native assets) and ≥ collateral floor. */
 export function hasCollateral(utxos: Utxo[]): boolean {
   return utxos.some(
     (u) => u.lovelace >= COLLATERAL_MIN_LOVELACE && Object.keys(u.assets).length === 0,

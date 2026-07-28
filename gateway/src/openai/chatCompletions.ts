@@ -108,7 +108,7 @@ async function runOneShot(
     throw paymentRequired(
       pf.collateralOk
         ? "insufficient balance for this request"
-        : "wallet has no pure-ADA UTxO ≥ 5 ADA for collateral; deposit a little more ADA",
+        : "wallet has no pure-AP3X UTxO ≥ 5 AP3X for collateral; deposit a little more AP3X",
       {
         x_vector: {
           required_lovelace: pf.requiredLovelace.toString(),

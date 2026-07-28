@@ -93,7 +93,7 @@ export async function openSessionCore(
   const pf = await preflight(deps.chain, ctx.walletKey.address, primary);
   if (!pf.ok) {
     throw paymentRequired(
-      pf.collateralOk ? "insufficient balance to open a session" : "wallet has no ≥5 ADA pure-ADA collateral UTxO",
+      pf.collateralOk ? "insufficient balance to open a session" : "wallet has no ≥5 AP3X pure-AP3X collateral UTxO",
       {
         x_vector: {
           required_lovelace: pf.requiredLovelace.toString(),

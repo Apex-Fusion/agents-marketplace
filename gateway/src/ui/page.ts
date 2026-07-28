@@ -33,7 +33,7 @@ export const INDEX_HTML = `<!doctype html>
 <div id="signupOut"></div>
 
 <h2>2. Fund your wallet</h2>
-<p class="muted">Send AP3X to your deposit address (you need price + bonds + ~5 ADA collateral + fees).</p>
+<p class="muted">Send AP3X to your deposit address (you need price + bonds + ~5 AP3X collateral + fees).</p>
 
 <h2>3. Account</h2>
 <div class="row">
