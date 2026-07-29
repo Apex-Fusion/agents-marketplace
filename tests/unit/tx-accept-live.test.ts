@@ -11,7 +11,7 @@
  * M1-F-4 RED — tests fail until Catherine implements the live CBOR path.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { LiveOgmiosProvider } from "../../packages/shared/src/chain/LiveOgmiosProvider.js";
 import { buildAcceptTx, ACCEPT_WINDOW_MS } from "../../packages/shared/src/tx/escrow/accept.js";
 import { TxConstructionError } from "../../packages/shared/src/tx/types.js";
@@ -36,8 +36,20 @@ const COLLATERAL_LOVELACE = 100_000_000;
 
 const mockFetch = vi.fn();
 
+// Freeze Date.now() inside the fixture's accept window: the live path checks
+// submitted_at + ACCEPT_WINDOW_MS against wall-clock time, and the fixture
+// timestamps are fixed POSIX values that would otherwise expire as real time
+// passes.
+const FAKE_NOW_MS = SUBMITTED_AT + 60_000;
+
 beforeEach(() => {
   mockFetch.mockReset();
+  vi.useFakeTimers();
+  vi.setSystemTime(FAKE_NOW_MS);
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 function rpcOk<T>(result: T) {
@@ -89,6 +101,13 @@ function setupAcceptHappyPath(escrowDatumHex: string): void {
       return rpcOk([makeOgmiosUtxo("c".repeat(64), 0, buyer.address, COLLATERAL_LOVELACE)]);
     }
     if (method === "queryNetwork/tip") return rpcOk({ slot: tipSlot, id: "a".repeat(64) });
+    // Like real Ogmios, return the script-spend redeemer with its true index:
+    // the escrow input ("ff…") sorts after the wallet input ("cc…"), so the
+    // spend redeemer index is 1. The provider's index-0 fallback for empty
+    // mock responses makes CML's set_exunits panic ("unreachable").
+    if (method === "evaluateTransaction") {
+      return rpcOk([{ validator: { purpose: "spend", index: 1 }, budget: { memory: 1_000_000, cpu: 500_000_000 } }]);
+    }
     if (method === "submitTransaction") return rpcOk({ transaction: { id: "d".repeat(64) } });
     return rpcOk({});
   });

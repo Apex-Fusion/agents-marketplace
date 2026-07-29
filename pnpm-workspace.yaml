@@ -6,3 +6,6 @@ packages:
   - "indexer"
   - "indexer-ui"
   - "wallet-monitor"
+
+onlyBuiltDependencies:
+  - better-sqlite3

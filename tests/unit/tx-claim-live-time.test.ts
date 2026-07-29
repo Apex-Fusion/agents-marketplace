@@ -115,6 +115,13 @@ function setupClaimLiveHappyPath(escrowDatumHex: string): void {
     if (method === "queryNetwork/tip") {
       return rpcOk({ slot: 100_000, id: "a".repeat(64) });
     }
+    // Like real Ogmios, return the script-spend redeemer with its true index:
+    // the escrow input ("ff…") sorts after the wallet input ("cc…"), so the
+    // spend redeemer index is 1. The provider's index-0 fallback for empty
+    // mock responses makes CML's set_exunits panic ("unreachable").
+    if (method === "evaluateTransaction") {
+      return rpcOk([{ validator: { purpose: "spend", index: 1 }, budget: { memory: 1_000_000, cpu: 500_000_000 } }]);
+    }
     if (method === "submitTransaction") return rpcOk({ transaction: { id: "d".repeat(64) } });
     return rpcOk({});
   });

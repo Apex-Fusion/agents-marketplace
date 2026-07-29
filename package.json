@@ -37,5 +37,10 @@
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"
+  },
+  "pnpm": {
+    "patchedDependencies": {
+      "libsodium-wrappers-sumo@0.7.16": "patches/libsodium-wrappers-sumo@0.7.16.patch"
+    }
   }
 }

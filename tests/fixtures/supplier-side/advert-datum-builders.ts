@@ -107,15 +107,17 @@ export function encodeSampleAdvertDatumHex(): string {
     hexToBytes(datum.supplier_pkh),
     utf8Bytes(datum.capability_id),
     utf8Bytes(datum.model),
-    datum.max_output_tokens,
-    datum.max_processing_ms,
+    // BigInt so cbor-x emits uint64 (0x1b) like the production codec — plain
+    // numbers encode minimally (or as float64 past 2^32) and break golden parity.
+    BigInt(datum.max_output_tokens),
+    BigInt(datum.max_processing_ms),
     datum.price_lovelace,
     datum.supplier_bond_lovelace,
     datum.buyer_bond_lovelace,
     utf8Bytes(datum.endpoint_url),
     utf8Bytes(datum.detail_uri),
     hexToBytes(datum.detail_hash),
-    datum.advertised_at,
+    BigInt(datum.advertised_at),
     statusTag,
   ]);
 

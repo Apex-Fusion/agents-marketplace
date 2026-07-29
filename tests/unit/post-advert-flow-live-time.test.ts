@@ -86,28 +86,23 @@ function protocolParamsResponse() {
 }
 
 /**
- * Attempt to extract and decode the AdvertDatum from a submitted test-tx hex.
+ * Attempt to extract and decode the AdvertDatum from a submitted tx CBOR hex.
  *
- * The test tx format produced by encodeTxBody:
- *   - First 8 hex chars: big-endian uint32 byte length of JSON payload
- *   - Next (length * 2) hex chars: JSON UTF-8 encoded payload
+ * The live path emits real Cardano (Conway) CBOR. The advert datum rides in
+ * the script output as an inline datum: datum_option = [1, #6.24(bytes)], so
+ * in hex it appears as "d818" (tag 24) followed by a definite-length byte
+ * string (0x58 <len> or 0x59 <len16>) holding the raw AdvertDatum CBOR.
  *
- * The JSON has shape { type, outputs: [{..., datumHex: "<hex>"}], ... }
- * We extract the first output's datumHex and decode it with decodeAdvertDatum.
- *
- * Returns null if the hex is not in this format or has no datum.
+ * Returns null if no tag-24 wrapped datum is found or decoding fails.
  */
 function extractAdvertisedAtFromTxCbor(txCborHex: string): number | null {
   try {
-    if (txCborHex.length < 8) return null;
-    const lenHex = txCborHex.slice(0, 8);
-    const jsonLen = parseInt(lenHex, 16);
-    if (!Number.isFinite(jsonLen) || jsonLen <= 0) return null;
-    const jsonHex = txCborHex.slice(8, 8 + jsonLen * 2);
-    const jsonStr = Buffer.from(jsonHex, "hex").toString("utf8");
-    const body = JSON.parse(jsonStr) as { outputs?: Array<{ datumHex?: string }> };
-    const datumHex = body.outputs?.[0]?.datumHex;
-    if (!datumHex) return null;
+    const m = /d818(?:58([0-9a-f]{2})|59([0-9a-f]{4}))/i.exec(txCborHex);
+    if (!m) return null;
+    const byteLen = parseInt(m[1] ?? m[2]!, 16);
+    const start = m.index + m[0].length;
+    const datumHex = txCborHex.slice(start, start + byteLen * 2);
+    if (datumHex.length !== byteLen * 2) return null;
     const datum = decodeAdvertDatum(datumHex);
     return datum.advertised_at;
   } catch {
