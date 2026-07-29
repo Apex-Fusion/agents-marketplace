@@ -2,8 +2,8 @@
  * gateway/src/walletHealth.ts — keep each custodial wallet usable.
  *
  * After every settled request (and on a periodic tick) we re-shape the wallet to
- * {≥5 ADA collateral UTxO, working UTxO} via the shared consolidate builder, so
- * the NEXT request's Accept/Reclaim script-spend always finds a pure-ADA
+ * {≥5 AP3X collateral UTxO, working UTxO} via the shared consolidate builder, so
+ * the NEXT request's Accept/Reclaim script-spend always finds a pure-AP3X
  * collateral candidate. No-op when the wallet is already healthy.
  */
 
