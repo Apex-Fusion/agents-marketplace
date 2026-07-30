@@ -50,7 +50,7 @@ export default function PdfUploadForm({ onUploaded }: { onUploaded: (info: Uploa
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
       <p className="text-sm text-gray-600">
-        Upload a text-based PDF book. The buyer will chunk it and pay marketplace
+        Upload a text-based PDF book. The buyer will chunk it and commission marketplace
         suppliers to summarize each chunk, then synthesize a full-book summary.
       </p>
       <input

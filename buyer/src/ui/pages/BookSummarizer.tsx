@@ -152,7 +152,7 @@ export default function BookSummarizer() {
       <div>
         <h1 className="text-2xl font-semibold">Book Summarizer</h1>
         <p className="mt-1 text-sm text-gray-500">
-          Upload a PDF → pay suppliers to summarize each chunk → get a full-book summary.
+          Upload a PDF → commission suppliers to summarize each chunk → get a full-book summary.
           Jobs keep running if you navigate away; reopen them below.
         </p>
       </div>

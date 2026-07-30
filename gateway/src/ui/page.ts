@@ -8,7 +8,7 @@ export const INDEX_HTML = `<!doctype html>
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Vector Marketplace — OpenAI Gateway</title>
+<title>Vector Marketplace - OpenAI Gateway</title>
 <style>
   body { font-family: system-ui, sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
   h1 { font-size: 1.5rem; } h2 { font-size: 1.1rem; margin-top: 2rem; }
@@ -22,7 +22,7 @@ export const INDEX_HTML = `<!doctype html>
 </style>
 </head>
 <body>
-<h1>Vector Marketplace — OpenAI-compatible Gateway</h1>
+<h1>Vector Marketplace - OpenAI-compatible Gateway</h1>
 <p class="muted">Point any OpenAI SDK at <code id="base"></code> using your API key as the bearer token.</p>
 
 <h2>1. Create an API key</h2>

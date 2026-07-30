@@ -304,7 +304,7 @@ function LifecycleCard({ lc }: { lc: Lifecycle }): JSX.Element {
           </>
         )}
         <span className="text-gray-500">·</span>
-        <span>{fmtAda(lc.payment_lovelace)} payment</span>
+        <span>{fmtAda(lc.payment_lovelace)} escrowed</span>
         <span className="text-gray-500">·</span>
         <span>{fmtAda(lc.buyer_bond_lovelace)} bond</span>
         <span className="text-gray-500">·</span>

@@ -94,7 +94,7 @@ export default function JobEstimate({
           <dd className="text-right">{est.mapCalls}</dd>
           <dt>Reduce calls</dt>
           <dd className="text-right">{est.reduceCalls}</dd>
-          <dt className="font-medium">Total paid calls</dt>
+          <dt className="font-medium">Total escrowed calls</dt>
           <dd className="text-right font-medium">{est.totalCalls}</dd>
           <dt className="font-medium">Est. max cost</dt>
           <dd className="text-right font-medium">{est.totalAp3x} AP3X</dd>
@@ -126,7 +126,7 @@ export default function JobEstimate({
         disabled={blocked || starting}
         className="rounded bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:bg-gray-400"
       >
-        {starting ? "Starting…" : `Proceed & pay (~${est.totalAp3x} AP3X)`}
+        {starting ? "Starting…" : `Proceed (locks ~${est.totalAp3x} AP3X in escrow)`}
       </button>
     </div>
   );

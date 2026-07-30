@@ -1,6 +1,6 @@
 /**
  * buyer/src/ui/pages/PendingReceipts.tsx — list of currently-Submitted escrows
- * for this buyer, with an "Accept & Pay" action per row.
+ * for this buyer, with an "Accept & Settle" action per row.
  *
  * Data flow:
  *   GET /v1/pending-receipts → buyer-app server proxies indexer /escrows?buyer=<pkh>
@@ -190,7 +190,7 @@ export default function PendingReceipts() {
               <th className="px-2 py-2">Submitted</th>
               <th className="px-2 py-2">Supplier</th>
               <th className="px-2 py-2">Capability</th>
-              <th className="px-2 py-2">Payment</th>
+              <th className="px-2 py-2">Escrowed</th>
               <th className="px-2 py-2">Window left</th>
               <th className="px-2 py-2">Action</th>
             </tr>
@@ -254,7 +254,7 @@ export default function PendingReceipts() {
                               : "bg-indigo-600 text-white hover:bg-indigo-700")
                         }
                       >
-                        {isAccepting ? "accepting…" : expired ? "expired" : "Accept & Pay"}
+                        {isAccepting ? "accepting…" : expired ? "expired" : "Accept & Settle"}
                       </button>
                     )}
                   </td>
