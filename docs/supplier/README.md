@@ -164,8 +164,8 @@ If the buyer does NOT accept within the dispute window (10 minutes), you can col
 
 - **Never share your .env file** - it contains your wallet seed phrase
 - **Never share your data/ folder** - it contains task history
-- The seed phrase controls your wallet funds. Back it up securely.
-- The node only responds to buyers who have already locked funds on-chain, so you cannot be scammed out of compute.
+- The seed phrase controls your wallet. Back it up securely.
+- The node only responds to buyers who have already locked value on-chain, so you cannot be scammed out of compute.
 
 ## Troubleshooting
 

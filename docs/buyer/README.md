@@ -1,11 +1,11 @@
 # Vector Buyer App
 
-A self-contained app for purchasing AI compute on the Vector L2 testnet (Cardano). You submit prompts, pay with AP3X tokens via on-chain escrow, and receive LLM responses from supplier nodes.
+A self-contained app for commissioning AI compute on the Vector L2 testnet. You submit prompts, bond AP3X in on-chain escrow, and receive LLM responses from supplier nodes; the escrow settles in AP3X on accepted work.
 
 ## How It Works
 
-1. You type a **prompt** and set a **payment** amount in the web UI
-2. The app posts an **escrow transaction** on-chain, locking your payment + bond
+1. You type a **prompt** and set a **price** in the web UI
+2. The app posts an **escrow transaction** on-chain, locking price + bond
 3. The app sends the task to a **supplier node** via HTTP
 4. The supplier calls an LLM, **claims** the escrow, and **submits** the result hash on-chain
 5. You see the response in the UI and can **accept** to release payment, or **dispute**
@@ -193,8 +193,8 @@ If you accept the result, you get your 1 AP3X bond back. Total cost = payment + 
 
 - **Never share your .env file** - it contains your wallet seed phrase
 - **Never share your data/ folder** - it contains task history
-- The seed phrase controls your wallet funds. Back it up securely.
-- Escrow protects you: the supplier cannot take your funds without delivering a result
+- The seed phrase controls your wallet. Back it up securely.
+- Escrow protects you: the supplier cannot take your escrowed value without delivering a result
 - You have a 10-minute dispute window after receiving a result
 
 ## Troubleshooting

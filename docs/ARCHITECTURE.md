@@ -8,13 +8,13 @@
 
 ## 1. Goal and scope
 
-**What this is.** A two-sided marketplace where buyers (agents or humans) submit prompts to suppliers running inference on their own hardware, pay with AP3X via on-chain bonded escrow on Vector L2, and receive signed-receipt responses. The primary validation goal is **technical feasibility + lifecycle** ("can it be done end-to-end"), not demand modelling or economic stress testing.
+**What this is.** A two-sided marketplace where buyers (agents or humans) submit prompts to suppliers running inference on their own hardware, with each job settled in AP3X through on-chain bonded escrow on Vector L2, and receive signed-receipt responses. The primary validation goal is **technical feasibility + lifecycle** ("can it be done end-to-end"), not demand modelling or economic stress testing.
 
 **What v1 is NOT.**
 - Not agentic on the supplier side. Suppliers answer single prompts. Buyer agents drive multiple prompts.
 - Not LLM-only in design. Capability model is open from day 1 (whisper / kokoro / image generation are planned siblings), but the first supplier is an LLM.
 - Not multi-slot. Single-slot per supplier process. Multi-capability operators run multiple processes.
-- Not multi-chain. Vector testnet first, mainnet later. Masumi / Sokosumi / USDM is target #2 (adapter, not fork).
+- Not multi-chain. Vector only (testnet and mainnet).
 - Not disputed. M1 ships happy-path escrow only. Module-1 disputes wire in M2.
 - Not streaming. `stream: true` is rejected by suppliers.
 - Not tool-calling. `tools` / `tool_choice` / `functions` are rejected by suppliers.
@@ -24,7 +24,7 @@
 
 | # | Decision |
 |---|---|
-| 1 | Payment token: **AP3X** (Vector testnet, later mainnet). Masumi = USDM, target #2. |
+| 1 | Settlement asset: **AP3X**, bonded in escrow; jobs settle in AP3X on accepted work. |
 | 2 | v1 scope: **Option C** — happy-path escrow only, no disputes. Module-1 wiring is milestone 2. |
 | 3 | Module-1 contract source: TBD — to be located or restored before M2. Not blocking M0–M1. |
 | 4 | Evidence: **signed receipt** `{prompt_hash, response_hash, model, tokens, wallclock}` + Ed25519 supplier signature. Hash on-chain, plaintext off-chain. |
@@ -283,7 +283,6 @@ Malformed datum · escrow to wrong script · supplier claims escrow addressed to
 | **M1** | Happy-path end-to-end, Hetzner CPU supplier | 2–3 wks | `qwen2.5:0.5b` on Hetzner, buyer posts → supplier claims → submits → buyer accepts; full Vector testnet lifecycle; indexer serves discovery |
 | **M2** | Module-1 dispute wiring | 2–3 wks post-M1 | Contract source located; supplier=claimer / buyer=auditor mapping; Dispute state; evidence URI; mainnet-dry-run lifecycle |
 | **M3** | Capability expansion + local lab | 2–4 wks (may overlap M2) | `speech.transcribe.v1` via Whisper live; local-lab GPU supplier with larger model; heterogeneous discovery validated |
-| **M4** | Masumi / Sokosumi adapter | later | MIP-003 HTTP shim; MIP-002 NFT registration; USDM payment path; Sokosumi listing |
 
 ## 9. Open follow-ups (not blocking M0 / M1)
 
@@ -310,5 +309,3 @@ Malformed datum · escrow to wrong script · supplier claims escrow addressed to
 - Apex-dashboard CBOR decoders: `apex-dashboard/server/cbor-decoder.ts`
 - Apex-dashboard test discipline: `apex-dashboard/tests/`
 - Prior Python reference (AP3X buyer/supplier): `./docs/buyer/`, `./docs/supplier/`
-- Masumi docs: https://docs.masumi.network/
-- MIP-003 spec: https://docs.masumi.network/mips/_mip-003

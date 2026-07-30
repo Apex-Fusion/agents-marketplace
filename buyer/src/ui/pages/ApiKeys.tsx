@@ -114,7 +114,7 @@ export default function ApiKeys() {
         <h1 className="text-2xl font-semibold">API Keys</h1>
         <p className="text-sm text-gray-600">
           Generate an OpenAI-compatible API key for the marketplace gateway. Each key has its own
-          custodial wallet — fund its deposit address with AP3X, then point any OpenAI SDK at{" "}
+          gateway-managed wallet (the gateway holds this wallet's key) - fund its deposit address with AP3X, then point any OpenAI SDK at{" "}
           <code className="font-mono text-xs">{baseUrl}</code>.
         </p>
       </div>
