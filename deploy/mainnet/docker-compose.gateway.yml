@@ -59,8 +59,18 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=traefik-net"
+      # This host is NOT Cloudflare-proxied: traefik terminates TLS itself with
+      # a Let's Encrypt cert (resolver defined in /root/traefik/traefik.yml on
+      # the box). The :80 router only redirects; ACME HTTP-01 challenges are
+      # answered by traefik before the redirect applies.
       - "traefik.http.routers.mp-gateway-mainnet.entrypoints=web"
       - "traefik.http.routers.mp-gateway-mainnet.rule=Host(`api.marketplace.vector.apexfusion.org`)"
+      - "traefik.http.routers.mp-gateway-mainnet.middlewares=mp-gateway-mainnet-https"
+      - "traefik.http.middlewares.mp-gateway-mainnet-https.redirectscheme.scheme=https"
+      - "traefik.http.middlewares.mp-gateway-mainnet-https.redirectscheme.permanent=true"
+      - "traefik.http.routers.mp-gateway-mainnet-tls.entrypoints=websecure"
+      - "traefik.http.routers.mp-gateway-mainnet-tls.rule=Host(`api.marketplace.vector.apexfusion.org`)"
+      - "traefik.http.routers.mp-gateway-mainnet-tls.tls.certresolver=letsencrypt"
       - "traefik.http.services.mp-gateway-mainnet.loadbalancer.server.port=8080"
     logging:
       driver: json-file
