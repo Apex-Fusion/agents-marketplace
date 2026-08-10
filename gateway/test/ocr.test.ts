@@ -400,3 +400,173 @@ describe("POST /v1/ocr/extract — escrow ref survives a post-escrow SupplierErr
     expect(failedLine[0].escrow_ref).toBe(knownEscrowRef);
   });
 });
+
+// ─── Busy pre-check - never post an escrow to a candidate that is busy ──────
+//
+// runOcrOneShot now checks each candidate's live /status immediately before
+// calling submitOcr for it (mirrors sessions.ts's startChat pre-check):
+// "working" means busy and moves on to the next candidate WITHOUT posting an
+// escrow; anything else (free, unreachable, malformed, slow) is treated as
+// usable. submitOcr is the escrow-posting path in these tests (same
+// monkeypatch pattern as the suites above), so asserting its call count is
+// exactly how "no escrow was posted" is observed.
+
+const OCR_SUPPLIER_A = {
+  ...OCR_SUPPLIER,
+  utxo_ref: `${"aa".repeat(32)}#0`,
+  supplier_pkh: "sA",
+  endpoint_url: "http://sup-a",
+};
+const OCR_SUPPLIER_B = {
+  ...OCR_SUPPLIER,
+  utxo_ref: `${"bb".repeat(32)}#0`,
+  supplier_pkh: "sB",
+  endpoint_url: "http://sup-b",
+};
+
+/** Indexer /suppliers lookup plus a per-endpoint /status responder, on one
+ * fetchFn - everything else falls back to the suite's usual empty array. */
+function makeFetchWithStatus(
+  suppliers: Array<typeof OCR_SUPPLIER>,
+  statusByEndpoint: Record<string, () => Response>,
+): typeof globalThis.fetch {
+  return (async (url: unknown) => {
+    const u = String(url);
+    if (u.includes("/suppliers")) {
+      return new Response(JSON.stringify(suppliers), { status: 200 });
+    }
+    for (const [endpoint, respond] of Object.entries(statusByEndpoint)) {
+      if (u === `${endpoint}/status`) return respond();
+    }
+    return new Response("[]", { status: 200 });
+  }) as unknown as typeof globalThis.fetch;
+}
+
+/** Same successful submitOcr shape as the happy-path suite above, reused
+ * across the busy pre-check tests. */
+function makeSubmitOcrStub() {
+  return vi.fn(async (_opts: { advertRef: { txHash: string; index: number } }) => ({
+    output_format: "markdown",
+    content: "extracted text",
+    usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+    receipt: {
+      prompt_hash: "1b".repeat(32),
+      response_hash: "2c".repeat(32),
+      model: "chandra-ocr-2",
+      prompt_tokens: 10,
+      completion_tokens: 5,
+      wallclock_ms: Date.now(),
+      supplier_pkh: "s3",
+      escrow_ref: `${"d".repeat(64)}#0`,
+    },
+    receiptSignature: "sig".repeat(20),
+    escrowRef: { txHash: "d".repeat(64), index: 0 },
+  }));
+}
+
+describe("POST /v1/ocr/extract - busy pre-check", () => {
+  it("a busy supplier is never sent an escrow; the route returns the busy response", async () => {
+    const fetchFn = makeFetchWithStatus([OCR_SUPPLIER], {
+      "http://sup": () => new Response(JSON.stringify({ status: "working" }), { status: 200 }),
+    });
+    const deps = makeDeps(fetchFn, { chain: fundedChain });
+    const rawKey = makeKey(deps, 0);
+    const keyRow = deps.store.getKeyByHash(hashApiKey(rawKey))!;
+
+    const ctx = deps.registry.getContext(keyRow);
+    const submitOcr = makeSubmitOcrStub();
+    (ctx.sdk as { submitOcr: unknown }).submitOcr = submitOcr;
+
+    const res = await request(createApp(deps))
+      .post("/v1/ocr/extract")
+      .set("Authorization", `Bearer ${rawKey}`)
+      .send(validBody());
+
+    // The escrow-posting path was never invoked.
+    expect(submitOcr).not.toHaveBeenCalled();
+    // toGatewayError maps SupplierError("supplier_busy") to 503 overloaded -
+    // the same busy response a post-escrow 409 would have produced.
+    expect(res.status).toBe(503);
+    expect(res.body.error?.code).toBe("overloaded");
+
+    const rows = deps.store.listUsage(keyRow.id, 10);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe("failed");
+    expect(rows[0].escrow_ref).toBeNull();
+  });
+
+  it("a free supplier proceeds to post and settle exactly as before", async () => {
+    const fetchFn = makeFetchWithStatus([OCR_SUPPLIER], {
+      "http://sup": () => new Response(JSON.stringify({ status: "free" }), { status: 200 }),
+    });
+    const deps = makeDeps(fetchFn, { chain: fundedChain });
+    const rawKey = makeKey(deps, 0);
+    const keyRow = deps.store.getKeyByHash(hashApiKey(rawKey))!;
+
+    const ctx = deps.registry.getContext(keyRow);
+    const submitOcr = makeSubmitOcrStub();
+    (ctx.sdk as { submitOcr: unknown }).submitOcr = submitOcr;
+
+    const res = await request(createApp(deps))
+      .post("/v1/ocr/extract")
+      .set("Authorization", `Bearer ${rawKey}`)
+      .send(validBody());
+
+    expect(submitOcr).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(200);
+    expect(res.body.x_vector.receipt_labels).toContain("first-party-brokered");
+  });
+
+  it("falls back to the second candidate when the first is busy, posting exactly one escrow", async () => {
+    const fetchFn = makeFetchWithStatus([OCR_SUPPLIER_A, OCR_SUPPLIER_B], {
+      "http://sup-a": () => new Response(JSON.stringify({ status: "working" }), { status: 200 }),
+      "http://sup-b": () => new Response(JSON.stringify({ status: "free" }), { status: 200 }),
+    });
+    const deps = makeDeps(fetchFn, { chain: fundedChain });
+    const rawKey = makeKey(deps, 0);
+    const keyRow = deps.store.getKeyByHash(hashApiKey(rawKey))!;
+
+    const ctx = deps.registry.getContext(keyRow);
+    const submitOcr = makeSubmitOcrStub();
+    (ctx.sdk as { submitOcr: unknown }).submitOcr = submitOcr;
+
+    const res = await request(createApp(deps))
+      .post("/v1/ocr/extract")
+      .set("Authorization", `Bearer ${rawKey}`)
+      .send(validBody());
+
+    expect(res.status).toBe(200);
+    // Exactly one escrow posted, and it is the second (free) candidate's -
+    // the busy first candidate was skipped, not retried after failing.
+    expect(submitOcr).toHaveBeenCalledTimes(1);
+    expect(submitOcr.mock.calls[0][0].advertRef).toEqual({ txHash: "bb".repeat(32), index: 0 });
+  });
+
+  it("a status check that errors does not block the attempt", async () => {
+    const fetchFn = makeFetchWithStatus([OCR_SUPPLIER], {
+      "http://sup": () => {
+        // Simulates both a network error and an aborted (timed-out) request -
+        // isSupplierBusy's catch block treats every failure mode the same
+        // way: unknown, not busy, proceed. A real AbortSignal timeout is not
+        // exercised here to keep the suite fast; the outcome is identical.
+        throw new Error("simulated network failure reaching /status");
+      },
+    });
+    const deps = makeDeps(fetchFn, { chain: fundedChain });
+    const rawKey = makeKey(deps, 0);
+    const keyRow = deps.store.getKeyByHash(hashApiKey(rawKey))!;
+
+    const ctx = deps.registry.getContext(keyRow);
+    const submitOcr = makeSubmitOcrStub();
+    (ctx.sdk as { submitOcr: unknown }).submitOcr = submitOcr;
+
+    const res = await request(createApp(deps))
+      .post("/v1/ocr/extract")
+      .set("Authorization", `Bearer ${rawKey}`)
+      .send(validBody());
+
+    // The candidate was still tried despite the failed pre-check.
+    expect(submitOcr).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(200);
+  });
+});

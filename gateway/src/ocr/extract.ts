@@ -4,8 +4,9 @@
  * One escrow per page against a model-scoped `ocr.page.extract.<model>.v1`
  * supplier (config.ocrCapabilityId). Lifecycle mirrors the one-shot chat
  * path, all inside the per-key mutex: parse → select supplier → preflight →
- * submitOcr (escrow → supplier call → receipt verify) → resolve Submitted
- * ref → Accept (awaited) → record usage → wallet-health → respond.
+ * per-candidate live busy pre-check → submitOcr (escrow → supplier call →
+ * receipt verify) → resolve Submitted ref → Accept (awaited) → record usage
+ * → wallet-health → respond.
  *
  * Response (200):
  *   {
@@ -38,7 +39,7 @@ import {
   ALLOWED_OCR_OUTPUT_FORMATS,
   MAX_OCR_IMAGE_B64_CHARS,
 } from "@marketplace/shared/tx";
-import type { ProgressEvent } from "@marketplace/buyer/sdk";
+import { SupplierError, type ProgressEvent } from "@marketplace/buyer/sdk";
 import type { GatewayDeps } from "../deps.js";
 import type { GatewayStore } from "../db/store.js";
 import { requireKey } from "../middleware/apiKeyAuth.js";
@@ -58,6 +59,10 @@ const RECEIPT_LABELS_V0 = ["first-party-brokered"] as const;
 const B64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
 const HEX64_RE = /^[0-9a-fA-F]{64}$/;
 const VENUE_RE = /^[a-z0-9-]{1,32}$/;
+
+/** Bound on the live busy pre-check below - cheap enough that a stalled
+ * supplier never meaningfully delays the request. */
+const SUPPLIER_STATUS_CHECK_TIMEOUT_MS = 2_000;
 
 interface ParsedOcrRequest {
   image_b64: string;
@@ -120,6 +125,35 @@ export function venueAttribution(req: Request): { venue: string; runUserHash: st
     venue: VENUE_RE.test(venueRaw) ? venueRaw : "",
     runUserHash: HEX64_RE.test(hashRaw) ? hashRaw.toLowerCase() : "",
   };
+}
+
+/**
+ * Live busy pre-check, run immediately before a candidate's escrow posts.
+ * Mirrors sessions.ts's startChat pre-check: same signal ("working" on the
+ * supplier's own /status), same best-effort posture. Posting an escrow only
+ * to have the supplier reject as busy strands the escrow until reclaim and
+ * burns the tx fee, so this is worth a bounded, cheap HTTP round trip.
+ *
+ * Never a gate: the indexer already filters candidates on advert status, so
+ * a timeout, network error, non-2xx, or malformed body all resolve to "not
+ * busy" (unknown, not blocking) - a briefly-unreachable /status must never
+ * stop the candidate from being attempted.
+ */
+async function isSupplierBusy(
+  endpointUrl: string,
+  fetchFn: typeof globalThis.fetch,
+): Promise<boolean> {
+  try {
+    const res = await fetchFn(`${endpointUrl.replace(/\/+$/, "")}/status`, {
+      signal: AbortSignal.timeout(SUPPLIER_STATUS_CHECK_TIMEOUT_MS),
+    });
+    if (!res.ok) return false;
+    const body = (await res.json()) as unknown;
+    const status = body && typeof body === "object" ? (body as { status?: unknown }).status : undefined;
+    return status === "working";
+  } catch {
+    return false;
+  }
 }
 
 function recordOcrUsage(
@@ -238,6 +272,17 @@ async function runOcrOneShot(
     // submitOcr's return value (I2 follow-up).
     let lastErr: unknown;
     for (const cand of candidates) {
+      // Live pre-check, run right here (not once at the top of the request):
+      // skip a candidate that is busy right now instead of paying to find
+      // out. See isSupplierBusy's docstring for the exact signal + posture.
+      if (await isSupplierBusy(cand.endpointUrl, fetchFn)) {
+        lastErr = new SupplierError("supplier_busy", {
+          status: 409,
+          message: "supplier is busy with another job",
+        });
+        continue;
+      }
+
       const onProgress = (ev: unknown): void => {
         const e = ev as ProgressEvent;
         if (e.type === "escrow_posted" && e.escrow_ref) escrowRefStr = e.escrow_ref;
