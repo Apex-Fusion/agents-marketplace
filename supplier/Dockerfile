@@ -27,6 +27,8 @@ RUN corepack enable && corepack prepare pnpm@10.33.2 --activate
 
 # Workspace manifests first to maximise layer cache reuse.
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json tsconfig.base.json .npmrc ./
+# pnpm-lock.yaml's patchedDependencies hash the patch files at install time.
+COPY patches ./patches
 COPY packages/shared/package.json ./packages/shared/package.json
 COPY supplier/package.json ./supplier/package.json
 # Buyer + indexer manifests are needed because pnpm-lock.yaml indexes the

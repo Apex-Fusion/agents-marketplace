@@ -29,6 +29,8 @@ RUN apk add --no-cache python3 make g++
 RUN corepack enable && corepack prepare pnpm@10.33.2 --activate
 
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json tsconfig.base.json .npmrc ./
+# pnpm-lock.yaml's patchedDependencies hash the patch files at install time.
+COPY patches ./patches
 COPY packages/shared/package.json ./packages/shared/package.json
 COPY indexer/package.json ./indexer/package.json
 COPY indexer-ui/package.json ./indexer-ui/package.json

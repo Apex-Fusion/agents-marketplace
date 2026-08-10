@@ -26,6 +26,8 @@ RUN corepack enable && corepack prepare pnpm@10.33.2 --activate
 # the whole workspace, so every package's manifest must be present even though
 # --filter only installs what wallet-monitor needs.
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json tsconfig.base.json .npmrc ./
+# pnpm-lock.yaml's patchedDependencies hash the patch files at install time.
+COPY patches ./patches
 COPY packages/shared/package.json ./packages/shared/package.json
 COPY wallet-monitor/package.json ./wallet-monitor/package.json
 COPY buyer/package.json ./buyer/package.json
