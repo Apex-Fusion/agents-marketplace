@@ -21,6 +21,7 @@ import { hashApiKey } from "../src/middleware/apiKeyAuth.js";
 import { venueAttribution } from "../src/ocr/extract.js";
 import type { GatewayConfig } from "../src/config.js";
 import type { GatewayDeps } from "../src/deps.js";
+import { SupplierError } from "@marketplace/buyer/sdk";
 
 // The one-shot settle step (resolveSubmittedRef → acceptAndConfirm) talks to
 // the live indexer + chain; the happy-path route test below only needs to
@@ -323,5 +324,79 @@ describe("POST /v1/ocr/extract — happy path", () => {
     // (the ORIGINAL Open ref), not the mocked resolveSubmittedRef's answer —
     // see settle.ts's docstring on why those two refs differ on-chain.
     expect(res.body.x_vector.escrow_ref).toBe(`${"d".repeat(64)}#0`);
+  });
+});
+
+// ─── Failure path — escrow ref survives a post-escrow SupplierError (I2) ────
+//
+// submitOcr posts the escrow, THEN calls the supplier. A SupplierError
+// (timeout, network failure, non-2xx, malformed response, receipt mismatch)
+// means the escrow already landed on chain even though submitOcr rejects —
+// per the OCR route's 120s supplier budget, this is likely the MOST common
+// paid-but-failed shape. Before this fix, escrowRefStr was only assigned
+// from submitOcr's *return value*, so this exact case recorded escrow_ref:
+// null. The route now also listens for the SDK's "escrow_posted" progress
+// event around each attempt, so the ref survives regardless of whether
+// submitOcr goes on to resolve or reject.
+
+describe("POST /v1/ocr/extract — escrow ref survives a post-escrow SupplierError", () => {
+  it("records the escrow_ref from the escrow_posted progress event, not null, when submitOcr posts an escrow then rejects", async () => {
+    const fetchFn = (async (url: unknown) => {
+      const u = String(url);
+      if (u.includes("/suppliers")) {
+        return new Response(JSON.stringify([OCR_SUPPLIER]), { status: 200 });
+      }
+      return new Response("[]", { status: 200 });
+    }) as unknown as typeof globalThis.fetch;
+
+    const deps = makeDeps(fetchFn, { chain: fundedChain });
+    const rawKey = makeKey(deps, 0);
+    const keyRow = deps.store.getKeyByHash(hashApiKey(rawKey))!;
+
+    // Same monkeypatch pattern as the happy-path test above: fetch the real
+    // per-key Marketplace instance from the registry BEFORE the request so
+    // its real EventEmitter (on/off/emit) stays live, then replace only
+    // submitOcr. The stub mirrors what Marketplace.submitOcr actually does
+    // on this failure shape: emit "escrow_posted" the instant the tx
+    // confirms, then throw once the supplier call fails.
+    const ctx = deps.registry.getContext(keyRow);
+    const knownEscrowRef = `${"9".repeat(64)}#0`;
+    const submitOcr = vi.fn(async () => {
+      ctx.sdk.emit("progress", { type: "escrow_posted", escrow_ref: knownEscrowRef });
+      throw new SupplierError("timeout", { message: "supplier did not respond within budget" });
+    });
+    (ctx.sdk as { submitOcr: unknown }).submitOcr = submitOcr;
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const res = await request(createApp(deps))
+      .post("/v1/ocr/extract")
+      .set("Authorization", `Bearer ${rawKey}`)
+      .send(validBody());
+    // Snapshot the recorded calls BEFORE restoring — mockRestore() also
+    // clears .mock.calls (it runs mockReset()/mockClear() first), so
+    // reading logSpy.mock.calls after restore always sees [].
+    const loggedLines = logSpy.mock.calls.map((args) => String(args[0]));
+    logSpy.mockRestore();
+
+    expect(submitOcr).toHaveBeenCalledTimes(1);
+    // toGatewayError maps SupplierError("timeout") to 504 supplier_timeout —
+    // confirms the request actually took the failure path this test targets.
+    expect(res.status).toBe(504);
+    expect(res.body.error?.code).toBe("supplier_timeout");
+
+    // The reconciliation spine: the usage row recorded in the catch block
+    // must carry the real ref, not null.
+    const rows = deps.store.listUsage(keyRow.id, 10);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe("failed");
+    expect(rows[0].escrow_ref).toBe(knownEscrowRef);
+
+    // The structured ocr_failed log line (wedge-ledger emitter input) must
+    // carry the same ref.
+    const failedLine = loggedLines
+      .filter((line) => line.includes('"evt":"ocr_failed"'))
+      .map((line) => JSON.parse(line) as { escrow_ref: string | null });
+    expect(failedLine).toHaveLength(1);
+    expect(failedLine[0].escrow_ref).toBe(knownEscrowRef);
   });
 });

@@ -38,6 +38,7 @@ import {
   ALLOWED_OCR_OUTPUT_FORMATS,
   MAX_OCR_IMAGE_B64_CHARS,
 } from "@marketplace/shared/tx";
+import type { ProgressEvent } from "@marketplace/buyer/sdk";
 import type { GatewayDeps } from "../deps.js";
 import type { GatewayStore } from "../db/store.js";
 import { requireKey } from "../middleware/apiKeyAuth.js";
@@ -224,8 +225,24 @@ async function runOcrOneShot(
     // Submit. Fall back to the next supplier ONLY on a pre-post
     // TxConstructionError (no escrow was posted). A SupplierError means the
     // escrow is already posted — do not retry (the sweeper recovers it).
+    //
+    // submitOcr posts the escrow internally and only returns escrowRef when
+    // it resolves. When the supplier call AFTER the post throws
+    // (SupplierError: timeout, network failure, non-2xx, malformed
+    // response, receipt mismatch) the escrow already landed on chain but
+    // escrowRefStr below would otherwise stay null — the OCR upstream has a
+    // 120s budget, so this is likely the most common paid-but-failed shape.
+    // The SDK emits a "progress" event of type "escrow_posted" (carrying
+    // escrow_ref) the instant the tx confirms, so listen for it around each
+    // attempt and capture the ref from the event rather than only from
+    // submitOcr's return value (I2 follow-up).
     let lastErr: unknown;
     for (const cand of candidates) {
+      const onProgress = (ev: unknown): void => {
+        const e = ev as ProgressEvent;
+        if (e.type === "escrow_posted" && e.escrow_ref) escrowRefStr = e.escrow_ref;
+      };
+      ctx.sdk.on("progress", onProgress);
       try {
         result = await ctx.sdk.submitOcr({
           advertRef: cand.advertRef,
@@ -240,6 +257,8 @@ async function runOcrOneShot(
         lastErr = err;
         if (err instanceof TxConstructionError) continue;
         throw err;
+      } finally {
+        ctx.sdk.off("progress", onProgress);
       }
     }
     if (!result || !used) {
