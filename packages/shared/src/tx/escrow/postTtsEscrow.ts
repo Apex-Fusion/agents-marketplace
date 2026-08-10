@@ -31,6 +31,7 @@ import { loadBlueprint } from "../blueprint.js";
 import { encodeTxBody, sha256Hex } from "../internal/testTxBody.js";
 import { mockSlotToWallclockMs, NETWORK_BUFFER_MS } from "../internal/constants.js";
 import { detectCborBackend } from "../internal/cborBackend.js";
+import { escrowLockFloor } from "../internal/minAdaFloor.js";
 import type { LiveOgmiosProvider } from "../../chain/LiveOgmiosProvider.js";
 
 /** TTS request envelope. The buyer-side hash and the supplier-side hash
@@ -149,7 +150,7 @@ export async function buildPostTtsEscrowTx(
   const requestSpecHash = sha256Utf8Hex(requestSpecCanonical);
   const promptHash = ttsPromptHash(request);
 
-  const totalLocked =
+  const economicTotal =
     advertDatum.price_lovelace +
     advertDatum.buyer_bond_lovelace +
     advertDatum.supplier_bond_lovelace;
@@ -170,6 +171,11 @@ export async function buildPostTtsEscrowTx(
     result_receipt_hash: null,
     state: "Open",
   };
+
+  // Lock enough that the escrow output satisfies min-ada in its LARGEST
+  // future state (Submitted) - value_equal on Claim/Submit forbids any
+  // later bump (min-ada floor).
+  const totalLocked = escrowLockFloor(escrowDatum, economicTotal);
 
   // Live path: reuse the chat builder. The live cbor path is already
   // capability-agnostic — `messages` is `void`-marked there. We pass an

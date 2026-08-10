@@ -42,6 +42,7 @@ import { loadBlueprint } from "../blueprint.js";
 import { encodeTxBody, sha256Hex } from "../internal/testTxBody.js";
 import { mockSlotToWallclockMs, NETWORK_BUFFER_MS } from "../internal/constants.js";
 import { detectCborBackend } from "../internal/cborBackend.js";
+import { escrowLockFloor } from "../internal/minAdaFloor.js";
 import type { LiveOgmiosProvider } from "../../chain/LiveOgmiosProvider.js";
 
 export interface PostChatEscrowParams {
@@ -132,7 +133,7 @@ export async function buildPostChatEscrowTx(
   const requestSpecHash = sha256Utf8Hex(requestSpecCanonical);
   const promptHash = chatSessionPromptHash({ session_nonce });
 
-  const totalLocked =
+  const economicTotal =
     advertDatum.price_lovelace +
     advertDatum.buyer_bond_lovelace +
     advertDatum.supplier_bond_lovelace;
@@ -153,6 +154,11 @@ export async function buildPostChatEscrowTx(
     result_receipt_hash: null,
     state: "Open",
   };
+
+  // Lock enough that the escrow output satisfies min-ada in its LARGEST
+  // future state (Submitted) - value_equal on Claim/Submit forbids any
+  // later bump (min-ada floor).
+  const totalLocked = escrowLockFloor(escrowDatum, economicTotal);
 
   // Live path: reuse the capability-agnostic chat builder (messages = []).
   // The on-chain commitment is the escrowDatum (carrying our session-init
