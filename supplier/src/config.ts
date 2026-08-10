@@ -166,12 +166,6 @@ export interface SupplierConfig {
    */
   hfModelRevision: string;
   /**
-   * Hub identity of the served weights, e.g. "hf:datalab-to/chandra-ocr-2".
-   * Recorded for telemetry now; feeds the receipt extension when that
-   * schema is added. Env: HF_WEIGHTS_SOURCE. "" = unset.
-   */
-  hfWeightsSource: string;
-  /**
    * Serving-runtime info route reporting the loaded checkpoint (TGI-style
    * /info or vLLM equivalent). Env: REVISION_PROBE_URL. "" = probing off.
    */
@@ -422,7 +416,6 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
   if (hfModelRevision !== "" && !/^[0-9a-fA-F]{40}$/.test(hfModelRevision)) {
     throw new Error("loadConfig: HF_MODEL_REVISION must be a 40-hex commit SHA when set");
   }
-  const hfWeightsSource = env.HF_WEIGHTS_SOURCE ?? "";
   const revisionProbeUrl = env.REVISION_PROBE_URL ?? "";
   // Datalab upstream: the health route is derived from DATALAB_BASE_URL, so
   // the liveness probe defaults ON without a REVISION_PROBE_URL. The
@@ -489,7 +482,6 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
     datalabTimeoutMs,
     ocrPromptOverride,
     hfModelRevision,
-    hfWeightsSource,
     revisionProbeUrl,
     revisionProbeMode,
     liveChain,

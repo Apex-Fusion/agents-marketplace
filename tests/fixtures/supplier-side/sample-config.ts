@@ -65,7 +65,6 @@ export function buildSampleOcrConfig(): SupplierConfig {
     datalabTimeoutMs: 120_000,
     ocrPromptOverride: "",
     hfModelRevision: "",
-    hfWeightsSource: "",
     revisionProbeUrl: "",
     revisionProbeMode: "off",
   };

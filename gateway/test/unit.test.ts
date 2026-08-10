@@ -208,8 +208,16 @@ describe("onchain/preflight", () => {
   });
 
   it("preflight requires balance AND collateral", async () => {
-    const cost = { priceLovelace: 2_000_000n, buyerBondLovelace: 1_000_000n, supplierBondLovelace: 1_000_000n };
-    // required = 2 + 1 + 1 + 5 (collateral) + 2 (fee) = 11 ADA
+    const cost = {
+      capabilityId: "llm.text.generate.v1",
+      priceLovelace: 2_000_000n,
+      buyerBondLovelace: 1_000_000n,
+      supplierBondLovelace: 1_000_000n,
+    };
+    // required = escrowLockFloor(2 + 1 + 1) + 5 (collateral) + 2 (fee) = 11 ADA
+    // — at this economic total (4 ADA) the Submitted-state min-ada floor for a
+    // short capability id (~2.2 ADA) stays well under the raw total, so the
+    // floor is a no-op here; tx-minada-floor.test.ts covers the lifted case.
     const fakeChain = { queryUtxosByAddress: async () => [pure(20_000_000n)] } as any;
     const ok = await preflight(fakeChain, "a", cost);
     expect(ok.ok).toBe(true);

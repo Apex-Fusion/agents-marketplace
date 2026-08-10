@@ -24,6 +24,13 @@ import {
 } from "../../packages/shared/src/tx/index.js";
 import { canonicalize } from "../../packages/shared/src/cbor/canonical.js";
 import { MockChainProvider } from "../../packages/shared/src/chain/MockChainProvider.js";
+import { encodeAdvertDatum } from "../../packages/shared/src/cbor/AdvertDatum.js";
+import { decodeEscrowDatum } from "../../packages/shared/src/cbor/EscrowDatum.js";
+import { escrowLockFloor } from "../../packages/shared/src/tx/internal/minAdaFloor.js";
+import type { AdvertDatum } from "../../packages/shared/src/cbor/types.js";
+import type { Utxo, OutputReference } from "../../packages/shared/src/chain/ChainProvider.js";
+import { buildBuyerWalletKey } from "../fixtures/buyer-side/wallet-keys.js";
+import { buildSupplierWalletKey } from "../fixtures/supplier-side/wallet-keys.js";
 
 const IMG = Buffer.from("not really a png but bytes are bytes").toString("base64");
 
@@ -118,5 +125,76 @@ describe("buildPostOcrEscrowTx — validation precedes chain access", () => {
       request: validRequest(),
       payment_lovelace: 200000n,
     })).rejects.toMatchObject({ reason: "advert ref not on chain" });
+  });
+});
+
+describe("buildPostOcrEscrowTx — happy path locks the min-ada floor (C1 regression)", () => {
+  // Guards packages/shared/src/tx/escrow/postOcrEscrow.ts:205
+  // (`escrowLockFloor(escrowDatum, economicTotal)`). Without that call the
+  // escrow locks only the raw economic total, the Submit continuing output
+  // gets bumped to min-ada, value_equal fails, and the validator errors with
+  // an empty trace — the 2026-08-07 mainnet incident. Neither existing
+  // `buildPostOcrEscrowTx` test above reaches line 205 (both throw first),
+  // so this is the only test that would catch a regression back to a bare
+  // `economicTotal` assignment.
+  const ADVERT_SCRIPT_ADDRESS = "addr_test1wrqq9qqjzf3uh4w9hm0kqzrpvt60r4ryjp5rjf5epd3nptq7yscm6";
+  const ADVERT_REF: OutputReference = { txHash: "c".repeat(64), index: 0 };
+  const PRICE = 200_000n;
+  const BUYER_BOND = 1_000_000n;
+  const SUPPLIER_BOND = 1_000_000n;
+  const ECONOMIC_TOTAL = PRICE + BUYER_BOND + SUPPLIER_BOND; // 2_200_000n
+
+  function makeOcrAdvert(): AdvertDatum {
+    const supplier = buildSupplierWalletKey();
+    return {
+      supplier_pkh: supplier.pubKeyHash,
+      capability_id: "ocr.page.extract.chandra-ocr-2.v1",
+      model: "chandra-ocr-2",
+      max_output_tokens: 4096,
+      max_processing_ms: 60_000,
+      price_lovelace: PRICE,
+      supplier_bond_lovelace: SUPPLIER_BOND,
+      buyer_bond_lovelace: BUYER_BOND,
+      endpoint_url: "https://supplier.example.com/v1",
+      detail_uri: "ipfs://Qm000",
+      detail_hash: "a".repeat(64),
+      advertised_at: 1_745_500_000_000,
+      status: "Active",
+    };
+  }
+
+  function seedOcrAdvert(chain: MockChainProvider): void {
+    const utxo: Utxo = {
+      ref: ADVERT_REF,
+      address: ADVERT_SCRIPT_ADDRESS,
+      lovelace: 2_000_000n,
+      assets: {},
+      datumHex: encodeAdvertDatum(makeOcrAdvert()),
+      scriptRef: null,
+    };
+    chain.seed(utxo);
+  }
+
+  it("locks escrowLockFloor(datum, economicTotal), strictly above the raw economic total", async () => {
+    const chain = new MockChainProvider();
+    chain.advanceSlot(1_745_500_000);
+    seedOcrAdvert(chain);
+
+    const buyer = buildBuyerWalletKey();
+    const result = await buildPostOcrEscrowTx({
+      chain,
+      buyerKey: buyer,
+      advertRef: ADVERT_REF,
+      request: validRequest(),
+      payment_lovelace: PRICE,
+    });
+
+    const escrowUtxo = await chain.queryUtxo(result.escrowOutputRef);
+    expect(escrowUtxo).not.toBeNull();
+    const datum = decodeEscrowDatum(escrowUtxo!.datumHex!);
+
+    const expectedFloor = escrowLockFloor(datum, ECONOMIC_TOTAL);
+    expect(escrowUtxo!.lovelace).toBe(expectedFloor);
+    expect(escrowUtxo!.lovelace).toBeGreaterThan(ECONOMIC_TOTAL);
   });
 });

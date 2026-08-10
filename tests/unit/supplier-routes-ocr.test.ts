@@ -138,7 +138,7 @@ describe("POST /v1/ocr/extract — header + body validation", () => {
 });
 
 describe("POST /v1/ocr/extract — revision-probe gate", () => {
-  it("503 revision_probe_failed when the probe cannot reach the runtime", async () => {
+  it("503 advert_unavailable — chain validation runs before the revision probe fires", async () => {
     // Advert/escrow would resolve AFTER the probe? No — probe runs at step
     // 7.5, after chain checks. Seeding a full escrow in the mock provider is
     // the chat-route suite's job; here we assert the config gate wiring by

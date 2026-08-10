@@ -1385,7 +1385,7 @@ export function createApp(deps: SupplierDeps): Application {
   // below; every other route keeps the 1mb ceiling.
   const jsonBody = express.json({ limit: "1mb" });
   app.use((req, res, next) =>
-    req.path.startsWith("/v1/ocr") ? next() : jsonBody(req, res, next));
+    req.path.startsWith("/v1/ocr/") ? next() : jsonBody(req, res, next));
 
   // /healthz is mounted FIRST and uses no deps — it must succeed regardless
   // of chain/state/config (independent of /status free/working/offline).

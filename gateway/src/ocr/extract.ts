@@ -42,7 +42,7 @@ import type { GatewayDeps } from "../deps.js";
 import type { GatewayStore } from "../db/store.js";
 import { requireKey } from "../middleware/apiKeyAuth.js";
 import { asyncHandler } from "../middleware/http.js";
-import { selectCandidates } from "../routing/selectSupplier.js";
+import { selectCandidates, type SupplierCandidate } from "../routing/selectSupplier.js";
 import { preflight } from "../onchain/preflight.js";
 import { resolveSubmittedRef, acceptAndConfirm } from "../onchain/settle.js";
 import { ensureWalletHealthy } from "../walletHealth.js";
@@ -107,8 +107,12 @@ function parseOcrRequest(body: unknown): ParsedOcrRequest {
   return { image_b64: image, mime, output_format: rawFormat, model };
 }
 
-/** Sanitized venue-attribution headers. Invalid values drop to "". */
-function venueAttribution(req: Request): { venue: string; runUserHash: string } {
+/** Sanitized venue-attribution headers. Invalid values drop to "".
+ * Exported for direct unit testing (I3 review finding) — it is the only
+ * gate on what lands in the ocr_settled/ocr_failed structured log lines the
+ * wedge-ledger emitter reads, so it needs coverage independent of the HTTP
+ * route. */
+export function venueAttribution(req: Request): { venue: string; runUserHash: string } {
   const venueRaw = req.header("X-Venue") ?? "";
   const hashRaw = req.header("X-Run-User-Hash") ?? "";
   return {
@@ -173,6 +177,16 @@ async function runOcrOneShot(
   const { config, store, chain, fetchFn } = deps;
   const capabilityId = config.ocrCapabilityId;
 
+  // Hoisted above the try so the catch block can report whatever is known
+  // even when the failure happens AFTER an escrow was posted (e.g. the
+  // supplier call or settle step fails) — these fields are the
+  // reconciliation spine that joins on-chain settlement to platform
+  // billing, and losing them makes paid-but-failed jobs unreconcilable
+  // (I2 review finding).
+  let result: Awaited<ReturnType<typeof ctx.sdk.submitOcr>> | undefined;
+  let used: SupplierCandidate | undefined;
+  let escrowRefStr: string | null = null;
+
   try {
     const candidates = await selectCandidates({
       indexerUrl: config.indexerUrl,
@@ -210,8 +224,6 @@ async function runOcrOneShot(
     // Submit. Fall back to the next supplier ONLY on a pre-post
     // TxConstructionError (no escrow was posted). A SupplierError means the
     // escrow is already posted — do not retry (the sweeper recovers it).
-    let result: Awaited<ReturnType<typeof ctx.sdk.submitOcr>> | undefined;
-    let used: (typeof candidates)[number] | undefined;
     let lastErr: unknown;
     for (const cand of candidates) {
       try {
@@ -235,11 +247,11 @@ async function runOcrOneShot(
     }
 
     // Settle: resolve the live Submitted ref, Accept, await confirmation.
-    const originalRefStr = `${result.escrowRef.txHash}#${result.escrowRef.index}`;
+    escrowRefStr = `${result.escrowRef.txHash}#${result.escrowRef.index}`;
     const submittedRef = await resolveSubmittedRef({
       indexerUrl: config.indexerUrl,
       buyerPkh: ctx.walletKey.pubKeyHash,
-      originalRefStr,
+      originalRefStr: escrowRefStr,
       fetchFn,
     });
     await acceptAndConfirm(chain, ctx.walletKey, submittedRef);
@@ -249,7 +261,7 @@ async function runOcrOneShot(
       capabilityId,
       model: used.model,
       supplierPkh: used.supplierPkh,
-      escrowRef: originalRefStr,
+      escrowRef: escrowRefStr,
       costLovelace: used.priceLovelace,
       promptTokens: result.usage.prompt_tokens,
       completionTokens: result.usage.completion_tokens,
@@ -261,7 +273,7 @@ async function runOcrOneShot(
     // caller sent none.
     console.log(JSON.stringify({
       evt: "ocr_settled",
-      escrow_ref: originalRefStr,
+      escrow_ref: escrowRefStr,
       capability_id: capabilityId,
       model: used.model,
       supplier_pkh: used.supplierPkh,
@@ -286,7 +298,7 @@ async function runOcrOneShot(
       x_vector: {
         receipt: result.receipt,
         receipt_signature: result.receiptSignature,
-        escrow_ref: originalRefStr,
+        escrow_ref: escrowRefStr,
         receipt_labels: RECEIPT_LABELS_V0,
       },
     });
@@ -294,15 +306,33 @@ async function runOcrOneShot(
     recordOcrUsage(store, {
       keyId,
       capabilityId,
-      model: parsed.model,
-      supplierPkh: null,
-      escrowRef: null,
-      costLovelace: null,
-      promptTokens: 0,
-      completionTokens: 0,
+      model: used?.model ?? parsed.model,
+      supplierPkh: used?.supplierPkh ?? null,
+      escrowRef: escrowRefStr,
+      costLovelace: used?.priceLovelace ?? null,
+      promptTokens: result?.usage.prompt_tokens ?? 0,
+      completionTokens: result?.usage.completion_tokens ?? 0,
       status: "failed",
       failureReason: err instanceof Error ? err.message : String(err),
     });
+
+    // Structured failure line mirroring ocr_settled's shape (same venue /
+    // run_user_hash / escrow_ref fields) so paid-but-failed jobs — an
+    // escrow posted on-chain, then a later step (supplier call, settle)
+    // failed — can still be reconciled against on-chain state instead of
+    // vanishing from the wedge-ledger emitter's input (I2 review finding).
+    console.log(JSON.stringify({
+      evt: "ocr_failed",
+      escrow_ref: escrowRefStr,
+      capability_id: capabilityId,
+      model: used?.model ?? parsed.model,
+      supplier_pkh: used?.supplierPkh ?? null,
+      venue: attribution.venue,
+      run_user_hash: attribution.runUserHash,
+      error: err instanceof Error ? err.message : String(err),
+      ts: new Date().toISOString(),
+    }));
+
     throw err;
   }
 }

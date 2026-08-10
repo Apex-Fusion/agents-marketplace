@@ -61,7 +61,7 @@ export function createApp(deps: GatewayDeps): Express {
   // the route; every other path keeps the 1mb ceiling.
   const jsonBody = express.json({ limit: "1mb" });
   app.use((req, res, next) =>
-    req.path.startsWith("/v1/ocr") ? next() : jsonBody(req, res, next));
+    req.path.startsWith("/v1/ocr/") ? next() : jsonBody(req, res, next));
 
   app.get("/healthz", (_req: Request, res: Response) => {
     res.json({ ok: true });
@@ -86,8 +86,11 @@ export function createApp(deps: GatewayDeps): Express {
 
   app.post("/openai/v1/chat/completions", ...gated, makeChatCompletionsHandler(deps));
   // Model-scoped OCR: 16mb parser covers MAX_OCR_IMAGE_B64_CHARS
-  // (~12M chars ≈ 9 MB binary) plus JSON envelope.
-  app.post("/v1/ocr/extract", express.json({ limit: "16mb" }), ...gated, makeOcrExtractHandler(deps));
+  // (~12M chars ≈ 9 MB binary) plus JSON envelope. Gates (auth + rate
+  // limits) run BEFORE the parser so an unauthenticated caller cannot
+  // buffer/JSON.parse up to 16mb before getting a 401, and rate limiting
+  // can actually throttle the request (2026-08 review finding C2).
+  app.post("/v1/ocr/extract", ...gated, express.json({ limit: "16mb" }), makeOcrExtractHandler(deps));
   app.get("/openai/v1/models", auth, makeModelsHandler(deps));
   app.post("/openai/v1/chat/sessions", ...gated, makeOpenSessionHandler(deps));
   app.post("/openai/v1/chat/sessions/:id/messages", ...gated, makeSessionMessageHandler(deps));

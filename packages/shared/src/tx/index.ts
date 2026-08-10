@@ -7,6 +7,7 @@ export { TxConstructionError } from "./types.js";
 export { normalizeChatMessage, chatMessagesEquivalent, toolCallsEqual } from "./chatMessage.js";
 export { mockSlotToWallclockMs, mockWallclockMsToSlot, NETWORK_BUFFER_MS } from "./internal/constants.js";
 export { detectCborBackend, type CborBackend } from "./internal/cborBackend.js";
+export { escrowLockFloor, minAdaForEscrowDatum } from "./internal/minAdaFloor.js";
 export type { Signer } from "./signer.js";
 export { MockSigner } from "./signer.js";
 export type { Blueprint } from "./blueprint.js";
