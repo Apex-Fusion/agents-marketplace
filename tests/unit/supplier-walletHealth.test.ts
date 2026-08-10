@@ -242,3 +242,115 @@ describe("walletHealth — triggerOnFailureConsolidate", () => {
     expect(state.snapshot().status).toBe("working");
   });
 });
+
+describe("walletHealth — F7 circuit breakers", () => {
+  let state: SupplierState;
+  let logLines: string[];
+  let log: (line: string) => void;
+  let consolidate: ReturnType<typeof vi.fn> & ConsolidateFn;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    state = new SupplierState();
+    _resetWalletHealthForTests(state);
+    logLines = [];
+    log = (line) => logLines.push(line);
+    consolidate = vi.fn() as never;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("halts after 3 consecutive consolidations that never reach healthy", async () => {
+    // The 2026-08-07 pump: every tick consolidates, none lands healthy.
+    consolidate.mockResolvedValue(consolidatedResult);
+
+    const ticker = startWalletHealthTicker(
+      { chain: FAKE_CHAIN, state, supplierKey: FAKE_KEY, consolidate },
+      { intervalMs: 1_000, log },
+    );
+
+    await vi.advanceTimersByTimeAsync(3_000);
+    await vi.waitFor(() => expect(consolidate).toHaveBeenCalledTimes(3));
+    expect(logLines.some((l) => l.includes("HALT") && l.includes("consecutive"))).toBe(true);
+
+    // Two more ticks: the breaker holds, no further txs.
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(consolidate).toHaveBeenCalledTimes(3);
+
+    ticker.stop();
+  });
+
+  it("an already-healthy result resets the consecutive counter", async () => {
+    consolidate
+      .mockResolvedValueOnce(consolidatedResult)
+      .mockResolvedValueOnce(consolidatedResult)
+      .mockResolvedValueOnce(healthyResult)
+      .mockResolvedValueOnce(consolidatedResult)
+      .mockResolvedValueOnce(consolidatedResult)
+      .mockResolvedValue(healthyResult);
+
+    const ticker = startWalletHealthTicker(
+      { chain: FAKE_CHAIN, state, supplierKey: FAKE_KEY, consolidate },
+      { intervalMs: 1_000, log },
+    );
+
+    // 6 ticks: c,c,h,c,c,h — never 3 consecutive, so never halted.
+    await vi.advanceTimersByTimeAsync(6_000);
+    await vi.waitFor(() => expect(consolidate).toHaveBeenCalledTimes(6));
+    expect(logLines.some((l) => l.includes("HALT"))).toBe(false);
+
+    ticker.stop();
+  });
+
+  it("halts when the 24h consolidation budget is exhausted", async () => {
+    // Interleave healthy results so the consecutive guard never fires:
+    // c,c,h,c,c,h,c,c -> 6 consolidations inside the window at tick 8.
+    consolidate
+      .mockResolvedValueOnce(consolidatedResult)
+      .mockResolvedValueOnce(consolidatedResult)
+      .mockResolvedValueOnce(healthyResult)
+      .mockResolvedValueOnce(consolidatedResult)
+      .mockResolvedValueOnce(consolidatedResult)
+      .mockResolvedValueOnce(healthyResult)
+      .mockResolvedValue(consolidatedResult);
+
+    const ticker = startWalletHealthTicker(
+      { chain: FAKE_CHAIN, state, supplierKey: FAKE_KEY, consolidate },
+      { intervalMs: 1_000, log },
+    );
+
+    await vi.advanceTimersByTimeAsync(8_000);
+    await vi.waitFor(() => expect(consolidate).toHaveBeenCalledTimes(8));
+    expect(logLines.some((l) => l.includes("HALT") && l.includes("budget"))).toBe(true);
+
+    // Breaker holds on subsequent ticks.
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(consolidate).toHaveBeenCalledTimes(8);
+
+    ticker.stop();
+  });
+
+  it("failed consolidations neither trip nor reset the breakers", async () => {
+    // Errors spend no fee: they must not count as consolidations, but they
+    // must not clear the consecutive count either.
+    consolidate
+      .mockResolvedValueOnce(consolidatedResult)
+      .mockResolvedValueOnce(consolidatedResult)
+      .mockRejectedValueOnce(new Error("balance too low to consolidate"))
+      .mockResolvedValue(consolidatedResult);
+
+    const ticker = startWalletHealthTicker(
+      { chain: FAKE_CHAIN, state, supplierKey: FAKE_KEY, consolidate },
+      { intervalMs: 1_000, log },
+    );
+
+    // c,c,error,c -> the 4th call is the 3rd consecutive consolidation.
+    await vi.advanceTimersByTimeAsync(4_000);
+    await vi.waitFor(() => expect(consolidate).toHaveBeenCalledTimes(4));
+    expect(logLines.some((l) => l.includes("HALT") && l.includes("consecutive"))).toBe(true);
+
+    ticker.stop();
+  });
+});
