@@ -38,6 +38,7 @@ import { loadBlueprint } from "../blueprint.js";
 import { encodeTxBody, sha256Hex } from "../internal/testTxBody.js";
 import { mockSlotToWallclockMs, NETWORK_BUFFER_MS } from "../internal/constants.js";
 import { detectCborBackend } from "../internal/cborBackend.js";
+import { escrowLockFloor } from "../internal/minAdaFloor.js";
 import type { LiveOgmiosProvider } from "../../chain/LiveOgmiosProvider.js";
 
 export interface PostEscrowParams {
@@ -129,7 +130,7 @@ export async function buildPostEscrowTx(
   // supplier-side validation in M1-C can verify role/content/system integrity.
   const promptHash = sha256Utf8Hex(canonicalize(messages));
 
-  const totalLocked =
+  const economicTotal =
     advertDatum.price_lovelace +
     advertDatum.buyer_bond_lovelace +
     advertDatum.supplier_bond_lovelace;
@@ -150,6 +151,11 @@ export async function buildPostEscrowTx(
     result_receipt_hash: null,
     state: "Open",
   };
+
+  // Lock enough that the escrow output satisfies min-ada in its LARGEST
+  // future state (Submitted) - value_equal on Claim/Submit forbids any
+  // later bump (min-ada floor).
+  const totalLocked = escrowLockFloor(escrowDatum, economicTotal);
 
   // Live path: produce real Cardano CBOR via lucid-evolution.
   if (detectCborBackend(chain) === "live") {
