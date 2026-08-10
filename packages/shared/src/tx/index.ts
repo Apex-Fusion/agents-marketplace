@@ -37,6 +37,15 @@ export {
 } from "./escrow/postTtsEscrow.js";
 export type { PostChatEscrowParams } from "./escrow/postChatEscrow.js";
 export { buildPostChatEscrowTx, chatSessionPromptHash } from "./escrow/postChatEscrow.js";
+export type { PostOcrEscrowParams, OcrRequest } from "./escrow/postOcrEscrow.js";
+export {
+  buildPostOcrEscrowTx,
+  ocrPromptHash,
+  validateOcrRequest,
+  ALLOWED_OCR_MIMES,
+  ALLOWED_OCR_OUTPUT_FORMATS,
+  MAX_OCR_IMAGE_B64_CHARS,
+} from "./escrow/postOcrEscrow.js";
 export type { ClaimParams } from "./escrow/claim.js";
 export { buildClaimTx } from "./escrow/claim.js";
 export type { SubmitParams } from "./escrow/submit.js";

@@ -14,6 +14,7 @@ import { ipRateLimit, keyRateLimit, demoIpRateLimit } from "./middleware/rateLim
 import { sendError } from "./middleware/http.js";
 import { notFound } from "./openai/errors.js";
 import { makeChatCompletionsHandler } from "./openai/chatCompletions.js";
+import { makeOcrExtractHandler } from "./ocr/extract.js";
 import { makeModelsHandler } from "./openai/models.js";
 import {
   makeOpenSessionHandler,
@@ -56,7 +57,11 @@ export function createApp(deps: GatewayDeps): Express {
   app.set("trust proxy", true);
   // CORS before body-parsing so preflight OPTIONS short-circuits cheaply.
   app.use(corsMiddleware(deps.config.corsOrigins));
-  app.use(express.json({ limit: "1mb" }));
+  // /v1/ocr carries a base64 page image and mounts its own larger parser on
+  // the route; every other path keeps the 1mb ceiling.
+  const jsonBody = express.json({ limit: "1mb" });
+  app.use((req, res, next) =>
+    req.path.startsWith("/v1/ocr") ? next() : jsonBody(req, res, next));
 
   app.get("/healthz", (_req: Request, res: Response) => {
     res.json({ ok: true });
@@ -80,6 +85,9 @@ export function createApp(deps: GatewayDeps): Express {
   app.post("/account/withdraw", auth, makeWithdrawHandler(deps));
 
   app.post("/openai/v1/chat/completions", ...gated, makeChatCompletionsHandler(deps));
+  // Model-scoped OCR: 16mb parser covers MAX_OCR_IMAGE_B64_CHARS
+  // (~12M chars ≈ 9 MB binary) plus JSON envelope.
+  app.post("/v1/ocr/extract", express.json({ limit: "16mb" }), ...gated, makeOcrExtractHandler(deps));
   app.get("/openai/v1/models", auth, makeModelsHandler(deps));
   app.post("/openai/v1/chat/sessions", ...gated, makeOpenSessionHandler(deps));
   app.post("/openai/v1/chat/sessions/:id/messages", ...gated, makeSessionMessageHandler(deps));

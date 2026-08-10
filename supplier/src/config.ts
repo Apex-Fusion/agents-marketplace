@@ -60,8 +60,26 @@ export interface AdvertRef {
  *   "chat"         — one-off `llm.text.generate.v1` (single prompt → single completion)
  *   "tts"          — `audio.synthesize.piper.v1`
  *   "chat-session" — multi-turn `llm.chat.v1` (escrow bookends, off-chain turns,
- *                    streaming). Requires LLM_BACKEND="openai". */
-export type CapabilityKind = "chat" | "tts" | "chat-session";
+ *                    streaming). Requires LLM_BACKEND="openai".
+ *   "ocr"          — model-scoped `ocr.page.extract.<model-slug>.v1` (one page
+ *                    image → one extraction). Upstream is an OpenAI-compatible
+ *                    VISION endpoint (OPENAI_BASE_URL), e.g. vLLM serving
+ *                    datalab-to/chandra-ocr-2. */
+export type CapabilityKind = "chat" | "tts" | "chat-session" | "ocr";
+
+/** Served-checkpoint probe cadence for the ocr capability.
+ *   "per_job" — probe the upstream before every Claim (default when
+ *               REVISION_PROBE_URL is set, and always the default for the
+ *               datalab upstream, whose health route is derived).
+ *   "off"     — no probing. */
+export type RevisionProbeMode = "per_job" | "off";
+
+/** Upstream flavor for the ocr capability.
+ *   "openai-vision" — OpenAI-compatible vision endpoint (vLLM self-hosting;
+ *                     supports the revision-pin attestation probe).
+ *   "datalab"       — Datalab hosted document API (submit + poll; liveness
+ *                     probe only — hosted supply has no checkpoint to pin). */
+export type OcrUpstream = "openai-vision" | "datalab";
 
 /** LLM backend selected for the chat capability. */
 export type LlmBackend = "ollama" | "openai";
@@ -124,6 +142,43 @@ export interface SupplierConfig {
   /** Chain settlement mode for chat sessions. Default "full". */
   chatSettleMode: ChatSettleMode;
   /**
+   * Upstream flavor for the ocr capability. Env: OCR_UPSTREAM
+   * ("openai-vision" default | "datalab").
+   */
+  ocrUpstream: OcrUpstream;
+  /** Datalab API key (X-API-Key). Required when ocrUpstream="datalab". */
+  datalabApiKey: string;
+  /** Datalab API origin. Env: DATALAB_BASE_URL, default https://www.datalab.to */
+  datalabBaseUrl: string;
+  /** Datalab quality mode: fast | balanced | accurate. Env: DATALAB_MODE. */
+  datalabMode: string;
+  /** Whole-call budget for submit+poll, ms. Env: DATALAB_TIMEOUT_MS. */
+  datalabTimeoutMs: number;
+  /**
+   * Overrides the built-in per-format OCR instruction prompt when non-empty
+   * (capabilityKind="ocr" + openai-vision upstream only). Env: OCR_PROMPT_OVERRIDE.
+   */
+  ocrPromptOverride: string;
+  /**
+   * Expected served-checkpoint SHA (40-hex) for the ocr upstream. When set
+   * together with revisionProbeUrl, a probe mismatch refuses the Claim.
+   * Env: HF_MODEL_REVISION. "" = no pin.
+   */
+  hfModelRevision: string;
+  /**
+   * Hub identity of the served weights, e.g. "hf:datalab-to/chandra-ocr-2".
+   * Recorded for telemetry now; feeds the receipt extension when that
+   * schema is added. Env: HF_WEIGHTS_SOURCE. "" = unset.
+   */
+  hfWeightsSource: string;
+  /**
+   * Serving-runtime info route reporting the loaded checkpoint (TGI-style
+   * /info or vLLM equivalent). Env: REVISION_PROBE_URL. "" = probing off.
+   */
+  revisionProbeUrl: string;
+  /** Probe cadence; see RevisionProbeMode. Env: REVISION_PROBE_MODE. */
+  revisionProbeMode: RevisionProbeMode;
+  /**
    * When true, the supplier boots a LiveOgmiosProvider (real submitTx/awaitTx).
    * Default false → ReadOnlyOgmiosProvider (safe; no chain writes).
    * Only the literal env value "1" sets this to true.
@@ -174,8 +229,13 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
   // CAPABILITY_KIND drives whether OLLAMA_URL or PIPER_URL is required.
   // Default to "chat" so existing chat suppliers keep booting unchanged.
   const capKindStr = env.CAPABILITY_KIND ?? "chat";
-  if (capKindStr !== "chat" && capKindStr !== "tts" && capKindStr !== "chat-session") {
-    throw new Error('loadConfig: CAPABILITY_KIND must be "chat", "tts", or "chat-session"');
+  if (
+    capKindStr !== "chat" &&
+    capKindStr !== "tts" &&
+    capKindStr !== "chat-session" &&
+    capKindStr !== "ocr"
+  ) {
+    throw new Error('loadConfig: CAPABILITY_KIND must be "chat", "tts", "chat-session", or "ocr"');
   }
   const capabilityKind: CapabilityKind = capKindStr;
 
@@ -202,6 +262,19 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
       throw new Error('loadConfig: CAPABILITY_KIND="chat-session" requires LLM_BACKEND="openai"');
     }
     openaiBaseUrl = requireField(env, "OPENAI_BASE_URL");
+    ollamaUrl = env.OLLAMA_URL ?? "";
+    piperUrl = env.PIPER_URL ?? "";
+  } else if (capabilityKind === "ocr") {
+    // Upstream is either an OpenAI-compatible vision endpoint (self-hosted
+    // vLLM; OPENAI_BASE_URL required) or the Datalab hosted API
+    // (DATALAB_API_KEY required, validated below). Ollama and piper are
+    // unused regardless of LLM_BACKEND.
+    const upstream = env.OCR_UPSTREAM ?? "openai-vision";
+    if (upstream === "openai-vision") {
+      openaiBaseUrl = requireField(env, "OPENAI_BASE_URL");
+    } else {
+      openaiBaseUrl = env.OPENAI_BASE_URL ?? "";
+    }
     ollamaUrl = env.OLLAMA_URL ?? "";
     piperUrl = env.PIPER_URL ?? "";
   } else if (capabilityKind === "chat") {
@@ -318,6 +391,53 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
   }
   const chatSettleMode: ChatSettleMode = settleModeStr;
 
+  // OCR-capability extras. All optional; harmless when set on other kinds
+  // (ignored by the chat/tts/chat-session paths).
+  const ocrUpstreamStr = env.OCR_UPSTREAM ?? "openai-vision";
+  if (ocrUpstreamStr !== "openai-vision" && ocrUpstreamStr !== "datalab") {
+    throw new Error('loadConfig: OCR_UPSTREAM must be "openai-vision" or "datalab"');
+  }
+  const ocrUpstream: OcrUpstream = ocrUpstreamStr;
+
+  const datalabApiKey = env.DATALAB_API_KEY ?? "";
+  if (capabilityKind === "ocr" && ocrUpstream === "datalab" && datalabApiKey === "") {
+    throw new Error('loadConfig: OCR_UPSTREAM="datalab" requires DATALAB_API_KEY');
+  }
+  const datalabBaseUrl = env.DATALAB_BASE_URL ?? "https://www.datalab.to";
+  const datalabMode = env.DATALAB_MODE ?? "accurate";
+  if (datalabMode !== "fast" && datalabMode !== "balanced" && datalabMode !== "accurate") {
+    throw new Error('loadConfig: DATALAB_MODE must be "fast", "balanced", or "accurate"');
+  }
+  const datalabTimeoutStr = env.DATALAB_TIMEOUT_MS;
+  let datalabTimeoutMs = 120_000;
+  if (datalabTimeoutStr !== undefined && datalabTimeoutStr !== "") {
+    if (!POS_INT_RE.test(datalabTimeoutStr)) {
+      throw new Error("loadConfig: DATALAB_TIMEOUT_MS must be a positive integer");
+    }
+    datalabTimeoutMs = Number(datalabTimeoutStr);
+  }
+
+  const ocrPromptOverride = env.OCR_PROMPT_OVERRIDE ?? "";
+  const hfModelRevision = env.HF_MODEL_REVISION ?? "";
+  if (hfModelRevision !== "" && !/^[0-9a-fA-F]{40}$/.test(hfModelRevision)) {
+    throw new Error("loadConfig: HF_MODEL_REVISION must be a 40-hex commit SHA when set");
+  }
+  const hfWeightsSource = env.HF_WEIGHTS_SOURCE ?? "";
+  const revisionProbeUrl = env.REVISION_PROBE_URL ?? "";
+  // Datalab upstream: the health route is derived from DATALAB_BASE_URL, so
+  // the liveness probe defaults ON without a REVISION_PROBE_URL. The
+  // openai-vision upstream keeps the explicit-URL requirement.
+  const probeDefault =
+    ocrUpstream === "datalab" || revisionProbeUrl !== "" ? "per_job" : "off";
+  const probeModeStr = env.REVISION_PROBE_MODE ?? probeDefault;
+  if (probeModeStr !== "per_job" && probeModeStr !== "off") {
+    throw new Error('loadConfig: REVISION_PROBE_MODE must be "per_job" or "off"');
+  }
+  if (probeModeStr === "per_job" && ocrUpstream === "openai-vision" && revisionProbeUrl === "" && capabilityKind === "ocr") {
+    throw new Error('loadConfig: REVISION_PROBE_MODE="per_job" requires REVISION_PROBE_URL for the openai-vision upstream');
+  }
+  const revisionProbeMode: RevisionProbeMode = probeModeStr;
+
   const piperTimeoutStr = env.PIPER_TIMEOUT_MS;
   let piperTimeoutMs = 120_000;
   if (piperTimeoutStr !== undefined && piperTimeoutStr !== "") {
@@ -362,6 +482,16 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
     chatIdleTimeoutMs,
     maxChatSessions,
     chatSettleMode,
+    ocrUpstream,
+    datalabApiKey,
+    datalabBaseUrl,
+    datalabMode,
+    datalabTimeoutMs,
+    ocrPromptOverride,
+    hfModelRevision,
+    hfWeightsSource,
+    revisionProbeUrl,
+    revisionProbeMode,
     liveChain,
     walletHealthIntervalMs,
   };

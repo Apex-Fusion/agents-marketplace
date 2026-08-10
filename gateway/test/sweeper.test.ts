@@ -45,6 +45,7 @@ function makeSweepDeps(opts: { chatSettleMode: "full" | "ticket"; escrows: Escro
     chatSettleMode: opts.chatSettleMode,
     walletHealthIntervalMs: 600_000,
     sdkRegistryMax: 100,
+    ocrCapabilityId: "ocr.page.extract.chandra-ocr-2.v1",
     corsOrigins: [],
   };
   const chain = { queryUtxo: async () => null } as unknown as GatewayDeps["chain"];

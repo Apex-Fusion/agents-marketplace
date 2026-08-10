@@ -188,6 +188,35 @@ export interface SubmitTtsResult {
 }
 
 /**
+ * SubmitOcrOptions — arguments to Marketplace.submitOcr() for model-scoped
+ * `ocr.page.extract.<model-slug>.v1` capabilities. The same `{image_b64,
+ * mime, output_format}` envelope is hashed (sha256 ∘ canonical) into the
+ * escrow datum's `prompt_hash` AND posted to the supplier's /v1/ocr/extract
+ * body, so the supplier can verify the request matches the on-chain commit.
+ */
+export interface SubmitOcrOptions {
+  advertRef: OutputReference;
+  image_b64: string;   // plain base64, no data: prefix
+  mime: string;        // image/png | image/jpeg | image/webp
+  output_format: string; // markdown | html | json
+  payment_lovelace: bigint;
+}
+
+/**
+ * SubmitOcrResult — returned from Marketplace.submitOcr() on success.
+ * `content` is the extraction in the requested output_format; the receipt's
+ * response_hash commits sha256(canonical({content, output_format})).
+ */
+export interface SubmitOcrResult {
+  output_format: string;
+  content: string;
+  usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+  receipt: Receipt;
+  receiptSignature: string;
+  escrowRef: OutputReference;
+}
+
+/**
  * StartChatOptions / StartChatResult — Marketplace.startChat() for the
  * `llm.chat.v1` capability. Opens the escrow (session-init prompt_hash) and
  * tells the supplier to Claim, reserving its single slot. The conversation

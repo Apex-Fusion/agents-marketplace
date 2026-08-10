@@ -53,6 +53,9 @@ export interface GatewayConfig {
   walletHealthIntervalMs: number;
   sdkRegistryMax: number;
   corsOrigins: string[];
+  /** Capability id the /v1/ocr/extract route escrows against. Model-scoped
+   * per the marketplace convention (one model, one id). Env: OCR_CAPABILITY_ID. */
+  ocrCapabilityId: string;
 }
 
 function requireField(env: Record<string, string | undefined>, name: string): string {
@@ -138,6 +141,7 @@ export function loadConfig(env: Record<string, string | undefined>): GatewayConf
     chatSettleMode: chatSettleMode(env),
     walletHealthIntervalMs: posInt(env, "WALLET_HEALTH_INTERVAL_MS", 10 * 60 * 1000),
     sdkRegistryMax: posInt(env, "SDK_REGISTRY_MAX", 500),
+    ocrCapabilityId: env.OCR_CAPABILITY_ID ?? "ocr.page.extract.chandra-ocr-2.v1",
     corsOrigins: (env.GATEWAY_CORS_ORIGINS ?? "")
       .split(",")
       .map((o) => o.trim().replace(/\/+$/, ""))

@@ -46,6 +46,7 @@ function makeDeps(
     chatSettleMode: overrides?.chatSettleMode ?? "full",
     walletHealthIntervalMs: 600_000,
     sdkRegistryMax: 100,
+    ocrCapabilityId: "ocr.page.extract.chandra-ocr-2.v1",
     corsOrigins: [],
   };
   const chain = overrides?.chain ?? ({ queryUtxosByAddress: async () => [] } as unknown as GatewayDeps["chain"]);

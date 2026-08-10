@@ -64,12 +64,34 @@ export interface TtsJobResponsePayload {
 }
 
 /**
+ * OCR-flavoured terminal payload. Stored when a `runOcrJob` succeeds.
+ * `content` is the extraction in the requested output_format (markdown/
+ * html/json as text). The receipt's response_hash commits
+ * sha256(canonical({content, output_format})).
+ */
+export interface OcrJobResponsePayload {
+  kind: "ocr";
+  output_format: string;     // "markdown" | "html" | "json"
+  content: string;
+  usage: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+  };
+  receipt: Record<string, unknown>;
+  receipt_signature: string;
+}
+
+/**
  * Discriminated union of every job-payload shape the store can hold.
  * `kind` defaults to "chat" on the chat shape (older code paths don't
  * set it; new `runChatJob` writes can set kind: "chat" explicitly to make
  * the discriminator narrowing reliable).
  */
-export type JobResponsePayload = ChatJobResponsePayload | TtsJobResponsePayload;
+export type JobResponsePayload =
+  | ChatJobResponsePayload
+  | TtsJobResponsePayload
+  | OcrJobResponsePayload;
 
 export interface JobFailure {
   httpStatus: number;
