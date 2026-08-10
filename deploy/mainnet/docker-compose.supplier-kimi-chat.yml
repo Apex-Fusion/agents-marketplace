@@ -74,6 +74,12 @@ services:
       - "traefik.docker.network=traefik-net"
       - "traefik.http.routers.mp-suppliers-kimi-chat-mainnet.entrypoints=web"
       - "traefik.http.routers.mp-suppliers-kimi-chat-mainnet.rule=Host(`mp-suppliers-kimi-chat.vector.apexfusion.org`)"
+      - "traefik.http.routers.mp-suppliers-kimi-chat-mainnet.middlewares=mp-suppliers-kimi-chat-mainnet-https"
+      - "traefik.http.middlewares.mp-suppliers-kimi-chat-mainnet-https.redirectscheme.scheme=https"
+      - "traefik.http.middlewares.mp-suppliers-kimi-chat-mainnet-https.redirectscheme.permanent=true"
+      - "traefik.http.routers.mp-suppliers-kimi-chat-mainnet-tls.entrypoints=websecure"
+      - "traefik.http.routers.mp-suppliers-kimi-chat-mainnet-tls.rule=Host(`mp-suppliers-kimi-chat.vector.apexfusion.org`)"
+      - "traefik.http.routers.mp-suppliers-kimi-chat-mainnet-tls.tls.certresolver=letsencrypt"
       - "traefik.http.services.mp-suppliers-kimi-chat-mainnet.loadbalancer.server.port=8080"
     logging:
       driver: json-file

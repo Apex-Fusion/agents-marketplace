@@ -61,6 +61,12 @@ services:
       - "traefik.docker.network=traefik-net"
       - "traefik.http.routers.mp-suppliers-gpt-mainnet.entrypoints=web"
       - "traefik.http.routers.mp-suppliers-gpt-mainnet.rule=Host(`mp-suppliers-gpt.vector.apexfusion.org`)"
+      - "traefik.http.routers.mp-suppliers-gpt-mainnet.middlewares=mp-suppliers-gpt-mainnet-https"
+      - "traefik.http.middlewares.mp-suppliers-gpt-mainnet-https.redirectscheme.scheme=https"
+      - "traefik.http.middlewares.mp-suppliers-gpt-mainnet-https.redirectscheme.permanent=true"
+      - "traefik.http.routers.mp-suppliers-gpt-mainnet-tls.entrypoints=websecure"
+      - "traefik.http.routers.mp-suppliers-gpt-mainnet-tls.rule=Host(`mp-suppliers-gpt.vector.apexfusion.org`)"
+      - "traefik.http.routers.mp-suppliers-gpt-mainnet-tls.tls.certresolver=letsencrypt"
       - "traefik.http.services.mp-suppliers-gpt-mainnet.loadbalancer.server.port=8080"
     logging:
       driver: json-file
