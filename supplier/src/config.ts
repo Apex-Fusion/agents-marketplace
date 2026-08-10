@@ -15,7 +15,10 @@
  *
  * Required for CAPABILITY_KIND="chat" + LLM_BACKEND="openai":
  *   OPENAI_BASE_URL        — http(s):// URL for an OpenAI-compatible /v1/chat/completions
- *                            host (e.g. ChatMock localhost proxy backed by Codex OAuth).
+ *                            host. Examples: ChatMock localhost proxy (Codex OAuth),
+ *                            OpenRouter (https://openrouter.ai/api), or the HuggingFace
+ *                            Inference Providers router (https://router.huggingface.co).
+ *                            See docs/HUGGINGFACE_ROUTER_SETUP.md for the HF preset.
  *
  * Required for CAPABILITY_KIND="tts":
  *   PIPER_URL              — http(s):// URL for the openedai-speech-min PiperTTS host
@@ -50,6 +53,15 @@ const HEX64_RE = /^[0-9a-fA-F]{64}$/;
 const TX_HASH_RE = /^[0-9a-fA-F]{64}$/;
 const NON_NEG_INT_RE = /^(?:0|[1-9]\d*)$/;
 const POS_INT_RE = /^[1-9]\d*$/;
+
+/** Lowercased hostname of a URL, or "" if it doesn't parse. */
+function hostnameOf(url: string): string {
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return "";
+  }
+}
 
 export interface AdvertRef {
   txHash: string;
@@ -268,6 +280,24 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
     reasoningRaw === "false" ||
     reasoningRaw === "0" ||
     reasoningRaw === "no";
+
+  // HuggingFace router guard. The `reasoning:{enabled:false}` param is
+  // OpenRouter-specific; the HF Inference Providers router
+  // (router.huggingface.co) rejects it with HTTP 400 on EVERY request. This is
+  // the easy footgun when copying an OpenRouter env to the HF preset, so fail
+  // fast at boot with a clear message instead of 400-ing every job.
+  // See docs/HUGGINGFACE_ROUTER_SETUP.md.
+  if (
+    llmBackend === "openai" &&
+    openaiReasoningDisabled &&
+    hostnameOf(openaiBaseUrl) === "router.huggingface.co"
+  ) {
+    throw new Error(
+      "loadConfig: OPENAI_REASONING must be unset for the HuggingFace router " +
+        "(OPENAI_BASE_URL=https://router.huggingface.co) — it rejects " +
+        "reasoning:{enabled:false} with HTTP 400. Remove OPENAI_REASONING.",
+    );
+  }
 
   // OPENAI_MAX_TOKENS — optional hard ceiling forwarded as `max_tokens`. Unset
   // or non-positive omits it (provider grants max available = context − prompt).

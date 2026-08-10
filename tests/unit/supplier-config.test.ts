@@ -184,6 +184,46 @@ describe("loadConfig() — LIVE_CHAIN parsing", () => {
   });
 });
 
+// ─── loadConfig — HuggingFace router preset (W1) ────────────────────────────
+// The HF Inference Providers router (router.huggingface.co) is OpenAI-compatible
+// and reuses LLM_BACKEND=openai, but rejects the OpenRouter-specific
+// reasoning:{enabled:false} param with HTTP 400 — so OPENAI_REASONING must stay
+// unset for it. loadConfig fails fast at boot to catch the copy-from-OpenRouter
+// footgun. See docs/HUGGINGFACE_ROUTER_SETUP.md.
+
+describe("loadConfig() — HuggingFace router guard", () => {
+  const hfEnv = (over: Record<string, string> = {}) => ({
+    ...buildSampleEnv(),
+    LLM_BACKEND: "openai",
+    OPENAI_BASE_URL: "https://router.huggingface.co",
+    OPENAI_API_KEY: "hf_sampletoken",
+    ...over,
+  });
+
+  it("accepts the HF router with OPENAI_REASONING unset", () => {
+    const cfg = loadConfig(hfEnv());
+    expect(cfg.openaiBaseUrl).toBe("https://router.huggingface.co");
+    expect(cfg.llmBackend).toBe("openai");
+    expect(cfg.openaiReasoningDisabled).toBe(false);
+  });
+
+  it("throws when OPENAI_REASONING=off is set against the HF router", () => {
+    expect(() => loadConfig(hfEnv({ OPENAI_REASONING: "off" }))).toThrow(
+      /OPENAI_REASONING must be unset for the HuggingFace router/i,
+    );
+  });
+
+  it("still allows OPENAI_REASONING=off for non-HF openai backends (e.g. OpenRouter)", () => {
+    const cfg = loadConfig({
+      ...buildSampleEnv(),
+      LLM_BACKEND: "openai",
+      OPENAI_BASE_URL: "https://openrouter.ai/api",
+      OPENAI_REASONING: "off",
+    });
+    expect(cfg.openaiReasoningDisabled).toBe(true);
+  });
+});
+
 // ─── parseAdvertRef ──────────────────────────────────────────────────────────
 
 describe("parseAdvertRef()", () => {
