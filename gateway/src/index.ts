@@ -57,7 +57,10 @@ export function runMain(env: Record<string, string | undefined>): void {
 const invokedDirectly =
   typeof process !== "undefined" &&
   process.argv?.[1] !== undefined &&
-  /gateway\/(src|dist)\/index\.(t|j)s$/.test(process.argv[1]);
+  // Accept both path separators: on Windows process.argv[1] arrives with
+  // backslashes, so a forward-slash-only pattern silently never matches and
+  // the process exits 0 without ever starting the server.
+  /gateway[\\/](src|dist)[\\/]index\.(t|j)s$/.test(process.argv[1]);
 
 if (invokedDirectly) {
   try {
