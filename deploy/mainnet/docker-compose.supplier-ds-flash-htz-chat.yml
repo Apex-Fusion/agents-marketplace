@@ -1,0 +1,100 @@
+# deploy/mainnet/docker-compose.supplier-ds-flash-htz-chat.yml — Supplier — MAINNET
+#   (Hetzner Inference / DeepSeek-V4-Flash-0731 — MULTI-TURN CHAT capability `llm.chat.v1`)
+#
+# The chat-session sibling of docker-compose.supplier-ds-flash-htz.yml. Same
+# image, same Hetzner backend (DeepSeek-V4-Flash-0731), but CAPABILITY_KIND=chat-session so
+# it mounts /v1/chat/{start,message,end} (escrow bookends, off-chain streaming
+# turns) instead of the one-off /v1/chat/completions route.
+#
+# A SEPARATE process/advert from the one-off supplier on purpose: the chat
+# session holds the supplier's single-slot lock for the whole conversation
+# (minutes), which would starve one-off traffic if co-hosted.
+#
+# One of 8 Hetzner-backed suppliers (4 models x {one-off, chat-session});
+# fleet runbook: docs/HETZNER_SETUP.md.
+#
+# Pre-flight:
+#   1. DNS: mp-suppliers-ds-flash-htz-chat.vector.apexfusion.org → host
+#      (wildcard *.vector.apexfusion.org already in place via Cloudflare)
+#   2. supplier/.env.ds-flash-htz-chat written on host (chmod 600) with at minimum:
+#        SUPPLIER_PRIV_KEY_HEX, SUPPLIER_ADDRESS, SUPPLIER_PKH,
+#        SUPPLIER_PUB_KEY_HEX, OPENAI_API_KEY, OGMIOS_URL, NETWORK_ID=1,
+#        VECTOR_ZERO_TIME_MS, ESCROW_REF_UTXO, ADVERT_REF_UTXO, ADVERT_REF,
+#        LIVE_CHAIN=1
+#      The advert must be posted with --capability-id llm.chat.v1 and a large
+#      --max-processing-ms (~1800000) so Claim+Submit both land before deliver_by.
+#   3. Networks already exist (created by the canonical supplier compose):
+#        docker network create marketplace-mainnet-net   # one-shot
+#        # traefik-net is created by the Traefik project
+
+name: marketplace-mainnet-supplier-ds-flash-htz-chat
+
+services:
+  supplier:
+    build:
+      context: ../..
+      dockerfile: supplier/Dockerfile
+    container_name: marketplace-mainnet-supplier-ds-flash-htz-chat
+    restart: unless-stopped
+    env_file:
+      # Self-contained env for this Hetzner-backed variant. Holds this
+      # supplier's distinct SUPPLIER_PRIV_KEY_HEX (+ derived wallet vars),
+      # ADVERT_REF, the shared Hetzner OPENAI_API_KEY, and the shared mainnet
+      # plumbing duplicated in full (NETWORK_ID, OGMIOS_URL, VECTOR_ZERO_TIME_MS,
+      # ref-script UTxOs, LIVE_CHAIN). No env_file ordering / override magic.
+      - path: ../../supplier/.env.ds-flash-htz-chat
+        required: false
+    environment:
+      # Multi-turn chat session capability (mounts /v1/chat/{start,message,end}).
+      CAPABILITY_KIND: chat-session
+      LLM_BACKEND: openai
+      # No /v1 suffix — supplier/src/openai.ts appends /v1/chat/completions
+      # (Hetzner serves at https://inference.hetzner.com/api/v1/...).
+      OPENAI_BASE_URL: https://inference.hetzner.com/api
+      # Reasoning-style models can be slow; mirror the one-off compose.
+      OPENAI_TIMEOUT_MS: "300000"
+      # Idle end (supplier Submits the transcript): single-slot suppliers must
+      # free up quickly (the gateway transparently reopens a session on the
+      # next turn). Mirrors the kimi-chat fleet.
+      CHAT_IDLE_TIMEOUT_MS: "900000"
+      CHAT_SETTLE_MODE: ticket
+      MAX_CHAT_SESSIONS: "8"
+      PORT: "8080"
+      # Enable LiveOgmiosProvider so Claim/Submit actually broadcast.
+      LIVE_CHAIN: "1"
+      # NETWORK_ID and OGMIOS_URL intentionally not pinned here — they MUST
+      # come from the operator-provided supplier/.env.ds-flash-htz-chat on a mainnet host.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz >/dev/null || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - marketplace-mainnet-net
+      - traefik-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-net"
+      - "traefik.http.routers.mp-suppliers-ds-flash-htz-chat-mainnet.entrypoints=web"
+      - "traefik.http.routers.mp-suppliers-ds-flash-htz-chat-mainnet.rule=Host(`mp-suppliers-ds-flash-htz-chat.vector.apexfusion.org`)"
+      - "traefik.http.routers.mp-suppliers-ds-flash-htz-chat-mainnet.middlewares=mp-suppliers-ds-flash-htz-chat-mainnet-https"
+      - "traefik.http.middlewares.mp-suppliers-ds-flash-htz-chat-mainnet-https.redirectscheme.scheme=https"
+      - "traefik.http.middlewares.mp-suppliers-ds-flash-htz-chat-mainnet-https.redirectscheme.permanent=true"
+      - "traefik.http.routers.mp-suppliers-ds-flash-htz-chat-mainnet-tls.entrypoints=websecure"
+      - "traefik.http.routers.mp-suppliers-ds-flash-htz-chat-mainnet-tls.rule=Host(`mp-suppliers-ds-flash-htz-chat.vector.apexfusion.org`)"
+      - "traefik.http.routers.mp-suppliers-ds-flash-htz-chat-mainnet-tls.tls.certresolver=letsencrypt"
+      - "traefik.http.services.mp-suppliers-ds-flash-htz-chat-mainnet.loadbalancer.server.port=8080"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  marketplace-mainnet-net:
+    external: true
+    name: marketplace-mainnet-net
+  traefik-net:
+    external: true
+    name: traefik-net
