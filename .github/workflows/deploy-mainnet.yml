@@ -1,0 +1,69 @@
+name: Deploy mainnet
+
+# CD for the vector-marketplace host (91.98.147.172).
+#
+# Trigger: automatically after the "CI" workflow succeeds on main, or manually
+# via workflow_dispatch (Actions tab -> Deploy mainnet -> Run workflow).
+#
+# The runner only SSHes in and executes deploy/mainnet/deploy.sh AT THE NEW
+# COMMIT (fetched server-side via `git show FETCH_HEAD:`), so deploy logic is
+# versioned with the code it deploys. The script itself decides which compose
+# projects to rebuild based on the old..new diff, drains busy suppliers, and
+# health-gates every restart — see deploy/mainnet/deploy.sh.
+#
+# Secrets: DEPLOY_SSH_KEY — ed25519 private key whose public half is in
+# root@vector-marketplace:~/.ssh/authorized_keys.
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Redeploy even if the server is already at origin/main"
+        type: boolean
+        default: false
+
+concurrency:
+  group: deploy-mainnet
+  cancel-in-progress: false # never kill a deploy mid-rollout
+
+env:
+  DEPLOY_HOST: 91.98.147.172
+  DEPLOY_USER: root
+  # Pinned host key (ssh-keyscan -t ed25519 91.98.147.172)
+  DEPLOY_HOSTKEY: "91.98.147.172 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJvjM8D+pNUb2Qr4yJbqVcRrUzbpbfyv0/tupUgD5Th0"
+
+jobs:
+  deploy:
+    name: deploy to vector-marketplace
+    runs-on: nixos
+    # workflow_run fires on failure too — only deploy green main.
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    steps:
+      # Self-hosted runner: keep key material in the job's temp dir, not the
+      # runner user's ~/.ssh (which persists across jobs).
+      - name: Set up SSH
+        run: |
+          install -m 700 -d "$RUNNER_TEMP/ssh"
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > "$RUNNER_TEMP/ssh/id_ed25519"
+          chmod 600 "$RUNNER_TEMP/ssh/id_ed25519"
+          printf '%s\n' "$DEPLOY_HOSTKEY" > "$RUNNER_TEMP/ssh/known_hosts"
+
+      - name: Run deploy script on server
+        run: |
+          FORCE=0
+          [ "${{ github.event.inputs.force }}" = "true" ] && FORCE=1
+          ssh -o BatchMode=yes \
+              -o IdentitiesOnly=yes \
+              -i "$RUNNER_TEMP/ssh/id_ed25519" \
+              -o UserKnownHostsFile="$RUNNER_TEMP/ssh/known_hosts" \
+              "$DEPLOY_USER@$DEPLOY_HOST" "
+            set -euo pipefail
+            cd /root/agents-marketplace
+            git fetch origin main
+            git show FETCH_HEAD:deploy/mainnet/deploy.sh > /run/marketplace-deploy.sh
+            FORCE=$FORCE bash /run/marketplace-deploy.sh
+          "
