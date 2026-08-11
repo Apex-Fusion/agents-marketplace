@@ -48,8 +48,13 @@ fleet serving `deepseek/deepseek-v4-flash`.
    rate limits apply to the aggregate.
 2. Eight funded supplier wallets (50 AP3X each recommended; bonds are 1 AP3X
    per in-flight job and returned on completion).
-3. The usual mainnet supplier deploy prerequisites (`deploy/README.md`); the
-   wildcard DNS `*.vector.apexfusion.org` already covers the new hosts.
+3. The usual mainnet supplier deploy prerequisites (`deploy/README.md`).
+4. **DNS**: one A record per supplier — `mp-suppliers-<name>.vector.apexfusion.org`
+   → `91.98.147.172`, **DNS-only/unproxied**. There is NO wildcard for
+   `*.vector.apexfusion.org`; and because traefik issues certs on-box via
+   Let's Encrypt HTTP-01 (port 80), a proxied/CDN record would break issuance.
+   Certs are issued automatically within ~a minute of the record propagating —
+   no restarts needed.
 
 ## 3. Verify the backend before spending on-chain
 
