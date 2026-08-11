@@ -39,22 +39,28 @@ env:
 jobs:
   deploy:
     name: deploy to vector-marketplace
-    runs-on: ubuntu-latest
+    runs-on: nixos
     # workflow_run fires on failure too — only deploy green main.
     if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     steps:
+      # Self-hosted runner: keep key material in the job's temp dir, not the
+      # runner user's ~/.ssh (which persists across jobs).
       - name: Set up SSH
         run: |
-          install -m 700 -d ~/.ssh
-          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-          printf '%s\n' "$DEPLOY_HOSTKEY" > ~/.ssh/known_hosts
+          install -m 700 -d "$RUNNER_TEMP/ssh"
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > "$RUNNER_TEMP/ssh/id_ed25519"
+          chmod 600 "$RUNNER_TEMP/ssh/id_ed25519"
+          printf '%s\n' "$DEPLOY_HOSTKEY" > "$RUNNER_TEMP/ssh/known_hosts"
 
       - name: Run deploy script on server
         run: |
           FORCE=0
           [ "${{ github.event.inputs.force }}" = "true" ] && FORCE=1
-          ssh -o BatchMode=yes "$DEPLOY_USER@$DEPLOY_HOST" "
+          ssh -o BatchMode=yes \
+              -o IdentitiesOnly=yes \
+              -i "$RUNNER_TEMP/ssh/id_ed25519" \
+              -o UserKnownHostsFile="$RUNNER_TEMP/ssh/known_hosts" \
+              "$DEPLOY_USER@$DEPLOY_HOST" "
             set -euo pipefail
             cd /root/agents-marketplace
             git fetch origin main
