@@ -10,7 +10,8 @@
 #
 # Pre-flight:
 #   1. DNS: mp-suppliers-glm.vector.apexfusion.org → host
-#      (wildcard *.vector.apexfusion.org already in place via Cloudflare)
+#      (individual DNS-only A record → 91.98.147.172; NO wildcard exists —
+#       letsencrypt HTTP-01 issuance needs the unproxied direct record)
 #   2. supplier/.env.glm written on host (chmod 600) with at minimum:
 #        SUPPLIER_PRIV_KEY_HEX, SUPPLIER_ADDRESS, SUPPLIER_PKH,
 #        SUPPLIER_PUB_KEY_HEX, OPENAI_API_KEY, OGMIOS_URL, NETWORK_ID=1,
