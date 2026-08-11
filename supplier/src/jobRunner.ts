@@ -38,11 +38,15 @@ import type { SupplierConfig } from "./config.js";
 import * as ollama from "./ollama.js";
 import * as openai from "./openai.js";
 import * as piper from "./piper.js";
+import * as ocrVision from "./ocrVision.js";
+import * as datalabOcr from "./datalabOcr.js";
+import type { OcrRequest } from "@marketplace/shared/tx";
 import type {
   JobStore,
   JobResponsePayload,
   ChatJobResponsePayload,
   TtsJobResponsePayload,
+  OcrJobResponsePayload,
 } from "./jobs.js";
 
 export interface RunChatJobDeps {
@@ -352,6 +356,176 @@ export async function runTtsJob(params: RunTtsJobParams): Promise<void> {
       format: requestBody.format,
       content_type: inference.contentType,
       byte_length: inference.audio.byteLength,
+      receipt: signed.receipt as unknown as Record<string, unknown>,
+      receipt_signature: signed.signature,
+    };
+    deps.jobs.complete(jobId, payload);
+  } finally {
+    try {
+      deps.state.release(escrowRef);
+    } catch {
+      /* never let lock-release escape */
+    }
+  }
+}
+
+// ─── runOcrJob ────────────────────────────────────────────────────────────
+//
+// Mirror of runTtsJob for model-scoped `ocr.page.extract.<model-slug>.v1`
+// capabilities. Same 7-step shape (setRunning → upstream → receipt →
+// buildSubmit → awaitTx → complete → finally release). Differences from the
+// TTS path:
+//
+//   - Upstream is `ocrVision.callOcrVision` against an OpenAI-compatible
+//     VISION endpoint (vLLM serving e.g. datalab-to/chandra-ocr-2); the
+//     one-page image rides as a data-URL content part.
+//   - response_hash = sha256(canonical({content, output_format})) — commits
+//     the extraction text AND the shape it was requested in.
+//   - prompt_tokens / completion_tokens come from upstream usage (vision
+//     tokens are real tokens, unlike Piper).
+
+export interface RunOcrJobParams {
+  deps: RunChatJobDeps;
+  jobId: string;
+  escrowRef: string;
+  claimedRef: OutputReference;
+  advert: AdvertDatum;
+  escrowDatum: EscrowDatum;
+  /** The OCR request envelope. The PROMPT_HASH committed by the buyer in
+   * the escrow datum is sha256(canonicalize(this same object)), validated
+   * by the route before Claim. */
+  requestBody: OcrRequest;
+}
+
+export async function runOcrJob(params: RunOcrJobParams): Promise<void> {
+  const { deps, jobId, escrowRef, claimedRef, advert, escrowDatum, requestBody } = params;
+
+  deps.jobs.setRunning(jobId);
+
+  try {
+    // ── 2. Call the OCR upstream (openai-vision or datalab) ───────────
+    let inference: ocrVision.OcrVisionResult;
+    try {
+      if (deps.config.ocrUpstream === "datalab") {
+        inference = await datalabOcr.callDatalabOcr({
+          baseUrl: deps.config.datalabBaseUrl,
+          apiKey: deps.config.datalabApiKey,
+          request: requestBody,
+          timeoutMs: deps.config.datalabTimeoutMs,
+          mode: deps.config.datalabMode,
+        });
+      } else {
+        const configuredMax = deps.config.openaiMaxTokens;
+        const maxTokens =
+          configuredMax > 0
+            ? Math.min(configuredMax, advert.max_output_tokens)
+            : advert.max_output_tokens;
+        inference = await ocrVision.callOcrVision({
+          baseUrl: deps.config.openaiBaseUrl,
+          model: advert.model,
+          request: requestBody,
+          timeoutMs: deps.config.openaiTimeoutMs,
+          apiKey: deps.config.openaiApiKey,
+          maxTokens,
+          promptOverride: deps.config.ocrPromptOverride,
+        });
+      }
+    } catch (err) {
+      const rawReason =
+        (err as ocrVision.OcrVisionError | datalabOcr.DatalabError)?.reason ??
+        (deps.config.ocrUpstream === "datalab" ? "datalab_failure" : "ocr_failure");
+      const message = err instanceof Error ? err.message : String(err);
+      // *_timeout collapses to the failure reason for jobs.fail, matching
+      // the chat/tts runner failure-code table (502 only).
+      const collapsedReason =
+        rawReason === "ocr_timeout" ? "ocr_failure"
+          : rawReason === "datalab_timeout" ? "datalab_failure"
+            : rawReason;
+      console.warn(
+        `[job_failed] jobId=${jobId} reason=${rawReason} httpStatus=502 msg=${message}`,
+      );
+      deps.jobs.fail(jobId, {
+        httpStatus: 502,
+        reason: collapsedReason,
+        message,
+      });
+      return;
+    }
+
+    // ── 3. Build + sign receipt ───────────────────────────────────────
+    const responseHash = sha256Hex(canonicalize({
+      content: inference.content,
+      output_format: requestBody.output_format,
+    }));
+
+    const receipt = buildReceipt({
+      prompt_hash: escrowDatum.prompt_hash,
+      response_hash: responseHash,
+      model: advert.model,
+      prompt_tokens: inference.prompt_tokens,
+      completion_tokens: inference.completion_tokens,
+      wallclock_ms: inference.wallclock_ms,
+      supplier_pkh: deps.supplierKey.pubKeyHash,
+      escrow_ref: escrowRef,
+    });
+    const signed = signReceipt(receipt, deps.supplierKey.privateKeyHex);
+    const resultHash = receiptResultHash(signed);
+
+    // ── 4+5. Submit tx: build + confirm as ONE wallet critical section ──
+    const submitOutcome = await deps.state.walletMutex.run(async () => {
+      let built: { txCborHex: string; expectedTxHash: string };
+      try {
+        built = await buildSubmitTx({
+          chain: deps.chain,
+          supplierKey: deps.supplierKey,
+          escrowRef: claimedRef,
+          receiptHash: resultHash,
+        });
+      } catch (err) {
+        return { kind: "build_failed" as const, err };
+      }
+      try {
+        await deps.chain.awaitTx(built.expectedTxHash, 60_000);
+      } catch (err) {
+        return { kind: "await_failed" as const, err };
+      }
+      return { kind: "ok" as const };
+    });
+    if (submitOutcome.kind === "build_failed") {
+      const message = submitOutcome.err instanceof Error ? submitOutcome.err.message : String(submitOutcome.err);
+      console.warn(
+        `[job_failed] jobId=${jobId} reason=submit_failed httpStatus=502 msg=${message}`,
+      );
+      deps.jobs.fail(jobId, {
+        httpStatus: 502,
+        reason: "submit_failed",
+        message: `Submit tx failed: ${message}`,
+      });
+      return;
+    }
+    if (submitOutcome.kind === "await_failed") {
+      const msg = submitOutcome.err instanceof Error ? submitOutcome.err.message : String(submitOutcome.err);
+      console.warn(
+        `[job_failed] jobId=${jobId} reason=submit_timeout httpStatus=502 msg=${msg}`,
+      );
+      deps.jobs.fail(jobId, {
+        httpStatus: 502,
+        reason: "submit_timeout",
+        message: `Submit awaitTx failed: ${msg}`,
+      });
+      return;
+    }
+
+    // ── 6. Mark complete ──────────────────────────────────────────────
+    const payload: OcrJobResponsePayload = {
+      kind: "ocr",
+      output_format: requestBody.output_format,
+      content: inference.content,
+      usage: {
+        prompt_tokens: inference.prompt_tokens,
+        completion_tokens: inference.completion_tokens,
+        total_tokens: inference.prompt_tokens + inference.completion_tokens,
+      },
       receipt: signed.receipt as unknown as Record<string, unknown>,
       receipt_signature: signed.signature,
     };

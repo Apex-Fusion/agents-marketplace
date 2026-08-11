@@ -73,8 +73,10 @@ import {
   buildPostEscrowTx,
   buildPostTtsEscrowTx,
   buildPostChatEscrowTx,
+  buildPostOcrEscrowTx,
   ttsPromptHash,
   chatSessionPromptHash,
+  ocrPromptHash,
   buildAcceptTx,
   buildReclaimTx,
   TxConstructionError,
@@ -88,6 +90,8 @@ import type {
   SubmitPromptResult,
   SubmitTtsOptions,
   SubmitTtsResult,
+  SubmitOcrOptions,
+  SubmitOcrResult,
   StartChatOptions,
   StartChatResult,
   ChatSettleMode,
@@ -801,6 +805,278 @@ export class Marketplace extends EventEmitterBase {
       format: responseBody.format ?? format,
       content_type: responseBody.content_type ?? `audio/${format}`,
       byte_length: responseBody.byte_length ?? 0,
+      receipt,
+      receiptSignature,
+      escrowRef: escrowOutputRef,
+    };
+  }
+
+  // ─── submitOcr — full lifecycle for ocr.page.extract.<model-slug>.v1 ──
+
+  async submitOcr(opts: SubmitOcrOptions): Promise<SubmitOcrResult> {
+    const { advertRef, image_b64, mime, output_format, payment_lovelace } = opts;
+    const request = { image_b64, mime, output_format };
+
+    let advertDatum: AdvertDatum | null = null;
+    let escrowOutputRef: OutputReference | null = null;
+    let escrowRefStr = "";
+    let postedAtMs = Date.now();
+
+    const previewStr = `[ocr:${mime} ${output_format} ${image_b64.length}b64]`;
+    const recordFailure = (reason: string): void => {
+      this.historyStore.save({
+        escrow_ref: escrowRefStr || `${"0".repeat(64)}#0`,
+        supplier_pkh: advertDatum?.supplier_pkh ?? "",
+        capability_id: advertDatum?.capability_id ?? "",
+        prompt_preview: previewStr,
+        posted_at: postedAtMs,
+        status: "failed",
+        failure_reason: reason,
+      });
+    };
+
+    // ── 1. Resolve advert + post escrow (OCR prompt_hash) ─────────────
+    let escrowResult;
+    try {
+      const utxo = await this.chain.queryUtxo(advertRef);
+      if (utxo && utxo.datumHex) {
+        try {
+          advertDatum = decodeAdvertDatum(utxo.datumHex);
+        } catch { /* builder will re-throw structurally */ }
+      }
+      escrowResult = await buildPostOcrEscrowTx({
+        chain: this.chain,
+        buyerKey: this.walletKey,
+        advertRef,
+        request,
+        payment_lovelace,
+      });
+    } catch (err) {
+      if (err instanceof TxConstructionError) {
+        recordFailure(err.reason);
+        throw err;
+      }
+      this.emitProgress({ type: "chain_submit_failed", detail: (err as Error).message });
+      recordFailure((err as Error).message);
+      throw err;
+    }
+
+    escrowOutputRef = escrowResult.escrowOutputRef;
+    escrowRefStr = refToString(escrowOutputRef);
+
+    this.emitProgress({ type: "escrow_posted", escrow_ref: escrowRefStr });
+
+    // ── 2. Wait for the escrow tx to confirm ──────────────────────────
+    try {
+      await this.chain.awaitTx(escrowResult.expectedTxHash, 120_000);
+    } catch { /* mock providers / tests */ }
+
+    // ── 3. Re-fetch escrow datum to capture posted_at ─────────────────
+    try {
+      const escrowUtxo = await this.chain.queryUtxo(escrowOutputRef);
+      if (escrowUtxo && escrowUtxo.datumHex) {
+        const ed = decodeEscrowDatum(escrowUtxo.datumHex);
+        postedAtMs = ed.posted_at;
+      }
+    } catch { /* metadata best-effort */ }
+
+    if (!advertDatum) {
+      const reason = "advert datum unavailable after escrow post";
+      recordFailure(reason);
+      throw new ReceiptVerificationError(reason);
+    }
+
+    // ── 4. Call supplier /v1/ocr/extract ──────────────────────────────
+    const supplierBaseUrl = advertDatum.endpoint_url;
+    const supplierHttp = new HttpClient({
+      baseUrl: supplierBaseUrl,
+      fetch: this.fetchImpl,
+    });
+    const ocrBody = { image_b64, mime, output_format };
+
+    let ocrResult;
+    try {
+      ocrResult = await supplierHttp.postJson("/v1/ocr/extract", ocrBody, {
+        headers: { "X-Escrow-Ref": escrowRefStr },
+      });
+    } catch (err) {
+      if (err instanceof HttpError) {
+        const reason = err.kind === "timeout" ? "timeout" : "network_error";
+        const sErr = new SupplierError(reason, { message: err.message });
+        recordFailure(reason);
+        throw sErr;
+      }
+      recordFailure((err as Error).message);
+      throw err;
+    }
+
+    // 202 + poll mirror of submitTts's async handling. OCR inference for a
+    // page runs seconds; the long tail is the Submit tx confirmation.
+    if (ocrResult.status === 202 && ocrResult.body && typeof ocrResult.body === "object") {
+      const jobId = (ocrResult.body as { job_id?: string }).job_id;
+      if (typeof jobId !== "string" || jobId.length === 0) {
+        const sErr = new SupplierError("malformed_response", {
+          status: ocrResult.status,
+          message: "supplier 202 response missing job_id",
+        });
+        recordFailure("malformed_response");
+        throw sErr;
+      }
+      const POLL_INTERVAL_MS = 2_000;
+      const POLL_TIMEOUT_MS = 180_000;
+      const pollDeadline = Date.now() + POLL_TIMEOUT_MS;
+      let polled = ocrResult;
+      let firstIter = true;
+      while (Date.now() < pollDeadline) {
+        if (!firstIter) {
+          await new Promise<void>((r) => setTimeout(r, POLL_INTERVAL_MS));
+        }
+        firstIter = false;
+        try {
+          polled = await supplierHttp.getJson(`/v1/ocr/extract/${jobId}`);
+        } catch (err) {
+          if (err instanceof HttpError) {
+            const reason = err.kind === "timeout" ? "timeout" : "network_error";
+            const sErr = new SupplierError(reason, { message: err.message });
+            recordFailure(reason);
+            throw sErr;
+          }
+          throw err;
+        }
+        if (polled.status === 200) break;
+        if (polled.status === 202) continue;
+        const failBody = (polled.body && typeof polled.body === "object")
+          ? polled.body as { reason?: string; message?: string }
+          : {};
+        const sErr = new SupplierError(failBody.reason ?? "supplier_http_error", {
+          status: polled.status,
+          message: failBody.message ?? `supplier returned ${polled.status}`,
+        });
+        recordFailure(sErr.reason);
+        throw sErr;
+      }
+      if (polled.status !== 200) {
+        const sErr = new SupplierError("timeout", {
+          status: polled.status,
+          message: `supplier job ${jobId} not done within ${POLL_TIMEOUT_MS}ms`,
+        });
+        recordFailure("timeout");
+        throw sErr;
+      }
+      ocrResult = polled;
+    }
+
+    if (!ocrResult.ok) {
+      const bodyReason =
+        ocrResult.body && typeof ocrResult.body === "object"
+          ? ((ocrResult.body as { reason?: string }).reason ?? "supplier_http_error")
+          : "supplier_http_error";
+      const sErr = new SupplierError(bodyReason, {
+        status: ocrResult.status,
+        message: `supplier returned ${ocrResult.status}`,
+      });
+      recordFailure(bodyReason);
+      throw sErr;
+    }
+    if (ocrResult.parseError || !ocrResult.body || typeof ocrResult.body !== "object") {
+      const sErr = new SupplierError("malformed_response", {
+        status: ocrResult.status,
+        message: "supplier body is not valid JSON",
+      });
+      recordFailure("malformed_response");
+      throw sErr;
+    }
+
+    const responseBody = ocrResult.body as {
+      output_format?: string;
+      content?: string;
+      usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+      receipt?: import("@marketplace/shared/receipt").Receipt;
+      receipt_signature?: string;
+    };
+    if (!responseBody.content || !responseBody.receipt || !responseBody.receipt_signature) {
+      const sErr = new SupplierError("malformed_response", {
+        status: ocrResult.status,
+        message: "supplier response is missing content / receipt / receipt_signature",
+      });
+      recordFailure("malformed_response");
+      throw sErr;
+    }
+    const receipt = responseBody.receipt;
+    const receiptSignature = responseBody.receipt_signature;
+
+    this.emitProgress({ type: "supplier_called", escrow_ref: escrowRefStr });
+
+    // ── 5. Receipt verification ───────────────────────────────────────
+    if (receipt.supplier_pkh !== advertDatum.supplier_pkh) {
+      recordFailure("wrong_supplier");
+      throw new ReceiptVerificationError("wrong_supplier");
+    }
+    if (receipt.escrow_ref !== escrowRefStr) {
+      recordFailure("wrong_escrow_ref");
+      throw new ReceiptVerificationError("wrong_escrow_ref");
+    }
+    // The OCR prompt commitment uses the SAME canonical hash the supplier
+    // validated against the escrow datum. Recompute from the envelope we
+    // sent; a mismatch means the supplier signed a different request.
+    const expectedPromptHash = ocrPromptHash(request);
+    if (receipt.prompt_hash !== expectedPromptHash) {
+      recordFailure("prompt_hash_mismatch");
+      throw new ReceiptVerificationError("prompt_hash_mismatch");
+    }
+    if (receipt.model !== advertDatum.model) {
+      recordFailure("request_spec_hash_mismatch");
+      throw new ReceiptVerificationError("request_spec_hash_mismatch");
+    }
+    // The receipt's response_hash must commit the content we actually
+    // received in the requested output shape.
+    const expectedResponseHash = nodeCrypto.createHash("sha256")
+      .update(canonicalize({
+        content: responseBody.content,
+        output_format: responseBody.output_format ?? output_format,
+      }), "utf8")
+      .digest("hex");
+    if (receipt.response_hash !== expectedResponseHash) {
+      recordFailure("response_hash_mismatch");
+      throw new ReceiptVerificationError("response_hash_mismatch");
+    }
+    if (typeof receiptSignature !== "string" || !SIG_RE.test(receiptSignature)) {
+      recordFailure("invalid_signature");
+      throw new ReceiptVerificationError("invalid_signature");
+    }
+    if (receiptSignature === ZERO_SIGNATURE) {
+      recordFailure("invalid_signature");
+      throw new ReceiptVerificationError("invalid_signature");
+    }
+    if (!HEX64_RE.test(receipt.prompt_hash) || !HEX64_RE.test(receipt.response_hash)) {
+      recordFailure("malformed_receipt");
+      throw new ReceiptVerificationError("malformed_receipt");
+    }
+
+    this.emitProgress({ type: "receipt_verified", escrow_ref: escrowRefStr });
+
+    this.historyStore.save({
+      escrow_ref: escrowRefStr,
+      supplier_pkh: advertDatum.supplier_pkh,
+      capability_id: advertDatum.capability_id,
+      prompt_preview: previewStr,
+      posted_at: postedAtMs,
+      status: "completed",
+      response: responseBody.content.length <= 200
+        ? responseBody.content
+        : responseBody.content.slice(0, 200),
+      receipt,
+      receipt_signature: receiptSignature,
+    });
+
+    return {
+      output_format: responseBody.output_format ?? output_format,
+      content: responseBody.content,
+      usage: {
+        prompt_tokens: responseBody.usage?.prompt_tokens ?? 0,
+        completion_tokens: responseBody.usage?.completion_tokens ?? 0,
+        total_tokens: responseBody.usage?.total_tokens ?? 0,
+      },
       receipt,
       receiptSignature,
       escrowRef: escrowOutputRef,

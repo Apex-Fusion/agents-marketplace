@@ -7,6 +7,7 @@ export { TxConstructionError } from "./types.js";
 export { normalizeChatMessage, chatMessagesEquivalent, toolCallsEqual } from "./chatMessage.js";
 export { mockSlotToWallclockMs, mockWallclockMsToSlot, NETWORK_BUFFER_MS } from "./internal/constants.js";
 export { detectCborBackend, type CborBackend } from "./internal/cborBackend.js";
+export { escrowLockFloor, minAdaForEscrowDatum } from "./internal/minAdaFloor.js";
 export type { Signer } from "./signer.js";
 export { MockSigner } from "./signer.js";
 export type { Blueprint } from "./blueprint.js";
@@ -37,6 +38,15 @@ export {
 } from "./escrow/postTtsEscrow.js";
 export type { PostChatEscrowParams } from "./escrow/postChatEscrow.js";
 export { buildPostChatEscrowTx, chatSessionPromptHash } from "./escrow/postChatEscrow.js";
+export type { PostOcrEscrowParams, OcrRequest } from "./escrow/postOcrEscrow.js";
+export {
+  buildPostOcrEscrowTx,
+  ocrPromptHash,
+  validateOcrRequest,
+  ALLOWED_OCR_MIMES,
+  ALLOWED_OCR_OUTPUT_FORMATS,
+  MAX_OCR_IMAGE_B64_CHARS,
+} from "./escrow/postOcrEscrow.js";
 export type { ClaimParams } from "./escrow/claim.js";
 export { buildClaimTx } from "./escrow/claim.js";
 export type { SubmitParams } from "./escrow/submit.js";

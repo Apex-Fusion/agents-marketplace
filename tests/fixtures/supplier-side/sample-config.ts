@@ -47,6 +47,40 @@ export function buildSampleTtsConfig(): SupplierConfig {
   };
 }
 
+/** OCR variant: OpenAI-compatible vision upstream, capabilityKind="ocr". */
+export function buildSampleOcrConfig(): SupplierConfig {
+  return {
+    ...buildSampleConfig(),
+    ollamaUrl: "",
+    openaiBaseUrl: "http://vllm.fake:8000",
+    openaiApiKey: "",
+    openaiTimeoutMs: 180_000,
+    openaiMaxTokens: 0,
+    openaiReasoningDisabled: false,
+    capabilityKind: "ocr",
+    ocrUpstream: "openai-vision",
+    datalabApiKey: "",
+    datalabBaseUrl: "https://www.datalab.to",
+    datalabMode: "accurate",
+    datalabTimeoutMs: 120_000,
+    ocrPromptOverride: "",
+    hfModelRevision: "",
+    revisionProbeUrl: "",
+    revisionProbeMode: "off",
+  };
+}
+
+/** Datalab-hosted OCR variant (OCR_UPSTREAM=datalab). */
+export function buildSampleDatalabOcrConfig(): SupplierConfig {
+  return {
+    ...buildSampleOcrConfig(),
+    openaiBaseUrl: "",
+    ocrUpstream: "datalab",
+    datalabApiKey: "dl-test-key",
+    revisionProbeMode: "per_job",
+  };
+}
+
 /** Env map matching the sample config above, for loadConfig() unit tests. */
 export function buildSampleEnv(): Record<string, string> {
   return {

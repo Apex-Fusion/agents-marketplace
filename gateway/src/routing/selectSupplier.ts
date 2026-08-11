@@ -53,6 +53,9 @@ export function parseRef(ref: string): OutputReference | null {
 
 export interface SelectSupplierOpts {
   indexerUrl: string;
+  /** Exact model match; "" matches ANY model under the capability (used by
+   * single-model capabilities like the ocr.* ids, where the capability
+   * already pins the model). */
   model: string;
   capabilityId: string;
   fetchFn?: typeof globalThis.fetch;
@@ -82,7 +85,7 @@ export async function selectCandidates(opts: SelectSupplierOpts): Promise<Suppli
   const candidates: SupplierCandidate[] = [];
   for (const raw of body as SupplierView[]) {
     if (raw.capability_id !== opts.capabilityId) continue;
-    if (raw.model !== opts.model) continue;
+    if (opts.model !== "" && raw.model !== opts.model) continue;
     if (raw.advert_status !== "Active") continue;
     if (raw.status !== "free" && raw.status !== "unknown" && !opts.ignoreStatusFor?.has(raw.supplier_pkh)) {
       continue;
