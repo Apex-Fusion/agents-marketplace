@@ -289,3 +289,34 @@ For the M1-F-2 (LiveOgmiosProvider) handoff: the supplier compose already
 joins `apex-dashboard_apex-net` and overrides `OGMIOS_URL=ws://ogmios:1337`,
 so once the supplier code stops booting `ReadOnlyOgmiosProvider` and
 starts talking to a real Ogmios, no compose changes are needed.
+
+## 10. Continuous deployment (mainnet, vector-marketplace host)
+
+Merges to `main` deploy automatically to the mainnet host once CI is green:
+
+1. `.github/workflows/ci.yml` runs typecheck + vitest on the merge commit.
+2. On success, `.github/workflows/deploy-mainnet.yml` SSHes into the host
+   (secret `DEPLOY_SSH_KEY`, host key pinned in the workflow) and executes
+   `deploy/mainnet/deploy.sh` **at the new commit** (`git show FETCH_HEAD:...`),
+   so deploy logic always matches the code being deployed.
+3. The script hard-resets `/root/agents-marketplace` to `origin/main`, maps the
+   old..new diff to affected compose projects (changes under `packages/`,
+   `patches/`, `contracts/` or root manifests rebuild everything), builds all
+   affected images up front, then does a rolling `up -d` with a health gate per
+   project. Suppliers are drained first: `/status` is polled until not
+   `working` (up to `DRAIN_TIMEOUT_SECS`, default 600) so an in-flight job
+   isn't killed and its escrow bond forfeited.
+
+Manual controls:
+
+- **Manual deploy / redeploy**: Actions → "Deploy mainnet" → Run workflow
+  (check *force* to redeploy the same sha), or on the host:
+  `bash /root/agents-marketplace/deploy/mainnet/deploy.sh` (`FORCE=1` to
+  redeploy, `DRY_RUN=1` to preview which projects would restart).
+- **Rollback**: `cd /root/agents-marketplace && git reset --hard <old-sha> &&
+  FORCE=1 bash deploy/mainnet/deploy.sh`. Every deploy appends
+  `old -> new (projects)` to `/var/log/marketplace-deploy.log`.
+
+Projects with no running containers on the host (e.g. wallet-monitor) are
+skipped; image-only projects (ollama, chatmock, tts-piper) redeploy only when
+their own compose file changes.
