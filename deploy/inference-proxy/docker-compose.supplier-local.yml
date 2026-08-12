@@ -1,0 +1,90 @@
+# deploy/inference-proxy/docker-compose.supplier-local.yml — Supplier — MAINNET
+#   (local llama.cpp on `vuk` via tailscale — one-off `llm.text.generate.v1`)
+#
+# Runs on the inference-proxy box (62.238.38.167), NOT the main marketplace
+# box. The compute backend is a llama.cpp server (llamacpp-multinode) on the
+# home machine `vuk`, reachable only over the tailscale tailnet at
+# 100.82.111.46:8002 (OpenAI-compatible /v1/chat/completions, no auth — the
+# tailnet is the trust boundary). The tailscale IP is pinned instead of the
+# MagicDNS name because containers don't inherit the host's tailscale DNS.
+#
+# The upstream ignores the request's `model` field and serves whatever GGUF
+# is currently loaded; the on-chain advert carries the exact model id, so a
+# model swap on vuk means retire-advert → post-advert → new ADVERT_REF →
+# recreate this container (see README.md).
+#
+# Pre-flight:
+#   1. DNS: mp-suppliers-local.vector.apexfusion.org → 62.238.38.167
+#      (individual DNS-only A record; letsencrypt HTTP-01 issuance needs the
+#       unproxied direct record)
+#   2. supplier/.env.local written on host (chmod 600) with at minimum:
+#        SUPPLIER_PRIV_KEY_HEX, SUPPLIER_ADDRESS, SUPPLIER_PKH,
+#        SUPPLIER_PUB_KEY_HEX, OGMIOS_URL, NETWORK_ID=1,
+#        VECTOR_ZERO_TIME_MS, ESCROW_REF_UTXO, ADVERT_REF_UTXO, ADVERT_REF,
+#        LIVE_CHAIN=1
+#      (no OPENAI_API_KEY — vuk's endpoint is unauthenticated)
+#   3. Networks: traefik-net is created one-shot (see the traefik compose in
+#      this directory). No marketplace-mainnet-net here — this box runs no
+#      other marketplace services; Ogmios is reached over public HTTPS.
+
+name: marketplace-mainnet-supplier-local
+
+services:
+  supplier:
+    build:
+      context: ../..
+      dockerfile: supplier/Dockerfile
+    container_name: marketplace-mainnet-supplier-local
+    restart: unless-stopped
+    env_file:
+      # Self-contained env for this supplier: wallet identity, ADVERT_REF,
+      # and the shared mainnet plumbing duplicated in full (NETWORK_ID,
+      # OGMIOS_URL, VECTOR_ZERO_TIME_MS, ref-script UTxOs, LIVE_CHAIN).
+      - path: ../../supplier/.env.local
+        required: false
+    environment:
+      LLM_BACKEND: openai
+      # No /v1 suffix — supplier/src/openai.ts appends /v1/chat/completions.
+      # vuk's tailscale IP; see header for why not the MagicDNS name.
+      OPENAI_BASE_URL: http://100.82.111.46:8002
+      # ~4.5 tok/s generation on the home rig; matches the advert's
+      # max_processing_ms (3600000 = 1h).
+      OPENAI_TIMEOUT_MS: "3600000"
+      # OPENAI_MAX_TOKENS intentionally unset: no max_tokens forwarded
+      # upstream; llama.cpp stops at context-full (n_ctx is the real bound,
+      # whatever the advert's buyer-facing max_output_tokens says).
+      PORT: "8080"
+      # Enable LiveOgmiosProvider so submitTx/awaitTx actually broadcast.
+      LIVE_CHAIN: "1"
+      # NETWORK_ID and OGMIOS_URL intentionally not pinned here — they MUST
+      # come from the operator-provided supplier/.env.local on a mainnet host.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz >/dev/null || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - traefik-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-net"
+      - "traefik.http.routers.mp-suppliers-local-mainnet.entrypoints=web"
+      - "traefik.http.routers.mp-suppliers-local-mainnet.rule=Host(`mp-suppliers-local.vector.apexfusion.org`)"
+      - "traefik.http.routers.mp-suppliers-local-mainnet.middlewares=mp-suppliers-local-mainnet-https"
+      - "traefik.http.middlewares.mp-suppliers-local-mainnet-https.redirectscheme.scheme=https"
+      - "traefik.http.middlewares.mp-suppliers-local-mainnet-https.redirectscheme.permanent=true"
+      - "traefik.http.routers.mp-suppliers-local-mainnet-tls.entrypoints=websecure"
+      - "traefik.http.routers.mp-suppliers-local-mainnet-tls.rule=Host(`mp-suppliers-local.vector.apexfusion.org`)"
+      - "traefik.http.routers.mp-suppliers-local-mainnet-tls.tls.certresolver=letsencrypt"
+      - "traefik.http.services.mp-suppliers-local-mainnet.loadbalancer.server.port=8080"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  traefik-net:
+    external: true
+    name: traefik-net

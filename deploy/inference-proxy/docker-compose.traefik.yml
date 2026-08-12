@@ -1,0 +1,61 @@
+# deploy/inference-proxy/docker-compose.traefik.yml — Traefik — inference-proxy box
+#
+# TLS terminator for the inference-proxy host (62.238.38.167) — the first
+# supplier host that is NOT the main vector-marketplace box. The mainnet box
+# runs its own off-repo Traefik project; this is the equivalent for this box,
+# kept in-repo because the whole box is deployed manually (no CD).
+#
+# Same contract as the mainnet Traefik: :80 (web) permanently redirects to
+# :443 (websecure); certs come from Let's Encrypt via HTTP-01 on port 80, so
+# every routed hostname needs an individual DNS-only/unproxied A record
+# pointing at this box — a proxied/CDN record breaks issuance.
+#
+# Pre-flight:
+#   1. docker network create traefik-net        # one-shot
+#   2. Write deploy/inference-proxy/.env with:
+#        ACME_EMAIL=<operator email>            # not committed — repo is public
+#   3. docker compose --env-file .env -f docker-compose.traefik.yml up -d
+#      (run from this directory so the .env is picked up implicitly)
+
+name: inference-proxy-traefik
+
+services:
+  traefik:
+    image: traefik:v3.3
+    container_name: inference-proxy-traefik
+    restart: unless-stopped
+    command:
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=traefik-net"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      - "--entrypoints.web.http.redirections.entrypoint.permanent=true"
+      - "--entrypoints.websecure.address=:443"
+      - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL:?set ACME_EMAIL in deploy/inference-proxy/.env}"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+      - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web"
+      - "--log.level=INFO"
+      - "--accesslog=true"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - letsencrypt:/letsencrypt
+    networks:
+      - traefik-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  letsencrypt:
+
+networks:
+  traefik-net:
+    external: true
+    name: traefik-net
