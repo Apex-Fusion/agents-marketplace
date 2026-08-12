@@ -21,9 +21,13 @@ name: inference-proxy-traefik
 
 services:
   traefik:
-    image: traefik:v3.3
+    image: traefik:v3.6
     container_name: inference-proxy-traefik
     restart: unless-stopped
+    environment:
+      # Docker Engine 29+ rejects API < 1.40; traefik's default negotiation
+      # lands on 1.24 and the docker provider dies. Pin a supported version.
+      DOCKER_API_VERSION: "1.44"
     command:
       - "--providers.docker=true"
       - "--providers.docker.exposedbydefault=false"
