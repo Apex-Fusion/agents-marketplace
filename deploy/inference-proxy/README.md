@@ -15,7 +15,7 @@ the home machine `vuk`, reachable only over the tailscale tailnet at
 | File | Project | Purpose |
 |---|---|---|
 | `docker-compose.traefik.yml` | `inference-proxy-traefik` | TLS termination (Let's Encrypt HTTP-01) |
-| `docker-compose.supplier-local.yml` | `marketplace-mainnet-supplier-local` | Supplier `local`, capability `llm.text.generate.v1` |
+| `docker-compose.supplier-local.yml` | `marketplace-mainnet-supplier-local` | Supplier `local`, capability `llm.chat.v1` (chat-session) |
 
 Host env files (never committed):
 
@@ -52,7 +52,7 @@ docker compose -f docker-compose.supplier-local.yml run --rm --no-deps supplier 
 # 6. advert (after funding confirmed)
 docker compose -f docker-compose.supplier-local.yml run --rm --no-deps supplier \
   node_modules/.bin/tsx supplier/src/cli/post-advert.ts \
-    --capability-id llm.text.generate.v1 \
+    --capability-id llm.chat.v1 \
     --model <exact id from http://100.82.111.46:8002/v1/models> \
     --max-output-tokens 262144 \
     --max-processing-ms 3600000 \

@@ -1,5 +1,5 @@
 # deploy/inference-proxy/docker-compose.supplier-local.yml — Supplier — MAINNET
-#   (local llama.cpp on `vuk` via tailscale — one-off `llm.text.generate.v1`)
+#   (local llama.cpp on `vuk` via tailscale — chat-session `llm.chat.v1`)
 #
 # Runs on the inference-proxy box (62.238.38.167), NOT the main marketplace
 # box. The compute backend is a llama.cpp server (llamacpp-multinode) on the
@@ -43,6 +43,13 @@ services:
       - path: ../../supplier/.env.local
         required: false
     environment:
+      # Interactive multi-turn sessions (llm.chat.v1). Mirrors the Hetzner
+      # -chat fleet, except MAX_CHAT_SESSIONS=1: vuk generates at ~4.5 tok/s
+      # on a single slot, so one session owns the rig at a time.
+      CAPABILITY_KIND: chat-session
+      CHAT_IDLE_TIMEOUT_MS: "900000"
+      CHAT_SETTLE_MODE: ticket
+      MAX_CHAT_SESSIONS: "1"
       LLM_BACKEND: openai
       # No /v1 suffix — supplier/src/openai.ts appends /v1/chat/completions.
       # vuk's tailscale IP; see header for why not the MagicDNS name.
