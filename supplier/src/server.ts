@@ -1272,17 +1272,23 @@ function makeChatSessionHandlers(deps: ResolvedDeps) {
       };
 
       try {
+        // Stateful upstreams (OpenClaw) key a persistent agent session off the
+        // OpenAI `user` field and carry the history themselves — send only this
+        // turn's delta or the transcript duplicates into the upstream context
+        // every turn. Stateless upstreams get the full transcript as before.
+        const stateful = deps.config.openaiSessionPassthrough;
         const result = await callOpenAiStream(
           {
             baseUrl: deps.config.openaiBaseUrl,
-            model: record.advert.model,
-            messages: record.transcript,
+            model: deps.config.openaiModelOverride || record.advert.model,
+            messages: stateful ? delta : record.transcript,
             timeoutMs: deps.config.openaiTimeoutMs,
             apiKey: deps.config.openaiApiKey,
             maxTokens: deps.config.openaiMaxTokens,
             disableReasoning: deps.config.openaiReasoningDisabled,
             tools,
             toolChoice,
+            user: stateful ? escrowRefStr : undefined,
           },
           (tok) => sse({ type: "token", value: tok }),
         );

@@ -52,6 +52,22 @@ describe("callOpenAiStream — tools passthrough", () => {
     expect("tool_choice" in body).toBe(false);
   });
 
+  it("includes user in the payload when provided (session passthrough)", async () => {
+    const fetchFn = makeStreamFetch(CONTENT_FRAMES);
+    vi.stubGlobal("fetch", fetchFn);
+    await callOpenAiStream({ ...BASE, user: `${"f".repeat(64)}#0` }, () => {});
+    const body = JSON.parse(fetchFn.mock.calls[0][1].body as string);
+    expect(body.user).toBe(`${"f".repeat(64)}#0`);
+  });
+
+  it("omits user from the payload when not provided", async () => {
+    const fetchFn = makeStreamFetch(CONTENT_FRAMES);
+    vi.stubGlobal("fetch", fetchFn);
+    await callOpenAiStream(BASE, () => {});
+    const body = JSON.parse(fetchFn.mock.calls[0][1].body as string);
+    expect("user" in body).toBe(false);
+  });
+
   it("accumulates fragmented delta.tool_calls across frames", async () => {
     const frames = sse([
       { choices: [{ delta: { tool_calls: [{ index: 0, id: "call_1", type: "function", function: { name: "get_time", arguments: "" } }] }, finish_reason: null }] },

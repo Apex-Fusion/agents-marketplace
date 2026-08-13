@@ -53,6 +53,13 @@ export interface CallOpenAiParams {
    */
   maxTokens?: number;
   /**
+   * Forwarded as the OpenAI `user` field when non-empty. Stateful upstreams
+   * (e.g. an OpenClaw gateway) key their agent session off it, so passing the
+   * escrow ref pins one upstream session per marketplace chat session.
+   * Stateless providers ignore it.
+   */
+  user?: string;
+  /**
    * When true, sends `reasoning: { enabled: false }` to disable OpenRouter
    * "thinking" tokens — faster/cheaper straight answers, and avoids reasoning
    * starving the completion budget into a length-truncated (empty) answer.
@@ -93,11 +100,12 @@ function isAbortError(err: unknown): boolean {
 }
 
 export async function callOpenAi(params: CallOpenAiParams): Promise<OpenAiResult> {
-  const { baseUrl, model, messages, timeoutMs, apiKey, maxTokens, disableReasoning } = params;
+  const { baseUrl, model, messages, timeoutMs, apiKey, maxTokens, disableReasoning, user } = params;
   const url = `${baseUrl}/v1/chat/completions`;
   const payload: Record<string, unknown> = { model, messages, stream: false };
   if (typeof maxTokens === "number" && maxTokens > 0) payload.max_tokens = maxTokens;
   if (disableReasoning) payload.reasoning = { enabled: false };
+  if (user) payload.user = user;
   const body = JSON.stringify(payload);
 
   const headers: Record<string, string> = { "content-type": "application/json" };
@@ -215,7 +223,7 @@ export async function callOpenAiStream(
   params: CallOpenAiParams,
   onToken: (delta: string) => void,
 ): Promise<OpenAiResult> {
-  const { baseUrl, model, messages, timeoutMs, apiKey, maxTokens, disableReasoning, tools, toolChoice } = params;
+  const { baseUrl, model, messages, timeoutMs, apiKey, maxTokens, disableReasoning, tools, toolChoice, user } = params;
   const url = `${baseUrl}/v1/chat/completions`;
   const payload: Record<string, unknown> = {
     model,
@@ -225,6 +233,7 @@ export async function callOpenAiStream(
   };
   if (typeof maxTokens === "number" && maxTokens > 0) payload.max_tokens = maxTokens;
   if (disableReasoning) payload.reasoning = { enabled: false };
+  if (user) payload.user = user;
   if (Array.isArray(tools) && tools.length > 0) {
     payload.tools = tools;
     if (toolChoice !== undefined) payload.tool_choice = toolChoice;

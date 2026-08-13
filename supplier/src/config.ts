@@ -36,6 +36,15 @@
  *   OLLAMA_TIMEOUT_MS      — ollama request timeout in ms (default 120_000)
  *   OPENAI_TIMEOUT_MS      — openai request timeout in ms (default 180_000 — GPT
  *                            first-token latency is longer than local Ollama)
+ *   OPENAI_SESSION_PASSTHROUGH
+ *                          — "1" switches chat-session turns to the stateful-
+ *                            upstream contract (OpenClaw): escrow ref as the
+ *                            OpenAI `user` field + delta-only messages per turn.
+ *                            Strict "1" only. Default off. Requires
+ *                            CAPABILITY_KIND="chat-session".
+ *   OPENAI_MODEL_OVERRIDE  — fixed upstream model id sent instead of the
+ *                            advert's buyer-facing model (OpenClaw accepts only
+ *                            "openclaw" / "openclaw/<agentId>"). Default unset.
  *   PIPER_TIMEOUT_MS       — piper request timeout in ms (default 120_000)
  *   LIVE_CHAIN             — "1" opts in to live-chain submit/await (default off).
  *                            Any other value (including "true", "yes", "TRUE")
@@ -129,6 +138,28 @@ export interface SupplierConfig {
    * the model context or the provider 400s (e.g. kimi context = 262144).
    */
   openaiMaxTokens: number;
+  /**
+   * When true, chat-session turns speak the STATEFUL-upstream contract
+   * (e.g. an OpenClaw gateway): each turn sends the escrow ref as the OpenAI
+   * `user` field (OpenClaw keys one persistent agent session per `user`, so
+   * browser/tool state survives across turns) and sends ONLY the current
+   * turn's delta messages — the upstream session carries the history, and
+   * re-sending the full transcript would duplicate it into the upstream
+   * context every turn. The supplier still accumulates the full transcript
+   * locally for the receipt. Env: OPENAI_SESSION_PASSTHROUGH="1". Default
+   * off (stateless upstreams get the full transcript each turn). Requires
+   * capabilityKind="chat-session".
+   */
+  openaiSessionPassthrough: boolean;
+  /**
+   * When non-empty, sent as the upstream `model` instead of the advert's
+   * model id. For upstreams that reject arbitrary model strings — OpenClaw's
+   * chat-completions endpoint 400s on anything but "openclaw" or
+   * "openclaw/<agentId>" — while the advert carries the buyer-facing id the
+   * gateway routes on. Env: OPENAI_MODEL_OVERRIDE. Default "" (advert model
+   * sent verbatim).
+   */
+  openaiModelOverride: string;
   /** Empty string when capabilityKind="chat". */
   piperUrl: string;
   advertRef: AdvertRef;
@@ -379,6 +410,22 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
     openaiMaxTokens = Number(maxTokStr);
   }
 
+  // OPENAI_SESSION_PASSTHROUGH — "1" switches chat-session turns to the
+  // stateful-upstream contract (OpenClaw): escrow ref as the OpenAI `user`
+  // field + delta-only messages (the upstream session carries history).
+  // Strict "1" only, mirroring LIVE_CHAIN.
+  const openaiSessionPassthrough = env.OPENAI_SESSION_PASSTHROUGH === "1";
+  if (openaiSessionPassthrough && capabilityKind !== "chat-session") {
+    throw new Error(
+      'loadConfig: OPENAI_SESSION_PASSTHROUGH requires CAPABILITY_KIND="chat-session"',
+    );
+  }
+
+  // OPENAI_MODEL_OVERRIDE — fixed upstream model id sent instead of the
+  // advert's (buyer-facing) model. Needed when the upstream validates the
+  // model field (OpenClaw accepts only "openclaw" / "openclaw/<agentId>").
+  const openaiModelOverride = env.OPENAI_MODEL_OVERRIDE ?? "";
+
   // CHAT_IDLE_TIMEOUT_MS — idle auto-end window for chat sessions (default 5 min).
   const chatIdleStr = env.CHAT_IDLE_TIMEOUT_MS;
   let chatIdleTimeoutMs = 300_000;
@@ -493,6 +540,8 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
     openaiApiKey,
     openaiReasoningDisabled,
     openaiMaxTokens,
+    openaiSessionPassthrough,
+    openaiModelOverride,
     piperUrl,
     advertRef,
     networkId,

@@ -103,6 +103,20 @@ describe("callOpenAi() — request shape", () => {
     expect(body.stream).toBe(false);
   });
 
+  it("includes user in the payload when provided (session passthrough)", async () => {
+    await callOpenAi({ baseUrl: BASE_URL, model: MODEL, messages: MESSAGES, timeoutMs: TIMEOUT_MS, user: `${"f".repeat(64)}#0` });
+    const [, init] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(init.body as string);
+    expect(body.user).toBe(`${"f".repeat(64)}#0`);
+  });
+
+  it("omits user from the payload when not provided", async () => {
+    await callOpenAi({ baseUrl: BASE_URL, model: MODEL, messages: MESSAGES, timeoutMs: TIMEOUT_MS });
+    const [, init] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(init.body as string);
+    expect("user" in body).toBe(false);
+  });
+
   it("omits authorization header when apiKey is not provided (ChatMock path)", async () => {
     await callOpenAi({ baseUrl: BASE_URL, model: MODEL, messages: MESSAGES, timeoutMs: TIMEOUT_MS });
     const [, init] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit];

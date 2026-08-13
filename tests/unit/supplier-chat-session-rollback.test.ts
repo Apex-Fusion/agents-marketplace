@@ -37,7 +37,7 @@ function chatSessionConfig(): SupplierConfig {
   } as SupplierConfig;
 }
 
-function makeAppWithSession() {
+function makeAppWithSession(configOverrides?: Partial<SupplierConfig>) {
   const chatSessions = new ChatSessionStore();
   const record = chatSessions.create({
     escrowRef: ESCROW_REF,
@@ -48,7 +48,7 @@ function makeAppWithSession() {
   const app = createApp({
     chain: new MockChainProvider(),
     state: new SupplierState(),
-    config: chatSessionConfig(),
+    config: { ...chatSessionConfig(), ...configOverrides } as SupplierConfig,
     supplierKey: buildSupplierWalletKey(),
     jobs: new JobStore(),
     chatSessions,
@@ -88,6 +88,54 @@ describe("ChatSessionStore.truncateTranscript", () => {
     store.truncateTranscript(ESCROW_REF, -1); // nonsense target
     store.truncateTranscript("missing", 0); // unknown session
     expect(store.get(ESCROW_REF)!.transcript).toHaveLength(1);
+  });
+});
+
+describe("POST /v1/chat/message — stateful upstream mode (OPENAI_SESSION_PASSTHROUGH)", () => {
+  it("sends delta-only messages + user=escrowRef + overridden model; transcript still accumulates fully", async () => {
+    const { app, record } = makeAppWithSession({
+      openaiSessionPassthrough: true,
+      openaiModelOverride: "openclaw",
+    });
+    const okFetch = () =>
+      vi.fn().mockResolvedValue(new Response(OK_STREAM, { status: 200, headers: { "content-type": "text/event-stream" } }));
+
+    const fetch1 = okFetch();
+    vi.stubGlobal("fetch", fetch1);
+    await request(app).post("/v1/chat/message").set("X-Escrow-Ref", ESCROW_REF).send({ content: "first" });
+
+    const fetch2 = okFetch();
+    vi.stubGlobal("fetch", fetch2);
+    await request(app).post("/v1/chat/message").set("X-Escrow-Ref", ESCROW_REF).send({ content: "second" });
+
+    // Turn 2 upstream call: only the new delta, keyed to the escrow ref, with
+    // the fixed upstream model — NOT the accumulated transcript / advert model.
+    const body2 = JSON.parse(fetch2.mock.calls[0][1].body as string);
+    expect(body2.messages).toEqual([{ role: "user", content: "second" }]);
+    expect(body2.user).toBe(ESCROW_REF);
+    expect(body2.model).toBe("openclaw");
+
+    // The local transcript (receipt source of truth) still has every turn.
+    expect(record.transcript).toEqual([
+      { role: "user", content: "first" },
+      { role: "assistant", content: "Hello" },
+      { role: "user", content: "second" },
+      { role: "assistant", content: "Hello" },
+    ]);
+  });
+
+  it("keeps full-transcript + advert-model behavior when passthrough is off", async () => {
+    const { app } = makeAppWithSession();
+    const fetch1 = vi
+      .fn()
+      .mockResolvedValue(new Response(OK_STREAM, { status: 200, headers: { "content-type": "text/event-stream" } }));
+    vi.stubGlobal("fetch", fetch1);
+    await request(app).post("/v1/chat/message").set("X-Escrow-Ref", ESCROW_REF).send({ content: "first" });
+
+    const body = JSON.parse(fetch1.mock.calls[0][1].body as string);
+    expect(body.messages).toEqual([{ role: "user", content: "first" }]);
+    expect("user" in body).toBe(false);
+    expect(body.model).toBe("kimi");
   });
 });
 

@@ -92,7 +92,7 @@ export async function runChatJob(params: RunChatJobParams): Promise<void> {
       if (deps.config.llmBackend === "openai") {
         inference = await openai.callOpenAi({
           baseUrl: deps.config.openaiBaseUrl,
-          model: advert.model,
+          model: deps.config.openaiModelOverride || advert.model,
           messages: requestBody.messages,
           timeoutMs: deps.config.openaiTimeoutMs,
           apiKey: deps.config.openaiApiKey,

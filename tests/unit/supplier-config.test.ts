@@ -294,3 +294,40 @@ describe("loadConfig() — MAX_CHAT_SESSIONS / CHAT_SETTLE_MODE", () => {
     expect(() => loadConfig({ ...chatSessionEnv(), CHAT_SETTLE_MODE: "nope" })).toThrow();
   });
 });
+
+// ─── loadConfig — OPENAI_SESSION_PASSTHROUGH ─────────────────────────────────
+
+describe("loadConfig() — OPENAI_SESSION_PASSTHROUGH", () => {
+  const chatSessionEnv = () => ({
+    ...buildSampleEnv(),
+    CAPABILITY_KIND: "chat-session",
+    LLM_BACKEND: "openai",
+    OPENAI_BASE_URL: "http://up",
+  });
+
+  it("defaults off", () => {
+    expect(loadConfig(chatSessionEnv()).openaiSessionPassthrough).toBe(false);
+  });
+
+  it('parses "1" for chat-session kind', () => {
+    const cfg = loadConfig({ ...chatSessionEnv(), OPENAI_SESSION_PASSTHROUGH: "1" });
+    expect(cfg.openaiSessionPassthrough).toBe(true);
+  });
+
+  it('treats values other than "1" as off (mirrors LIVE_CHAIN strictness)', () => {
+    const cfg = loadConfig({ ...chatSessionEnv(), OPENAI_SESSION_PASSTHROUGH: "true" });
+    expect(cfg.openaiSessionPassthrough).toBe(false);
+  });
+
+  it("rejects it for non-chat-session kinds", () => {
+    expect(() => loadConfig({ ...buildSampleEnv(), OPENAI_SESSION_PASSTHROUGH: "1" })).toThrow(
+      /chat-session/,
+    );
+  });
+
+  it("parses OPENAI_MODEL_OVERRIDE (default empty = advert model verbatim)", () => {
+    expect(loadConfig(chatSessionEnv()).openaiModelOverride).toBe("");
+    const cfg = loadConfig({ ...chatSessionEnv(), OPENAI_MODEL_OVERRIDE: "openclaw" });
+    expect(cfg.openaiModelOverride).toBe("openclaw");
+  });
+});
