@@ -4,13 +4,20 @@
 #
 # Runs on the inference-proxy box (62.238.38.167), next to supplier `local`.
 # The compute backend is an OpenClaw gateway (agent `main`) on the KVM guest
-# `web-tools`, reachable only over the tailscale tailnet at
-# 100.101.143.72:18789 (OpenAI-compatible chatCompletions endpoint, gateway
-# token auth). The agent's own brain is the SAME llama.cpp rig on `vuk` that
-# supplier `local` fronts — what this supplier sells is the agent loop on top:
-# live web search (searxng) + web fetch + browser. Both suppliers contend for
-# vuk's single slot; requests queue at llama.cpp and the 1h deadline absorbs
-# stalls.
+# `web-tools`. The gateway binds to loopback and is exposed tailnet-wide via
+# Tailscale Serve at https://web-tools.taild99fee.ts.net (valid *.ts.net TLS,
+# gateway token auth). The agent's own brain is the SAME llama.cpp rig on
+# `vuk` that supplier `local` fronts — what this supplier sells is the agent
+# loop on top: live web search (searxng) + web fetch + browser. Both suppliers
+# contend for vuk's single slot; requests queue at llama.cpp and the 1h
+# deadline absorbs stalls.
+#
+# Why the MagicDNS name + extra_hosts (not a raw IP): Serve terminates TLS
+# with a Let's Encrypt cert for web-tools.taild99fee.ts.net, so the client
+# must use that hostname (SNI + cert match). Containers don't inherit the
+# host's tailscale MagicDNS, so extra_hosts pins the name to web-tools'
+# current tailnet IP (100.105.36.0 on tailnet taild99fee.ts.net, account
+# teamhaleight@). If the tailnet/IP changes, update the extra_hosts IP.
 #
 # Stateful upstream contract (differs from every other -chat supplier):
 #   - OPENAI_SESSION_PASSTHROUGH=1 — each turn sends the escrow ref as the
@@ -29,9 +36,11 @@
 #   bound to the tailnet interface with token auth.
 #
 # Pre-flight:
-#   1. Tailscale ACL: local-inference-proxy (100.127.17.106) must be allowed
-#      to reach web-tools (100.101.143.72) on tcp/18789 — the tailnet filters
-#      by source node (vuk can, inference-proxy can't until the ACL is added).
+#   1. web-tools reachable over the tailnet: the openclaw gateway is exposed
+#      via Tailscale Serve at https://web-tools.taild99fee.ts.net. Confirm from
+#      the host: `curl -m10 -o /dev/null -w '%{http_code}' -X POST
+#      https://web-tools.taild99fee.ts.net/v1/chat/completions` → 401 (needs
+#      token). No tailnet ACL is required (serve is tailnet-wide).
 #   2. DNS: mp-suppliers-openclaw.vector.apexfusion.org → 62.238.38.167
 #      (individual DNS-only A record; letsencrypt HTTP-01 issuance needs the
 #       unproxied direct record)
@@ -71,9 +80,10 @@ services:
       MAX_CHAT_SESSIONS: "1"
       LLM_BACKEND: openai
       # No /v1 suffix — supplier/src/openai.ts appends /v1/chat/completions.
-      # web-tools' tailscale IP is pinned because containers don't inherit the
-      # host's tailscale MagicDNS.
-      OPENAI_BASE_URL: http://100.101.143.72:18789
+      # Tailscale Serve endpoint (HTTPS, valid *.ts.net cert). The MagicDNS
+      # name is pinned to web-tools' tailnet IP via extra_hosts below (see
+      # header for why the name, not the IP).
+      OPENAI_BASE_URL: https://web-tools.taild99fee.ts.net
       # Agent turns are slow: reasoning + tool loops at ~4.5 tok/s generation.
       # Matches the advert's max_processing_ms (3600000 = 1h).
       OPENAI_TIMEOUT_MS: "3600000"
@@ -87,6 +97,11 @@ services:
       # NETWORK_ID and OGMIOS_URL intentionally not pinned here — they MUST
       # come from the operator-provided supplier/.env.openclaw on a mainnet
       # host.
+    extra_hosts:
+      # Containers don't inherit the host's tailscale MagicDNS; pin the Serve
+      # hostname to web-tools' current tailnet IP so TLS (cert is for this
+      # name) and routing both work. Update the IP if the tailnet changes.
+      - "web-tools.taild99fee.ts.net:100.105.36.0"
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz >/dev/null || exit 1"]
       interval: 20s

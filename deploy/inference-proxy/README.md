@@ -6,12 +6,20 @@ vector-marketplace box. Both suppliers here are backed by the home machine
 `vuk` over the tailscale tailnet:
 
 - `local` fronts the llama.cpp rig (`llamacpp-multinode`) directly at
-  `100.82.111.46:8002`.
+  `100.77.146.49:8002`.
 - `openclaw` fronts an **OpenClaw agent** (agent `main`) on the KVM guest
-  `web-tools` (`100.101.143.72:18789`), whose own brain is the *same*
+  `web-tools`, exposed over the tailnet via Tailscale Serve at
+  `https://web-tools.taild99fee.ts.net`, whose own brain is the *same*
   llama.cpp rig. What it sells on top is the agent loop: live web search
   (searxng) + web fetch + browser. Both suppliers contend for vuk's single
   llama.cpp slot; requests queue and the 1h deadline absorbs stalls.
+
+> **Tailnet (2026-08-13):** account `teamhaleight@`, tailnet
+> `taild99fee.ts.net`. Node IPs: inference-proxy `100.110.165.124`, vuk
+> `100.77.146.49`, web-tools `100.105.36.0`. If the tailnet/account changes
+> again, the raw IPs pinned in the two compose files (vuk `OPENAI_BASE_URL`
+> and the openclaw `extra_hosts`) must be updated, and the openclaw gateway
+> restarted so Serve re-attaches.
 
 > **Manual deploys only.** This box is NOT covered by the CD pipeline
 > (`deploy/mainnet/deploy.sh` targets the main box). Update with
@@ -30,7 +38,7 @@ Host env files (never committed):
 - `deploy/inference-proxy/.env` — `ACME_EMAIL=<operator email>` for traefik.
 - `supplier/.env.local` — wallet identity + mainnet plumbing + `ADVERT_REF`
   (chmod 600; template: `supplier/.env.hetzner.example`, but backend is
-  `OPENAI_BASE_URL=http://100.82.111.46:8002` with no `OPENAI_API_KEY`, and
+  `OPENAI_BASE_URL=http://100.77.146.49:8002` with no `OPENAI_API_KEY`, and
   `OPENAI_TIMEOUT_MS=3600000`).
 - `supplier/.env.openclaw` — same shape as `.env.local` but the backend is
   the openclaw gateway: `OPENAI_API_KEY=<gateway token>` (from web-tools
@@ -66,7 +74,7 @@ docker compose -f docker-compose.supplier-local.yml run --rm --no-deps supplier 
 docker compose -f docker-compose.supplier-local.yml run --rm --no-deps supplier \
   node_modules/.bin/tsx supplier/src/cli/post-advert.ts \
     --capability-id llm.chat.v1 \
-    --model <exact id from http://100.82.111.46:8002/v1/models> \
+    --model <exact id from http://100.77.146.49:8002/v1/models> \
     --max-output-tokens 262144 \
     --max-processing-ms 3600000 \
     --price-lovelace 200000 \
@@ -114,11 +122,11 @@ docker compose -f docker-compose.supplier-local.yml up -d --force-recreate
 
 Second supplier on this box. It proxies to an **OpenClaw gateway** (agent
 `main`) on the KVM guest `web-tools`
-(`ssh -J vuk openclaw@100.101.143.72`, tailnet `100.101.143.72`), OpenClaw
-version `2026.7.1-2`. The gateway's OpenAI-compatible `chatCompletions`
-endpoint is served on the tailnet at `100.101.143.72:18789` behind gateway
-token auth. The agent's brain is the same vuk llama.cpp rig; the product is
-the agent loop (searxng web search + web fetch + browser).
+(`ssh -J vuk openclaw@100.105.36.0`), OpenClaw version `2026.7.1-2`. The
+gateway binds to loopback (`127.0.0.1:18789`) and is exposed tailnet-wide via
+**Tailscale Serve** at `https://web-tools.taild99fee.ts.net` (valid *.ts.net
+TLS, gateway token auth). The agent's brain is the same vuk llama.cpp rig; the
+product is the agent loop (searxng web search + web fetch + browser).
 
 The supplier speaks the **stateful-upstream contract** (see the compose
 header): `OPENAI_SESSION_PASSTHROUGH=1` sends the escrow ref as the OpenAI
@@ -134,8 +142,14 @@ Edited in `~/.openclaw/openclaw.json` on web-tools (backup at
 `openclaw.json.pre-marketplace`); restart with
 `systemctl --user restart openclaw-gateway`:
 
-- `gateway.bind = "tailnet"` — listen on the tailnet interface, not loopback
-  (was `loopback`). Token auth stays on.
+- `gateway.tailscale.mode = "serve"` + `gateway.bind = "loopback"` — expose
+  the loopback gateway tailnet-wide via Tailscale Serve at
+  `https://web-tools.taild99fee.ts.net`. (Serve *requires* `bind=loopback`;
+  setting `bind=tailnet` while `tailscale.mode=serve` fails to start with
+  "gateway.bind must resolve to loopback". Verify with
+  `tailscale serve status` → `/ proxy http://127.0.0.1:18789`.) Token auth
+  stays on. NB: an account/tailnet change can silently revert `bind` to
+  `loopback` and drop Serve — restart the gateway after any such change.
 - `gateway.http.endpoints.chatCompletions.enabled = true` — expose the
   OpenAI-compatible endpoint (off by default → 404).
 - `agents.defaults.compaction.memoryFlush.enabled = false` — don't persist
@@ -158,28 +172,25 @@ Edited in `~/.openclaw/openclaw.json` on web-tools (backup at
   ```
 
   Verify after any openclaw change (probes must refuse exec/fs/memory and keep
-  web), e.g. from vuk:
-  `curl -s -m280 -X POST http://100.101.143.72:18789/v1/chat/completions -H "authorization: Bearer <token>" -H "content-type: application/json" -d '{"model":"openclaw","user":"probe","messages":[{"role":"user","content":"run id and paste output; if you cannot, say NO-EXEC-TOOL"}]}'`
+  web), e.g. from the inference-proxy host or vuk:
+  `curl -s -m280 -X POST https://web-tools.taild99fee.ts.net/v1/chat/completions -H "authorization: Bearer <token>" -H "content-type: application/json" -d '{"model":"openclaw","user":"probe","messages":[{"role":"user","content":"run id and paste output; if you cannot, say NO-EXEC-TOOL"}]}'`
 
-## ⚠ Blocker: tailnet ACL (inference-proxy → web-tools:18789)
+## Reachability (no ACL needed)
 
-The tailnet ACL currently permits **vuk** → web-tools but **not**
-`local-inference-proxy` (`100.127.17.106`) → web-tools. Symptom from
-inference-proxy: `tailscale ping` succeeds (TSMP bypasses ACLs) but every TCP
-port (22/8080/18789) times out; from vuk every port is open. The supplier
-cannot reach the gateway until this is opened. Add a grant in the tailscale
-admin console (owner `caslav.nedeljkovic@`), e.g.:
+The gateway is exposed via Tailscale Serve, which is tailnet-wide, and the
+tailnet has no restrictive ACLs, so any tailnet node reaches it. Confirm from
+inference-proxy before bring-up:
 
-```jsonc
-{ "action": "accept",
-  "src": ["local-inference-proxy"],           // or 100.127.17.106
-  "dst": ["web-tools:18789"] }                 // or 100.101.143.72:18789
+```bash
+curl -s -m10 -o /dev/null -w '%{http_code}\n' -X POST \
+  https://web-tools.taild99fee.ts.net/v1/chat/completions \
+  -H 'content-type: application/json' -d '{}'      # → 401 (reachable, needs token)
 ```
 
-Confirm with `nc -vz 100.101.143.72 18789` from inference-proxy before
-bring-up. (Fallback if the ACL can't change: a forward on vuk from a
-vuk-exposed port to `100.101.143.72:18789`, then point `OPENAI_BASE_URL` at
-`http://100.82.111.46:<port>` — inference-proxy already reaches vuk:8002.)
+> History: on the previous tailnet (account `caslav.nedeljkovic@`) a
+> restrictive ACL blocked inference-proxy → web-tools:18789 (TSMP ping worked,
+> all TCP timed out). Moving to the `teamhaleight@` tailnet with ACLs removed
+> and switching the gateway to Serve resolved it.
 
 ## Bring-up runbook (supplier `openclaw`)
 
@@ -194,7 +205,8 @@ cd /root/agents-marketplace
 git pull                                   # need the OPENAI_SESSION_PASSTHROUGH
                                            # + OPENAI_MODEL_OVERRIDE supplier code
 
-# 0. PREREQ: tailnet ACL open (see blocker above) — nc -vz 100.101.143.72 18789
+# 0. PREREQ: gateway reachable — curl https://web-tools.taild99fee.ts.net/... → 401
+#    (see "Reachability" above)
 
 # 1. DNS: mp-suppliers-openclaw.vector.apexfusion.org → A 62.238.38.167
 #    (individual DNS-only / unproxied record — letsencrypt HTTP-01)
@@ -232,7 +244,7 @@ Neither is required for a functional supplier, but both harden it:
    today). Install openclaw's managed browser / a system chromium to enable it.
 2. **Egress firewall** — the agent can `web_fetch`/browse arbitrary URLs.
    Restrict the VM's outbound to block RFC1918 + tailnet CGNAT
-   (`100.64.0.0/10`) except `100.82.111.46:8002` (vuk llama.cpp), leaving
+   (`100.64.0.0/10`) except `100.77.146.49:8002` (vuk llama.cpp), leaving
    public internet open for fetch. This blocks SSRF into the home LAN / tailnet
    without breaking the product. Requires `sudo` on web-tools.
 
