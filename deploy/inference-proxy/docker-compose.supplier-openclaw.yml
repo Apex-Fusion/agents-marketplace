@@ -1,0 +1,119 @@
+# deploy/inference-proxy/docker-compose.supplier-openclaw.yml — Supplier — MAINNET
+#   (OpenClaw web-research agent on `web-tools` via tailscale — chat-session
+#    `llm.chat.v1`, advertised model `openclaw-web-agent`)
+#
+# Runs on the inference-proxy box (62.238.38.167), next to supplier `local`.
+# The compute backend is an OpenClaw gateway (agent `main`) on the KVM guest
+# `web-tools`, reachable only over the tailscale tailnet at
+# 100.101.143.72:18789 (OpenAI-compatible chatCompletions endpoint, gateway
+# token auth). The agent's own brain is the SAME llama.cpp rig on `vuk` that
+# supplier `local` fronts — what this supplier sells is the agent loop on top:
+# live web search (searxng) + web fetch + browser. Both suppliers contend for
+# vuk's single slot; requests queue at llama.cpp and the 1h deadline absorbs
+# stalls.
+#
+# Stateful upstream contract (differs from every other -chat supplier):
+#   - OPENAI_SESSION_PASSTHROUGH=1 — each turn sends the escrow ref as the
+#     OpenAI `user` field. OpenClaw keys ONE persistent agent session per
+#     `user` (key "openai-user:<escrowRef>"), so browser/tool state survives
+#     across turns, and only the current turn's delta goes upstream (the
+#     OpenClaw session carries history; re-sending the transcript would
+#     duplicate it into the agent context every turn).
+#   - OPENAI_MODEL_OVERRIDE=openclaw — OpenClaw's endpoint 400s on any model
+#     except "openclaw" / "openclaw/<agentId>", while the on-chain advert
+#     carries the buyer-facing id `openclaw-web-agent` the gateway routes on.
+#
+# Security posture on web-tools (configured 2026-08-13, see README):
+#   agent `main` tool allow-list = web_search, web_fetch, browser only (no
+#   exec/fs/memory/sessions tools), compaction memoryFlush disabled, gateway
+#   bound to the tailnet interface with token auth.
+#
+# Pre-flight:
+#   1. Tailscale ACL: local-inference-proxy (100.127.17.106) must be allowed
+#      to reach web-tools (100.101.143.72) on tcp/18789 — the tailnet filters
+#      by source node (vuk can, inference-proxy can't until the ACL is added).
+#   2. DNS: mp-suppliers-openclaw.vector.apexfusion.org → 62.238.38.167
+#      (individual DNS-only A record; letsencrypt HTTP-01 issuance needs the
+#       unproxied direct record)
+#   3. supplier/.env.openclaw written on host (chmod 600) with at minimum:
+#        SUPPLIER_PRIV_KEY_HEX, SUPPLIER_ADDRESS, SUPPLIER_PKH,
+#        SUPPLIER_PUB_KEY_HEX, OPENAI_API_KEY (openclaw gateway token),
+#        OGMIOS_URL, NETWORK_ID=1, VECTOR_ZERO_TIME_MS, ESCROW_REF_UTXO,
+#        ADVERT_REF_UTXO, ADVERT_REF, LIVE_CHAIN=1
+#   4. Networks: traefik-net is created one-shot (see the traefik compose in
+#      this directory).
+
+name: marketplace-mainnet-supplier-openclaw
+
+services:
+  supplier:
+    build:
+      context: ../..
+      dockerfile: supplier/Dockerfile
+    container_name: marketplace-mainnet-supplier-openclaw
+    restart: unless-stopped
+    env_file:
+      # Self-contained env for this supplier: wallet identity, ADVERT_REF,
+      # the openclaw gateway token (OPENAI_API_KEY), and the shared mainnet
+      # plumbing duplicated in full (NETWORK_ID, OGMIOS_URL,
+      # VECTOR_ZERO_TIME_MS, ref-script UTxOs, LIVE_CHAIN).
+      - path: ../../supplier/.env.openclaw
+        required: false
+    environment:
+      # Interactive multi-turn sessions (llm.chat.v1). Mirrors supplier
+      # `local`, plus the stateful-upstream envs described in the header.
+      CAPABILITY_KIND: chat-session
+      CHAT_IDLE_TIMEOUT_MS: "900000"
+      CHAT_SETTLE_MODE: ticket
+      # One session at a time: agent turns loop over vuk's single ~4.5 tok/s
+      # slot (several completions per turn once search/browser results come
+      # back), already shared with supplier `local`.
+      MAX_CHAT_SESSIONS: "1"
+      LLM_BACKEND: openai
+      # No /v1 suffix — supplier/src/openai.ts appends /v1/chat/completions.
+      # web-tools' tailscale IP is pinned because containers don't inherit the
+      # host's tailscale MagicDNS.
+      OPENAI_BASE_URL: http://100.101.143.72:18789
+      # Agent turns are slow: reasoning + tool loops at ~4.5 tok/s generation.
+      # Matches the advert's max_processing_ms (3600000 = 1h).
+      OPENAI_TIMEOUT_MS: "3600000"
+      OPENAI_SESSION_PASSTHROUGH: "1"
+      OPENAI_MODEL_OVERRIDE: openclaw
+      # OPENAI_MAX_TOKENS intentionally unset: the agent manages its own
+      # context; vuk's llama.cpp stops at context-full.
+      PORT: "8080"
+      # Enable LiveOgmiosProvider so submitTx/awaitTx actually broadcast.
+      LIVE_CHAIN: "1"
+      # NETWORK_ID and OGMIOS_URL intentionally not pinned here — they MUST
+      # come from the operator-provided supplier/.env.openclaw on a mainnet
+      # host.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz >/dev/null || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - traefik-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-net"
+      - "traefik.http.routers.mp-suppliers-openclaw-mainnet.entrypoints=web"
+      - "traefik.http.routers.mp-suppliers-openclaw-mainnet.rule=Host(`mp-suppliers-openclaw.vector.apexfusion.org`)"
+      - "traefik.http.routers.mp-suppliers-openclaw-mainnet.middlewares=mp-suppliers-openclaw-mainnet-https"
+      - "traefik.http.middlewares.mp-suppliers-openclaw-mainnet-https.redirectscheme.scheme=https"
+      - "traefik.http.middlewares.mp-suppliers-openclaw-mainnet-https.redirectscheme.permanent=true"
+      - "traefik.http.routers.mp-suppliers-openclaw-mainnet-tls.entrypoints=websecure"
+      - "traefik.http.routers.mp-suppliers-openclaw-mainnet-tls.rule=Host(`mp-suppliers-openclaw.vector.apexfusion.org`)"
+      - "traefik.http.routers.mp-suppliers-openclaw-mainnet-tls.tls.certresolver=letsencrypt"
+      - "traefik.http.services.mp-suppliers-openclaw-mainnet.loadbalancer.server.port=8080"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  traefik-net:
+    external: true
+    name: traefik-net
