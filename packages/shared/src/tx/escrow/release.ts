@@ -17,6 +17,8 @@ import type { WalletKey, BuildResult } from "../types.js";
 import { TxConstructionError } from "../types.js";
 import { encodeTxBody, sha256Hex } from "../internal/testTxBody.js";
 import { ACCEPT_WINDOW_MS, mockSlotToWallclockMs } from "../internal/constants.js";
+import { detectCborBackend } from "../internal/cborBackend.js";
+import type { LiveOgmiosProvider } from "../../chain/LiveOgmiosProvider.js";
 
 export interface ReleaseParams {
   chain: ChainProvider;
@@ -65,8 +67,10 @@ export async function buildReleaseTx(
   }
 
   // 4. Tip must be at or past submitted_at + ACCEPT_WINDOW.
+  // Live backend uses real POSIX ms; mock backend keeps slot*1000.
   const tipSlot = await chain.tip();
-  const tipMs = mockSlotToWallclockMs(tipSlot);
+  const isLive = detectCborBackend(chain) === "live";
+  const tipMs = isLive ? Date.now() : mockSlotToWallclockMs(tipSlot);
   const threshold = datum.submitted_at + ACCEPT_WINDOW_MS;
   if (tipMs < threshold) {
     throw new TxConstructionError(
@@ -75,6 +79,21 @@ export async function buildReleaseTx(
     );
   }
 
+  // Live path: real Cardano CBOR via lucid-evolution.
+  if (isLive) {
+    const liveCborPath = "../internal/liveCbor.js";
+    const { buildLiveTxForRelease } = await import(/* @vite-ignore */ liveCborPath);
+    return buildLiveTxForRelease({
+      chain: chain as LiveOgmiosProvider,
+      supplierKey,
+      escrowRef,
+      escrowUtxo: utxo,
+      datum,
+      tipMs,
+    });
+  }
+
+  // Mock path: synthetic testTxBody (preserves existing test behaviour).
   const supplierDue =
     datum.payment_lovelace + datum.supplier_bond_lovelace + datum.buyer_bond_lovelace;
 
