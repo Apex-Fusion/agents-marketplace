@@ -19,6 +19,26 @@ import { badRequest, forbidden } from "../openai/errors.js";
 
 const ACTIVE_ESCROW_STATES = new Set(["Open", "Claimed", "Submitted"]);
 
+/** Bound on per-request escrow liveness lookups; rows past the cap count as
+ * locked unverified (a key with this many active escrows has bigger problems). */
+const LIVENESS_CHECK_CAP = 32;
+
+/** True when the escrow UTxO behind an indexer row is still unspent. The
+ * indexer never updates rows on terminal spends (Accept/Reclaim/Release
+ * consume the escrow without a new escrow output), so "active" rows can be
+ * long spent. Unparseable refs and failed lookups count as live so errors
+ * inflate the locked figure rather than hide funds. */
+async function escrowUtxoIsLive(deps: GatewayDeps, utxoRef: string): Promise<boolean> {
+  const m = /^([0-9a-fA-F]{64})#(\d+)$/.exec(utxoRef);
+  if (!m) return true;
+  try {
+    const utxo = await deps.chain.queryUtxo({ txHash: m[1], index: Number(m[2]) });
+    return utxo !== null;
+  } catch {
+    return true;
+  }
+}
+
 function ap3x(lovelace: bigint): string {
   return (Number(lovelace) / 1e6).toFixed(2);
 }
@@ -74,8 +94,15 @@ export function makeAccountHandler(deps: GatewayDeps) {
       if (r.ok) {
         const rows = (await r.json()) as Array<Record<string, unknown>>;
         if (Array.isArray(rows)) {
-          for (const row of rows) {
-            if (!ACTIVE_ESCROW_STATES.has(String(row.state))) continue;
+          const active = rows.filter((row) => ACTIVE_ESCROW_STATES.has(String(row.state)));
+          const liveness = await Promise.all(
+            active.map((row, i) =>
+              i < LIVENESS_CHECK_CAP ? escrowUtxoIsLive(deps, String(row.utxo_ref ?? "")) : Promise.resolve(true),
+            ),
+          );
+          for (let i = 0; i < active.length; i++) {
+            if (!liveness[i]) continue;
+            const row = active[i];
             lockedInEscrow +=
               BigInt(String(row.payment_lovelace ?? "0")) +
               BigInt(String(row.buyer_bond_lovelace ?? "0")) +
