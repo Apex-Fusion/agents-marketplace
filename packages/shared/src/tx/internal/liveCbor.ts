@@ -10,8 +10,8 @@
  * for vkh enterprise). Input UTxOs may carry testnet-prefixed addresses — lucid
  * does not validate address network for inputs (only for outputs).
  *
- * Deferred builders (postAdvert, updateAdvert, retireAdvert, reclaim, release)
- * are NOT touched in M1-F-4. Those continue using the synthetic testTxBody path.
+ * Deferred builders: only updateAdvert remains on the synthetic testTxBody
+ * path. postAdvert, retireAdvert, reclaim, and release all have live builders.
  *
  * Catherine M1-F-4-green.
  */
@@ -61,6 +61,7 @@ const REDEEMER_CLAIM = 121;
 const REDEEMER_SUBMIT = 122;
 const REDEEMER_ACCEPT = 123;
 const REDEEMER_RECLAIM = 124;
+const REDEEMER_RELEASE = 125;
 
 // AdvertRedeemer Constr indices per lib/marketplace/types.ak:
 //   PostAdvert    → Constr0 (tag 121, creation event — never seen by spend)
@@ -115,6 +116,15 @@ export interface LiveAcceptParams {
 export interface LiveReclaimParams {
   chain: LiveOgmiosProvider;
   buyerKey: WalletKey;
+  escrowRef: OutputReference;
+  escrowUtxo: Utxo;
+  datum: EscrowDatum;
+  tipMs: number;
+}
+
+export interface LiveReleaseParams {
+  chain: LiveOgmiosProvider;
+  supplierKey: WalletKey;
   escrowRef: OutputReference;
   escrowUtxo: Utxo;
   datum: EscrowDatum;
@@ -770,6 +780,77 @@ export async function buildLiveTxForReclaim(params: LiveReclaimParams): Promise<
     signed = await completed.sign.withWallet().complete();
   } catch (err) {
     rethrowAsTxError(err, "reclaim build failed");
+  }
+
+  const txCborHex = signed.toCBOR();
+  const expectedTxHash = signed.toHash();
+  await params.chain.submitTx(txCborHex);
+  return { txCborHex, expectedTxHash };
+}
+
+// ─── Release ─────────────────────────────────────────────────────────
+
+export async function buildLiveTxForRelease(params: LiveReleaseParams): Promise<BuildResult> {
+  const provider = buildLucidProvider(params.chain);
+  const { lucid } = await createLucidContext(provider, params.supplierKey, {
+    networkId: 1,
+    systemStartUnix: 0,
+    slotLengthMs: 1000,
+  }, { usePresetProtocolParameters: true });
+
+  const { script, address: escrowAddress } = loadEscrowScript();
+  const spendCtx = await resolveSpendCtx(lucid, "ESCROW_REF_UTXO", script);
+  const lucidInput = chainUtxoToLucidScriptInput(params.escrowUtxo, escrowAddress);
+  const releaseRedeemerHex = encodeNullaryConstrHex(REDEEMER_RELEASE);
+
+  if (params.datum.submitted_at === null) {
+    throw new TxConstructionError(
+      "submitted_at missing",
+      "Submitted-state escrow must carry a submitted_at timestamp",
+    );
+  }
+
+  // Release pays everything to the supplier: payment + supplier_bond + buyer_bond.
+  const supplierDue =
+    params.datum.payment_lovelace +
+    params.datum.supplier_bond_lovelace +
+    params.datum.buyer_bond_lovelace;
+  const supplierLovelace = supplierDue < MIN_UTXO_LOVELACE ? MIN_UTXO_LOVELACE : supplierDue;
+  const supplierAddress = pkhToEnterpriseAddress(params.datum.supplier_pkh, MAINNET_ID);
+
+  const realWalletUtxos = await lucid.wallet().getUtxos();
+  assertCollateralCandidate(realWalletUtxos);
+  const presetWalletInputs = realWalletUtxos;
+
+  // escrow.ak:handle_release checks `lower_bound >= submitted_at + ACCEPT_WINDOW`.
+  // Clamp validFrom to that threshold: the Reclaim-style tip-60s back-pad alone
+  // would violate the validator whenever the tip is less than 60s past the window.
+  const threshold = params.datum.submitted_at + ACCEPT_WINDOW_MS;
+  const validFromMs = Math.max(threshold, params.tipMs - 60_000);
+
+  let signed;
+  try {
+    const txBuilder = (
+      spendCtx.kind === "ref"
+        ? lucid.newTx().readFrom([spendCtx.refUtxo])
+        : lucid.newTx().attach.SpendingValidator(spendCtx.script)
+    )
+      .collectFrom([lucidInput], releaseRedeemerHex)
+      .pay.ToAddress(supplierAddress, { lovelace: supplierLovelace })
+      .addSignerKey(params.supplierKey.pubKeyHash)
+      .validFrom(validFromMs)
+      .validTo(params.tipMs + 60_000)
+      .setMinFee(500_000n);
+
+    // Same UPLC eval delegation as Accept/Reclaim — lucid's CML evaluator
+    // falsely rejects valid Plutus V3 spends; route to Ogmios.
+    const completed = await txBuilder.complete({
+      presetWalletInputs,
+      localUPLCEval: false,
+    });
+    signed = await completed.sign.withWallet().complete();
+  } catch (err) {
+    rethrowAsTxError(err, "release build failed");
   }
 
   const txCborHex = signed.toCBOR();
