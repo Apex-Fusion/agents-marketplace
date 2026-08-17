@@ -1,0 +1,92 @@
+# deploy/mainnet/docker-compose.supplier-hf-llama33.yml — Supplier — MAINNET
+#   (HuggingFace Inference Providers router / meta-llama/Llama-3.3-70B-Instruct
+#    — one-off `llm.text.generate.v1`)
+#
+# HF-router-backed supplier. LLM_BACKEND=openai pointed at the HuggingFace
+# Inference Providers router (OpenAI-compatible at https://router.huggingface.co).
+# No local proxy container — reachable over public HTTPS. Direct analogue of the
+# OpenRouter/Hetzner-backed suppliers; the router is OpenAI-compatible so this is
+# config only (V1 HF integration).
+#
+# Pre-flight:
+#   1. DNS: mp-suppliers-hf-llama33.vector.apexfusion.org → host
+#      (individual DNS-only A record → 91.98.147.172; NO wildcard exists —
+#       letsencrypt HTTP-01 issuance needs the unproxied direct record)
+#   2. supplier/.env.hf-llama33 written on host (chmod 600) with at minimum:
+#        SUPPLIER_PRIV_KEY_HEX, SUPPLIER_ADDRESS, SUPPLIER_PKH,
+#        SUPPLIER_PUB_KEY_HEX, OPENAI_API_KEY (hf_ token), OGMIOS_URL,
+#        NETWORK_ID=1, VECTOR_ZERO_TIME_MS, ESCROW_REF_UTXO, ADVERT_REF_UTXO,
+#        ADVERT_REF, LIVE_CHAIN=1
+#      Advert posted with --capability-id llm.text.generate.v1.
+#      Do NOT set OPENAI_REASONING — the HF router rejects it (HTTP 400) and the
+#      supplier's config guard refuses to boot.
+#   3. Networks already exist (created by the canonical supplier compose):
+#        docker network create marketplace-mainnet-net   # one-shot
+#        # traefik-net is created by the Traefik project
+
+name: marketplace-mainnet-supplier-hf-llama33
+
+services:
+  supplier:
+    build:
+      context: ../..
+      dockerfile: supplier/Dockerfile
+    container_name: marketplace-mainnet-supplier-hf-llama33
+    restart: unless-stopped
+    env_file:
+      # Self-contained env for this HF-router-backed variant. Holds this
+      # supplier's distinct SUPPLIER_PRIV_KEY_HEX (+ derived wallet vars),
+      # ADVERT_REF, the HF OPENAI_API_KEY, and the shared mainnet plumbing
+      # duplicated in full (NETWORK_ID, OGMIOS_URL, VECTOR_ZERO_TIME_MS,
+      # ref-script UTxOs, LIVE_CHAIN). No env_file ordering / override magic.
+      - path: ../../supplier/.env.hf-llama33
+        required: false
+    environment:
+      LLM_BACKEND: openai
+      # No /v1 suffix — supplier/src/openai.ts appends /v1/chat/completions
+      # (HF router serves at https://router.huggingface.co/v1/...).
+      OPENAI_BASE_URL: https://router.huggingface.co
+      # First-token latency across hosted providers can exceed local backends;
+      # kept ≤ the advert's max_processing_ms (300000) per fleet footgun #4.
+      OPENAI_TIMEOUT_MS: "300000"
+      # OPENAI_MAX_TOKENS intentionally unset: no max_tokens forwarded upstream,
+      # the provider grants context − prompt. Advert cap = model context length.
+      PORT: "8080"
+      # Enable LiveOgmiosProvider so submitTx/awaitTx actually broadcast.
+      LIVE_CHAIN: "1"
+      # NETWORK_ID and OGMIOS_URL intentionally not pinned here — they MUST
+      # come from the operator-provided supplier/.env.hf-llama33 on a mainnet host.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz >/dev/null || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - marketplace-mainnet-net
+      - traefik-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-net"
+      - "traefik.http.routers.mp-suppliers-hf-llama33-mainnet.entrypoints=web"
+      - "traefik.http.routers.mp-suppliers-hf-llama33-mainnet.rule=Host(`mp-suppliers-hf-llama33.vector.apexfusion.org`)"
+      - "traefik.http.routers.mp-suppliers-hf-llama33-mainnet.middlewares=mp-suppliers-hf-llama33-mainnet-https"
+      - "traefik.http.middlewares.mp-suppliers-hf-llama33-mainnet-https.redirectscheme.scheme=https"
+      - "traefik.http.middlewares.mp-suppliers-hf-llama33-mainnet-https.redirectscheme.permanent=true"
+      - "traefik.http.routers.mp-suppliers-hf-llama33-mainnet-tls.entrypoints=websecure"
+      - "traefik.http.routers.mp-suppliers-hf-llama33-mainnet-tls.rule=Host(`mp-suppliers-hf-llama33.vector.apexfusion.org`)"
+      - "traefik.http.routers.mp-suppliers-hf-llama33-mainnet-tls.tls.certresolver=letsencrypt"
+      - "traefik.http.services.mp-suppliers-hf-llama33-mainnet.loadbalancer.server.port=8080"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  marketplace-mainnet-net:
+    external: true
+    name: marketplace-mainnet-net
+  traefik-net:
+    external: true
+    name: traefik-net

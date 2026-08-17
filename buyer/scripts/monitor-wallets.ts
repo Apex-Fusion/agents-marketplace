@@ -42,6 +42,13 @@ interface OperatorSource {
 
 const OPERATOR_SOURCES: OperatorSource[] = [
   {
+    label: "supplier-hf-llama33@vector-marketplace",
+    host: "root@91.98.147.172",
+    envPath: "/root/agents-marketplace/supplier/.env.hf-llama33",
+    keyVar: "SUPPLIER_PRIV_KEY_HEX",
+    role: "supplier",
+  },
+  {
     label: "buyer@vector-marketplace",
     host: "root@91.98.147.172",
     envPath: "/root/agents-marketplace/buyer/.env",
