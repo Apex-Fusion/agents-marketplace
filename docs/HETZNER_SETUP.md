@@ -1,8 +1,13 @@
 # Hetzner Inference Supplier Fleet — Setup Runbook
 
-> **Status:** shipped. Configures 8 mainnet supplier nodes that use **Hetzner
-> Inference** (`https://inference.hetzner.com`) as their **compute backend** for
-> bonded inference work commissioned on Vector. Config only — no code changes.
+> **Status:** shipped; fleet trimmed 2026-08-21. Hetzner retired
+> `Kimi-K2.7-Code`, `GLM-5.2-NVFP4`, and `DeepSeek-V4-Flash-0731` from
+> Inference (gone from `/v1/models`), so the 6 suppliers serving them were
+> deregistered (adverts retired on-chain, containers removed). `Qwen3.8-27B`
+> was added in their place, reusing the retired kimi-code wallets. Configures
+> mainnet supplier nodes that use **Hetzner Inference**
+> (`https://inference.hetzner.com`) as their **compute backend** for bonded
+> inference work commissioned on Vector. Config only — no code changes.
 
 ---
 
@@ -15,19 +20,21 @@ upstream client (`supplier/src/openai.ts`) already speaks plain
 This is the same pattern as the DeepSeek-direct and OpenRouter suppliers, and
 the direct sibling of `docs/HUGGINGFACE_ROUTER_SETUP.md`.
 
-One supplier per (model × capability) — 4 models, both the one-off
+One supplier per (model × capability) — both the one-off
 `llm.text.generate.v1` and the multi-turn `llm.chat.v1` capability:
 
 | Supplier name | Model (on-chain + API param, verbatim) | Capability | Advert max_output_tokens |
 |---|---|---|---|
-| `kimi-code` | `Kimi-K2.7-Code` | `llm.text.generate.v1` | 262144 |
-| `kimi-code-chat` | `Kimi-K2.7-Code` | `llm.chat.v1` | 262144 |
-| `glm` | `GLM-5.2-NVFP4` | `llm.text.generate.v1` | 512000 |
-| `glm-chat` | `GLM-5.2-NVFP4` | `llm.chat.v1` | 512000 |
-| `ds-flash-htz` | `DeepSeek-V4-Flash-0731` | `llm.text.generate.v1` | 512000 |
-| `ds-flash-htz-chat` | `DeepSeek-V4-Flash-0731` | `llm.chat.v1` | 512000 |
 | `qwen35b` | `Qwen/Qwen3.6-35B-A3B-FP8` | `llm.text.generate.v1` | 262144 |
 | `qwen35b-chat` | `Qwen/Qwen3.6-35B-A3B-FP8` | `llm.chat.v1` | 262144 |
+| `qwen38` | `Qwen3.8-27B` | `llm.text.generate.v1` | 262144 |
+| `qwen38-chat` | `Qwen3.8-27B` | `llm.chat.v1` | 262144 |
+
+Deregistered 2026-08-21 (models dropped by Hetzner): `kimi-code`,
+`kimi-code-chat` (`Kimi-K2.7-Code`), `glm`, `glm-chat` (`GLM-5.2-NVFP4`),
+`ds-flash-htz`, `ds-flash-htz-chat` (`DeepSeek-V4-Flash-0731`). The qwen38
+pair reuses the kimi-code / kimi-code-chat wallets; the other four wallets
+still hold funds and their env files remain on the host.
 
 Shared advert parameters: price **200000 lovelace (0.2 AP3X)** flat per job,
 bonds **1000000 lovelace (1 AP3X)** both sides, `max_processing_ms` **300000**
@@ -36,18 +43,18 @@ for one-off / **1800000** for chat (the session spans the whole conversation).
 forwarded upstream (`OPENAI_MAX_TOKENS` unset), so the advert value only gates
 what buyers may request.
 
-Names follow the brand-by-model convention; `ds-flash-htz` carries a `-htz`
-suffix only because `deepseek-flash-*` was already taken by the OpenRouter
-fleet serving `deepseek/deepseek-v4-flash`.
+Names follow the brand-by-model convention; the retired `ds-flash-htz`
+carried a `-htz` suffix only because `deepseek-flash-*` was already taken by
+the OpenRouter fleet serving `deepseek/deepseek-v4-flash`.
 
 ## 2. Prerequisites
 
 1. A Hetzner account with Inference access and an API key (usage-based billing
    to you as the node operator — the flat 0.2 AP3X job price is a business
-   choice, not cost-derived). One key is shared by all 8 suppliers; Hetzner
+   choice, not cost-derived). One key is shared by all suppliers; Hetzner
    rate limits apply to the aggregate.
-2. Eight funded supplier wallets (50 AP3X each recommended; bonds are 1 AP3X
-   per in-flight job and returned on completion).
+2. One funded supplier wallet per supplier (50 AP3X each recommended; bonds
+   are 1 AP3X per in-flight job and returned on completion).
 3. The usual mainnet supplier deploy prerequisites (`deploy/README.md`).
 4. **DNS**: one A record per supplier — `mp-suppliers-<name>.vector.apexfusion.org`
    → `91.98.147.172`, **DNS-only/unproxied**. There is NO wildcard for
@@ -58,24 +65,25 @@ fleet serving `deepseek/deepseek-v4-flash`.
 
 ## 3. Verify the backend before spending on-chain
 
-The four model ids come from `GET https://inference.hetzner.com/api/v1/models`
+The model ids come from `GET https://inference.hetzner.com/api/v1/models`
+(this list changes — Hetzner retires models; re-check before any advert)
 and are sent **verbatim** as the upstream `model` param (the runtime uses
 `advert.model`). Before posting adverts, smoke-test each model:
 
 ```bash
 curl -sS -X POST https://inference.hetzner.com/api/v1/chat/completions \
   -H "Authorization: Bearer $HETZNER_KEY" -H "Content-Type: application/json" \
-  -d '{"model":"GLM-5.2-NVFP4","messages":[{"role":"user","content":"ping"}]}' \
+  -d '{"model":"Qwen3.8-27B","messages":[{"role":"user","content":"ping"}]}' \
   | jq '.choices[0].message.content'
 ```
 
 `choices[0].message.content` must be a non-empty string with **no `max_tokens`
 sent** (matches runtime config) — the supplier throws `openai_malformed`
 otherwise and forfeits its 1 AP3X bond per failed job. For chat suppliers also
-verify a `tools`/`tool_choice` round-trip. All four models passed both checks
-on 2026-08-11.
+verify a `tools`/`tool_choice` round-trip. The original four models passed
+both checks on 2026-08-11; `Qwen3.8-27B` passed both on 2026-08-21.
 
-## 4. Per-supplier bring-up (repeat ×8)
+## 4. Per-supplier bring-up (repeat per supplier)
 
 ```bash
 # 1. wallet — prints privateKeyHex, publicKeyHex, pubKeyHash, address

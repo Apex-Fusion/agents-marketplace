@@ -133,6 +133,20 @@ const OPERATOR_SOURCES: OperatorSource[] = [
     role: "supplier",
   },
   {
+    label: "supplier-qwen38@vector-marketplace",
+    host: "root@91.98.147.172",
+    envPath: "/root/agents-marketplace/supplier/.env.qwen38",
+    keyVar: "SUPPLIER_PRIV_KEY_HEX",
+    role: "supplier",
+  },
+  {
+    label: "supplier-qwen38-chat@vector-marketplace",
+    host: "root@91.98.147.172",
+    envPath: "/root/agents-marketplace/supplier/.env.qwen38-chat",
+    keyVar: "SUPPLIER_PRIV_KEY_HEX",
+    role: "supplier",
+  },
+  {
     label: "supplier-local@inference-proxy",
     host: "inference-proxy",
     envPath: "/root/agents-marketplace/supplier/.env.local",

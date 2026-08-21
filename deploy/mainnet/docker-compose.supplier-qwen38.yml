@@ -1,18 +1,20 @@
-# deploy/mainnet/docker-compose.supplier-glm.yml — Supplier — MAINNET
-#   (Hetzner Inference / GLM-5.2-NVFP4 — one-off `llm.text.generate.v1`)
+# deploy/mainnet/docker-compose.supplier-qwen38.yml — Supplier — MAINNET
+#   (Hetzner Inference / Qwen3.8-27B — one-off `llm.text.generate.v1`)
 #
 # Hetzner-backed supplier. LLM_BACKEND=openai pointed directly at Hetzner's
 # hosted inference API (OpenAI-compatible at https://inference.hetzner.com/api).
 # No local proxy container — reachable over public HTTPS.
 #
-# One of 8 Hetzner-backed suppliers (4 models x {one-off, chat-session});
-# fleet runbook: docs/HETZNER_SETUP.md.
+# One of the Hetzner-backed suppliers (models x {one-off, chat-session});
+# fleet runbook: docs/HETZNER_SETUP.md. Wallet reused from the retired
+# kimi-code supplier (Hetzner dropped Kimi-K2.7-Code on 2026-08; advert
+# retired 2026-08-21, tx 3f37082166faf2b2220e6476235bae8723af9a3434a6aaf60277366ff1f62bfb).
 #
 # Pre-flight:
-#   1. DNS: mp-suppliers-glm.vector.apexfusion.org → host
+#   1. DNS: mp-suppliers-qwen38.vector.apexfusion.org → host
 #      (individual DNS-only A record → 91.98.147.172; NO wildcard exists —
 #       letsencrypt HTTP-01 issuance needs the unproxied direct record)
-#   2. supplier/.env.glm written on host (chmod 600) with at minimum:
+#   2. supplier/.env.qwen38 written on host (chmod 600) with at minimum:
 #        SUPPLIER_PRIV_KEY_HEX, SUPPLIER_ADDRESS, SUPPLIER_PKH,
 #        SUPPLIER_PUB_KEY_HEX, OPENAI_API_KEY, OGMIOS_URL, NETWORK_ID=1,
 #        VECTOR_ZERO_TIME_MS, ESCROW_REF_UTXO, ADVERT_REF_UTXO, ADVERT_REF,
@@ -21,14 +23,14 @@
 #        docker network create marketplace-mainnet-net   # one-shot
 #        # traefik-net is created by the Traefik project
 
-name: marketplace-mainnet-supplier-glm
+name: marketplace-mainnet-supplier-qwen38
 
 services:
   supplier:
     build:
       context: ../..
       dockerfile: supplier/Dockerfile
-    container_name: marketplace-mainnet-supplier-glm
+    container_name: marketplace-mainnet-supplier-qwen38
     restart: unless-stopped
     env_file:
       # Self-contained env for this Hetzner-backed variant. Holds this
@@ -36,7 +38,7 @@ services:
       # ADVERT_REF, the shared Hetzner OPENAI_API_KEY, and the shared mainnet
       # plumbing duplicated in full (NETWORK_ID, OGMIOS_URL, VECTOR_ZERO_TIME_MS,
       # ref-script UTxOs, LIVE_CHAIN). No env_file ordering / override magic.
-      - path: ../../supplier/.env.glm
+      - path: ../../supplier/.env.qwen38
         required: false
     environment:
       LLM_BACKEND: openai
@@ -52,7 +54,7 @@ services:
       # Enable LiveOgmiosProvider so submitTx/awaitTx actually broadcast.
       LIVE_CHAIN: "1"
       # NETWORK_ID and OGMIOS_URL intentionally not pinned here — they MUST
-      # come from the operator-provided supplier/.env.glm on a mainnet host.
+      # come from the operator-provided supplier/.env.qwen38 on a mainnet host.
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz >/dev/null || exit 1"]
       interval: 20s
@@ -65,15 +67,15 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=traefik-net"
-      - "traefik.http.routers.mp-suppliers-glm-mainnet.entrypoints=web"
-      - "traefik.http.routers.mp-suppliers-glm-mainnet.rule=Host(`mp-suppliers-glm.vector.apexfusion.org`)"
-      - "traefik.http.routers.mp-suppliers-glm-mainnet.middlewares=mp-suppliers-glm-mainnet-https"
-      - "traefik.http.middlewares.mp-suppliers-glm-mainnet-https.redirectscheme.scheme=https"
-      - "traefik.http.middlewares.mp-suppliers-glm-mainnet-https.redirectscheme.permanent=true"
-      - "traefik.http.routers.mp-suppliers-glm-mainnet-tls.entrypoints=websecure"
-      - "traefik.http.routers.mp-suppliers-glm-mainnet-tls.rule=Host(`mp-suppliers-glm.vector.apexfusion.org`)"
-      - "traefik.http.routers.mp-suppliers-glm-mainnet-tls.tls.certresolver=letsencrypt"
-      - "traefik.http.services.mp-suppliers-glm-mainnet.loadbalancer.server.port=8080"
+      - "traefik.http.routers.mp-suppliers-qwen38-mainnet.entrypoints=web"
+      - "traefik.http.routers.mp-suppliers-qwen38-mainnet.rule=Host(`mp-suppliers-qwen38.vector.apexfusion.org`)"
+      - "traefik.http.routers.mp-suppliers-qwen38-mainnet.middlewares=mp-suppliers-qwen38-mainnet-https"
+      - "traefik.http.middlewares.mp-suppliers-qwen38-mainnet-https.redirectscheme.scheme=https"
+      - "traefik.http.middlewares.mp-suppliers-qwen38-mainnet-https.redirectscheme.permanent=true"
+      - "traefik.http.routers.mp-suppliers-qwen38-mainnet-tls.entrypoints=websecure"
+      - "traefik.http.routers.mp-suppliers-qwen38-mainnet-tls.rule=Host(`mp-suppliers-qwen38.vector.apexfusion.org`)"
+      - "traefik.http.routers.mp-suppliers-qwen38-mainnet-tls.tls.certresolver=letsencrypt"
+      - "traefik.http.services.mp-suppliers-qwen38-mainnet.loadbalancer.server.port=8080"
     logging:
       driver: json-file
       options:
