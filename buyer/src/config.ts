@@ -42,6 +42,10 @@
  *                         API key" page knows where to POST /signup. When
  *                         unset, the SPA falls back to deriving "api." +
  *                         current host.
+ *   PDF_ENABLED         — "1" (default) serves the PDF book summarizer
+ *                         (/v1/pdf-* routes). Set "0" to disable the feature
+ *                         entirely: no PDF job store is opened and every
+ *                         /v1/pdf-* route responds 503.
  */
 
 const HEX64_RE = /^[0-9a-fA-F]{64}$/;
@@ -62,6 +66,7 @@ export interface BuyerConfig {
   password: string;
   sessionSecret: string;
   cookieSecure: boolean;
+  pdfEnabled: boolean;
   gatewayPublicUrl: string;
 }
 
@@ -148,6 +153,18 @@ export function loadConfig(env: Record<string, string | undefined>): BuyerConfig
     cookieSecure = cookieSecureStr === "1";
   }
 
+  // PDF_ENABLED: defaults to true. Set "0" to disable the PDF book summarizer
+  // entirely — runMain skips the JobStore wiring and every /v1/pdf-* route
+  // responds 503. Accept only "0" / "1" to keep boot-time misconfig loud.
+  let pdfEnabled = true;
+  const pdfEnabledStr = env.PDF_ENABLED;
+  if (pdfEnabledStr !== undefined && pdfEnabledStr !== "") {
+    if (pdfEnabledStr !== "0" && pdfEnabledStr !== "1") {
+      throw new Error('loadConfig: PDF_ENABLED must be "0" or "1"');
+    }
+    pdfEnabled = pdfEnabledStr === "1";
+  }
+
   // GATEWAY_PUBLIC_URL — optional. Public base URL of the gateway, surfaced to
   // the SPA via the boot block (no trailing slash). Empty string means the SPA
   // derives the URL from its own host ("api." + location.host).
@@ -167,6 +184,7 @@ export function loadConfig(env: Record<string, string | undefined>): BuyerConfig
     password,
     sessionSecret,
     cookieSecure,
+    pdfEnabled,
     gatewayPublicUrl,
   };
 }

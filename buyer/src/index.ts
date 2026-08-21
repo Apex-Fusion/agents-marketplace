@@ -96,29 +96,36 @@ export async function runMain(env: Record<string, string | undefined>): Promise<
 
   // PDF book summarizer: one job registry, sharing the live marketplace SDK,
   // chain, wallet, and (optional) archive. Caps come from PDF_* env vars.
+  // PDF_ENABLED=0 skips the whole wiring; createApp then registers every
+  // /v1/pdf-* route as a 503 stub (feature disabled).
   const pdfCaps = loadPdfCaps(env);
-  // Durable job store (SQLite under ARCHIVE_DIR) so past summaries survive
-  // restarts and navigation. Best-effort: if it can't open, jobs fall back to
-  // in-memory only (lost on restart) but the feature still works.
-  let pdfJobDb: PdfJobDb | undefined;
-  try {
-    pdfJobDb = new PdfJobDb(config.archiveDir);
-    console.log(`[buyer] pdf job store at ${config.archiveDir}/pdf-jobs.db`);
-  } catch (err) {
-    console.error(
-      `[buyer] failed to open pdf job store at ${config.archiveDir}:`,
-      err instanceof Error ? err.message : String(err),
-    );
+  let jobStore: JobStore | undefined;
+  if (config.pdfEnabled) {
+    // Durable job store (SQLite under ARCHIVE_DIR) so past summaries survive
+    // restarts and navigation. Best-effort: if it can't open, jobs fall back to
+    // in-memory only (lost on restart) but the feature still works.
+    let pdfJobDb: PdfJobDb | undefined;
+    try {
+      pdfJobDb = new PdfJobDb(config.archiveDir);
+      console.log(`[buyer] pdf job store at ${config.archiveDir}/pdf-jobs.db`);
+    } catch (err) {
+      console.error(
+        `[buyer] failed to open pdf job store at ${config.archiveDir}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+    jobStore = new JobStore({
+      marketplace,
+      chain,
+      walletKey,
+      indexerUrl: config.indexerUrl,
+      archive,
+      caps: pdfCaps,
+      db: pdfJobDb,
+    });
+  } else {
+    console.log("[buyer] pdf summarizer disabled (PDF_ENABLED=0)");
   }
-  const jobStore = new JobStore({
-    marketplace,
-    chain,
-    walletKey,
-    indexerUrl: config.indexerUrl,
-    archive,
-    caps: pdfCaps,
-    db: pdfJobDb,
-  });
 
   const app = createApp({
     distPath,

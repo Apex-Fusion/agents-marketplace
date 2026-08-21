@@ -40,7 +40,7 @@ export function registerPdfRoutes(
         res,
         503,
         "service_unavailable",
-        "PDF summarizer disabled (buyer booted without chain/marketplace/archive deps)",
+        "PDF summarizer disabled",
       );
     app.post("/v1/pdf-upload", disabled);
     app.all(/^\/v1\/pdf-jobs(\/.*)?$/, disabled);

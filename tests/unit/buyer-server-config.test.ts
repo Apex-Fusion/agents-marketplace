@@ -87,6 +87,19 @@ describe("loadConfig(env)", () => {
     const env = { ...VALID_ENV, COOKIE_SECURE: "true" };
     expect(() => loadConfig(env)).toThrow(/COOKIE_SECURE/);
   });
+
+  it("defaults pdfEnabled to true when PDF_ENABLED is not provided", () => {
+    expect(loadConfig(VALID_ENV).pdfEnabled).toBe(true);
+  });
+
+  it('honours PDF_ENABLED="0" (summarizer kill switch)', () => {
+    const config = loadConfig({ ...VALID_ENV, PDF_ENABLED: "0" });
+    expect(config.pdfEnabled).toBe(false);
+  });
+
+  it("throws when PDF_ENABLED is not 0 or 1", () => {
+    expect(() => loadConfig({ ...VALID_ENV, PDF_ENABLED: "false" })).toThrow(/PDF_ENABLED/);
+  });
 });
 
 // ─── createApp tests ──────────────────────────────────────────────────────────
