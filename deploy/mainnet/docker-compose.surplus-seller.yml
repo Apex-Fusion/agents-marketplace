@@ -1,0 +1,39 @@
+name: marketplace-mainnet-surplus-seller
+
+services:
+  surplus-seller:
+    build:
+      context: ../..
+      dockerfile: supplier/Dockerfile
+    container_name: marketplace-mainnet-surplus-seller
+    restart: unless-stopped
+    command:
+      - node_modules/.bin/tsx
+      - supplier/src/cli/surplus-seller.ts
+    env_file:
+      - path: /var/lib/agents-marketplace/surplus-seller.env
+        required: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - surplus-seller-state:/var/lib/surplus-manager
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz >/dev/null || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  surplus-seller-state:
+    name: marketplace-mainnet-surplus-seller-state

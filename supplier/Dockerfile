@@ -70,6 +70,9 @@ COPY --from=builder /repo /repo
 
 # Drop privileges. The official node image ships a non-root `node` user.
 RUN chown -R node:node /repo
+RUN mkdir -p /var/lib/surplus-manager \
+ && chown node:node /var/lib/surplus-manager \
+ && chmod 700 /var/lib/surplus-manager
 USER node
 
 ENV NODE_ENV=production

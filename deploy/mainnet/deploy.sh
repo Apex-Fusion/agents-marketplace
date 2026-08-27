@@ -82,13 +82,14 @@ project_re() {
     docker-compose.buyer.yml)          echo "^buyer/|$SHARED_RE" ;;
     docker-compose.gateway.yml)        echo "^gateway/|$SHARED_RE" ;;
     docker-compose.wallet-monitor.yml) echo "^wallet-monitor/|$SHARED_RE" ;;
+    docker-compose.surplus-seller.yml) echo "^supplier/|$SHARED_RE" ;;
     docker-compose.supplier*.yml)      echo "^supplier/|$SHARED_RE" ;;
     *)                                 echo "" ;;
   esac
 }
 
 # Restart order: infra first, suppliers last (each supplier drains first).
-ORDERED_NON_SUPPLIER="docker-compose.indexer.yml docker-compose.buyer.yml docker-compose.gateway.yml docker-compose.wallet-monitor.yml docker-compose.ollama.yml docker-compose.chatmock.yml docker-compose.tts-piper.yml"
+ORDERED_NON_SUPPLIER="docker-compose.indexer.yml docker-compose.buyer.yml docker-compose.gateway.yml docker-compose.wallet-monitor.yml docker-compose.surplus-seller.yml docker-compose.ollama.yml docker-compose.chatmock.yml docker-compose.tts-piper.yml"
 SUPPLIERS=$(cd "$COMPOSE_DIR" && ls docker-compose.supplier*.yml)
 
 AFFECTED=()

@@ -10,7 +10,8 @@
     "tx:retire-advert": "tsx src/cli/retire-advert.ts",
     "tx:publish-reference-scripts": "tsx src/cli/publish-reference-scripts.ts",
     "tx:consolidate-wallet": "tsx src/cli/consolidate-wallet.ts",
-    "reseller:setup": "tsx src/cli/setup-reseller.ts"
+    "reseller:setup": "tsx src/cli/setup-reseller.ts",
+    "surplus:start": "tsx src/cli/surplus-seller.ts"
   },
   "dependencies": {
     "@marketplace/shared": "workspace:*",
