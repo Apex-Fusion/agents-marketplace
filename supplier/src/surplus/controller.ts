@@ -359,44 +359,40 @@ export class SurplusSellerController {
     const pending = this.state;
     const offers = await this.client.listAllOffers();
     const active = offers.filter((offer) => offer.status === "active");
-    const matches = active
+    const activeMatches = active
       .filter((offer) =>
         offer.model === pending.intent.model &&
         normalizeUrl(offer.sellerBaseUrl) ===
           normalizeUrl(this.config.providerBaseUrl)
       )
       .sort((left, right) => left.id.localeCompare(right.id));
-    if (matches.length === 0) {
-      const inactiveMatch = offers.some((offer) =>
+    const inactiveMatches = offers
+      .filter((offer) =>
         offer.status === "inactive" &&
         offer.model === pending.intent.model &&
         normalizeUrl(offer.sellerBaseUrl) ===
           normalizeUrl(this.config.providerBaseUrl)
-      );
-      if (inactiveMatch && active.length === 0) {
-        const selecting: SurplusControllerState = {
-          version: 1,
-          phase: "selecting",
-        };
-        await this.stateStore.save(selecting);
-        this.state = selecting;
-        this.markSuccess("suspended", null, null);
-        return;
-      }
+      )
+      .sort((left, right) => left.id.localeCompare(right.id));
+    const primary = activeMatches[0] ?? inactiveMatches[0];
+    if (!primary) {
       if (active.length > 0) await this.pauseOffers(active);
       throw new Error(
         "Create result is ambiguous and no matching offer is visible; refusing another POST",
       );
     }
-    const primary = matches[0];
     await this.pauseOffers(active.filter((offer) => offer.id !== primary.id));
     const confirmedOffers = await this.client.listAllOffers();
     const confirmedActive = confirmedOffers.filter(
       (offer) => offer.status === "active",
     );
-    if (confirmedActive.length !== 1 || confirmedActive[0].id !== primary.id) {
+    const expectedActive = primary.status === "active" ? 1 : 0;
+    if (
+      confirmedActive.length !== expectedActive ||
+      (expectedActive === 1 && confirmedActive[0].id !== primary.id)
+    ) {
       await this.pauseOffers(confirmedActive);
-      throw new Error("Adopted Surplus create did not reconcile to one active offer");
+      throw new Error("Adopted Surplus create did not reconcile safely");
     }
     const adopted: SurplusControllerState = {
       version: 1,
@@ -413,6 +409,10 @@ export class SurplusSellerController {
       throw error;
     }
     this.state = adopted;
+    if (primary.status === "inactive") {
+      await this.manageActiveOffer();
+      return;
+    }
     this.markSuccess("active", null, {
       intent: adopted.intent,
       offerId: adopted.offerId,
@@ -492,7 +492,8 @@ export class SurplusSellerController {
       outputMicroUsdPer1m: quote.outputMicroUsdPer1m,
     };
     const priceChanged =
-      managed.costMultiplierPpm !== quote.costMultiplierPpm ||
+      managed.costMultiplierPpm === null ||
+      Math.abs(managed.costMultiplierPpm - quote.costMultiplierPpm) > 1 ||
       managed.capDailyUsd !== Number(this.config.perOfferCapUsd);
     if (this.config.live && priceChanged) {
       await this.client.updateOffer(currentState.offerId, {

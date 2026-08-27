@@ -260,6 +260,42 @@ describe("SurplusSellerController", () => {
     await restarted.stop();
   });
 
+  it("adopts and resumes an inactive offer after an ambiguous create", async () => {
+    const client = new FakeSurplusClient();
+    client.offer = {
+      id: "managed-offer",
+      model: "beta-model",
+      sellerBaseUrl: "https://openrouter.ai/api/v1",
+      status: "inactive",
+      capDailyUsd: 1,
+      costMultiplierPpm: 49_950,
+      inputMicroUsdPer1m: 3_972,
+      outputMicroUsdPer1m: 7_944,
+    };
+    const store = new MemoryStateStore();
+    store.state = {
+      version: 1,
+      phase: "create_pending",
+      intent: {
+        model: "beta-model",
+        providerModelId: "vendor/beta-model",
+        costMultiplierPpm: 49_950,
+        inputMicroUsdPer1m: 3_972,
+        outputMicroUsdPer1m: 7_944,
+        dailyCapUsd: 1,
+        idempotencyKey: "create-1",
+        createdAt: "2026-08-27T10:00:00.000Z",
+        baselineTrades24h: 0,
+      },
+    };
+
+    await controller(client, store).runOnce();
+
+    expect(client.createCalls).toBe(0);
+    expect(client.offer.status).toBe("active");
+    expect(store.state.phase).toBe("active");
+  });
+
   it("never retries an ambiguous create when no matching offer is visible", async () => {
     const client = new FakeSurplusClient();
     client.createError = new SurplusHttpError("network lost", null);

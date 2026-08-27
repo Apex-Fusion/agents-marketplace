@@ -381,7 +381,10 @@ function parseOffer(value: unknown, index: number): SurplusOffer {
   return {
     id: offerId(item, `Surplus offer ${index}`),
     model: string(item.model, `Surplus offer ${index}.model`),
-    sellerBaseUrl: string(item.seller_base_url, `Surplus offer ${index}.seller_base_url`),
+    sellerBaseUrl: string(
+      item.seller_base_url ?? item.base_url,
+      `Surplus offer ${index}.base_url`,
+    ),
     status,
     capDailyUsd: optionalNonNegativeNumber(item.cap_daily_usd, `Surplus offer ${index}.cap_daily_usd`),
     costMultiplierPpm: optionalMultiplierPpm(
