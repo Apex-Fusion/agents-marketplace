@@ -22,6 +22,7 @@ export interface SurplusManagerConfig {
   pollIntervalMs: number;
   requestTimeoutMs: number;
   stopAfterTrades: number;
+  settledStatuses: string[];
   statePath: string;
   port: number;
 }
@@ -124,6 +125,10 @@ export function loadSurplusManagerConfig(
       1,
       1,
     ),
+    settledStatuses: statusList(
+      env.SURPLUS_SETTLED_STATUSES ?? "",
+      "SURPLUS_SETTLED_STATUSES",
+    ),
     statePath: requiredWithDefault(
       env.SURPLUS_STATE_PATH,
       "/var/lib/surplus-manager/state.json",
@@ -186,6 +191,20 @@ function boundedInteger(
     throw new Error(`${name} must be from ${minimum} to ${maximum}`);
   }
   return parsed;
+}
+
+function statusList(value: string, name: string): string[] {
+  if (value.trim() === "") return [];
+  const statuses = value.split(",").map((status) => status.trim().toLowerCase());
+  const seen = new Set<string>();
+  for (const status of statuses) {
+    if (!/^[a-z][a-z0-9_-]*$/.test(status)) {
+      throw new Error(`${name} contains an invalid status`);
+    }
+    if (seen.has(status)) throw new Error(`${name} contains a duplicate status`);
+    seen.add(status);
+  }
+  return statuses;
 }
 
 function httpsUrl(value: string, name: string, hostname: string): string {

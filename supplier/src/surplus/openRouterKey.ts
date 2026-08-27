@@ -44,9 +44,7 @@ export class OpenRouterKeyClient {
       const text = await readBoundedText(response, controller);
       if (!response.ok) {
         throw new Error(
-          `OpenRouter key endpoint returned HTTP ${response.status}${
-            text ? `: ${text.slice(0, 200).replace(/[\r\n]+/g, " ")}` : ""
-          }`,
+          `OpenRouter key endpoint returned HTTP ${response.status}`,
         );
       }
       let body: unknown;

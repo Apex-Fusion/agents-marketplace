@@ -311,9 +311,7 @@ export class SurplusClient {
       const text = await readBoundedText(response, controller);
       if (!response.ok) {
         throw new SurplusHttpError(
-          `Surplus ${path} returned HTTP ${response.status}${
-            text ? `: ${sanitizedErrorSnippet(text)}` : ""
-          }`,
+          `Surplus ${path} returned HTTP ${response.status}`,
           response.status,
           response.headers.get("retry-after"),
         );
@@ -500,9 +498,3 @@ function optionalMicroUsd(value: unknown, field: string): number | null {
   return microUsd(value, field);
 }
 
-function sanitizedErrorSnippet(value: string): string {
-  return value
-    .slice(0, 300)
-    .replace(/(?:si_seller_|sk-or-v1-)[A-Za-z0-9_-]+/g, "[redacted]")
-    .replace(/[\r\n]+/g, " ");
-}

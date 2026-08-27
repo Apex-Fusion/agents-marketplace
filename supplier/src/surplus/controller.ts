@@ -70,11 +70,6 @@ interface SurplusControllerOptions {
   log?: (message: string) => void;
 }
 
-const SETTLED_STATUSES: Record<string, true> = {
-  confirmed: true,
-  paid: true,
-  settled: true,
-};
 
 export class SurplusSellerController {
   private readonly config: SurplusManagerConfig;
@@ -403,7 +398,6 @@ export class SurplusSellerController {
       await this.pauseOffers(confirmedActive);
       throw new Error("Adopted Surplus create did not reconcile to one active offer");
     }
-    this.assertAggregateCap(confirmedOffers);
     const adopted: SurplusControllerState = {
       version: 1,
       phase: "active",
@@ -412,9 +406,10 @@ export class SurplusSellerController {
       highestTrades24h: pending.intent.baselineTrades24h,
     };
     try {
+      this.assertAggregateCap(confirmedOffers);
       await this.stateStore.save(adopted);
     } catch (error) {
-      await this.client.pauseOffer(primary.id, this.mutationId()).catch(() => undefined);
+      await this.pauseOffers(confirmedActive).catch(() => undefined);
       throw error;
     }
     this.state = adopted;
@@ -430,10 +425,14 @@ export class SurplusSellerController {
     if (this.state?.phase !== "active") return;
     const currentState = this.state;
     const offers = await this.client.listAllOffers();
+    const activeOffers = offers.filter((offer) => offer.status === "active");
     const managed = offers.find((offer) => offer.id === currentState.offerId);
-    if (!managed) throw new Error(`Managed Surplus offer is missing: ${currentState.offerId}`);
-    const otherActive = offers.filter(
-      (offer) => offer.status === "active" && offer.id !== currentState.offerId,
+    if (!managed) {
+      await this.pauseOffers(activeOffers);
+      throw new Error(`Managed Surplus offer is missing: ${currentState.offerId}`);
+    }
+    const otherActive = activeOffers.filter(
+      (offer) => offer.id !== currentState.offerId,
     );
     if (otherActive.length > 0) {
       await this.pauseOffers(otherActive);
@@ -600,11 +599,22 @@ export class SurplusSellerController {
   ): SurplusEarnings["recentSales"][number] | null {
     const tradeObservedAt = Date.parse(state.tradeObservedAt);
     return earnings.recentSales.find((sale) => {
-      if (!SETTLED_STATUSES[sale.settlementStatus.toLowerCase()]) return false;
-      if (sale.model !== state.intent.model || sale.sellerCostMicroUsd <= 0) return false;
-      if (sale.offerId !== null) return sale.offerId === state.offerId;
-      return sale.createdAt !== null &&
-        Date.parse(sale.createdAt) >= tradeObservedAt;
+      if (
+        !this.config.settledStatuses.includes(
+          sale.settlementStatus.toLowerCase(),
+        )
+      ) {
+        return false;
+      }
+      if (
+        sale.offerId !== state.offerId ||
+        sale.createdAt === null ||
+        sale.model !== state.intent.model ||
+        sale.sellerCostMicroUsd <= 0
+      ) {
+        return false;
+      }
+      return Date.parse(sale.createdAt) >= tradeObservedAt;
     }) ?? null;
   }
 
@@ -637,7 +647,11 @@ export class SurplusSellerController {
       if (offer.capDailyUsd === null) {
         throw new Error(`Active Surplus offer has no daily cap: ${offer.id}`);
       }
-      activeCap += parseUsdDecimal(offer.capDailyUsd.toFixed(6), "ceil");
+      const capMicroUsd = offer.capDailyUsd * 1_000_000;
+      if (!Number.isSafeInteger(capMicroUsd)) {
+        throw new Error(`Active Surplus offer cap has excess precision: ${offer.id}`);
+      }
+      activeCap += BigInt(capMicroUsd) * 1_000n;
     }
     const aggregateCap = parseUsdDecimal(this.config.aggregateCapUsd, "floor");
     if (activeCap > aggregateCap) {

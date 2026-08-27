@@ -39,6 +39,7 @@ function config(): SurplusManagerConfig {
     pollIntervalMs: 300_000,
     requestTimeoutMs: 120_000,
     stopAfterTrades: 1,
+    settledStatuses: ["confirmed"],
     statePath: "/tmp/surplus-test-state.json",
     port: 8080,
   };
