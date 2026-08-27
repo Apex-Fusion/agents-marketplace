@@ -208,12 +208,15 @@ const ALLOWANCE: OpenRouterKeyAllowance = {
 function controller(
   client: FakeSurplusClient,
   store: MemoryStateStore,
+  allowance: { readAllowance(): Promise<OpenRouterKeyAllowance> } = {
+    readAllowance: async () => ALLOWANCE,
+  },
 ): SurplusSellerController {
   let mutation = 0;
   return new SurplusSellerController({
     config: config(),
     client,
-    allowance: { readAllowance: async () => ALLOWANCE },
+    allowance,
     stateStore: store,
     now: () => Date.parse("2026-08-27T10:00:00.000Z"),
     mutationId: () => `mutation-${++mutation}`,
@@ -260,6 +263,26 @@ describe("SurplusSellerController", () => {
     await restarted.stop();
   });
 
+  it("pauses when provider spend reaches the per-offer cap", async () => {
+    const client = new FakeSurplusClient();
+    const store = new MemoryStateStore();
+    let remaining = 20_000_000_000n;
+    const activeController = controller(client, store, {
+      readAllowance: async () => ({
+        ...ALLOWANCE,
+        remainingUsdNanos: remaining,
+      }),
+    });
+    await activeController.runOnce();
+    expect(client.offer?.status).toBe("active");
+
+    remaining = 18_700_000_000n;
+    await activeController.runOnce();
+
+    expect(client.offer?.status).toBe("inactive");
+    expect(store.state.phase).toBe("awaiting_settlement");
+  });
+
   it("adopts and resumes an inactive offer after an ambiguous create", async () => {
     const client = new FakeSurplusClient();
     client.offer = {
@@ -283,6 +306,7 @@ describe("SurplusSellerController", () => {
         inputMicroUsdPer1m: 3_972,
         outputMicroUsdPer1m: 7_944,
         dailyCapUsd: 1,
+        baselineRemainingUsdNanos: "20000000000",
         idempotencyKey: "create-1",
         createdAt: "2026-08-27T10:00:00.000Z",
         baselineTrades24h: 0,

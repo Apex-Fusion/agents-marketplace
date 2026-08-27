@@ -262,6 +262,7 @@ export class SurplusSellerController {
         costMultiplierPpm: quote.costMultiplierPpm,
         inputMicroUsdPer1m: quote.inputMicroUsdPer1m,
         outputMicroUsdPer1m: quote.outputMicroUsdPer1m,
+        baselineRemainingUsdNanos: allowance.remainingUsdNanos.toString(),
         dailyCapUsd: Number(this.config.perOfferCapUsd),
         idempotencyKey: this.mutationId(),
         createdAt: new Date(this.now()).toISOString(),
@@ -445,6 +446,28 @@ export class SurplusSellerController {
       allowance,
       parseUsdDecimal(this.config.perOfferCapUsd, "ceil"),
     );
+    const baselineAllowance = BigInt(
+      currentState.intent.baselineRemainingUsdNanos,
+    );
+    const providerSpend = baselineAllowance > allowance.remainingUsdNanos
+      ? baselineAllowance - allowance.remainingUsdNanos
+      : 0n;
+    const spendCap = parseUsdDecimal(this.config.perOfferCapUsd, "ceil");
+    if (providerSpend >= spendCap) {
+      const stopping: SurplusControllerState = {
+        version: 1,
+        phase: "stopping",
+        offerId: currentState.offerId,
+        intent: currentState.intent,
+        highestTrades24h: currentState.highestTrades24h,
+        tradeObservedAt: currentState.intent.createdAt,
+        pauseIdempotencyKey: this.mutationId(),
+      };
+      await this.stateStore.save(stopping);
+      this.state = stopping;
+      await this.finishStopping();
+      return;
+    }
     const discovered = await this.client.discoverModels(
       this.config.providerApiKey,
       this.config.providerBaseUrl,

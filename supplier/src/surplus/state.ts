@@ -18,6 +18,7 @@ export interface SurplusOfferIntent {
   inputMicroUsdPer1m: number;
   outputMicroUsdPer1m: number;
   dailyCapUsd: number;
+  baselineRemainingUsdNanos: string;
   idempotencyKey: string;
   createdAt: string;
   baselineTrades24h: number;
@@ -283,6 +284,10 @@ function parseIntent(value: unknown): SurplusOfferIntent {
       intent.dailyCapUsd,
       "Surplus state intent.dailyCapUsd",
     ),
+    baselineRemainingUsdNanos: nonNegativeIntegerString(
+      intent.baselineRemainingUsdNanos,
+      "Surplus state intent.baselineRemainingUsdNanos",
+    ),
     idempotencyKey: nonEmptyString(
       intent.idempotencyKey,
       "Surplus state intent.idempotencyKey",
@@ -305,6 +310,13 @@ function object(value: unknown, field: string): Record<string, unknown> {
 function nonEmptyString(value: unknown, field: string): string {
   if (typeof value !== "string" || value === "") {
     throw new Error(`${field} must be a non-empty string`);
+  }
+  return value;
+}
+
+function nonNegativeIntegerString(value: unknown, field: string): string {
+  if (typeof value !== "string" || !/^(?:0|[1-9]\d*)$/.test(value)) {
+    throw new Error(`${field} must be a non-negative integer string`);
   }
   return value;
 }
