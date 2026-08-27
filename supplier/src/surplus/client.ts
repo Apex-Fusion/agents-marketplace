@@ -390,8 +390,9 @@ function parseDiscoveredModel(value: unknown, index: number): SurplusDiscoveredM
     priceUnit: optionalString(pricing.price_unit) ?? "M",
     priceVariable: pricing.price_variable === undefined ? false : boolean(pricing.price_variable, `Surplus discovery item ${index}.pricing.price_variable`),
     providerModelId: string(metadata.provider_model_id, `Surplus discovery item ${index}.metadata.provider_model_id`),
-    modelType: string(metadata.model_type, `Surplus discovery item ${index}.metadata.model_type`),
-    availabilityStatus: string(metadata.availability_status, `Surplus discovery item ${index}.metadata.availability_status`),
+    modelType: optionalString(metadata.model_type) ?? "unknown",
+    availabilityStatus:
+      optionalString(metadata.availability_status) ?? "unknown",
   };
 }
 
