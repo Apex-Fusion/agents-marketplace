@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  quoteSurplusPrice,
+  quoteSurplusMultiplier,
 } from "../../supplier/src/surplus/policy.js";
 import {
   eligibleCompetitors,
@@ -41,8 +41,8 @@ function market(model: string, requests24h: number): SurplusMarketSummary {
 }
 
 describe("Surplus bounded price policy", () => {
-  it("uses exact recovery floors and undercuts in integer micro-USD", () => {
-    const quote = quoteSurplusPrice({
+  it("uses an exact recovery multiplier and undercuts in integer micro-USD", () => {
+    const quote = quoteSurplusMultiplier({
       upstreamInputMicroUsdPer1m: 79_520,
       upstreamOutputMicroUsdPer1m: 159_040,
       recoveryBps: 490,
@@ -54,17 +54,16 @@ describe("Surplus bounded price policy", () => {
       }],
     });
 
-    expect(quote.floorInputMicroUsdPer1m).toBe(3_897);
-    expect(quote.floorOutputMicroUsdPer1m).toBe(7_793);
+    expect(quote.floorMultiplierPpm).toBe(49_000);
+    expect(quote.costMultiplierPpm).toBe(49_950);
+    expect(quote.costMultiplier).toBe(0.04995);
     expect(quote.inputMicroUsdPer1m).toBe(3_972);
     expect(quote.outputMicroUsdPer1m).toBe(7_944);
-    expect(quote.inputUsdPer1m).toBe(0.003972);
-    expect(quote.outputUsdPer1m).toBe(0.007944);
     expect(quote.competitive).toBe(true);
   });
 
   it("keeps the recovery floor when the cheapest offer is too low", () => {
-    const quote = quoteSurplusPrice({
+    const quote = quoteSurplusMultiplier({
       upstreamInputMicroUsdPer1m: 79_520,
       upstreamOutputMicroUsdPer1m: 159_040,
       recoveryBps: 490,
@@ -76,8 +75,8 @@ describe("Surplus bounded price policy", () => {
       }],
     });
 
-    expect(quote.inputMicroUsdPer1m).toBe(3_897);
-    expect(quote.outputMicroUsdPer1m).toBe(7_793);
+    expect(quote.floorMultiplierPpm).toBe(49_000);
+    expect(quote.costMultiplierPpm).toBe(49_000);
     expect(quote.competitive).toBe(false);
   });
 
@@ -91,9 +90,9 @@ describe("Surplus bounded price policy", () => {
     const left = { id: "left", inputMicroUsdPer1m: 100, outputMicroUsdPer1m: 300 };
     const right = { id: "right", inputMicroUsdPer1m: 200, outputMicroUsdPer1m: 200 };
 
-    expect(quoteSurplusPrice({ ...input, competitors: [right, left] }).competitorId)
+    expect(quoteSurplusMultiplier({ ...input, competitors: [right, left] }).competitorId)
       .toBe("left");
-    expect(quoteSurplusPrice({ ...input, competitors: [left, right] }).competitorId)
+    expect(quoteSurplusMultiplier({ ...input, competitors: [left, right] }).competitorId)
       .toBe("left");
   });
 });

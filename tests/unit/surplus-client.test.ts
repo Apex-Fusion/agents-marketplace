@@ -222,7 +222,7 @@ describe("SurplusClient", () => {
     expect(String(fetchFn.mock.calls[1][0])).toContain("alpha%3Amodel");
   });
 
-  it("sends one absolute PATCH with plain USD prices and the cap", async () => {
+  it("sends one absolute cost-multiplier PATCH with the cap", async () => {
     let request: RequestInit | undefined;
     const client = new SurplusClient({
       apiBaseUrl: "https://api.surplusintelligence.ai",
@@ -235,17 +235,15 @@ describe("SurplusClient", () => {
     });
 
     await client.updateOffer("offer/one", {
-      inputUsdPer1m: 0.003972,
-      outputUsdPer1m: 0.007944,
+      costMultiplier: 0.04995,
       dailyCapUsd: 1,
       idempotencyKey: "mutation-1",
     });
 
     expect(request?.method).toBe("PATCH");
     expect(JSON.parse(String(request?.body))).toEqual({
-      pricing_mode: "per_token",
-      price_input_per_1m: 0.003972,
-      price_output_per_1m: 0.007944,
+      pricing_mode: "cost_multiplier",
+      cost_multiplier: 0.04995,
       cap_daily_usd: 1,
     });
     const headers = new Headers(request?.headers);

@@ -14,7 +14,7 @@ import type {
 } from "./openRouterKey.js";
 import {
   formatMicroUsd,
-  quoteSurplusPrice,
+  quoteSurplusMultiplier,
 } from "./policy.js";
 import {
   eligibleCompetitors,
@@ -236,7 +236,7 @@ export class SurplusSellerController {
         this.config.sellerWallet,
         ownOfferIds,
       );
-      const quote = quoteSurplusPrice({
+      const quote = quoteSurplusMultiplier({
         upstreamInputMicroUsdPer1m: candidate.upstreamInputMicroUsdPer1m,
         upstreamOutputMicroUsdPer1m: candidate.upstreamOutputMicroUsdPer1m,
         recoveryBps: this.config.recoveryBps,
@@ -259,6 +259,7 @@ export class SurplusSellerController {
       intent = {
         model: candidate.model,
         providerModelId: candidate.providerModelId,
+        costMultiplierPpm: quote.costMultiplierPpm,
         inputMicroUsdPer1m: quote.inputMicroUsdPer1m,
         outputMicroUsdPer1m: quote.outputMicroUsdPer1m,
         dailyCapUsd: Number(this.config.perOfferCapUsd),
@@ -296,8 +297,7 @@ export class SurplusSellerController {
         model: intent.model,
         apiKey: this.config.providerApiKey,
         sellerBaseUrl: this.config.providerBaseUrl,
-        inputUsdPer1m: intent.inputMicroUsdPer1m / 1_000_000,
-        outputUsdPer1m: intent.outputMicroUsdPer1m / 1_000_000,
+        costMultiplier: intent.costMultiplierPpm / 1_000_000,
         dailyCapUsd: intent.dailyCapUsd,
         payoutAddress: this.config.payoutAddress,
         idempotencyKey: intent.idempotencyKey,
@@ -478,7 +478,7 @@ export class SurplusSellerController {
       this.config.sellerWallet,
       ownIds,
     );
-    const quote = quoteSurplusPrice({
+    const quote = quoteSurplusMultiplier({
       upstreamInputMicroUsdPer1m: Math.ceil(selected.inputUsdPer1m * 1_000_000),
       upstreamOutputMicroUsdPer1m: Math.ceil(selected.outputUsdPer1m * 1_000_000),
       recoveryBps: this.config.recoveryBps,
@@ -487,16 +487,16 @@ export class SurplusSellerController {
     });
     const nextIntent: SurplusOfferIntent = {
       ...currentState.intent,
+      costMultiplierPpm: quote.costMultiplierPpm,
       inputMicroUsdPer1m: quote.inputMicroUsdPer1m,
       outputMicroUsdPer1m: quote.outputMicroUsdPer1m,
     };
-    const priceChanged = managed.inputMicroUsdPer1m !== quote.inputMicroUsdPer1m ||
-      managed.outputMicroUsdPer1m !== quote.outputMicroUsdPer1m ||
+    const priceChanged =
+      managed.costMultiplierPpm !== quote.costMultiplierPpm ||
       managed.capDailyUsd !== Number(this.config.perOfferCapUsd);
     if (this.config.live && priceChanged) {
       await this.client.updateOffer(currentState.offerId, {
-        inputUsdPer1m: quote.inputUsdPer1m,
-        outputUsdPer1m: quote.outputUsdPer1m,
+        costMultiplier: quote.costMultiplier,
         dailyCapUsd: Number(this.config.perOfferCapUsd),
         idempotencyKey: this.mutationId(),
       });

@@ -14,6 +14,7 @@ import { randomUUID } from "node:crypto";
 export interface SurplusOfferIntent {
   model: string;
   providerModelId: string;
+  costMultiplierPpm: number;
   inputMicroUsdPer1m: number;
   outputMicroUsdPer1m: number;
   dailyCapUsd: number;
@@ -265,6 +266,10 @@ function parseIntent(value: unknown): SurplusOfferIntent {
     providerModelId: nonEmptyString(
       intent.providerModelId,
       "Surplus state intent.providerModelId",
+    ),
+    costMultiplierPpm: positiveInteger(
+      intent.costMultiplierPpm,
+      "Surplus state intent.costMultiplierPpm",
     ),
     inputMicroUsdPer1m: positiveInteger(
       intent.inputMicroUsdPer1m,

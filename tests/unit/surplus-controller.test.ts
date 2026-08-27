@@ -147,8 +147,9 @@ class FakeSurplusClient implements SurplusControllerClient {
       sellerBaseUrl: input.sellerBaseUrl,
       status: "active",
       capDailyUsd: input.dailyCapUsd,
-      inputMicroUsdPer1m: Math.round(input.inputUsdPer1m * 1_000_000),
-      outputMicroUsdPer1m: Math.round(input.outputUsdPer1m * 1_000_000),
+      costMultiplierPpm: Math.round(input.costMultiplier * 1_000_000),
+      inputMicroUsdPer1m: Math.floor(79_520 * input.costMultiplier),
+      outputMicroUsdPer1m: Math.floor(159_040 * input.costMultiplier),
     };
     return this.offer.id;
   }
@@ -157,8 +158,15 @@ class FakeSurplusClient implements SurplusControllerClient {
     this.externalCalls += 1;
     this.patchPayload = patch;
     if (!this.offer) throw new Error("missing fake offer");
-    this.offer.inputMicroUsdPer1m = Math.round(patch.inputUsdPer1m * 1_000_000);
-    this.offer.outputMicroUsdPer1m = Math.round(patch.outputUsdPer1m * 1_000_000);
+    this.offer.costMultiplierPpm = Math.round(
+      patch.costMultiplier * 1_000_000,
+    );
+    this.offer.inputMicroUsdPer1m = Math.floor(
+      79_520 * patch.costMultiplier,
+    );
+    this.offer.outputMicroUsdPer1m = Math.floor(
+      159_040 * patch.costMultiplier,
+    );
     this.offer.capDailyUsd = patch.dailyCapUsd;
   }
 
@@ -223,8 +231,7 @@ describe("SurplusSellerController", () => {
     expect(client.createCalls).toBe(1);
     expect(client.createdPayload).toMatchObject({
       model: "beta-model",
-      inputUsdPer1m: 0.003972,
-      outputUsdPer1m: 0.007944,
+      costMultiplier: 0.04995,
       dailyCapUsd: 1,
       payoutAddress: SELLER_WALLET,
     });

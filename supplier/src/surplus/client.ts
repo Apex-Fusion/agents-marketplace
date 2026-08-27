@@ -4,6 +4,7 @@ export interface SurplusOffer {
   sellerBaseUrl: string;
   status: "active" | "inactive";
   capDailyUsd: number | null;
+  costMultiplierPpm: number | null;
   inputMicroUsdPer1m: number | null;
   outputMicroUsdPer1m: number | null;
 }
@@ -50,16 +51,14 @@ export interface SurplusOfferWrite {
   model: string;
   apiKey: string;
   sellerBaseUrl: string;
-  inputUsdPer1m: number;
-  outputUsdPer1m: number;
+  costMultiplier: number;
   dailyCapUsd: number;
   payoutAddress: string;
   idempotencyKey: string;
 }
 
 export interface SurplusOfferPatch {
-  inputUsdPer1m: number;
-  outputUsdPer1m: number;
+  costMultiplier: number;
   dailyCapUsd: number;
   idempotencyKey: string;
 }
@@ -223,9 +222,8 @@ export class SurplusClient {
         model: input.model,
         api_key: input.apiKey,
         seller_base_url: input.sellerBaseUrl,
-        pricing_mode: "per_token",
-        price_input_per_1m: input.inputUsdPer1m,
-        price_output_per_1m: input.outputUsdPer1m,
+        pricing_mode: "cost_multiplier",
+        cost_multiplier: input.costMultiplier,
         cap_daily_usd: input.dailyCapUsd,
         payout_address: input.payoutAddress,
       }),
@@ -239,9 +237,8 @@ export class SurplusClient {
       method: "PATCH",
       headers: mutationHeaders(patch.idempotencyKey),
       body: JSON.stringify({
-        pricing_mode: "per_token",
-        price_input_per_1m: patch.inputUsdPer1m,
-        price_output_per_1m: patch.outputUsdPer1m,
+        pricing_mode: "cost_multiplier",
+        cost_multiplier: patch.costMultiplier,
         cap_daily_usd: patch.dailyCapUsd,
       }),
     });
@@ -387,6 +384,10 @@ function parseOffer(value: unknown, index: number): SurplusOffer {
     sellerBaseUrl: string(item.seller_base_url, `Surplus offer ${index}.seller_base_url`),
     status,
     capDailyUsd: optionalNonNegativeNumber(item.cap_daily_usd, `Surplus offer ${index}.cap_daily_usd`),
+    costMultiplierPpm: optionalMultiplierPpm(
+      item.cost_multiplier,
+      `Surplus offer ${index}.cost_multiplier`,
+    ),
     inputMicroUsdPer1m: optionalMicroUsd(item.price_input_per_1m, `Surplus offer ${index}.price_input_per_1m`),
     outputMicroUsdPer1m: optionalMicroUsd(item.price_output_per_1m, `Surplus offer ${index}.price_output_per_1m`),
   };
@@ -514,6 +515,18 @@ function nonNegativeNumber(value: unknown, field: string): number {
 function optionalNonNegativeNumber(value: unknown, field: string): number | null {
   if (value === null || value === undefined) return null;
   return nonNegativeNumber(value, field);
+}
+
+function optionalMultiplierPpm(value: unknown, field: string): number | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    throw new Error(`${field} must be a positive finite number`);
+  }
+  const ppm = Math.round(value * 1_000_000);
+  if (!Number.isSafeInteger(ppm) || ppm <= 0) {
+    throw new Error(`${field} cannot be represented at six decimal places`);
+  }
+  return ppm;
 }
 
 function sanitizedErrorSnippet(

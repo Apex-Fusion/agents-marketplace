@@ -4,7 +4,7 @@ export interface SurplusCompetitor {
   outputMicroUsdPer1m: number;
 }
 
-export interface SurplusPricePolicyInput {
+export interface SurplusMultiplierPolicyInput {
   upstreamInputMicroUsdPer1m: number;
   upstreamOutputMicroUsdPer1m: number;
   recoveryBps: number;
@@ -12,23 +12,23 @@ export interface SurplusPricePolicyInput {
   competitors: SurplusCompetitor[];
 }
 
-export interface SurplusPriceQuote {
+export interface SurplusMultiplierQuote {
+  costMultiplierPpm: number;
+  costMultiplier: number;
   inputMicroUsdPer1m: number;
   outputMicroUsdPer1m: number;
-  inputUsdPer1m: number;
-  outputUsdPer1m: number;
-  floorInputMicroUsdPer1m: number;
-  floorOutputMicroUsdPer1m: number;
+  floorMultiplierPpm: number;
   competitorId: string | null;
   competitive: boolean;
 }
 
 const BPS_SCALE = 10_000n;
+const PPM_SCALE = 1_000_000n;
 const MICRO_USD = 1_000_000;
 
-export function quoteSurplusPrice(
-  input: SurplusPricePolicyInput,
-): SurplusPriceQuote {
+export function quoteSurplusMultiplier(
+  input: SurplusMultiplierPolicyInput,
+): SurplusMultiplierQuote {
   positiveSafeInteger(
     input.upstreamInputMicroUsdPer1m,
     "upstream input price",
@@ -40,32 +40,50 @@ export function quoteSurplusPrice(
   boundedBps(input.recoveryBps, "recoveryBps", 1, 10_000);
   boundedBps(input.undercutBps, "undercutBps", 0, 9_999);
 
-  const floorInput = multiplyBpsCeil(
-    input.upstreamInputMicroUsdPer1m,
-    input.recoveryBps,
-  );
-  const floorOutput = multiplyBpsCeil(
-    input.upstreamOutputMicroUsdPer1m,
-    input.recoveryBps,
-  );
-
+  const floorMultiplierPpm = input.recoveryBps * 100;
   const competitor = cheapestCompetitor(input.competitors);
-  const candidateInput = competitor
-    ? undercut(competitor.inputMicroUsdPer1m, input.undercutBps)
-    : floorInput;
-  const candidateOutput = competitor
-    ? undercut(competitor.outputMicroUsdPer1m, input.undercutBps)
-    : floorOutput;
-  const quotedInput = Math.max(floorInput, candidateInput);
-  const quotedOutput = Math.max(floorOutput, candidateOutput);
+  const competitorMultiplierPpm = competitor
+    ? Math.min(
+        ratioPpm(
+          competitor.inputMicroUsdPer1m,
+          input.upstreamInputMicroUsdPer1m,
+        ),
+        ratioPpm(
+          competitor.outputMicroUsdPer1m,
+          input.upstreamOutputMicroUsdPer1m,
+        ),
+      )
+    : floorMultiplierPpm;
+  let undercutMultiplierPpm = Number(
+    BigInt(competitorMultiplierPpm) *
+      BigInt(10_000 - input.undercutBps) /
+      BPS_SCALE,
+  );
+  if (
+    input.undercutBps > 0 &&
+    undercutMultiplierPpm >= competitorMultiplierPpm
+  ) {
+    undercutMultiplierPpm = Math.max(1, competitorMultiplierPpm - 1);
+  }
+  const quotedMultiplierPpm = Math.max(
+    floorMultiplierPpm,
+    undercutMultiplierPpm,
+  );
+  const quotedInput = applyMultiplier(
+    input.upstreamInputMicroUsdPer1m,
+    quotedMultiplierPpm,
+  );
+  const quotedOutput = applyMultiplier(
+    input.upstreamOutputMicroUsdPer1m,
+    quotedMultiplierPpm,
+  );
 
   return {
+    costMultiplierPpm: quotedMultiplierPpm,
+    costMultiplier: quotedMultiplierPpm / Number(PPM_SCALE),
     inputMicroUsdPer1m: quotedInput,
     outputMicroUsdPer1m: quotedOutput,
-    inputUsdPer1m: quotedInput / MICRO_USD,
-    outputUsdPer1m: quotedOutput / MICRO_USD,
-    floorInputMicroUsdPer1m: floorInput,
-    floorOutputMicroUsdPer1m: floorOutput,
+    floorMultiplierPpm,
     competitorId: competitor?.id ?? null,
     competitive: competitor === null || (
       quotedInput < competitor.inputMicroUsdPer1m &&
@@ -119,17 +137,12 @@ function compareCompetitors(
   );
 }
 
-function undercut(value: number, bps: number): number {
-  const discounted = Number(
-    (BigInt(value) * BigInt(10_000 - bps)) / BPS_SCALE,
-  );
-  if (discounted >= value && value > 1) return value - 1;
-  return Math.max(1, discounted);
+function ratioPpm(numerator: number, denominator: number): number {
+  return Number(BigInt(numerator) * PPM_SCALE / BigInt(denominator));
 }
 
-function multiplyBpsCeil(value: number, bps: number): number {
-  const numerator = BigInt(value) * BigInt(bps);
-  return Number((numerator + BPS_SCALE - 1n) / BPS_SCALE);
+function applyMultiplier(value: number, multiplierPpm: number): number {
+  return Number(BigInt(value) * BigInt(multiplierPpm) / PPM_SCALE);
 }
 
 function positiveSafeInteger(value: number, field: string): void {

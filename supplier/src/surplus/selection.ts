@@ -4,10 +4,10 @@ import type {
   SurplusOrderBookOffer,
 } from "./client.js";
 import {
-  quoteSurplusPrice,
+  quoteSurplusMultiplier,
   usdPer1mToMicroUsd,
   type SurplusCompetitor,
-  type SurplusPriceQuote,
+  type SurplusMultiplierQuote,
 } from "./policy.js";
 
 export interface SurplusModelCandidate {
@@ -17,7 +17,7 @@ export interface SurplusModelCandidate {
   upstreamOutputMicroUsdPer1m: number;
   requests24h: number;
   volume24h: number;
-  summaryQuote: SurplusPriceQuote;
+  summaryQuote: SurplusMultiplierQuote;
 }
 
 export function selectSurplusModelCandidates(
@@ -54,7 +54,7 @@ export function selectSurplusModelCandidates(
       model.outputUsdPer1m,
       `${model.model} discovery output price`,
     );
-    const quote = quoteSurplusPrice({
+    const quote = quoteSurplusMultiplier({
       upstreamInputMicroUsdPer1m: inputPrice,
       upstreamOutputMicroUsdPer1m: outputPrice,
       recoveryBps,
