@@ -81,6 +81,17 @@ describe("routing/selectSupplier", () => {
     expect(got.map((candidate) => candidate.supplierPkh)).toEqual(["s2"]);
   });
 
+  it("orders the preferred supplier first and keeps fallback candidates", async () => {
+    const got = await selectCandidates({
+      indexerUrl: "http://ix",
+      model: "m",
+      capabilityId: "llm.text.generate.v1",
+      preferredSupplierPkh: "s2",
+      fetchFn: jsonResponse(rows),
+    });
+    expect(got.map((candidate) => candidate.supplierPkh)).toEqual(["s2", "s1"]);
+  });
+
   it("routes chat.v1 separately", async () => {
     const got = await selectCandidates({
       indexerUrl: "http://ix",

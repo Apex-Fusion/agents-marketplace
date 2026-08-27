@@ -28,6 +28,7 @@
 
 const HEX64_RE = /^[0-9a-fA-F]{64}$/;
 const POS_INT_RE = /^[1-9]\d*$/;
+const PKH_RE = /^[0-9a-fA-F]{56}$/;
 
 export interface GatewayConfig {
   masterKeyHex: string;
@@ -56,6 +57,8 @@ export interface GatewayConfig {
   /** Capability id the /v1/ocr/extract route escrows against. Model-scoped
    * per the marketplace convention (one model, one id). Env: OCR_CAPABILITY_ID. */
   ocrCapabilityId: string;
+  /** Seller preferred for matching one-shot models. Other suppliers remain fallback. */
+  preferredSupplierPkh?: string;
 }
 
 function requireField(env: Record<string, string | undefined>, name: string): string {
@@ -115,6 +118,17 @@ export function loadConfig(env: Record<string, string | undefined>): GatewayConf
     }
     networkId = networkIdStr === "1" ? 1 : 0;
   }
+  const preferredSupplierPkhRaw =
+    (env.GATEWAY_PREFERRED_SUPPLIER_PKH ?? "").trim();
+  if (
+    preferredSupplierPkhRaw !== "" &&
+    !PKH_RE.test(preferredSupplierPkhRaw)
+  ) {
+    throw new Error(
+      "loadConfig: GATEWAY_PREFERRED_SUPPLIER_PKH must be a 28-byte hex payment-key hash",
+    );
+  }
+
 
   return {
     masterKeyHex,
@@ -142,6 +156,9 @@ export function loadConfig(env: Record<string, string | undefined>): GatewayConf
     walletHealthIntervalMs: posInt(env, "WALLET_HEALTH_INTERVAL_MS", 10 * 60 * 1000),
     sdkRegistryMax: posInt(env, "SDK_REGISTRY_MAX", 500),
     ocrCapabilityId: env.OCR_CAPABILITY_ID ?? "ocr.page.extract.chandra-ocr-2.v1",
+    preferredSupplierPkh: preferredSupplierPkhRaw === ""
+      ? undefined
+      : preferredSupplierPkhRaw.toLowerCase(),
     corsOrigins: (env.GATEWAY_CORS_ORIGINS ?? "")
       .split(",")
       .map((o) => o.trim().replace(/\/+$/, ""))

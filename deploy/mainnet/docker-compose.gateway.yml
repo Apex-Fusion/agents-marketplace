@@ -34,6 +34,8 @@ services:
       # Accept/Reclaim/Submit. Same values the buyer/suppliers use on mainnet.
       ESCROW_REF_UTXO: c8d84c6d67ec67a1efe5e9c6c06d53020e05d1bb96d1c55ecb1eb7d5010c4d54#0
       ADVERT_REF_UTXO: c8d84c6d67ec67a1efe5e9c6c06d53020e05d1bb96d1c55ecb1eb7d5010c4d54#1
+      # Prefer the balance-aware reseller for matching models; fall back when unavailable.
+      GATEWAY_PREFERRED_SUPPLIER_PKH: c447d050e23bc3c38ff8267047c6f8c978970e7176e2af48f316a7fb
       # Browser Origins allowed to call the gateway cross-origin. The buyer
       # frontend's "API Keys" page (served from marketplace.vector…) POSTs to
       # /signup here. Comma-separated; empty disables CORS entirely.

@@ -60,6 +60,8 @@ export interface SelectSupplierOpts {
   capabilityId: string;
   /** Optional exact seller identity pin for deterministic agent routing. */
   supplierPkh?: string;
+  /** Preferred seller ordered first when it is eligible. */
+  preferredSupplierPkh?: string;
   fetchFn?: typeof globalThis.fetch;
   /** supplier_pkhs eligible regardless of polled status — used after the demo
    * executor frees a supplier the indexer poller (~20 s cadence) still reports
@@ -111,8 +113,16 @@ export async function selectCandidates(opts: SelectSupplierOpts): Promise<Suppli
       status: raw.status,
     });
   }
-  // Prefer known-free over unknown so we route to confirmed-available first.
-  candidates.sort((a, b) => (a.status === "free" ? 0 : 1) - (b.status === "free" ? 0 : 1));
+  // Prefer the configured seller, then known-free over unknown.
+  candidates.sort((left, right) => {
+    const leftRank =
+      (left.supplierPkh === opts.preferredSupplierPkh ? 0 : 2) +
+      (left.status === "free" ? 0 : 1);
+    const rightRank =
+      (right.supplierPkh === opts.preferredSupplierPkh ? 0 : 2) +
+      (right.status === "free" ? 0 : 1);
+    return leftRank - rightRank;
+  });
   return candidates;
 }
 
