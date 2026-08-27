@@ -71,6 +71,35 @@ describe("SurplusClient", () => {
     ]);
   });
 
+  it("normalizes unsupported discovery rows with null pricing as ineligible", async () => {
+    const client = new SurplusClient({
+      apiBaseUrl: "https://api.surplusintelligence.ai",
+      sellerApiKey: SELLER_KEY,
+      timeoutMs: 1_000,
+      fetchFn: async () => ndjsonResponse([JSON.stringify({
+        model: "unsupported",
+        supported: false,
+        pricing: null,
+        metadata: {
+          provider_model_id: "vendor/unsupported",
+          model_type: null,
+          availability_status: null,
+        },
+      })]),
+    });
+
+    await expect(
+      client.discoverModels(PROVIDER_KEY, "https://openrouter.ai/api/v1"),
+    ).resolves.toEqual([expect.objectContaining({
+      model: "unsupported",
+      inputUsdPer1m: 0,
+      outputUsdPer1m: 0,
+      priceUnit: "unknown",
+      modelType: "unknown",
+      availabilityStatus: "unknown",
+    })]);
+  });
+
   it("rejects one malformed discovery line without returning a partial catalog", async () => {
     const client = new SurplusClient({
       apiBaseUrl: "https://api.surplusintelligence.ai",

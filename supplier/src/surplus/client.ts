@@ -380,16 +380,38 @@ function parseOffer(value: unknown, index: number): SurplusOffer {
 
 function parseDiscoveredModel(value: unknown, index: number): SurplusDiscoveredModel {
   const item = record(value, `Surplus discovery item ${index}`);
-  const pricing = record(item.pricing, `Surplus discovery item ${index}.pricing`);
-  const metadata = record(item.metadata, `Surplus discovery item ${index}.metadata`);
+  const model = string(item.model, `Surplus discovery item ${index}.model`);
+  const supported = boolean(
+    item.supported,
+    `Surplus discovery item ${index}.supported`,
+  );
+  const pricing = optionalRecord(item.pricing);
+  const metadata = optionalRecord(item.metadata) ?? {};
   return {
-    model: string(item.model, `Surplus discovery item ${index}.model`),
-    supported: boolean(item.supported, `Surplus discovery item ${index}.supported`),
-    inputUsdPer1m: nonNegativeNumber(pricing.input_per_1m, `Surplus discovery item ${index}.pricing.input_per_1m`),
-    outputUsdPer1m: nonNegativeNumber(pricing.output_per_1m, `Surplus discovery item ${index}.pricing.output_per_1m`),
-    priceUnit: optionalString(pricing.price_unit) ?? "M",
-    priceVariable: pricing.price_variable === undefined ? false : boolean(pricing.price_variable, `Surplus discovery item ${index}.pricing.price_variable`),
-    providerModelId: string(metadata.provider_model_id, `Surplus discovery item ${index}.metadata.provider_model_id`),
+    model,
+    supported,
+    inputUsdPer1m: pricing
+      ? optionalNonNegativeNumber(
+          pricing.input_per_1m,
+          `Surplus discovery item ${index}.pricing.input_per_1m`,
+        ) ?? 0
+      : 0,
+    outputUsdPer1m: pricing
+      ? optionalNonNegativeNumber(
+          pricing.output_per_1m,
+          `Surplus discovery item ${index}.pricing.output_per_1m`,
+        ) ?? 0
+      : 0,
+    priceUnit: pricing
+      ? optionalString(pricing.price_unit) ?? "M"
+      : "unknown",
+    priceVariable: pricing?.price_variable === undefined
+      ? false
+      : boolean(
+          pricing.price_variable,
+          `Surplus discovery item ${index}.pricing.price_variable`,
+        ),
+    providerModelId: optionalString(metadata.provider_model_id) ?? "",
     modelType: optionalString(metadata.model_type) ?? "unknown",
     availabilityStatus:
       optionalString(metadata.availability_status) ?? "unknown",
@@ -446,6 +468,14 @@ function record(value: unknown, field: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+
+function optionalRecord(value: unknown): Record<string, unknown> | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Optional Surplus object has the wrong type");
+  }
+  return value as Record<string, unknown>;
+}
 function string(value: unknown, field: string): string {
   if (typeof value !== "string" || value === "") throw new Error(`${field} must be a non-empty string`);
   return value;

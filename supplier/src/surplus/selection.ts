@@ -33,6 +33,7 @@ export function selectSurplusModelCandidates(
     if (
       !market ||
       !model.supported ||
+      model.providerModelId === "" ||
       model.availabilityStatus !== "available" ||
       model.modelType !== "text" ||
       model.priceUnit !== "M" ||
