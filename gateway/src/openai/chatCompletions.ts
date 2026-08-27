@@ -96,6 +96,7 @@ async function runOneShot(
     indexerUrl: config.indexerUrl,
     model: parsed.model,
     capabilityId: CAPABILITY,
+    supplierPkh: parsed.supplierPkh,
     fetchFn,
   });
   if (candidates.length === 0) {

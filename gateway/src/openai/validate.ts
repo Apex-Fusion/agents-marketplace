@@ -13,6 +13,7 @@ export interface ParsedChatRequest {
   tools?: unknown[];
   toolChoice?: unknown;
   publicPreview: boolean;
+  supplierPkh?: string;
 }
 
 const ROLES = new Set(["system", "user", "assistant"]);
@@ -92,6 +93,38 @@ export function parseChatRequest(body: unknown, opts?: { allowTools?: boolean })
   }
   const publicPreview = b.public_preview === true;
 
+  let supplierPkh: string | undefined;
+  if (b.x_vector !== undefined) {
+    if (
+      typeof b.x_vector !== "object" ||
+      b.x_vector === null ||
+      Array.isArray(b.x_vector)
+    ) {
+      throw badRequest("invalid_x_vector", "`x_vector` must be an object");
+    }
+    const requested = (b.x_vector as Record<string, unknown>).supplier_pkh;
+    if (
+      requested !== undefined &&
+      (typeof requested !== "string" || !/^[0-9a-fA-F]{56}$/.test(requested))
+    ) {
+      throw badRequest(
+        "invalid_supplier_pkh",
+        "`x_vector.supplier_pkh` must be a 28-byte hex payment-key hash",
+      );
+    }
+    if (typeof requested === "string") supplierPkh = requested.toLowerCase();
+  }
+
+
   const stream = b.stream === true;
-  return { model, messages, maxTokens, stream, tools, toolChoice, publicPreview };
+  return {
+    model,
+    messages,
+    maxTokens,
+    stream,
+    tools,
+    toolChoice,
+    publicPreview,
+    supplierPkh,
+  };
 }

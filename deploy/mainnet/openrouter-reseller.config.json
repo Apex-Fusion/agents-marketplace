@@ -2,7 +2,7 @@
   "networkId": 1,
   "ogmiosUrl": "https://ogmios.vector.mainnet.apexfusion.org",
   "endpointUrl": "https://mp-suppliers-openrouter-reseller.vector.apexfusion.org",
-  "marketplaceModel": "vector/deepseek-v4-flash-spot",
+  "marketplaceModel": "deepseek/deepseek-v4-flash",
   "openRouterModel": "deepseek/deepseek-v4-flash",
   "maxInputTokens": 8192,
   "maxOutputTokens": 512,

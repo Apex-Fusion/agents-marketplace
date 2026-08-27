@@ -58,6 +58,8 @@ export interface SelectSupplierOpts {
    * already pins the model). */
   model: string;
   capabilityId: string;
+  /** Optional exact seller identity pin for deterministic agent routing. */
+  supplierPkh?: string;
   fetchFn?: typeof globalThis.fetch;
   /** supplier_pkhs eligible regardless of polled status — used after the demo
    * executor frees a supplier the indexer poller (~20 s cadence) still reports
@@ -86,6 +88,9 @@ export async function selectCandidates(opts: SelectSupplierOpts): Promise<Suppli
   for (const raw of body as SupplierView[]) {
     if (raw.capability_id !== opts.capabilityId) continue;
     if (opts.model !== "" && raw.model !== opts.model) continue;
+    if (opts.supplierPkh !== undefined && raw.supplier_pkh !== opts.supplierPkh) {
+      continue;
+    }
     if (raw.advert_status !== "Active") continue;
     if (raw.status !== "free" && raw.status !== "unknown" && !opts.ignoreStatusFor?.has(raw.supplier_pkh)) {
       continue;

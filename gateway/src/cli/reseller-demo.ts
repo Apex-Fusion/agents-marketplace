@@ -62,6 +62,23 @@ export async function runResellerDemo(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), options.timeoutMs);
   try {
+    const sellerResponse = await fetch(`${options.dashboardUrl}/api/status`, {
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    const sellerBody = await sellerResponse.json().catch(() => null) as
+      | Record<string, unknown>
+      | null;
+    if (!sellerResponse.ok) {
+      throw new Error(
+        `seller status returned HTTP ${sellerResponse.status}`,
+      );
+    }
+    const supplierPkh = sellerBody?.supplier_pkh;
+    if (typeof supplierPkh !== "string" || !/^[0-9a-fA-F]{56}$/.test(supplierPkh)) {
+      throw new Error("seller status omitted a valid supplier_pkh");
+    }
+
     const response = await fetch(
       `${options.gatewayUrl}/openai/v1/chat/completions`,
       {
@@ -76,6 +93,7 @@ export async function runResellerDemo(
           max_tokens: options.maxTokens,
           stream: false,
           public_preview: true,
+          x_vector: { supplier_pkh: supplierPkh },
         }),
         signal: controller.signal,
       },
@@ -101,6 +119,7 @@ export async function runResellerDemo(
       completion_id: body?.id ?? null,
       escrow_ref: escrowRef,
       model: body?.model ?? options.model,
+      supplier_pkh: supplierPkh,
       upstream_cost_usd: job.upstream_cost_usd,
       ap3x_payout: job.ap3x_payout,
       dashboard_url: options.dashboardUrl,

@@ -298,14 +298,6 @@ async function findOrPostAdvert(
       // Ignore unrelated or malformed script outputs.
     }
   }
-  const otherSeller = sameModel.find(
-    (candidate) => candidate.datum.supplier_pkh !== expected.supplier_pkh,
-  );
-  if (otherSeller) {
-    throw new Error(
-      `marketplace model ${expected.model} is already advertised by another supplier`,
-    );
-  }
   const own = sameModel.filter(
     (candidate) => candidate.datum.supplier_pkh === expected.supplier_pkh,
   );

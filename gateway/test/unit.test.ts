@@ -70,6 +70,17 @@ describe("routing/selectSupplier", () => {
     expect(got[0].priceLovelace).toBe(2n);
   });
 
+  it("pins routing to an exact supplier when requested", async () => {
+    const got = await selectCandidates({
+      indexerUrl: "http://ix",
+      model: "m",
+      capabilityId: "llm.text.generate.v1",
+      supplierPkh: "s2",
+      fetchFn: jsonResponse(rows),
+    });
+    expect(got.map((candidate) => candidate.supplierPkh)).toEqual(["s2"]);
+  });
+
   it("routes chat.v1 separately", async () => {
     const got = await selectCandidates({
       indexerUrl: "http://ix",
@@ -117,6 +128,20 @@ describe("openai/validate", () => {
     expect(p.model).toBe("m");
     expect(p.maxTokens).toBe(50);
     expect(p.stream).toBe(false);
+  });
+  it("accepts and validates a Vector supplier pin", () => {
+    const supplierPkh = "a".repeat(56);
+    const parsed = parseChatRequest({
+      model: "m",
+      messages: [{ role: "user", content: "hi" }],
+      x_vector: { supplier_pkh: supplierPkh },
+    });
+    expect(parsed.supplierPkh).toBe(supplierPkh);
+    expect(() => parseChatRequest({
+      model: "m",
+      messages: [{ role: "user", content: "hi" }],
+      x_vector: { supplier_pkh: "bad" },
+    })).toThrow(GatewayError);
   });
   it("rejects tools/functions", () => {
     expect(() => parseChatRequest({ model: "m", messages: [{ role: "user", content: "x" }], tools: [] })).toThrow(GatewayError);
