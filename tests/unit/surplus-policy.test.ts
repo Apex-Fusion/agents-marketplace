@@ -126,7 +126,7 @@ describe("Surplus multi-model selection", () => {
       .toBe("alpha-model");
   });
 
-  it("excludes unhealthy, untrusted, unavailable, and self offers", () => {
+  it("prices against healthy available offers while excluding self", () => {
     const base: SurplusOrderBookOffer = {
       id: "external",
       seller: "0x2222222222222222222222222222222222222222",
@@ -149,6 +149,9 @@ describe("Surplus multi-model selection", () => {
     ];
 
     expect(eligibleCompetitors(offers, seller, new Set(["managed-id"])))
-      .toEqual([{ id: "external", inputMicroUsdPer1m: 4_000, outputMicroUsdPer1m: 8_000 }]);
+      .toEqual([
+        { id: "external", inputMicroUsdPer1m: 4_000, outputMicroUsdPer1m: 8_000 },
+        { id: "untrusted", inputMicroUsdPer1m: 4_000, outputMicroUsdPer1m: 8_000 },
+      ]);
   });
 });

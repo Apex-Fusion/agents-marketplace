@@ -89,7 +89,6 @@ export function eligibleCompetitors(
     .filter((offer) =>
       offer.available &&
       offer.healthy &&
-      offer.trusted &&
       offer.seller !== normalizedWallet &&
       !ownOfferIds.has(offer.id)
     )
