@@ -153,7 +153,7 @@ export class SurplusClient {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ api_key: apiKey, base_url: baseUrl }),
-    });
+    }, true, [apiKey]);
     if (response.text.trim() === "") {
       throw new Error("Surplus discovery returned an empty body");
     }
@@ -209,7 +209,7 @@ export class SurplusClient {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ api_key: apiKey, base_url: baseUrl, model }),
-    });
+    }, true, [apiKey]);
     const root = record(body, "Surplus connection response");
     if (root.ok !== true) throw new Error("Surplus provider connection test failed");
     return nonNegativeNumber(root.latency_ms, "Surplus connection latency_ms");
@@ -229,7 +229,7 @@ export class SurplusClient {
         cap_daily_usd: input.dailyCapUsd,
         payout_address: input.payoutAddress,
       }),
-    });
+    }, true, [input.apiKey]);
     const root = record(body, "Surplus create offer response");
     return offerId(root, "Surplus create offer response");
   }
@@ -282,8 +282,14 @@ export class SurplusClient {
     path: string,
     init: RequestInit = {},
     authenticated = true,
+    additionalSecrets: readonly string[] = [],
   ): Promise<unknown> {
-    const response = await this.requestText(path, init, authenticated);
+    const response = await this.requestText(
+      path,
+      init,
+      authenticated,
+      additionalSecrets,
+    );
     if (response.text === "") return {};
     try {
       return JSON.parse(response.text);
@@ -296,6 +302,7 @@ export class SurplusClient {
     path: string,
     init: RequestInit = {},
     authenticated = true,
+    additionalSecrets: readonly string[] = [],
   ): Promise<{ status: number; text: string }> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
@@ -311,7 +318,14 @@ export class SurplusClient {
       const text = await readBoundedText(response, controller);
       if (!response.ok) {
         throw new SurplusHttpError(
-          `Surplus ${path} returned HTTP ${response.status}`,
+          `Surplus ${path} returned HTTP ${response.status}${
+            text
+              ? `: ${sanitizedErrorSnippet(
+                  text,
+                  [this.sellerApiKey, ...additionalSecrets],
+                )}`
+              : ""
+          }`,
           response.status,
           response.headers.get("retry-after"),
         );
@@ -500,6 +514,20 @@ function nonNegativeNumber(value: unknown, field: string): number {
 function optionalNonNegativeNumber(value: unknown, field: string): number | null {
   if (value === null || value === undefined) return null;
   return nonNegativeNumber(value, field);
+}
+
+function sanitizedErrorSnippet(
+  value: string,
+  secrets: readonly string[],
+): string {
+  let sanitized = value;
+  for (const secret of secrets) {
+    if (secret !== "") sanitized = sanitized.replaceAll(secret, "[redacted]");
+  }
+  return sanitized
+    .replace(/(?:si_seller_|sk-or-v1-)[A-Za-z0-9_-]+/g, "[redacted]")
+    .replace(/[\r\n]+/g, " ")
+    .slice(0, 300);
 }
 
 function positiveSafeInteger(value: unknown, field: string): number {
