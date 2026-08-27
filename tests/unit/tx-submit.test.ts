@@ -104,6 +104,28 @@ describe("buildSubmitTx() — happy path", () => {
     const newUtxo = await chain.queryUtxo({ txHash: result.expectedTxHash, index: 0 });
     expect(newUtxo!.lovelace).toBe(TOTAL_LOCKED);
   });
+  it("journals signed Submit CBOR before broadcast", async () => {
+    const supplier = buildSupplierWalletKey();
+    const utxo = buildClaimedEscrowUtxo();
+    let hookCalled = false;
+    const result = await buildSubmitTx({
+      chain,
+      supplierKey: supplier,
+      escrowRef: utxo.ref,
+      receiptHash: VALID_RECEIPT_HASH,
+      beforeSubmit: async (built) => {
+        hookCalled = true;
+        expect(
+          await chain.queryUtxo({ txHash: built.expectedTxHash, index: 0 }),
+        ).toBeNull();
+      },
+    });
+    expect(hookCalled).toBe(true);
+    expect(
+      await chain.queryUtxo({ txHash: result.expectedTxHash, index: 0 }),
+    ).not.toBeNull();
+  });
+
 });
 
 // ─── Rejection: double-submit ────────────────────────────────────────────────

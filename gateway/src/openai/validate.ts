@@ -12,6 +12,7 @@ export interface ParsedChatRequest {
   stream: boolean;
   tools?: unknown[];
   toolChoice?: unknown;
+  publicPreview: boolean;
 }
 
 const ROLES = new Set(["system", "user", "assistant"]);
@@ -83,6 +84,14 @@ export function parseChatRequest(body: unknown, opts?: { allowTools?: boolean })
     maxTokens = mt;
   }
 
+  if (b.public_preview !== undefined && typeof b.public_preview !== "boolean") {
+    throw badRequest(
+      "invalid_public_preview",
+      "`public_preview` must be a boolean when provided",
+    );
+  }
+  const publicPreview = b.public_preview === true;
+
   const stream = b.stream === true;
-  return { model, messages, maxTokens, stream, tools, toolChoice };
+  return { model, messages, maxTokens, stream, tools, toolChoice, publicPreview };
 }

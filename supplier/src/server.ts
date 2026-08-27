@@ -38,6 +38,7 @@ import type { ChainProvider, OutputReference } from "@marketplace/shared/chain";
 import { decodeAdvertDatum, decodeEscrowDatum, canonicalize } from "@marketplace/shared/cbor";
 import type { AdvertDatum, EscrowDatum } from "@marketplace/shared/cbor";
 import type { ChatMessage, WalletKey } from "@marketplace/shared/tx";
+import { chatInputTokenUpperBound } from "@marketplace/shared/tx";
 import {
   buildClaimTx,
   chatSessionPromptHash,
@@ -62,6 +63,9 @@ import { endChatSession, type EndChatSessionDeps } from "./chatSessionRunner.js"
 import { callOpenAiStream } from "./openai.js";
 import { healthzRouter } from "./routes/healthz.js";
 import { triggerOnFailureConsolidate } from "./walletHealth.js";
+import type { ResellerRuntime } from "./reseller/runtime.js";
+import { formatUsdNanos } from "./reseller/money.js";
+import { renderResellerDashboardPage } from "./reseller/dashboardPage.js";
 
 export interface SupplierDeps {
   chain: ChainProvider;
@@ -72,6 +76,8 @@ export interface SupplierDeps {
   jobs?: JobStore;
   /** Optional: defaults to a fresh ChatSessionStore (chat-session capability). */
   chatSessions?: ChatSessionStore;
+  /** Optional balance-aware resale runtime. Absent for every legacy supplier. */
+  reseller?: ResellerRuntime;
 }
 
 const ESCROW_REF_RE = /^[0-9a-fA-F]{64}#(?:0|[1-9]\d*)$/;
@@ -102,6 +108,7 @@ interface ResolvedDeps {
   supplierKey: WalletKey;
   jobs: JobStore;
   chatSessions: ChatSessionStore;
+  reseller?: ResellerRuntime;
 }
 
 function makeCapabilityHandler(deps: ResolvedDeps) {
@@ -138,6 +145,9 @@ function makeCapabilityHandler(deps: ResolvedDeps) {
         supplier_pkh: datum.supplier_pkh,
         // SPEC FIX 2026-04-25: pub_key_hex required for buyer-side receipt verification
         pub_key_hex: deps.supplierKey.pubKeyHex,
+        ...(deps.reseller
+          ? { max_input_tokens: deps.reseller.maxInputTokens }
+          : {}),
       });
     } catch (err) {
       next(err);
@@ -151,14 +161,26 @@ function makeCapabilityHandler(deps: ResolvedDeps) {
 function makeStatusHandler(deps: ResolvedDeps) {
   return (_req: Request, res: Response) => {
     const snap = deps.state.snapshot();
+    const effectiveStatus = deps.reseller?.effectiveStatus() ?? snap.status;
     const payload: Record<string, unknown> = {
-      status: snap.status,
+      status: effectiveStatus,
       last_seen: snap.lastSeenIso,
       active_sessions: snap.activeSessions,
       max_sessions: snap.maxSessions,
     };
     if (snap.status === "working" && snap.currentEscrowRef) {
       payload.current_escrow_ref = snap.currentEscrowRef;
+    }
+    if (deps.reseller) {
+      const capacity = deps.reseller.capacitySnapshot();
+      payload.capacity = {
+        provider: capacity.provider,
+        reason: effectiveStatus === "working" ? "working" : capacity.reason,
+        sellable_usd: formatUsdNanos(capacity.sellableUsdNanos),
+        checked_at: capacity.checkedAtMs === null
+          ? null
+          : new Date(capacity.checkedAtMs).toISOString(),
+      };
     }
     return res.status(200).json(payload);
   };
@@ -202,6 +224,8 @@ function makeChatHandler(deps: ResolvedDeps) {
     // Slot held by THIS request (null until acquired / after hand-off to the
     // job runner) — the catch-all must only release its own acquisition.
     let acquiredRef: string | null = null;
+    let evidenceRecorded = false;
+    let evidenceEscrowRef: string | null = null;
     try {
       // ── 1. Header validation ──────────────────────────────────────────
       const headerVal = req.header("X-Escrow-Ref");
@@ -214,6 +238,7 @@ function makeChatHandler(deps: ResolvedDeps) {
           'X-Escrow-Ref must match "<64-hex>#<int>"');
       }
       const escrowRefStr = `${escrowRef.txHash}#${escrowRef.index}`;
+      evidenceEscrowRef = escrowRefStr;
 
       // ── 2. Body shape validation ─────────────────────────────────────
       const body = (req.body ?? {}) as ChatBody;
@@ -240,6 +265,18 @@ function makeChatHandler(deps: ResolvedDeps) {
         }
       }
       const validatedMessages = messages as Array<{ role: "system" | "user" | "assistant"; content: string }>;
+      if (deps.reseller) {
+        const inputUnits = chatInputTokenUpperBound(validatedMessages);
+        if (inputUnits > deps.reseller.maxInputTokens) {
+          return jsonError(
+            res,
+            413,
+            "input_cap_exceeded",
+            `input bound ${inputUnits} exceeds supplier cap ${deps.reseller.maxInputTokens}`,
+          );
+        }
+      }
+
 
       // ── 3. Resolve advert ────────────────────────────────────────────
       const advertResult = await fetchActiveAdvert(deps);
@@ -314,6 +351,28 @@ function makeChatHandler(deps: ResolvedDeps) {
         return jsonError(res, 408, "past_deliver_by",
           `now ${nowMs} >= deliver_by ${escrowDatum.deliver_by}`);
       }
+      if (deps.reseller) {
+        let capacity;
+        try {
+          capacity = await deps.reseller.refreshCapacity();
+        } catch {
+          return jsonError(
+            res,
+            503,
+            "capacity_unavailable",
+            "provider capacity or evidence database is unavailable",
+          );
+        }
+        if (!capacity.canServe) {
+          return jsonError(
+            res,
+            503,
+            "capacity_unavailable",
+            `provider capacity is unavailable (${capacity.reason})`,
+          );
+        }
+      }
+
 
       // ── 8. Acquire session slot ──────────────────────────────────────
       if (!deps.state.tryAcquire(escrowRefStr)) {
@@ -322,6 +381,26 @@ function makeChatHandler(deps: ResolvedDeps) {
       acquiredRef = escrowRefStr;
       // From here on, every error path MUST release the slot until the
       // runner takes ownership of it.
+      if (deps.reseller) {
+        try {
+          await deps.reseller.recordReceived(
+            escrowRefStr,
+            validatedMessages,
+            req.header("X-Vector-Public-Preview") === "1",
+          );
+          evidenceRecorded = true;
+        } catch {
+          deps.state.release(escrowRefStr);
+          acquiredRef = null;
+          return jsonError(
+            res,
+            503,
+            "evidence_unavailable",
+            "reseller evidence database is unavailable",
+          );
+        }
+      }
+
 
       // ── 9+10. Claim tx: build + confirm as ONE wallet critical section ─
       // (splitting them would let another wallet spend coin-select mid-flight)
@@ -343,7 +422,12 @@ function makeChatHandler(deps: ResolvedDeps) {
         }
         return { kind: "ok" as const, built };
       });
+      const failEvidence = async (reason: string): Promise<void> => {
+        if (!evidenceRecorded || !deps.reseller) return;
+        await deps.reseller.recordFailed(escrowRefStr, reason).catch(() => undefined);
+      };
       if (claimOutcome.kind === "build_failed") {
+        await failEvidence("claim_submit_failed");
         deps.state.release(escrowRefStr);
         acquiredRef = null;
         // Backstop the periodic wallet-health ticker: most Claim build failures
@@ -359,6 +443,7 @@ function makeChatHandler(deps: ResolvedDeps) {
           `Claim tx submit failed: ${(claimOutcome.err as Error).message}`);
       }
       if (claimOutcome.kind === "await_failed") {
+        await failEvidence("claim_confirmation_timeout");
         deps.state.release(escrowRefStr);
         acquiredRef = null;
         return jsonError(res, 504, "claim_timeout",
@@ -372,6 +457,32 @@ function makeChatHandler(deps: ResolvedDeps) {
         index: 0,
       };
       const jobId = deps.jobs.create(escrowRefStr);
+      if (deps.reseller) {
+        try {
+          await deps.reseller.recordClaimed(
+            escrowRefStr,
+            claimResult.expectedTxHash,
+            jobId,
+          );
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          deps.jobs.fail(jobId, {
+            httpStatus: 503,
+            reason: "evidence_unavailable",
+            message,
+          });
+          deps.state.release(escrowRefStr);
+          acquiredRef = null;
+          await failEvidence("claim_record_failed");
+          return jsonError(
+            res,
+            503,
+            "evidence_unavailable",
+            "Claim confirmed but evidence persistence failed",
+          );
+        }
+      }
+
 
       // Slot release now happens inside runChatJob's finally.
       acquiredRef = null;
@@ -382,6 +493,7 @@ function makeChatHandler(deps: ResolvedDeps) {
           config: deps.config,
           supplierKey: deps.supplierKey,
           jobs: deps.jobs,
+          reseller: deps.reseller,
         },
         jobId,
         escrowRef: escrowRefStr,
@@ -400,6 +512,11 @@ function makeChatHandler(deps: ResolvedDeps) {
     } catch (err) {
       if (acquiredRef) {
         try { deps.state.release(acquiredRef); } catch { /* ignore */ }
+      }
+      if (evidenceRecorded && deps.reseller && evidenceEscrowRef) {
+        await deps.reseller
+          .recordFailed(evidenceEscrowRef, err instanceof Error ? err.message : String(err))
+          .catch(() => undefined);
       }
       next(err);
       return;
@@ -1383,6 +1500,7 @@ export function createApp(deps: SupplierDeps): Application {
     supplierKey: deps.supplierKey,
     jobs: deps.jobs ?? new JobStore(),
     chatSessions: deps.chatSessions ?? new ChatSessionStore(),
+    reseller: deps.reseller,
   };
 
   const app = express();
@@ -1396,6 +1514,41 @@ export function createApp(deps: SupplierDeps): Application {
   // /healthz is mounted FIRST and uses no deps — it must succeed regardless
   // of chain/state/config (independent of /status free/working/offline).
   app.use(healthzRouter());
+  if (resolved.reseller) {
+    app.get("/reseller", (_req: Request, res: Response) => {
+      res.setHeader("Cache-Control", "no-store");
+      res.type("html").send(renderResellerDashboardPage());
+    });
+    app.get("/reseller/api/status", async (_req: Request, res: Response) => {
+      res.setHeader("Cache-Control", "no-store");
+      try {
+        res.status(200).json(await resolved.reseller!.publicState());
+      } catch {
+        jsonError(
+          res,
+          503,
+          "evidence_unavailable",
+          "reseller evidence database is unavailable",
+        );
+      }
+    });
+    app.get("/reseller/api/jobs", async (req: Request, res: Response) => {
+      res.setHeader("Cache-Control", "no-store");
+      const parsed = Number(req.query.limit ?? 50);
+      const limit = Number.isSafeInteger(parsed) ? parsed : 50;
+      try {
+        res.status(200).json({ jobs: await resolved.reseller!.publicJobs(limit) });
+      } catch {
+        jsonError(
+          res,
+          503,
+          "evidence_unavailable",
+          "reseller evidence database is unavailable",
+        );
+      }
+    });
+  }
+
 
   app.get("/capability", makeCapabilityHandler(resolved));
   app.get("/status", makeStatusHandler(resolved));

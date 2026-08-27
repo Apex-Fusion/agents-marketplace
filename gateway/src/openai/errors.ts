@@ -71,6 +71,22 @@ export function toGatewayError(err: unknown): GatewayError {
     return new GatewayError(502, "server_error", "indexer_error", `indexer error: ${err.reason}`);
   }
   if (err instanceof TxConstructionError) {
+    if (err.reason === "input_cap_exceeded") {
+      return new GatewayError(
+        400,
+        "invalid_request_error",
+        "input_cap_exceeded",
+        err.message,
+      );
+    }
+    if (err.reason === "supplier_preflight_failed") {
+      return new GatewayError(
+        503,
+        "server_error",
+        "supplier_preflight_failed",
+        err.message,
+      );
+    }
     return new GatewayError(502, "server_error", "escrow_failed", `escrow build failed: ${err.reason}`);
   }
   const message = err instanceof Error ? err.message : String(err);

@@ -30,6 +30,7 @@ import type { AdvertDatum, EscrowDatum } from "../../packages/shared/src/cbor/ty
 import type { Utxo, OutputReference } from "../../packages/shared/src/chain/ChainProvider.js";
 import type { ChatMessage } from "../../packages/shared/src/tx/types.js";
 import type { ProgressEvent } from "../../buyer/src/sdk/types.js";
+import { BOUNDED_INPUT_DETAIL_MARKER } from "../../packages/shared/src/tx/inputBound.js";
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -473,6 +474,43 @@ describe("Marketplace.submitPrompt() — rejection paths", () => {
     expect(e.name).toBe("ReceiptVerificationError");
     expect(e.reason).toBe("test reason");
   });
+  it("rejects a bounded-input request before posting escrow", async () => {
+    const advert = makeActiveAdvert({
+      detail_uri: `https://supplier.example.com/reseller${BOUNDED_INPUT_DETAIL_MARKER}`,
+    });
+    seedAdvertUtxo(chain, advert);
+    const submitSpy = vi.spyOn(chain, "submitTx");
+    fetchSpy.mockImplementation((url: unknown) => {
+      if (String(url).endsWith("/capability")) {
+        return jsonFetch({
+          capability_id: advert.capability_id,
+          model: advert.model,
+          max_output_tokens: advert.max_output_tokens,
+          max_processing_ms: advert.max_processing_ms,
+          max_input_tokens: 1,
+          price_lovelace: advert.price_lovelace.toString(),
+          advert_ref: `${ADVERT_REF.txHash}#${ADVERT_REF.index}`,
+          supplier_pkh: advert.supplier_pkh,
+          pub_key_hex: supplier.pubKeyHex,
+        });
+      }
+      return jsonFetch({});
+    });
+    const mp = makeMarketplace(chain, fetchSpy);
+    await expect(
+      mp.submitPrompt({
+        advertRef: ADVERT_REF,
+        messages: SAMPLE_MESSAGES,
+        payment_lovelace: PAYMENT,
+      }),
+    ).rejects.toSatisfy(
+      (error: unknown) =>
+        error instanceof TxConstructionError &&
+        error.reason === "input_cap_exceeded",
+    );
+    expect(submitSpy).not.toHaveBeenCalled();
+  });
+
 });
 
 // ─── M1-F-1: isSyncThrow dead-code removal (RED) ─────────────────────────────

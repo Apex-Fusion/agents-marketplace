@@ -331,3 +331,62 @@ describe("loadConfig() — OPENAI_SESSION_PASSTHROUGH", () => {
     expect(cfg.openaiModelOverride).toBe("openclaw");
   });
 });
+
+describe("loadConfig() — OpenRouter reseller", () => {
+  const resellerEnv = () => ({
+    ...buildSampleEnv(),
+    CAPABILITY_KIND: "chat",
+    LLM_BACKEND: "openai",
+    OPENAI_BASE_URL: "https://openrouter.ai/api",
+    OPENAI_API_KEY: "seller-only-key",
+    OPENAI_MAX_TOKENS: "256",
+    RESELLER_PROVIDER: "openrouter",
+    RESELLER_DATABASE_URL: "postgresql://reseller:secret@postgres:5432/reseller",
+    RESELLER_RESERVE_USD: "1.25",
+    RESELLER_MAX_INPUT_TOKENS: "4096",
+  });
+
+  it("stays disabled for every legacy config", () => {
+    expect(loadConfig(buildSampleEnv()).reseller).toBeNull();
+  });
+
+  it("parses a complete balance-aware config", () => {
+    const cfg = loadConfig(resellerEnv());
+    expect(cfg.reseller).toMatchObject({
+      provider: "openrouter",
+      reserveUsd: "1.25",
+      maxInputTokens: 4096,
+      pollIntervalMs: 30_000,
+      providerTimeoutMs: 10_000,
+    });
+  });
+
+  it("rejects partial and unsafe configurations", () => {
+    expect(() => loadConfig({
+      ...buildSampleEnv(),
+      RESELLER_RESERVE_USD: "1",
+    })).toThrow(/RESELLER_PROVIDER/);
+    expect(() => loadConfig({
+      ...resellerEnv(),
+      OPENAI_BASE_URL: "https://example.com",
+    })).toThrow(/OPENAI_BASE_URL/);
+    for (const OPENAI_BASE_URL of [
+      "http://openrouter.ai/api",
+      "https://openrouter.ai/v1",
+      "https://user:secret@openrouter.ai/api",
+    ]) {
+      expect(() => loadConfig({
+        ...resellerEnv(),
+        OPENAI_BASE_URL,
+      })).toThrow(/OPENAI_BASE_URL/);
+    }
+    expect(() => loadConfig({
+      ...resellerEnv(),
+      OPENAI_MAX_TOKENS: "",
+    })).toThrow(/OPENAI_MAX_TOKENS/);
+    expect(() => loadConfig({
+      ...resellerEnv(),
+      RESELLER_RESERVE_USD: "-1",
+    })).toThrow(/RESELLER_RESERVE_USD/);
+  });
+});

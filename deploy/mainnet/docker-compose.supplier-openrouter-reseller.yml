@@ -1,0 +1,79 @@
+name: marketplace-mainnet-supplier-openrouter-reseller
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: marketplace-mainnet-openrouter-reseller-postgres
+    restart: unless-stopped
+    env_file:
+      - path: /var/lib/agents-marketplace/openrouter-reseller-postgres.env
+        required: true
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    volumes:
+      - openrouter-reseller-postgres:/var/lib/postgresql/data
+    networks:
+      - reseller-db
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  supplier:
+    build:
+      context: ../..
+      dockerfile: supplier/Dockerfile
+    container_name: marketplace-mainnet-supplier-openrouter-reseller
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - path: /var/lib/agents-marketplace/openrouter-reseller.env
+        required: true
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz >/dev/null || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - marketplace-mainnet-net
+      - traefik-net
+      - reseller-db
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-net"
+      - "traefik.http.routers.mp-openrouter-reseller-mainnet.entrypoints=web"
+      - "traefik.http.routers.mp-openrouter-reseller-mainnet.rule=Host(`mp-suppliers-openrouter-reseller.vector.apexfusion.org`)"
+      - "traefik.http.routers.mp-openrouter-reseller-mainnet.middlewares=mp-openrouter-reseller-mainnet-https"
+      - "traefik.http.middlewares.mp-openrouter-reseller-mainnet-https.redirectscheme.scheme=https"
+      - "traefik.http.middlewares.mp-openrouter-reseller-mainnet-https.redirectscheme.permanent=true"
+      - "traefik.http.routers.mp-openrouter-reseller-mainnet-tls.entrypoints=websecure"
+      - "traefik.http.routers.mp-openrouter-reseller-mainnet-tls.rule=Host(`mp-suppliers-openrouter-reseller.vector.apexfusion.org`)"
+      - "traefik.http.routers.mp-openrouter-reseller-mainnet-tls.tls.certresolver=letsencrypt"
+      - "traefik.http.services.mp-openrouter-reseller-mainnet.loadbalancer.server.port=8080"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  openrouter-reseller-postgres:
+    name: marketplace-mainnet-openrouter-reseller-postgres
+
+networks:
+  reseller-db:
+    internal: true
+  marketplace-mainnet-net:
+    external: true
+    name: marketplace-mainnet-net
+  traefik-net:
+    external: true
+    name: traefik-net

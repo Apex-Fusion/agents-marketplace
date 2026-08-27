@@ -15,6 +15,7 @@ import {
   detectCborBackend,
   mockSlotToWallclockMs,
   TxConstructionError,
+  type PostAdvertBuildResult,
   type WalletKey,
 } from "@marketplace/shared/tx";
 
@@ -34,6 +35,8 @@ export interface PostAdvertFlowParams {
    * in that order. Defaults to console.log.
    */
   log?: (line: string) => void;
+  /** Durable journal hook invoked with the signed transaction before broadcast. */
+  beforeSubmit?: (built: PostAdvertBuildResult) => Promise<void>;
 }
 
 export interface PostAdvertFlowResult {
@@ -110,6 +113,7 @@ export async function runPostAdvert(
     walletKey,
     advertDatum: datumToSubmit,
     deposit_lovelace: datumToSubmit.supplier_bond_lovelace,
+    beforeSubmit: params.beforeSubmit,
   });
 
   writeLog(`submitted tx ${built.expectedTxHash}`);

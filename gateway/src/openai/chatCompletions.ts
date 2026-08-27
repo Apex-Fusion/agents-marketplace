@@ -152,6 +152,7 @@ async function runOneShot(
           messages: parsed.messages,
           payment_lovelace: cand.priceLovelace,
           max_output_tokens: parsed.maxTokens,
+          public_preview: parsed.publicPreview,
         });
         used = cand;
         break;
@@ -167,6 +168,9 @@ async function runOneShot(
 
     // Settle: resolve the live Submitted ref, Accept, await confirmation.
     const originalRefStr = `${result.escrowRef.txHash}#${result.escrowRef.index}`;
+    if (!parsed.stream) {
+      res.setHeader("X-Vector-Escrow-Ref", originalRefStr);
+    }
     const submittedRef = await resolveSubmittedRef({
       indexerUrl: config.indexerUrl,
       buyerPkh: ctx.walletKey.pubKeyHash,

@@ -48,6 +48,8 @@ import type {
   TtsJobResponsePayload,
   OcrJobResponsePayload,
 } from "./jobs.js";
+import type { ResellerRuntime } from "./reseller/runtime.js";
+import { parseUsdNumberCeil } from "./reseller/money.js";
 
 export interface RunChatJobDeps {
   chain: ChainProvider;
@@ -55,6 +57,7 @@ export interface RunChatJobDeps {
   config: SupplierConfig;
   supplierKey: WalletKey;
   jobs: JobStore;
+  reseller?: ResellerRuntime;
 }
 
 export interface RunChatJobParams {
@@ -71,6 +74,15 @@ function sha256Hex(s: string): string {
   return createHash("sha256").update(s, "utf8").digest("hex");
 }
 
+async function recordResellerFailure(
+  reseller: ResellerRuntime | undefined,
+  escrowRef: string,
+  reason: string,
+): Promise<void> {
+  if (!reseller) return;
+  await reseller.recordFailed(escrowRef, reason).catch(() => undefined);
+}
+
 /**
  * Run Ollama → receipt → Submit in the background.
  * Always resolves (never rejects). Terminal state written to jobs store.
@@ -83,11 +95,31 @@ export async function runChatJob(params: RunChatJobParams): Promise<void> {
   deps.jobs.setRunning(jobId);
 
   try {
+    if (deps.reseller) {
+      try {
+        await deps.reseller.recordInferenceStarted(escrowRef);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        deps.jobs.fail(jobId, {
+          httpStatus: 503,
+          reason: "evidence_unavailable",
+          message,
+        });
+        return;
+      }
+    }
+
     // ── 2. Call upstream LLM ───────────────────────────────────────────
     // Both backends return the same { content, prompt_tokens,
     // completion_tokens, wallclock_ms } shape so receipt construction
     // downstream is identical.
-    let inference: { content: string; prompt_tokens: number; completion_tokens: number; wallclock_ms: number };
+    let inference: {
+      content: string;
+      prompt_tokens: number;
+      completion_tokens: number;
+      wallclock_ms: number;
+      cost_usd?: number;
+    };
     try {
       if (deps.config.llmBackend === "openai") {
         inference = await openai.callOpenAi({
@@ -127,6 +159,7 @@ export async function runChatJob(params: RunChatJobParams): Promise<void> {
         reason: collapsedReason,
         message,
       });
+      await recordResellerFailure(deps.reseller, escrowRef, collapsedReason);
       return;
     }
 
@@ -146,8 +179,39 @@ export async function runChatJob(params: RunChatJobParams): Promise<void> {
     });
     const signed = signReceipt(receipt, deps.supplierKey.privateKeyHex);
     const resultHash = receiptResultHash(signed);
+    if (deps.reseller) {
+      try {
+        await deps.reseller.recordOutput(escrowRef, {
+          response: assistantMessage,
+          receipt: {
+            receipt: signed.receipt,
+            signature: signed.signature,
+          },
+          promptTokens: inference.prompt_tokens,
+          completionTokens: inference.completion_tokens,
+          outputText: inference.content,
+          actualCostUsdNanos: inference.cost_usd === undefined
+            ? null
+            : parseUsdNumberCeil(inference.cost_usd, "OpenRouter usage cost"),
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        deps.jobs.fail(jobId, {
+          httpStatus: 503,
+          reason: "evidence_unavailable",
+          message,
+        });
+        await recordResellerFailure(
+          deps.reseller,
+          escrowRef,
+          "output_persistence_failed",
+        );
+        return;
+      }
+    }
 
-    // ── 4+5. Submit tx: build + confirm as ONE wallet critical section ──
+
+    // ── 4+5. Broadcast, journal, then confirm Submit under one wallet lock ─
     const submitOutcome = await deps.state.walletMutex.run(async () => {
       let built: { txCborHex: string; expectedTxHash: string };
       try {
@@ -156,19 +220,30 @@ export async function runChatJob(params: RunChatJobParams): Promise<void> {
           supplierKey: deps.supplierKey,
           escrowRef: claimedRef,
           receiptHash: resultHash,
+          beforeSubmit: deps.reseller
+            ? async (candidate) => {
+                await deps.reseller!.recordSubmitting(
+                  escrowRef,
+                  `${candidate.expectedTxHash}#0`,
+                );
+              }
+            : undefined,
         });
       } catch (err) {
         return { kind: "build_failed" as const, err };
       }
+      const submittedRef = `${built.expectedTxHash}#0`;
       try {
         await deps.chain.awaitTx(built.expectedTxHash, 60_000);
       } catch (err) {
-        return { kind: "await_failed" as const, err };
+        return { kind: "await_failed" as const, err, built, submittedRef };
       }
-      return { kind: "ok" as const };
+      return { kind: "ok" as const, built, submittedRef };
     });
     if (submitOutcome.kind === "build_failed") {
-      const message = submitOutcome.err instanceof Error ? submitOutcome.err.message : String(submitOutcome.err);
+      const message = submitOutcome.err instanceof Error
+        ? submitOutcome.err.message
+        : String(submitOutcome.err);
       console.warn(
         `[job_failed] jobId=${jobId} reason=submit_failed httpStatus=502 msg=${message}`,
       );
@@ -177,20 +252,42 @@ export async function runChatJob(params: RunChatJobParams): Promise<void> {
         reason: "submit_failed",
         message: `Submit tx failed: ${message}`,
       });
+      await recordResellerFailure(deps.reseller, escrowRef, "submit_failed");
       return;
     }
     if (submitOutcome.kind === "await_failed") {
-      const msg = submitOutcome.err instanceof Error ? submitOutcome.err.message : String(submitOutcome.err);
+      const message = submitOutcome.err instanceof Error
+        ? submitOutcome.err.message
+        : String(submitOutcome.err);
       console.warn(
-        `[job_failed] jobId=${jobId} reason=submit_timeout httpStatus=502 msg=${msg}`,
+        `[job_failed] jobId=${jobId} reason=submit_timeout httpStatus=502 msg=${message}`,
       );
       deps.jobs.fail(jobId, {
         httpStatus: 502,
         reason: "submit_timeout",
-        message: `Submit awaitTx failed: ${msg}`,
+        message: `Submit awaitTx failed: ${message}`,
       });
+      deps.reseller?.watchSubmitting(escrowRef, submitOutcome.submittedRef);
       return;
     }
+    if (deps.reseller) {
+      try {
+        await deps.reseller.recordSubmitConfirmed(
+          escrowRef,
+          submitOutcome.submittedRef,
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        deps.jobs.fail(jobId, {
+          httpStatus: 503,
+          reason: "evidence_unavailable",
+          message,
+        });
+        deps.reseller.watchSubmitting(escrowRef, submitOutcome.submittedRef);
+        return;
+      }
+    }
+
 
     // ── 6. Mark complete ────────────────────────────────────────────────
     const payload: ChatJobResponsePayload = {
@@ -212,6 +309,9 @@ export async function runChatJob(params: RunChatJobParams): Promise<void> {
     };
     deps.jobs.complete(jobId, payload);
   } finally {
+    if (deps.reseller) {
+      await deps.reseller.refreshCapacity().catch(() => undefined);
+    }
     // ── 7. Always release this job's slot ───────────────────────────────
     try {
       deps.state.release(escrowRef);

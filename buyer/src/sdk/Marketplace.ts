@@ -80,6 +80,8 @@ import {
   buildAcceptTx,
   buildReclaimTx,
   TxConstructionError,
+  chatInputTokenUpperBound,
+  BOUNDED_INPUT_DETAIL_MARKER,
 } from "@marketplace/shared/tx";
 import { decodeAdvertDatum, decodeEscrowDatum, canonicalize } from "@marketplace/shared/cbor";
 import type { AdvertDatum } from "@marketplace/shared/cbor";
@@ -88,6 +90,7 @@ import type {
   DiscoverSuppliersOptions,
   SubmitPromptOptions,
   SubmitPromptResult,
+  SupplierCapabilityView,
   SubmitTtsOptions,
   SubmitTtsResult,
   SubmitOcrOptions,
@@ -110,6 +113,50 @@ import { MemoryTaskHistoryStore } from "./history.js";
 import { HttpClient, HttpError } from "./httpClient.js";
 
 const ZERO_SIGNATURE = "0".repeat(128);
+
+function validateSupplierCapability(
+  body: unknown,
+  advert: AdvertDatum,
+  advertRef: OutputReference,
+): SupplierCapabilityView {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    throw new TxConstructionError(
+      "supplier_preflight_failed",
+      "supplier /capability response must be an object",
+    );
+  }
+  const capability = body as Record<string, unknown>;
+  const expectedRef = `${advertRef.txHash}#${advertRef.index}`;
+  if (
+    capability.advert_ref !== expectedRef ||
+    capability.capability_id !== advert.capability_id ||
+    capability.model !== advert.model ||
+    capability.max_output_tokens !== advert.max_output_tokens ||
+    capability.max_processing_ms !== advert.max_processing_ms ||
+    capability.price_lovelace !== advert.price_lovelace.toString() ||
+    capability.supplier_pkh !== advert.supplier_pkh ||
+    typeof capability.pub_key_hex !== "string"
+  ) {
+    throw new TxConstructionError(
+      "supplier_preflight_failed",
+      "supplier /capability response does not match the on-chain advert",
+    );
+  }
+  if (
+    capability.max_input_tokens !== undefined &&
+    (
+      typeof capability.max_input_tokens !== "number" ||
+      !Number.isSafeInteger(capability.max_input_tokens) ||
+      capability.max_input_tokens <= 0
+    )
+  ) {
+    throw new TxConstructionError(
+      "supplier_preflight_failed",
+      "supplier max_input_tokens must be a positive safe integer",
+    );
+  }
+  return capability as unknown as SupplierCapabilityView;
+}
 const HEX64_RE = /^[0-9a-fA-F]{64}$/;
 const SIG_RE = /^[0-9a-fA-F]{128}$/;
 
@@ -241,16 +288,23 @@ export class Marketplace extends EventEmitterBase {
     }
     return result.body as SupplierView[];
   }
-
   // ─── submitPrompt — happy path + every adversarial branch ──────────────
 
   async submitPrompt(opts: SubmitPromptOptions): Promise<SubmitPromptResult> {
-    const { advertRef, messages, payment_lovelace, max_output_tokens } = opts;
+    const {
+      advertRef,
+      messages,
+      payment_lovelace,
+      max_output_tokens,
+      public_preview,
+    } = opts;
 
+    let supplierHttp: HttpClient | null = null;
     let advertDatum: AdvertDatum | null = null;
     let escrowOutputRef: OutputReference | null = null;
     let escrowRefStr = "";
     let postedAtMs = Date.now();
+    let deliverByMs = 0;
 
     const recordFailure = (reason: string): void => {
       this.historyStore.save({
@@ -276,6 +330,46 @@ export class Marketplace extends EventEmitterBase {
           advertDatum = decodeAdvertDatum(utxo.datumHex);
         } catch {
           /* swallow — builder will throw a structured error */
+        }
+      }
+
+      if (advertDatum) {
+        supplierHttp = new HttpClient({
+          baseUrl: advertDatum.endpoint_url,
+          fetch: this.fetchImpl,
+        });
+        if (advertDatum.detail_uri.endsWith(BOUNDED_INPUT_DETAIL_MARKER)) {
+          let capabilityResult;
+          try {
+            capabilityResult = await supplierHttp.getJson("/capability");
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            throw new TxConstructionError("supplier_preflight_failed", message);
+          }
+          if (!capabilityResult.ok || capabilityResult.parseError) {
+            throw new TxConstructionError(
+              "supplier_preflight_failed",
+              `supplier /capability returned HTTP ${capabilityResult.status}`,
+            );
+          }
+          const capability = validateSupplierCapability(
+            capabilityResult.body,
+            advertDatum,
+            advertRef,
+          );
+          if (capability.max_input_tokens === undefined) {
+            throw new TxConstructionError(
+              "supplier_preflight_failed",
+              "bounded-input supplier omitted max_input_tokens",
+            );
+          }
+          const inputUnits = chatInputTokenUpperBound(messages);
+          if (inputUnits > capability.max_input_tokens) {
+            throw new TxConstructionError(
+              "input_cap_exceeded",
+              `input bound ${inputUnits} exceeds supplier cap ${capability.max_input_tokens}`,
+            );
+          }
         }
       }
 
@@ -321,24 +415,33 @@ export class Marketplace extends EventEmitterBase {
       if (escrowUtxo && escrowUtxo.datumHex) {
         const ed = decodeEscrowDatum(escrowUtxo.datumHex);
         postedAtMs = ed.posted_at;
+        deliverByMs = ed.deliver_by;
       }
     } catch {
       /* posted_at is best-effort metadata */
     }
 
     if (!advertDatum) {
-      // Should never happen — buildPostEscrowTx throws before this on missing/bad advert.
+      // Should never happen — buildPostEscrowTx rejects missing or bad adverts.
       const reason = "advert datum unavailable after escrow post";
       recordFailure(reason);
       throw new ReceiptVerificationError(reason);
     }
+    if (!supplierHttp) {
+      const reason = "supplier client unavailable after escrow post";
+      recordFailure(reason);
+      throw new ReceiptVerificationError(reason);
+    }
+    if (deliverByMs === 0) {
+      deliverByMs =
+        postedAtMs + advertDatum.max_processing_ms + 30_000;
+    }
+    const supplierCallTimeoutMs = Math.max(
+      30_000,
+      deliverByMs - Date.now() + 90_000,
+    );
 
     // ── 4. Call supplier /v1/chat/completions ─────────────────────────
-    const supplierBaseUrl = advertDatum.endpoint_url;
-    const supplierHttp = new HttpClient({
-      baseUrl: supplierBaseUrl,
-      fetch: this.fetchImpl,
-    });
 
     const requestedMax = max_output_tokens ?? advertDatum.max_output_tokens;
     const cappedMax = Math.min(requestedMax, advertDatum.max_output_tokens);
@@ -347,11 +450,14 @@ export class Marketplace extends EventEmitterBase {
       messages,
       max_tokens: cappedMax,
     };
-
     let chatResult;
     try {
       chatResult = await supplierHttp.postJson("/v1/chat/completions", chatBody, {
-        headers: { "X-Escrow-Ref": escrowRefStr },
+        headers: {
+          "X-Escrow-Ref": escrowRefStr,
+          ...(public_preview ? { "X-Vector-Public-Preview": "1" } : {}),
+        },
+        timeoutMs: supplierCallTimeoutMs,
       });
     } catch (err) {
       if (err instanceof HttpError) {
@@ -385,8 +491,11 @@ export class Marketplace extends EventEmitterBase {
         throw sErr;
       }
       const POLL_INTERVAL_MS = 2_000;
-      const POLL_TIMEOUT_MS = 180_000;
-      const pollDeadline = Date.now() + POLL_TIMEOUT_MS;
+      const pollBudgetMs = Math.max(
+        30_000,
+        deliverByMs + 90_000 - Date.now(),
+      );
+      const pollDeadline = Date.now() + pollBudgetMs;
       let polled = chatResult;
       // First poll runs immediately so a quickly-completed job doesn't pay
       // the leading delay; subsequent polls wait POLL_INTERVAL_MS.
@@ -423,7 +532,7 @@ export class Marketplace extends EventEmitterBase {
       if (polled.status !== 200) {
         const sErr = new SupplierError("timeout", {
           status: polled.status,
-          message: `supplier job ${jobId} not done within ${POLL_TIMEOUT_MS}ms`,
+          message: `supplier job ${jobId} not done within ${pollBudgetMs}ms`,
         });
         recordFailure("timeout");
         throw sErr;

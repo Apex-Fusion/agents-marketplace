@@ -138,6 +138,19 @@ export interface SupplierView {
   created_slot: number;
 }
 
+/** Live off-chain capability metadata published by a supplier endpoint. */
+export interface SupplierCapabilityView {
+  capability_id: string;
+  model: string;
+  max_output_tokens: number;
+  max_processing_ms: number;
+  price_lovelace: string;
+  advert_ref: string;
+  supplier_pkh: string;
+  pub_key_hex: string;
+  max_input_tokens?: number;
+}
+
 /**
  * DiscoverSuppliersOptions — optional filters for discoverSuppliers().
  */
@@ -154,6 +167,8 @@ export interface SubmitPromptOptions {
   messages: import("@marketplace/shared/tx").ChatMessage[];
   payment_lovelace: bigint;
   max_output_tokens?: number;
+  /** Explicit consent for the seller's public redacted demo preview. */
+  public_preview?: boolean;
 }
 
 /**

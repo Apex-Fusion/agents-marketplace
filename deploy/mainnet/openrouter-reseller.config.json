@@ -1,0 +1,21 @@
+{
+  "networkId": 1,
+  "ogmiosUrl": "https://ogmios.vector.mainnet.apexfusion.org",
+  "endpointUrl": "https://mp-suppliers-openrouter-reseller.vector.apexfusion.org",
+  "marketplaceModel": "vector/deepseek-v4-flash-spot",
+  "openRouterModel": "deepseek/deepseek-v4-flash",
+  "maxInputTokens": 8192,
+  "maxOutputTokens": 512,
+  "maxProcessingMs": 600000,
+  "inferenceTimeoutMs": 180000,
+  "priceLovelace": "200000",
+  "supplierBondLovelace": "1000000",
+  "buyerBondLovelace": "1000000",
+  "reserveUsd": "1.00",
+  "pollIntervalMs": 30000,
+  "providerTimeoutMs": 10000,
+  "previewMaxChars": 160,
+  "minimumWalletLovelace": "20000000",
+  "fundingTimeoutMs": 3600000,
+  "composeFile": "deploy/mainnet/docker-compose.supplier-openrouter-reseller.yml"
+}

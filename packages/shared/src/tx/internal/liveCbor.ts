@@ -101,6 +101,7 @@ export interface LiveSubmitParams {
   deliverBy: number;
   tipMs: number;
   receiptHash: string;
+  beforeSubmit?: (built: BuildResult) => Promise<void>;
 }
 
 export interface LiveAcceptParams {
@@ -136,6 +137,7 @@ export interface LivePostAdvertParams {
   walletKey: WalletKey;
   advertDatum: AdvertDatum;
   deposit_lovelace: bigint;
+  beforeSubmit?: (built: PostAdvertBuildResult) => Promise<void>;
 }
 
 export interface LiveRetireAdvertParams {
@@ -499,6 +501,7 @@ async function buildSpendOpenOrClaimedTx(opts: {
   validFromMs: number;
   validToMs: number;
   signerPkh: string;
+  beforeSubmit?: (built: BuildResult) => Promise<void>;
 }): Promise<BuildResult> {
   const provider = buildLucidProvider(opts.chain);
   const { lucid } = await createLucidContext(provider, opts.walletKey, {
@@ -585,6 +588,7 @@ async function buildSpendOpenOrClaimedTx(opts: {
 
   const txCborHex = signed.toCBOR();
   const expectedTxHash = signed.toHash();
+  await opts.beforeSubmit?.({ txCborHex, expectedTxHash });
 
   await opts.chain.submitTx(txCborHex);
 
@@ -650,6 +654,7 @@ export async function buildLiveTxForSubmit(params: LiveSubmitParams): Promise<Bu
     validFromMs: tipMs,
     validToMs: stampMs,
     signerPkh: params.supplierKey.pubKeyHash,
+    beforeSubmit: params.beforeSubmit,
   });
 }
 
@@ -910,14 +915,16 @@ export async function buildLiveTxForAdvert(
 
   const txCborHex = signed.toCBOR();
   const expectedTxHash = signed.toHash();
-
-  await chain.submitTx(txCborHex);
-
-  return {
+  const built: PostAdvertBuildResult = {
     txCborHex,
     expectedTxHash,
     advertOutputRef: { txHash: expectedTxHash, index: 0 },
   };
+  await params.beforeSubmit?.(built);
+
+  await chain.submitTx(txCborHex);
+
+  return built;
 }
 
 // ─── RetireAdvert ────────────────────────────────────────────────────

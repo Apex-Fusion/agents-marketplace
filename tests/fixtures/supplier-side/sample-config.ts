@@ -34,6 +34,7 @@ export function buildSampleConfig(): SupplierConfig {
     maxChatSessions: 1,
     chatSettleMode: "full",
     liveChain: false,
+    reseller: null,
   };
 }
 

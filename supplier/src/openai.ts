@@ -74,6 +74,8 @@ export interface OpenAiResult {
   prompt_tokens: number;
   completion_tokens: number;
   wallclock_ms: number;
+  /** Provider-reported request cost in USD when present (OpenRouter extension). */
+  cost_usd?: number;
   /** Present when the model requested tool calls (streaming path only). */
   tool_calls?: ToolCall[];
   /** Upstream finish_reason when reported (e.g. "stop", "tool_calls"). */
@@ -188,10 +190,18 @@ export async function callOpenAi(params: CallOpenAiParams): Promise<OpenAiResult
   const usageRaw = obj.usage;
   let promptTokens = 0;
   let completionTokens = 0;
+  let costUsd: number | undefined;
   if (usageRaw && typeof usageRaw === "object") {
     const usage = usageRaw as Record<string, unknown>;
     if (typeof usage.prompt_tokens === "number") promptTokens = usage.prompt_tokens;
     if (typeof usage.completion_tokens === "number") completionTokens = usage.completion_tokens;
+    if (
+      typeof usage.cost === "number" &&
+      Number.isFinite(usage.cost) &&
+      usage.cost >= 0
+    ) {
+      costUsd = usage.cost;
+    }
   }
 
   const wallclockMs = Date.now() - startedAt;
@@ -201,6 +211,7 @@ export async function callOpenAi(params: CallOpenAiParams): Promise<OpenAiResult
     prompt_tokens: promptTokens,
     completion_tokens: completionTokens,
     wallclock_ms: wallclockMs,
+    ...(costUsd === undefined ? {} : { cost_usd: costUsd }),
   };
 }
 

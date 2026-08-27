@@ -28,6 +28,8 @@ export interface PostAdvertParams {
   walletKey: WalletKey;
   advertDatum: AdvertDatum;
   deposit_lovelace: bigint;
+  /** Durable journal hook invoked with signed CBOR before broadcast. */
+  beforeSubmit?: (built: PostAdvertBuildResult) => Promise<void>;
 }
 
 export async function buildPostAdvertTx(
@@ -75,6 +77,7 @@ export async function buildPostAdvertTx(
       walletKey,
       advertDatum,
       deposit_lovelace,
+      beforeSubmit: params.beforeSubmit,
     });
   }
 
@@ -102,13 +105,15 @@ export async function buildPostAdvertTx(
 
   const txCborHex = encodeTxBody(body);
   const expectedTxHash = sha256Hex(txCborHex);
-
-  // Submit so the mock seeds the new UTxO + spends inputs (none here).
-  await chain.submitTx(txCborHex);
-
-  return {
+  const built: PostAdvertBuildResult = {
     txCborHex,
     expectedTxHash,
     advertOutputRef: { txHash: expectedTxHash, index: 0 },
   };
+  await params.beforeSubmit?.(built);
+
+  // Submit so the mock seeds the new UTxO + spends inputs (none here).
+  await chain.submitTx(txCborHex);
+
+  return built;
 }

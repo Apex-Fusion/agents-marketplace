@@ -128,7 +128,7 @@ done
 drain_supplier() { # drain_supplier <compose-file>
   [ "$DRAIN_TIMEOUT_SECS" = "0" ] && return 0
   local cid deadline status
-  cid=$(docker compose -f "$COMPOSE_DIR/$1" ps -q | head -1)
+  cid=$(docker compose -f "$COMPOSE_DIR/$1" ps -q supplier)
   [ -n "$cid" ] || return 0
   deadline=$(( $(date +%s) + DRAIN_TIMEOUT_SECS ))
   while [ "$(date +%s)" -lt "$deadline" ]; do

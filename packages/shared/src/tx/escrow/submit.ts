@@ -26,6 +26,8 @@ export interface SubmitParams {
   supplierKey: WalletKey;
   escrowRef: OutputReference;
   receiptHash: string;
+  /** Durable journal hook invoked with signed CBOR before broadcast. */
+  beforeSubmit?: (built: BuildResult) => Promise<void>;
 }
 
 function isHex32(s: string): boolean {
@@ -113,6 +115,7 @@ export async function buildSubmitTx(
       deliverBy: datum.deliver_by,
       tipMs,
       receiptHash: receiptHash.toLowerCase(),
+      beforeSubmit: params.beforeSubmit,
     });
   }
 
@@ -138,6 +141,7 @@ export async function buildSubmitTx(
   const txCborHex = encodeTxBody(body);
   const expectedTxHash = sha256Hex(txCborHex);
 
+  await params.beforeSubmit?.({ txCborHex, expectedTxHash });
   await chain.submitTx(txCborHex);
 
   return { txCborHex, expectedTxHash };

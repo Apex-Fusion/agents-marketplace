@@ -5,6 +5,10 @@
 export type { ChatMessage, ToolCall, WalletKey, BuildResult, PostAdvertBuildResult, PostEscrowBuildResult } from "./types.js";
 export { TxConstructionError } from "./types.js";
 export { normalizeChatMessage, chatMessagesEquivalent, toolCallsEqual } from "./chatMessage.js";
+export {
+  BOUNDED_INPUT_DETAIL_MARKER,
+  chatInputTokenUpperBound,
+} from "./inputBound.js";
 export { mockSlotToWallclockMs, mockWallclockMsToSlot, NETWORK_BUFFER_MS } from "./internal/constants.js";
 export { detectCborBackend, type CborBackend } from "./internal/cborBackend.js";
 export { escrowLockFloor, minAdaForEscrowDatum } from "./internal/minAdaFloor.js";

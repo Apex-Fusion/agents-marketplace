@@ -22,6 +22,12 @@ import { JobStore } from "./jobs.js";
 import { createApp, type SupplierDeps } from "./server.js";
 import { buildChainProvider } from "./chain.js";
 import { startWalletHealthTicker } from "./walletHealth.js";
+import { decodeAdvertDatum } from "@marketplace/shared/cbor";
+import { BOUNDED_INPUT_DETAIL_MARKER } from "@marketplace/shared/tx";
+import { OpenRouterCapacityProvider } from "./reseller/openRouterCapacity.js";
+import { CapacityGate } from "./reseller/capacityGate.js";
+import { ResellerEvidenceStore } from "./reseller/evidenceStore.js";
+import { ResellerRuntime } from "./reseller/runtime.js";
 
 async function main(): Promise<void> {
   const cfg = loadConfig(process.env);
@@ -45,8 +51,74 @@ async function main(): Promise<void> {
   // chat-session kind serves N concurrent sessions; one-shot kinds stay 1.
   const state = new SupplierState(cfg.capabilityKind === "chat-session" ? cfg.maxChatSessions : 1);
   const jobs = new JobStore();
+  let reseller: ResellerRuntime | undefined;
+  if (cfg.reseller) {
+    const advertUtxo = await chain.queryUtxo(cfg.advertRef);
+    if (!advertUtxo?.datumHex) {
+      throw new Error("reseller boot: configured advert UTxO is unavailable");
+    }
+    const advert = decodeAdvertDatum(advertUtxo.datumHex);
+    if (advert.status !== "Active") {
+      throw new Error(`reseller boot: advert status is ${advert.status}`);
+    }
+    if (advert.capability_id !== "llm.text.generate.v1") {
+      throw new Error(
+        `reseller boot: advert capability must be llm.text.generate.v1, got ${advert.capability_id}`,
+      );
+    }
+    if (!advert.detail_uri.endsWith(BOUNDED_INPUT_DETAIL_MARKER)) {
+      throw new Error("reseller boot: advert is missing bounded-input metadata");
+    }
+    if (advert.max_output_tokens !== cfg.openaiMaxTokens) {
+      throw new Error(
+        "reseller boot: OPENAI_MAX_TOKENS must equal advert max_output_tokens",
+      );
+    }
+    if (advert.supplier_pkh !== supplierKey.pubKeyHash) {
+      throw new Error("reseller boot: advert supplier does not match SUPPLIER_PKH");
+    }
 
-  const deps: SupplierDeps = { chain, state, config: cfg, supplierKey, jobs };
+    const providerModel = cfg.openaiModelOverride || advert.model;
+    const provider = new OpenRouterCapacityProvider({
+      baseUrl: cfg.openaiBaseUrl,
+      apiKey: cfg.openaiApiKey,
+      timeoutMs: cfg.reseller.providerTimeoutMs,
+    });
+    const gate = new CapacityGate({
+      provider,
+      model: providerModel,
+      reserveUsd: cfg.reseller.reserveUsd,
+      maxInputTokens: cfg.reseller.maxInputTokens,
+      maxOutputTokens: advert.max_output_tokens,
+      staleAfterMs: cfg.reseller.staleAfterMs,
+    });
+    const store = new ResellerEvidenceStore(
+      cfg.reseller.databaseUrl,
+      cfg.reseller.previewMaxChars,
+    );
+    reseller = new ResellerRuntime({
+      chain,
+      state,
+      gate,
+      store,
+      advert,
+      advertRef: cfg.advertRef,
+      providerModel,
+      pollIntervalMs: cfg.reseller.pollIntervalMs,
+      maxInputTokens: cfg.reseller.maxInputTokens,
+    });
+    await reseller.initialize();
+  }
+
+
+  const deps: SupplierDeps = {
+    chain,
+    state,
+    config: cfg,
+    supplierKey,
+    jobs,
+    reseller,
+  };
   const app = createApp(deps);
 
   const server = app.listen(cfg.port, () => {
@@ -80,7 +152,9 @@ async function main(): Promise<void> {
     clearInterval(evictInterval);
     walletHealthTicker?.stop();
     state.markOffline();
-    server.close(() => process.exit(0));
+    server.close(() => {
+      void (reseller?.close() ?? Promise.resolve()).finally(() => process.exit(0));
+    });
     setTimeout(() => process.exit(1), 5_000).unref();
   };
   process.on("SIGINT", () => shutdown("SIGINT"));

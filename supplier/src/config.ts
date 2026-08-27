@@ -62,6 +62,7 @@ const HEX64_RE = /^[0-9a-fA-F]{64}$/;
 const TX_HASH_RE = /^[0-9a-fA-F]{64}$/;
 const NON_NEG_INT_RE = /^(?:0|[1-9]\d*)$/;
 const POS_INT_RE = /^[1-9]\d*$/;
+const USD_RE = /^(?:0|[1-9]\d*)(?:\.\d{1,9})?$/;
 
 /** Lowercased hostname of a URL, or "" if it doesn't parse. */
 function hostnameOf(url: string): string {
@@ -69,6 +70,24 @@ function hostnameOf(url: string): string {
     return new URL(url).hostname.toLowerCase();
   } catch {
     return "";
+  }
+}
+
+function isOpenRouterApiBaseUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (
+      url.protocol === "https:" &&
+      url.hostname === "openrouter.ai" &&
+      url.port === "" &&
+      url.username === "" &&
+      url.password === "" &&
+      (url.pathname === "/api" || url.pathname === "/api/") &&
+      url.search === "" &&
+      url.hash === ""
+    );
+  } catch {
+    return false;
   }
 }
 
@@ -111,6 +130,22 @@ export type LlmBackend = "ollama" | "openai";
  *              verifies it as an entry ticket but never Claims/Submits, and
  *              the buyer's sweeper Reclaims the Open escrow after deliver_by. */
 export type ChatSettleMode = "full" | "ticket";
+
+export type ResellerProvider = "openrouter";
+
+export interface ResellerConfig {
+  provider: ResellerProvider;
+  databaseUrl: string;
+  /** Fixed protected amount in provider USD credits. Parsed exactly at runtime. */
+  reserveUsd: string;
+  /** Conservative off-chain input bound advertised by /capability. */
+  maxInputTokens: number;
+  pollIntervalMs: number;
+  staleAfterMs: number;
+  providerTimeoutMs: number;
+  previewMaxChars: number;
+}
+
 
 export interface SupplierConfig {
   supplierPrivKeyHex: string;
@@ -226,6 +261,8 @@ export interface SupplierConfig {
    * Default 600_000 (10 min). Only fires while liveChain=true.
    */
   walletHealthIntervalMs: number;
+  /** Optional balance-aware provider resale mode. Null preserves legacy behavior. */
+  reseller: ResellerConfig | null;
 }
 
 function requireField(env: Record<string, string | undefined>, name: string): string {
@@ -532,6 +569,121 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
     walletHealthIntervalMs = Number(whIntervalStr);
   }
 
+  const resellerFields = [
+    "RESELLER_DATABASE_URL",
+    "RESELLER_RESERVE_USD",
+    "RESELLER_MAX_INPUT_TOKENS",
+    "RESELLER_POLL_INTERVAL_MS",
+    "RESELLER_PROVIDER_TIMEOUT_MS",
+    "RESELLER_PREVIEW_MAX_CHARS",
+  ] as const;
+  const resellerProviderRaw = (env.RESELLER_PROVIDER ?? "").trim();
+  const hasResellerFields = resellerFields.some(
+    (name) => env[name] !== undefined && env[name] !== "",
+  );
+  let reseller: ResellerConfig | null = null;
+  if (resellerProviderRaw === "") {
+    if (hasResellerFields) {
+      throw new Error(
+        "loadConfig: RESELLER_PROVIDER is required when reseller fields are set",
+      );
+    }
+  } else {
+    if (resellerProviderRaw !== "openrouter") {
+      throw new Error('loadConfig: RESELLER_PROVIDER must be "openrouter"');
+    }
+    if (capabilityKind !== "chat" || llmBackend !== "openai") {
+      throw new Error(
+        'loadConfig: RESELLER_PROVIDER requires CAPABILITY_KIND="chat" and LLM_BACKEND="openai"',
+      );
+    }
+    if (!isOpenRouterApiBaseUrl(openaiBaseUrl)) {
+      throw new Error(
+        "loadConfig: RESELLER_PROVIDER=openrouter requires OPENAI_BASE_URL=https://openrouter.ai/api",
+      );
+    }
+    if (openaiApiKey === "") {
+      throw new Error(
+        "loadConfig: RESELLER_PROVIDER=openrouter requires OPENAI_API_KEY",
+      );
+    }
+    if (openaiMaxTokens <= 0) {
+      throw new Error(
+        "loadConfig: RESELLER_PROVIDER requires a positive OPENAI_MAX_TOKENS",
+      );
+    }
+
+    const databaseUrl = requireField(env, "RESELLER_DATABASE_URL");
+    let databaseProtocol = "";
+    try {
+      databaseProtocol = new URL(databaseUrl).protocol;
+    } catch {
+      throw new Error(
+        "loadConfig: RESELLER_DATABASE_URL must be a valid PostgreSQL URL",
+      );
+    }
+    if (databaseProtocol !== "postgres:" && databaseProtocol !== "postgresql:") {
+      throw new Error(
+        "loadConfig: RESELLER_DATABASE_URL must use postgres:// or postgresql://",
+      );
+    }
+
+    const reserveUsd = requireField(env, "RESELLER_RESERVE_USD").trim();
+    if (!USD_RE.test(reserveUsd)) {
+      throw new Error(
+        "loadConfig: RESELLER_RESERVE_USD must be a non-negative decimal with at most 9 places",
+      );
+    }
+
+    const maxInputRaw = requireField(env, "RESELLER_MAX_INPUT_TOKENS");
+    if (!POS_INT_RE.test(maxInputRaw) || !Number.isSafeInteger(Number(maxInputRaw))) {
+      throw new Error(
+        "loadConfig: RESELLER_MAX_INPUT_TOKENS must be a positive safe integer",
+      );
+    }
+
+    const pollRaw = env.RESELLER_POLL_INTERVAL_MS ?? "30000";
+    if (!POS_INT_RE.test(pollRaw) || !Number.isSafeInteger(Number(pollRaw))) {
+      throw new Error(
+        "loadConfig: RESELLER_POLL_INTERVAL_MS must be a positive safe integer",
+      );
+    }
+    const pollIntervalMs = Number(pollRaw);
+
+    const providerTimeoutRaw = env.RESELLER_PROVIDER_TIMEOUT_MS ?? "10000";
+    if (
+      !POS_INT_RE.test(providerTimeoutRaw) ||
+      !Number.isSafeInteger(Number(providerTimeoutRaw))
+    ) {
+      throw new Error(
+        "loadConfig: RESELLER_PROVIDER_TIMEOUT_MS must be a positive safe integer",
+      );
+    }
+
+    const previewMaxRaw = env.RESELLER_PREVIEW_MAX_CHARS ?? "160";
+    if (
+      !POS_INT_RE.test(previewMaxRaw) ||
+      !Number.isSafeInteger(Number(previewMaxRaw)) ||
+      Number(previewMaxRaw) > 1000
+    ) {
+      throw new Error(
+        "loadConfig: RESELLER_PREVIEW_MAX_CHARS must be an integer from 1 to 1000",
+      );
+    }
+
+    reseller = {
+      provider: "openrouter",
+      databaseUrl,
+      reserveUsd,
+      maxInputTokens: Number(maxInputRaw),
+      pollIntervalMs,
+      staleAfterMs: Math.max(pollIntervalMs * 2, pollIntervalMs + 5000),
+      providerTimeoutMs: Number(providerTimeoutRaw),
+      previewMaxChars: Number(previewMaxRaw),
+    };
+  }
+
+
   return {
     supplierPrivKeyHex,
     ogmiosUrl,
@@ -565,5 +717,6 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
     revisionProbeMode,
     liveChain,
     walletHealthIntervalMs,
+    reseller,
   };
 }
