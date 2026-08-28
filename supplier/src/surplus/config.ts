@@ -2,6 +2,7 @@ const USD_RE = /^(?:0|[1-9]\d*)(?:\.\d{1,6})?$/;
 const EVM_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 const POSITIVE_INT_RE = /^[1-9]\d*$/;
 const NON_NEGATIVE_INT_RE = /^(?:0|[1-9]\d*)$/;
+const HEX64_RE = /^[0-9a-fA-F]{64}$/;
 
 export interface SurplusManagerConfig {
   live: boolean;
@@ -25,8 +26,18 @@ export interface SurplusManagerConfig {
   settledStatuses: string[];
   statePath: string;
   port: number;
+  proof: SurplusProofConfig | null;
 }
 
+export interface SurplusProofConfig {
+  ogmiosUrl: string;
+  walletPrivateKeyHex: string;
+  ledgerPath: string;
+  reserveLovelace: bigint;
+  feeBudgetLovelace: bigint;
+  intervalMs: number;
+  confirmTimeoutMs: number;
+}
 export function loadSurplusManagerConfig(
   env: Record<string, string | undefined>,
 ): SurplusManagerConfig {
@@ -135,6 +146,62 @@ export function loadSurplusManagerConfig(
       "SURPLUS_STATE_PATH",
     ),
     port: boundedInteger(env.PORT ?? "8080", "PORT", 1, 65_535),
+    proof: loadProofConfig(env),
+  };
+}
+
+function loadProofConfig(
+  env: Record<string, string | undefined>,
+): SurplusProofConfig | null {
+  const enabledRaw = env.SURPLUS_PROOF_ENABLED;
+  if (enabledRaw === undefined || enabledRaw === "") return null;
+  if (enabledRaw !== "1") {
+    throw new Error("SURPLUS_PROOF_ENABLED must be literal 1 or unset");
+  }
+
+  const ogmiosUrl = required(env, "OGMIOS_URL");
+  const walletPrivateKeyHex = required(
+    env,
+    "SURPLUS_PROOF_WALLET_PRIV_KEY_HEX",
+  );
+  if (!HEX64_RE.test(walletPrivateKeyHex)) {
+    throw new Error(
+      "SURPLUS_PROOF_WALLET_PRIV_KEY_HEX must be 64 hexadecimal characters",
+    );
+  }
+
+  return {
+    ogmiosUrl,
+    walletPrivateKeyHex: walletPrivateKeyHex.toLowerCase(),
+    ledgerPath: requiredWithDefault(
+      env.SURPLUS_PROOF_LEDGER_PATH,
+      "/var/lib/surplus-manager/vector-proofs.json",
+      "SURPLUS_PROOF_LEDGER_PATH",
+    ),
+    reserveLovelace: BigInt(boundedInteger(
+      env.SURPLUS_PROOF_RESERVE_LOVELACE ?? "5000000",
+      "SURPLUS_PROOF_RESERVE_LOVELACE",
+      0,
+      Number.MAX_SAFE_INTEGER,
+    )),
+    feeBudgetLovelace: BigInt(boundedInteger(
+      env.SURPLUS_PROOF_FEE_BUDGET_LOVELACE ?? "1000000",
+      "SURPLUS_PROOF_FEE_BUDGET_LOVELACE",
+      1,
+      Number.MAX_SAFE_INTEGER,
+    )),
+    intervalMs: boundedInteger(
+      env.SURPLUS_PROOF_INTERVAL_MS ?? "300000",
+      "SURPLUS_PROOF_INTERVAL_MS",
+      60_000,
+      86_400_000,
+    ),
+    confirmTimeoutMs: boundedInteger(
+      env.SURPLUS_PROOF_CONFIRM_TIMEOUT_MS ?? "300000",
+      "SURPLUS_PROOF_CONFIRM_TIMEOUT_MS",
+      10_000,
+      3_600_000,
+    ),
   };
 }
 
