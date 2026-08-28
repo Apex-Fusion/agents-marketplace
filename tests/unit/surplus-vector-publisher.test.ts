@@ -209,6 +209,54 @@ describe("SurplusVectorProofPublisher", () => {
     ]);
     expect(ledger.dashboardProof("01EXPIRED")).toMatchObject({ status: "confirmed" });
   });
+  it("anchors export-only settlements per Base tx and never re-ingests known sale ids", async () => {
+    const baseTxA = "0x" + "a".repeat(64);
+    const baseTxB = "0x" + "b".repeat(64);
+    const observed = sale("01OBSERVED", { transactionHash: baseTxA });
+    const { ledger, publisher, anchors } = await harness({ sales: [observed] });
+
+    await ledger.ingestSales([observed]);
+    const conflictingExportCopy = sale("01OBSERVED", {
+      transactionHash: baseTxA,
+      inputTokens: 999_999,
+      cacheReadTokens: 0,
+    });
+    const historical = [
+      conflictingExportCopy,
+      sale("01HISTA2", { transactionHash: baseTxA, cacheReadTokens: 0 }),
+      sale("01HISTB1", {
+        transactionHash: baseTxB,
+        cacheReadTokens: 0,
+        createdAtMs: Date.parse("2026-08-27T01:00:00.000Z"),
+        createdAt: "2026-08-27T01:00:00.000Z",
+      }),
+    ];
+    const historicalPublisher = new SurplusVectorProofPublisher({
+      ledger,
+      earnings: async () => earningsWith([observed]),
+      historicalSales: async () => historical,
+      anchor: publisher["options"].anchor,
+      awaitTx: async () => undefined,
+      balanceLovelace: async () => 25_000_000n,
+      reserveLovelace: 5_000_000n,
+      feeBudgetLovelace: 1_000_000n,
+      settledStatuses: ["confirmed"],
+      intervalMs: 60_000,
+      confirmTimeoutMs: 1_000,
+      log: () => undefined,
+    });
+
+    const result = await historicalPublisher.runCycle();
+
+    expect(result).toMatchObject({ ingested: 2, anchored: 2, failed: false });
+    expect(anchors.map((metadata) => metadata.first)).toEqual([
+      "01HISTB1",
+      "01HISTA2",
+    ]);
+    expect(ledger.dashboardProof("01OBSERVED")).toMatchObject({ status: "confirmed" });
+    expect(ledger.dashboardProof("01HISTA2")).toMatchObject({ status: "confirmed" });
+    expect(ledger.dashboardProof("01HISTB1")).toMatchObject({ status: "confirmed" });
+  });
 
   it("marks a confirmation timeout as a confirm-stage failure", async () => {
     const { ledger, publisher } = await harness({

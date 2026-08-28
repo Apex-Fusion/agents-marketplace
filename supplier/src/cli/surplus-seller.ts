@@ -7,7 +7,7 @@ import {
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import { loadSurplusManagerConfig } from "../surplus/config.js";
-import { SurplusClient } from "../surplus/client.js";
+import { SurplusClient, type SurplusSale } from "../surplus/client.js";
 import { SurplusSellerController } from "../surplus/controller.js";
 import { OpenRouterKeyClient } from "../surplus/openRouterKey.js";
 import { FileSurplusStateStore } from "../surplus/state.js";
@@ -16,6 +16,7 @@ import {
   type SurplusDashboardSnapshot,
 } from "../surplus/dashboard.js";
 import { FileSurplusVectorProofLedger } from "../surplus/vectorProof.js";
+import { loadHistoricalSalesCsv } from "../surplus/historyExport.js";
 import { SurplusVectorProofPublisher } from "../surplus/vectorPublisher.js";
 import { LiveOgmiosProvider } from "@marketplace/shared/chain";
 import type { WalletKey } from "@marketplace/shared/tx";
@@ -63,9 +64,24 @@ export async function runSurplusSeller(
       privateKeyHex: derived.privateKeyHex,
       address: derived.address,
     };
+
+    let historicalSales: (() => Promise<readonly SurplusSale[]>) | undefined;
+    if (proofConfig.historyCsvPath !== null && proofConfig.historyOfferId !== null) {
+      const history = await loadHistoricalSalesCsv(
+        proofConfig.historyCsvPath,
+        proofConfig.historyOfferId,
+      );
+      console.log(
+        `surplus-proof: loaded ${history.sales.length} settled export sale(s) from ` +
+          `${proofConfig.historyCsvPath} (${history.settledWithoutTx} without a Base tx, ` +
+          `${history.skippedUnsettled} unsettled rows skipped)`,
+      );
+      historicalSales = async () => history.sales;
+    }
     publisher = new SurplusVectorProofPublisher({
       ledger,
       earnings: () => client.getEarnings(),
+      historicalSales,
       anchor: async (metadata) => {
         const built = await buildAnchorMetadataTx({ chain, walletKey, metadata });
         return { expectedTxHash: built.expectedTxHash };

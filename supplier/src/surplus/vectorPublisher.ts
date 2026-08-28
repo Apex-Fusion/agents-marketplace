@@ -18,6 +18,7 @@
 import type { SurplusEarnings, SurplusSale } from "./client.js";
 import {
   SURPLUS_SALE_PROOF_PROTOCOL,
+  SURPLUS_VECTOR_BATCH_SIZE,
   type CanonicalSurplusSale,
   type FileSurplusVectorProofLedger,
   type SurplusPendingBatchIntent,
@@ -39,11 +40,18 @@ export type SurplusProofLedgerSeam = Pick<
   | "pendingBatchIntent"
   | "confirmPendingBatch"
   | "failPendingBatch"
+  | "dashboardProof"
 >;
 
 export interface SurplusVectorProofPublisherOptions {
   ledger: SurplusProofLedgerSeam;
   earnings: () => Promise<SurplusEarnings>;
+  /**
+   * Optional support-export source for sales the live window can no longer
+   * show. Observed sales win on id collisions; ids already in the ledger are
+   * never re-ingested, so a later live observation cannot conflict.
+   */
+  historicalSales?: () => Promise<readonly SurplusSale[]>;
   anchor: (
     metadata: SurplusProofAnchorMetadata,
   ) => Promise<{ expectedTxHash: string }>;
@@ -122,7 +130,14 @@ export class SurplusVectorProofPublisher {
     };
 
     const settled = await this.observeSettledSales();
-    const { inserted } = await ledger.ingestSales(settled);
+    const historical = this.options.historicalSales === undefined
+      ? []
+      : await this.options.historicalSales();
+    const candidates = dedupeById([...settled, ...historical]);
+    const fresh = candidates.filter((sale) =>
+      ledger.dashboardProof(sale.id) === null
+    );
+    const { inserted } = await ledger.ingestSales(fresh);
     result.ingested = inserted;
     if (inserted > 0) {
       log(`surplus-proof: captured ${inserted} newly settled sale(s)`);
@@ -136,7 +151,7 @@ export class SurplusVectorProofPublisher {
       );
     }
 
-    for (const batch of this.planBatches(settled, ledger.selectUnprovedSales())) {
+    for (const batch of this.planBatches(candidates, ledger.selectUnprovedSales())) {
       if (this.stopped) break;
       if (!(await this.fundsAvailable())) {
         result.fundingBlocked = true;
@@ -164,9 +179,9 @@ export class SurplusVectorProofPublisher {
   }
 
   /**
-   * One batch per observed Base settlement tx (oldest first), then one
-   * catch-up batch for unproved sales whose settlement tx is no longer
-   * observable in the Surplus API window.
+   * One batch per known Base settlement tx (oldest first), then catch-up
+   * batches for unproved sales with no known settlement tx, chunked to the
+   * ledger batch-size limit.
    */
   private planBatches(
     settled: readonly SurplusSale[],
@@ -195,7 +210,9 @@ export class SurplusVectorProofPublisher {
     const batches = [...groups.values()].sort(
       (left, right) => earliest(left) - earliest(right),
     );
-    if (leftovers.length > 0) batches.push(leftovers);
+    for (let start = 0; start < leftovers.length; start += SURPLUS_VECTOR_BATCH_SIZE) {
+      batches.push(leftovers.slice(start, start + SURPLUS_VECTOR_BATCH_SIZE));
+    }
     return batches;
   }
 
@@ -265,4 +282,16 @@ function earliest(sales: readonly CanonicalSurplusSale[]): number {
     if (sale.createdAtEpochMs < value) value = sale.createdAtEpochMs;
   }
   return value;
+}
+
+/** First occurrence wins; callers put observed live sales before export rows. */
+function dedupeById(sales: readonly SurplusSale[]): SurplusSale[] {
+  const seen = new Set<string>();
+  const unique: SurplusSale[] = [];
+  for (const sale of sales) {
+    if (seen.has(sale.id)) continue;
+    seen.add(sale.id);
+    unique.push(sale);
+  }
+  return unique;
 }

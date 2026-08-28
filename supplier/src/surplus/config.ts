@@ -37,6 +37,8 @@ export interface SurplusProofConfig {
   feeBudgetLovelace: bigint;
   intervalMs: number;
   confirmTimeoutMs: number;
+  historyCsvPath: string | null;
+  historyOfferId: string | null;
 }
 export function loadSurplusManagerConfig(
   env: Record<string, string | undefined>,
@@ -170,6 +172,11 @@ function loadProofConfig(
     );
   }
 
+  const historyCsvPath = env.SURPLUS_PROOF_HISTORY_CSV_PATH?.trim() || null;
+  const historyOfferId = historyCsvPath === null
+    ? null
+    : required(env, "SURPLUS_PROOF_HISTORY_OFFER_ID");
+
   return {
     ogmiosUrl,
     walletPrivateKeyHex: walletPrivateKeyHex.toLowerCase(),
@@ -202,6 +209,8 @@ function loadProofConfig(
       10_000,
       3_600_000,
     ),
+    historyCsvPath,
+    historyOfferId,
   };
 }
 
