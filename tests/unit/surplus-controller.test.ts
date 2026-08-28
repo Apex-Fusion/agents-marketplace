@@ -114,6 +114,9 @@ class FakeSurplusClient implements SurplusControllerClient {
       healthy: true,
       trusted: true,
       trades24h: 0,
+      rank: 1,
+      capRemainingMicroUsd: null,
+      volume24hMicroUsd: 0,
     }];
     if (this.offer) {
       offers.push({
@@ -126,6 +129,9 @@ class FakeSurplusClient implements SurplusControllerClient {
         healthy: true,
         trusted: true,
         trades24h: this.trades24h,
+        rank: 2,
+        capRemainingMicroUsd: 50_000,
+        volume24hMicroUsd: 0,
       });
     }
     return { model, offers };
@@ -187,12 +193,26 @@ class FakeSurplusClient implements SurplusControllerClient {
       totalEarnedMicroUsd: this.settled ? 100 : 0,
       pendingMicroUsd: 0,
       paidMicroUsd: this.settled ? 100 : 0,
+      daily: [],
+      byModel: [],
+      requestCount: this.settled ? 1 : 0,
+      tokenCount: this.settled ? 2 : 0,
+      topModel: this.settled ? "beta-model" : null,
+      payoutHoldReason: null,
+      payoutHoldReleasesAt: null,
       recentSales: this.settled ? [{
+        id: "sale-1",
         model: "beta-model",
         offerId: "managed-offer",
         settlementStatus: "confirmed",
         createdAt: "2026-08-27T10:00:01.000Z",
         sellerCostMicroUsd: 100,
+        inputTokens: 1,
+        outputTokens: 1,
+        cacheReadTokens: 0,
+        effectiveInputUsdPer1m: 0.003972,
+        effectiveOutputUsdPer1m: 0.007944,
+        transactionHash: "0x" + "a".repeat(64),
       }] : [],
     };
   }

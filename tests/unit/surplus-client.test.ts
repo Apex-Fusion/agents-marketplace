@@ -201,6 +201,9 @@ describe("SurplusClient", () => {
           healthy: true,
           trusted: true,
           trades_24h: 7,
+          rank: 1,
+          cap_remaining: null,
+          volume_24h: 0,
         }],
       });
     });
@@ -220,6 +223,79 @@ describe("SurplusClient", () => {
       offers: [expect.objectContaining({ id: "external", trades24h: 7 })],
     });
     expect(String(fetchFn.mock.calls[1][0])).toContain("alpha%3Amodel");
+  });
+
+  it("normalizes live earnings, payout hold, and settlement records", async () => {
+    const client = new SurplusClient({
+      apiBaseUrl: "https://api.surplusintelligence.ai",
+      sellerApiKey: SELLER_KEY,
+      timeoutMs: 1_000,
+      fetchFn: async () => Response.json({
+        total_earned_usdc: "186810",
+        pending_usdc: "176817",
+        paid_usdc: "9993",
+        daily: [{
+          day: "2026-08-27",
+          earned_usd: 0.18681,
+          input_tokens: 100,
+          output_tokens: 20,
+          requests: 3,
+          total_tokens: 120,
+        }],
+        by_model: [{
+          model: "alpha",
+          earned_usd: 0.18681,
+          requests: 3,
+          total_tokens: 120,
+          last_sale_at: 1787831146968,
+        }],
+        share: {
+          requests: 3,
+          tokens: 120,
+          top_model: "alpha",
+        },
+        recent_sales: [{
+          id: "sale-1",
+          model: "alpha",
+          offer_id: "offer-1",
+          settlement_status: "confirmed",
+          created_at: 1787831146968,
+          seller_cost_usdc: "83",
+          input_tokens: 10,
+          output_tokens: 2,
+          cache_read_tokens: 4,
+          effective_input_per_1m: 0.004,
+          effective_output_per_1m: 0.008,
+          tx_hash: "0x" + "a".repeat(64),
+        }],
+        payout_hold: {
+          reason: "new_seller",
+          releases_at: "2026-08-29T11:24:42.552Z",
+        },
+      }),
+    });
+
+    const earnings = await client.getEarnings();
+
+    expect(earnings).toMatchObject({
+      totalEarnedMicroUsd: 186_810,
+      pendingMicroUsd: 176_817,
+      paidMicroUsd: 9_993,
+      requestCount: 3,
+      tokenCount: 120,
+      topModel: "alpha",
+      payoutHoldReason: "new_seller",
+    });
+    expect(earnings.daily[0]).toMatchObject({ requests: 3, totalTokens: 120 });
+    expect(earnings.recentSales[0]).toMatchObject({
+      id: "sale-1",
+      settlementStatus: "confirmed",
+      cacheReadTokens: 4,
+      sellerCostMicroUsd: 83,
+    });
+    expect(earnings.recentSales[0].createdAt).toBe(
+      new Date(1787831146968).toISOString(),
+    );
   });
 
   it("sends one absolute cost-multiplier PATCH with the cap", async () => {

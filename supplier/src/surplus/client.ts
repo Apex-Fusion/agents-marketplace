@@ -40,6 +40,9 @@ export interface SurplusOrderBookOffer {
   healthy: boolean;
   trusted: boolean;
   trades24h: number;
+  rank: number;
+  capRemainingMicroUsd: number | null;
+  volume24hMicroUsd: number;
 }
 
 export interface SurplusOrderBook {
@@ -64,17 +67,48 @@ export interface SurplusOfferPatch {
 }
 
 export interface SurplusSale {
+  id: string;
   model: string;
   offerId: string | null;
   settlementStatus: string;
   createdAt: string | null;
   sellerCostMicroUsd: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  effectiveInputUsdPer1m: number;
+  effectiveOutputUsdPer1m: number;
+  transactionHash: string | null;
+}
+
+export interface SurplusDailyEarnings {
+  day: string;
+  earnedUsd: number;
+  inputTokens: number;
+  outputTokens: number;
+  requests: number;
+  totalTokens: number;
+}
+
+export interface SurplusModelEarnings {
+  model: string;
+  earnedUsd: number;
+  requests: number;
+  totalTokens: number;
+  lastSaleAt: string | null;
 }
 
 export interface SurplusEarnings {
   totalEarnedMicroUsd: number;
   pendingMicroUsd: number;
   paidMicroUsd: number;
+  daily: SurplusDailyEarnings[];
+  byModel: SurplusModelEarnings[];
+  requestCount: number;
+  tokenCount: number;
+  topModel: string | null;
+  payoutHoldReason: string | null;
+  payoutHoldReleasesAt: string | null;
   recentSales: SurplusSale[];
 }
 
@@ -263,15 +297,43 @@ export class SurplusClient {
   async getEarnings(): Promise<SurplusEarnings> {
     const body = await this.requestJson("/v1/seller/earnings?range=lifetime");
     const root = record(body, "Surplus earnings response");
-    const rawSales = root.recent_sales;
-    if (!Array.isArray(rawSales)) {
+    if (!Array.isArray(root.recent_sales)) {
       throw new Error("Surplus earnings response.recent_sales must be an array");
     }
+    if (!Array.isArray(root.daily)) {
+      throw new Error("Surplus earnings response.daily must be an array");
+    }
+    if (!Array.isArray(root.by_model)) {
+      throw new Error("Surplus earnings response.by_model must be an array");
+    }
+    const share = record(root.share, "Surplus earnings response.share");
+    const payoutHold = optionalRecord(root.payout_hold);
     return {
       totalEarnedMicroUsd: microUsd(root.total_earned_usdc, "total_earned_usdc"),
       pendingMicroUsd: microUsd(root.pending_usdc, "pending_usdc"),
       paidMicroUsd: microUsd(root.paid_usdc, "paid_usdc"),
-      recentSales: rawSales.map((sale, index) => parseSale(sale, index)),
+      daily: root.daily.map((day, index) => parseDailyEarnings(day, index)),
+      byModel: root.by_model.map((model, index) =>
+        parseModelEarnings(model, index)
+      ),
+      requestCount: nonNegativeSafeInteger(
+        share.requests,
+        "Surplus earnings share.requests",
+      ),
+      tokenCount: nonNegativeSafeInteger(
+        share.tokens,
+        "Surplus earnings share.tokens",
+      ),
+      topModel: optionalString(share.top_model),
+      payoutHoldReason: payoutHold
+        ? optionalString(payoutHold.reason)
+        : null,
+      payoutHoldReleasesAt: payoutHold
+        ? optionalTimestamp(payoutHold.releases_at, "payout_hold.releases_at")
+        : null,
+      recentSales: root.recent_sales.map((sale, index) =>
+        parseSale(sale, index)
+      ),
     };
   }
 
@@ -460,17 +522,98 @@ function parseOrderBookOffer(value: unknown, index: number): SurplusOrderBookOff
     healthy: boolean(item.healthy, `Surplus order book offer ${index}.healthy`),
     trusted: boolean(item.trusted, `Surplus order book offer ${index}.trusted`),
     trades24h: nonNegativeSafeInteger(item.trades_24h, `Surplus order book offer ${index}.trades_24h`),
+    rank: positiveSafeInteger(item.rank, `Surplus order book offer ${index}.rank`),
+    capRemainingMicroUsd: optionalMicroUsd(
+      item.cap_remaining,
+      `Surplus order book offer ${index}.cap_remaining`,
+    ),
+    volume24hMicroUsd: microUsd(
+      item.volume_24h,
+      `Surplus order book offer ${index}.volume_24h`,
+    ),
   };
 }
 
 function parseSale(value: unknown, index: number): SurplusSale {
   const item = record(value, `Surplus sale ${index}`);
   return {
+    id: string(item.id, `Surplus sale ${index}.id`),
     model: string(item.model, `Surplus sale ${index}.model`),
     offerId: optionalString(item.offer_id),
     settlementStatus: string(item.settlement_status, `Surplus sale ${index}.settlement_status`),
-    createdAt: optionalString(item.created_at),
+    createdAt: optionalTimestamp(item.created_at, `Surplus sale ${index}.created_at`),
     sellerCostMicroUsd: microUsd(item.seller_cost_usdc, `Surplus sale ${index}.seller_cost_usdc`),
+    inputTokens: optionalSafeInteger(item.input_tokens, `Surplus sale ${index}.input_tokens`),
+    outputTokens: optionalSafeInteger(item.output_tokens, `Surplus sale ${index}.output_tokens`),
+    cacheReadTokens: optionalSafeInteger(
+      item.cache_read_tokens,
+      `Surplus sale ${index}.cache_read_tokens`,
+    ),
+    effectiveInputUsdPer1m: nonNegativeNumber(
+      item.effective_input_per_1m,
+      `Surplus sale ${index}.effective_input_per_1m`,
+    ),
+    effectiveOutputUsdPer1m: nonNegativeNumber(
+      item.effective_output_per_1m,
+      `Surplus sale ${index}.effective_output_per_1m`,
+    ),
+    transactionHash: optionalString(item.tx_hash),
+  };
+}
+
+function parseDailyEarnings(
+  value: unknown,
+  index: number,
+): SurplusDailyEarnings {
+  const item = record(value, `Surplus daily earnings ${index}`);
+  return {
+    day: string(item.day, `Surplus daily earnings ${index}.day`),
+    earnedUsd: nonNegativeNumber(
+      item.earned_usd,
+      `Surplus daily earnings ${index}.earned_usd`,
+    ),
+    inputTokens: nonNegativeSafeInteger(
+      item.input_tokens,
+      `Surplus daily earnings ${index}.input_tokens`,
+    ),
+    outputTokens: nonNegativeSafeInteger(
+      item.output_tokens,
+      `Surplus daily earnings ${index}.output_tokens`,
+    ),
+    requests: nonNegativeSafeInteger(
+      item.requests,
+      `Surplus daily earnings ${index}.requests`,
+    ),
+    totalTokens: nonNegativeSafeInteger(
+      item.total_tokens,
+      `Surplus daily earnings ${index}.total_tokens`,
+    ),
+  };
+}
+
+function parseModelEarnings(
+  value: unknown,
+  index: number,
+): SurplusModelEarnings {
+  const item = record(value, `Surplus model earnings ${index}`);
+  return {
+    model: string(item.model, `Surplus model earnings ${index}.model`),
+    earnedUsd: nonNegativeNumber(
+      item.earned_usd,
+      `Surplus model earnings ${index}.earned_usd`,
+    ),
+    requests: nonNegativeSafeInteger(
+      item.requests,
+      `Surplus model earnings ${index}.requests`,
+    ),
+    totalTokens: nonNegativeSafeInteger(
+      item.total_tokens,
+      `Surplus model earnings ${index}.total_tokens`,
+    ),
+    lastSaleAt: optionalTimestamp(
+      item.last_sale_at,
+      `Surplus model earnings ${index}.last_sale_at`,
+    ),
   };
 }
 
@@ -501,6 +644,19 @@ function string(value: unknown, field: string): string {
 
 function optionalString(value: unknown): string | null {
   return typeof value === "string" && value !== "" ? value : null;
+}
+
+function optionalTimestamp(value: unknown, field: string): string | null {
+  if (value === null || value === undefined) return null;
+  const timestamp = typeof value === "number"
+    ? value
+    : typeof value === "string"
+      ? Date.parse(value)
+      : Number.NaN;
+  if (!Number.isFinite(timestamp) || timestamp < 0) {
+    throw new Error(`${field} must be a timestamp`);
+  }
+  return new Date(timestamp).toISOString();
 }
 
 function boolean(value: unknown, field: string): boolean {
@@ -558,6 +714,11 @@ function nonNegativeSafeInteger(value: unknown, field: string): number {
     throw new Error(`${field} must be a non-negative safe integer`);
   }
   return value;
+}
+
+function optionalSafeInteger(value: unknown, field: string): number {
+  if (value === null || value === undefined) return 0;
+  return nonNegativeSafeInteger(value, field);
 }
 
 function microUsd(value: unknown, field: string): number {
