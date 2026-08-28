@@ -453,7 +453,7 @@ export class SurplusSellerController {
       ? baselineAllowance - allowance.remainingUsdNanos
       : 0n;
     const spendCap = parseUsdDecimal(this.config.perOfferCapUsd, "ceil");
-    if (providerSpend >= spendCap) {
+    if (this.config.stopAfterTrades > 0 && providerSpend >= spendCap) {
       const stopping: SurplusControllerState = {
         version: 1,
         phase: "stopping",
@@ -476,6 +476,7 @@ export class SurplusSellerController {
     const book = await this.client.getOrderBook(currentState.intent.model);
     const ownBookOffer = book.offers.find((offer) => offer.id === currentState.offerId);
     if (
+      this.config.stopAfterTrades > 0 &&
       ownBookOffer &&
       ownBookOffer.trades24h >=
         currentState.highestTrades24h + this.config.stopAfterTrades

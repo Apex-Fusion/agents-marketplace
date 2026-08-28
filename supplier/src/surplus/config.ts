@@ -120,9 +120,9 @@ export function loadSurplusManagerConfig(
       300_000,
     ),
     stopAfterTrades: boundedInteger(
-      env.SURPLUS_STOP_AFTER_SETTLED_REQUESTS ?? "1",
+      env.SURPLUS_STOP_AFTER_SETTLED_REQUESTS ?? "0",
       "SURPLUS_STOP_AFTER_SETTLED_REQUESTS",
-      1,
+      0,
       1,
     ),
     settledStatuses: statusList(

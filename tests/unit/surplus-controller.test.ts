@@ -211,10 +211,11 @@ function controller(
   allowance: { readAllowance(): Promise<OpenRouterKeyAllowance> } = {
     readAllowance: async () => ALLOWANCE,
   },
+  managerConfig: SurplusManagerConfig = config(),
 ): SurplusSellerController {
   let mutation = 0;
   return new SurplusSellerController({
-    config: config(),
+    config: managerConfig,
     client,
     allowance,
     stateStore: store,
@@ -281,6 +282,31 @@ describe("SurplusSellerController", () => {
 
     expect(client.offer?.status).toBe("inactive");
     expect(store.state.phase).toBe("awaiting_settlement");
+  });
+
+  it("keeps selling in continuous mode after trades and provider spend", async () => {
+    const client = new FakeSurplusClient();
+    const store = new MemoryStateStore();
+    let remaining = 20_000_000_000n;
+    const activeController = controller(
+      client,
+      store,
+      {
+        readAllowance: async () => ({
+          ...ALLOWANCE,
+          remainingUsdNanos: remaining,
+        }),
+      },
+      { ...config(), stopAfterTrades: 0 },
+    );
+    await activeController.runOnce();
+    client.trades24h = 1;
+    remaining = 18_700_000_000n;
+
+    await activeController.runOnce();
+
+    expect(client.offer?.status).toBe("active");
+    expect(store.state.phase).toBe("active");
   });
 
   it("adopts and resumes an inactive offer after an ambiguous create", async () => {
