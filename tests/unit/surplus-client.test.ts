@@ -334,6 +334,25 @@ describe("SurplusClient", () => {
     );
     expect(earnings.recentSales[0].createdAtMs).toBe(1787831146968);
   });
+  it("defaults omitted cache_read_tokens to zero as the live API sends", async () => {
+    const sparse = saleRow("sale-sparse");
+    delete sparse.cache_read_tokens;
+    delete sparse.tx_hash;
+    const client = new SurplusClient({
+      apiBaseUrl: "https://api.surplusintelligence.ai",
+      sellerApiKey: "si_seller_test",
+      timeoutMs: 1_000,
+      fetchFn: async () => Response.json(earningsEnvelope([sparse])),
+    });
+
+    const earnings = await client.getEarnings();
+
+    expect(earnings.recentSales[0]).toMatchObject({
+      id: "sale-sparse",
+      cacheReadTokens: 0,
+      transactionHash: null,
+    });
+  });
 
   it("returns the deduplicated observed sale window in deterministic sale-id order", async () => {
     const duplicate = saleRow("sale-a", {
@@ -384,7 +403,6 @@ describe("SurplusClient", () => {
       "seller_cost_usdc",
       "input_tokens",
       "output_tokens",
-      "cache_read_tokens",
       "effective_input_per_1m",
       "effective_output_per_1m",
     ];

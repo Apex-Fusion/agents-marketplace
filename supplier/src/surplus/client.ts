@@ -582,7 +582,7 @@ function parseSale(value: unknown, index: number): SurplusSale {
     inputTokens: nonNegativeSafeInteger(item.input_tokens, `Surplus sale ${index}.input_tokens`),
     outputTokens: nonNegativeSafeInteger(item.output_tokens, `Surplus sale ${index}.output_tokens`),
     cacheReadTokens: nonNegativeSafeInteger(
-      item.cache_read_tokens,
+      item.cache_read_tokens ?? 0,
       `Surplus sale ${index}.cache_read_tokens`,
     ),
     effectiveInputUsdPer1m: nonNegativeNumber(
