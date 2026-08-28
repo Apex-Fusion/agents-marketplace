@@ -72,11 +72,11 @@ export function loadSurplusManagerConfig(
     providerBaseUrl,
     capacityBaseUrl,
     perOfferCapUsd: usd(
-      env.SURPLUS_PER_OFFER_CAP_USD ?? "1.00",
+      env.SURPLUS_PER_OFFER_CAP_USD ?? "0.05",
       "SURPLUS_PER_OFFER_CAP_USD",
     ),
     aggregateCapUsd: usd(
-      env.SURPLUS_AGGREGATE_CAP_USD ?? "1.00",
+      env.SURPLUS_AGGREGATE_CAP_USD ?? "0.05",
       "SURPLUS_AGGREGATE_CAP_USD",
     ),
     sellerWallet,

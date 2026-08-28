@@ -27,8 +27,8 @@ function config(): SurplusManagerConfig {
     providerApiKey: "sk-or-v1-test",
     providerBaseUrl: "https://openrouter.ai/api/v1",
     capacityBaseUrl: "https://openrouter.ai/api",
-    perOfferCapUsd: "1.00",
-    aggregateCapUsd: "1.00",
+    perOfferCapUsd: "0.05",
+    aggregateCapUsd: "0.05",
     sellerWallet: SELLER_WALLET,
     payoutAddress: SELLER_WALLET,
     maxCandidateOrderBooks: 10,
@@ -236,7 +236,7 @@ describe("SurplusSellerController", () => {
     expect(client.createdPayload).toMatchObject({
       model: "beta-model",
       costMultiplier: 0.04995,
-      dailyCapUsd: 1,
+      dailyCapUsd: 0.05,
       payoutAddress: SELLER_WALLET,
     });
     expect(store.state.phase).toBe("active");
@@ -316,7 +316,7 @@ describe("SurplusSellerController", () => {
       model: "beta-model",
       sellerBaseUrl: "https://openrouter.ai/api/v1",
       status: "inactive",
-      capDailyUsd: 1,
+      capDailyUsd: 0.05,
       costMultiplierPpm: 49_950,
       inputMicroUsdPer1m: 3_972,
       outputMicroUsdPer1m: 7_944,
@@ -331,7 +331,7 @@ describe("SurplusSellerController", () => {
         costMultiplierPpm: 49_950,
         inputMicroUsdPer1m: 3_972,
         outputMicroUsdPer1m: 7_944,
-        dailyCapUsd: 1,
+        dailyCapUsd: 0.05,
         baselineRemainingUsdNanos: "20000000000",
         idempotencyKey: "create-1",
         createdAt: "2026-08-27T10:00:00.000Z",

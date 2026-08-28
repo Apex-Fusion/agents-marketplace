@@ -212,7 +212,12 @@ export class SurplusSellerController {
     }
 
     const allowance = await this.allowance.readAllowance();
-    this.assertAllowance(allowance, parseUsdDecimal(this.config.aggregateCapUsd, "ceil"));
+    this.assertAllowance(
+      allowance,
+      this.providerExposureUsdNanos(
+        parseUsdDecimal(this.config.aggregateCapUsd, "ceil"),
+      ),
+    );
     const [discovered, markets] = await Promise.all([
       this.client.discoverModels(
         this.config.providerApiKey,
@@ -444,7 +449,9 @@ export class SurplusSellerController {
     const allowance = await this.allowance.readAllowance();
     this.assertAllowance(
       allowance,
-      parseUsdDecimal(this.config.perOfferCapUsd, "ceil"),
+      this.providerExposureUsdNanos(
+        parseUsdDecimal(this.config.perOfferCapUsd, "ceil"),
+      ),
     );
     const baselineAllowance = BigInt(
       currentState.intent.baselineRemainingUsdNanos,
@@ -452,7 +459,9 @@ export class SurplusSellerController {
     const providerSpend = baselineAllowance > allowance.remainingUsdNanos
       ? baselineAllowance - allowance.remainingUsdNanos
       : 0n;
-    const spendCap = parseUsdDecimal(this.config.perOfferCapUsd, "ceil");
+    const spendCap = this.providerExposureUsdNanos(
+      parseUsdDecimal(this.config.perOfferCapUsd, "ceil"),
+    );
     if (this.config.stopAfterTrades > 0 && providerSpend >= spendCap) {
       const stopping: SurplusControllerState = {
         version: 1,
@@ -682,6 +691,12 @@ export class SurplusSellerController {
     if (activeCap > aggregateCap) {
       throw new Error("Active Surplus offer caps exceed the aggregate cap");
     }
+  }
+
+  private providerExposureUsdNanos(sellerCapUsdNanos: bigint): bigint {
+    const numerator = sellerCapUsdNanos * 10_000n;
+    const denominator = BigInt(this.config.recoveryBps);
+    return (numerator + denominator - 1n) / denominator;
   }
 
   private assertAllowance(
