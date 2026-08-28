@@ -69,9 +69,10 @@ export interface SurplusOfferPatch {
 export interface SurplusSale {
   id: string;
   model: string;
-  offerId: string | null;
+  offerId: string;
   settlementStatus: string;
-  createdAt: string | null;
+  createdAt: string;
+  createdAtMs: number;
   sellerCostMicroUsd: number;
   inputTokens: number;
   outputTokens: number;
@@ -134,6 +135,15 @@ export class SurplusHttpError extends Error {
 
   get ambiguousMutation(): boolean {
     return this.status === null || this.status >= 500;
+  }
+}
+
+export class SurplusHistoricalCompletenessError extends Error {
+  constructor() {
+    super(
+      "Surplus does not provide historical sale pagination; only the observed recent-sales window is available",
+    );
+    this.name = "SurplusHistoricalCompletenessError";
   }
 }
 
@@ -337,6 +347,27 @@ export class SurplusClient {
     };
   }
 
+  async listObservedSales(): Promise<SurplusSale[]> {
+    const salesById = new Map<string, SurplusSale>();
+    for (const sale of (await this.getEarnings()).recentSales) {
+      const existing = salesById.get(sale.id);
+      if (existing === undefined) {
+        salesById.set(sale.id, sale);
+      } else if (!sameImmutableSale(existing, sale)) {
+        throw new Error(
+          `Surplus recent-sales window contains conflicting immutable fields for sale ${sale.id}`,
+        );
+      }
+    }
+    return [...salesById.values()].sort((left, right) =>
+      left.id.localeCompare(right.id)
+    );
+  }
+
+  async listAllSales(): Promise<SurplusSale[]> {
+    throw new SurplusHistoricalCompletenessError();
+  }
+
   private async requestJson(
     path: string,
     init: RequestInit = {},
@@ -536,16 +567,21 @@ function parseOrderBookOffer(value: unknown, index: number): SurplusOrderBookOff
 
 function parseSale(value: unknown, index: number): SurplusSale {
   const item = record(value, `Surplus sale ${index}`);
+  const createdAtMs = timestampMs(
+    item.created_at,
+    `Surplus sale ${index}.created_at`,
+  );
   return {
     id: string(item.id, `Surplus sale ${index}.id`),
     model: string(item.model, `Surplus sale ${index}.model`),
-    offerId: optionalString(item.offer_id),
+    offerId: string(item.offer_id, `Surplus sale ${index}.offer_id`),
     settlementStatus: string(item.settlement_status, `Surplus sale ${index}.settlement_status`),
-    createdAt: optionalTimestamp(item.created_at, `Surplus sale ${index}.created_at`),
+    createdAt: new Date(createdAtMs).toISOString(),
+    createdAtMs,
     sellerCostMicroUsd: microUsd(item.seller_cost_usdc, `Surplus sale ${index}.seller_cost_usdc`),
-    inputTokens: optionalSafeInteger(item.input_tokens, `Surplus sale ${index}.input_tokens`),
-    outputTokens: optionalSafeInteger(item.output_tokens, `Surplus sale ${index}.output_tokens`),
-    cacheReadTokens: optionalSafeInteger(
+    inputTokens: nonNegativeSafeInteger(item.input_tokens, `Surplus sale ${index}.input_tokens`),
+    outputTokens: nonNegativeSafeInteger(item.output_tokens, `Surplus sale ${index}.output_tokens`),
+    cacheReadTokens: nonNegativeSafeInteger(
       item.cache_read_tokens,
       `Surplus sale ${index}.cache_read_tokens`,
     ),
@@ -559,6 +595,19 @@ function parseSale(value: unknown, index: number): SurplusSale {
     ),
     transactionHash: optionalString(item.tx_hash),
   };
+}
+
+function sameImmutableSale(left: SurplusSale, right: SurplusSale): boolean {
+  return left.id === right.id &&
+    left.offerId === right.offerId &&
+    left.model === right.model &&
+    left.createdAtMs === right.createdAtMs &&
+    left.inputTokens === right.inputTokens &&
+    left.outputTokens === right.outputTokens &&
+    left.cacheReadTokens === right.cacheReadTokens &&
+    left.sellerCostMicroUsd === right.sellerCostMicroUsd &&
+    left.effectiveInputUsdPer1m === right.effectiveInputUsdPer1m &&
+    left.effectiveOutputUsdPer1m === right.effectiveOutputUsdPer1m;
 }
 
 function parseDailyEarnings(
@@ -648,15 +697,19 @@ function optionalString(value: unknown): string | null {
 
 function optionalTimestamp(value: unknown, field: string): string | null {
   if (value === null || value === undefined) return null;
+  return new Date(timestampMs(value, field)).toISOString();
+}
+
+function timestampMs(value: unknown, field: string): number {
   const timestamp = typeof value === "number"
     ? value
     : typeof value === "string"
       ? Date.parse(value)
       : Number.NaN;
-  if (!Number.isFinite(timestamp) || timestamp < 0) {
-    throw new Error(`${field} must be a timestamp`);
+  if (!Number.isSafeInteger(timestamp) || timestamp < 0) {
+    throw new Error(`${field} must be a timestamp with integer milliseconds`);
   }
-  return new Date(timestamp).toISOString();
+  return timestamp;
 }
 
 function boolean(value: unknown, field: string): boolean {

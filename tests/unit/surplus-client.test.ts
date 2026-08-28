@@ -36,6 +36,42 @@ function discoveryRow(model: string, providerModelId: string): string {
   });
 }
 
+function saleRow(
+  id: string,
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    id,
+    model: "alpha",
+    offer_id: "offer-1",
+    settlement_status: "confirmed",
+    created_at: 1_787_831_146_968,
+    seller_cost_usdc: "83",
+    input_tokens: 10,
+    output_tokens: 2,
+    cache_read_tokens: 4,
+    effective_input_per_1m: 0.004,
+    effective_output_per_1m: 0.008,
+    tx_hash: null,
+    ...overrides,
+  };
+}
+
+function earningsEnvelope(
+  recentSales: Record<string, unknown>[],
+): Record<string, unknown> {
+  return {
+    total_earned_usdc: "166",
+    pending_usdc: "166",
+    paid_usdc: "0",
+    daily: [],
+    by_model: [],
+    share: { requests: recentSales.length, tokens: 0, top_model: "alpha" },
+    recent_sales: recentSales,
+    payout_hold: null,
+  };
+}
+
 describe("SurplusClient", () => {
   it("authenticates and parses fragmented NDJSON discovery", async () => {
     const first = discoveryRow("alpha", "vendor/alpha");
@@ -296,6 +332,90 @@ describe("SurplusClient", () => {
     expect(earnings.recentSales[0].createdAt).toBe(
       new Date(1787831146968).toISOString(),
     );
+    expect(earnings.recentSales[0].createdAtMs).toBe(1787831146968);
+  });
+
+  it("returns the deduplicated observed sale window in deterministic sale-id order", async () => {
+    const duplicate = saleRow("sale-a", {
+      buyer_address: "must-not-be-retained",
+    });
+    const client = new SurplusClient({
+      apiBaseUrl: "https://api.surplusintelligence.ai",
+      sellerApiKey: SELLER_KEY,
+      timeoutMs: 1_000,
+      fetchFn: async () =>
+        Response.json(earningsEnvelope([
+          saleRow("sale-b"),
+          duplicate,
+          { ...duplicate },
+        ])),
+    });
+
+    const sales = await client.listObservedSales();
+
+    expect(sales.map((sale) => sale.id)).toEqual(["sale-a", "sale-b"]);
+    expect(sales[0]).not.toHaveProperty("buyerAddress");
+    expect(sales[0]).not.toHaveProperty("buyer_address");
+  });
+
+  it("fails closed on conflicting immutable fields in the observed sale window", async () => {
+    const client = new SurplusClient({
+      apiBaseUrl: "https://api.surplusintelligence.ai",
+      sellerApiKey: SELLER_KEY,
+      timeoutMs: 1_000,
+      fetchFn: async () =>
+        Response.json(earningsEnvelope([
+          saleRow("sale-a"),
+          saleRow("sale-a", { input_tokens: 11 }),
+        ])),
+    });
+
+    await expect(client.listObservedSales()).rejects.toThrow(
+      "conflicting immutable fields for sale sale-a",
+    );
+  });
+
+  it("requires every immutable proof field in observed sales", async () => {
+    const requiredFields = [
+      "id",
+      "model",
+      "offer_id",
+      "created_at",
+      "seller_cost_usdc",
+      "input_tokens",
+      "output_tokens",
+      "cache_read_tokens",
+      "effective_input_per_1m",
+      "effective_output_per_1m",
+    ];
+
+    for (const field of requiredFields) {
+      const row = saleRow("sale-a");
+      delete row[field];
+      const client = new SurplusClient({
+        apiBaseUrl: "https://api.surplusintelligence.ai",
+        sellerApiKey: SELLER_KEY,
+        timeoutMs: 1_000,
+        fetchFn: async () => Response.json(earningsEnvelope([row])),
+      });
+
+      await expect(client.listObservedSales()).rejects.toThrow();
+    }
+  });
+
+  it("fails clearly instead of claiming unavailable historical completeness", async () => {
+    const fetchFn = vi.fn();
+    const client = new SurplusClient({
+      apiBaseUrl: "https://api.surplusintelligence.ai",
+      sellerApiKey: SELLER_KEY,
+      timeoutMs: 1_000,
+      fetchFn,
+    });
+
+    await expect(client.listAllSales()).rejects.toThrow(
+      "does not provide historical sale pagination",
+    );
+    expect(fetchFn).not.toHaveBeenCalled();
   });
 
   it("sends one absolute cost-multiplier PATCH with the cap", async () => {

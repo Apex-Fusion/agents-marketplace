@@ -45,3 +45,16 @@ export type {
   WithdrawWalletBuildResult,
 } from "./wallet/withdrawWallet.js";
 export { buildWithdrawTx } from "./wallet/withdrawWallet.js";
+
+// ── Surplus Merkle-batch anchor (live-only) ────────────────────────────
+export type {
+  AnchorMetadataParams,
+  SurplusSaleProofAnchorMetadata,
+} from "./wallet/anchorMetadata.js";
+export {
+  MAX_TRANSACTION_METADATA_TEXT_BYTES,
+  SURPLUS_SALE_PROOF_METADATA_LABEL,
+  SURPLUS_SALE_PROOF_PROTOCOL,
+  buildAnchorMetadataTx,
+  validateSurplusSaleProofAnchorMetadata,
+} from "./wallet/anchorMetadata.js";

@@ -1,8 +1,10 @@
 // @vitest-environment happy-dom
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
-import ResaleDashboard from "../../buyer/src/ui/pages/ResaleDashboard.js";
+import { render, screen, waitFor, within } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
+import App from "../../buyer/src/ui/App.js";
+import { AuthProvider } from "../../buyer/src/ui/state/AuthContext.js";
 
 const DASHBOARD = {
   generatedAt: "2026-08-28T12:00:00.000Z",
@@ -47,28 +49,62 @@ const DASHBOARD = {
       payoutHoldReason: "new_seller",
       payoutHoldReleasesAt: "2026-08-29T11:24:42.552Z",
     },
-    recentSales: [{
-      id: "sale-1",
-      model: "deepseek-v4-flash",
-      createdAt: "2026-08-28T11:00:00.000Z",
-      settlementStatus: "confirmed",
-      inputTokens: 10,
-      outputTokens: 2,
-      cacheReadTokens: 3,
-      revenueUsd: "0.000083",
-      transactionHash: "0x" + "c".repeat(64),
-    }],
-  },
-  vector: {
-    status: "retired",
-    model: "deepseek/deepseek-v4-flash",
-    supplierWallet: "addr1test",
-    advertRef: `${"a".repeat(64)}#0`,
-    retirementTransaction: "b".repeat(64),
-    retiredOn: "2026-08-27",
-    historicalAp3xEarned: "1.600000",
-    historicalSettledJobs: 8,
-    historicalUpstreamSpendUsd: "0.000093",
+    recentSales: [
+      {
+        id: "sale-1",
+        model: "deepseek-v4-flash",
+        createdAt: "2026-08-28T11:00:00.000Z",
+        settlementStatus: "confirmed",
+        inputTokens: 10,
+        outputTokens: 2,
+        cacheReadTokens: 3,
+        revenueUsd: "0.000083",
+        vectorProof: {
+          status: "confirmed",
+          saleHash: "1".repeat(64),
+          batchRoot: "2".repeat(64),
+          txHash: "d".repeat(64),
+          leafIndex: 0,
+          siblings: ["3".repeat(64)],
+        },
+      },
+      {
+        id: "sale-2",
+        model: "deepseek-v4-flash",
+        createdAt: "2026-08-28T11:01:00.000Z",
+        settlementStatus: "confirmed",
+        inputTokens: 20,
+        outputTokens: 4,
+        cacheReadTokens: 6,
+        revenueUsd: "0.000166",
+        vectorProof: {
+          status: "pending",
+          saleHash: "4".repeat(64),
+          batchRoot: null,
+          txHash: null,
+          leafIndex: null,
+          siblings: [],
+        },
+      },
+      {
+        id: "sale-3",
+        model: "deepseek-v4-flash",
+        createdAt: "2026-08-28T11:02:00.000Z",
+        settlementStatus: "confirmed",
+        inputTokens: 30,
+        outputTokens: 6,
+        cacheReadTokens: 9,
+        revenueUsd: "0.000249",
+        vectorProof: {
+          status: "failed",
+          saleHash: "5".repeat(64),
+          batchRoot: null,
+          txHash: null,
+          leafIndex: null,
+          siblings: [],
+        },
+      },
+    ],
   },
 };
 
@@ -76,29 +112,41 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("ResaleDashboard", () => {
-  it("matches the marketplace card system and renders both settlement markets", async () => {
+describe("Capacity markets dashboard", () => {
+  it("renders the authenticated route with a Vector proof state for every sale", async () => {
     const fetchMock = vi.fn(async () => Response.json(DASHBOARD));
     vi.stubGlobal("fetch", fetchMock);
 
-    render(<ResaleDashboard />);
+    render(
+      <MemoryRouter initialEntries={["/dashboard"]}>
+        <AuthProvider initialStatus="authenticated">
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
 
-    expect(await screen.findByRole("heading", { name: "Resale Dashboard" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Capacity Markets" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Capacity" })).toHaveAttribute("href", "/dashboard");
     expect(screen.getByRole("heading", { name: "Surplus Intelligence" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Vector marketplace" })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Vector proof" })).toBeInTheDocument();
     expect(screen.getByText("$0.2399")).toBeInTheDocument();
-    expect(screen.getByText("1.600000 AP3X")).toBeInTheDocument();
-    expect(screen.getByText("confirmed")).toBeInTheDocument();
     expect(screen.getByTestId("resale-dashboard")).toHaveClass("max-w-7xl");
     expect(document.querySelectorAll(".bg-white").length).toBeGreaterThan(3);
-    expect(screen.getByRole("link", { name: /Open confirmed transaction/ })).toHaveAttribute(
+
+    const proofSummary = screen.getByRole("group", { name: "Vector proof summary" });
+    expect(within(proofSummary).getByText("Confirmed 1")).toHaveClass("bg-green-100");
+    expect(within(proofSummary).getByText("Pending 1")).toHaveClass("bg-amber-100");
+    expect(within(proofSummary).getByText("Failed 1")).toHaveClass("bg-red-100");
+    expect(screen.getByText("pending")).toHaveClass("bg-amber-100");
+    expect(screen.getByText("failed")).toHaveClass("bg-red-100");
+
+    const proofLink = screen.getByRole("link", { name: /Confirmed Vector proof transaction/ });
+    expect(proofLink).toHaveAttribute(
       "href",
-      `https://vector.apexscan.org/en/transaction/${"b".repeat(64)}/summary/`,
+      `https://vector.apexscan.org/en/transaction/${"d".repeat(64)}/summary/`,
     );
-    expect(screen.getByRole("link", { name: /0xcccc/ })).toHaveAttribute(
-      "href",
-      `https://basescan.org/tx/0x${"c".repeat(64)}`,
-    );
+    expect(within(proofLink).getByText("dddddddddddd…ddddddddd")).toBeInTheDocument();
+
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
       "/v1/resale-dashboard",
       { cache: "no-store" },

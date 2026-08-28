@@ -5,7 +5,12 @@ import type {
   SurplusEarnings,
   SurplusOffer,
   SurplusOrderBook,
+  SurplusSale,
 } from "./client.js";
+import {
+  hashSurplusSale,
+  type SurplusDashboardVectorProof,
+} from "./vectorProof.js";
 import type {
   SurplusControllerStatus,
   SurplusSellerController,
@@ -25,6 +30,19 @@ export interface VectorMigrationSummary {
   historicalSettledJobs: number;
   historicalUpstreamSpendUsd: string;
 }
+export interface DashboardSaleProof {
+  status: "pending" | "confirmed" | "failed";
+  saleHash: string | null;
+  batchRoot: string | null;
+  txHash: string | null;
+  leafIndex: number | null;
+  siblings: string[];
+}
+
+export interface DashboardProofSource {
+  dashboardProof(saleId: string): SurplusDashboardVectorProof | null;
+}
+
 
 export interface SurplusDashboardSnapshot {
   generatedAt: string;
@@ -80,6 +98,7 @@ export interface SurplusDashboardSnapshot {
       cacheReadTokens: number;
       revenueUsd: string;
       transactionHash: string | null;
+      vectorProof: DashboardSaleProof;
     }>;
   };
   vector: VectorMigrationSummary;
@@ -91,6 +110,7 @@ interface SurplusDashboardOptions {
   allowance: Pick<OpenRouterKeyClient, "readAllowance">;
   config: SurplusManagerConfig;
   vector?: VectorMigrationSummary;
+  proofs?: DashboardProofSource;
   cacheMs?: number;
   now?: () => number;
 }
@@ -117,6 +137,7 @@ export class SurplusDashboardService {
   >;
   private readonly allowance: Pick<OpenRouterKeyClient, "readAllowance">;
   private readonly config: SurplusManagerConfig;
+  private readonly proofs: DashboardProofSource | null;
   private readonly vector: VectorMigrationSummary;
   private readonly cacheMs: number;
   private readonly now: () => number;
@@ -128,6 +149,7 @@ export class SurplusDashboardService {
     this.client = options.client;
     this.allowance = options.allowance;
     this.config = options.config;
+    this.proofs = options.proofs ?? null;
     this.vector = options.vector ?? DEFAULT_VECTOR_MIGRATION;
     this.cacheMs = options.cacheMs ?? 15_000;
     this.now = options.now ?? Date.now;
@@ -218,9 +240,29 @@ export class SurplusDashboardService {
           cacheReadTokens: sale.cacheReadTokens,
           revenueUsd: formatMicroUsd(sale.sellerCostMicroUsd),
           transactionHash: sale.transactionHash,
+          vectorProof: this.proofFor(sale),
         })),
       },
       vector: this.vector,
+    };
+  }
+
+  private proofFor(sale: SurplusSale): DashboardSaleProof {
+    const ledger = this.proofs?.dashboardProof(sale.id) ?? null;
+    if (ledger !== null) return ledger;
+    let saleHash: string | null = null;
+    try {
+      saleHash = hashSurplusSale(sale);
+    } catch {
+      saleHash = null;
+    }
+    return {
+      status: "pending",
+      saleHash,
+      batchRoot: null,
+      txHash: null,
+      leafIndex: null,
+      siblings: [],
     };
   }
 }

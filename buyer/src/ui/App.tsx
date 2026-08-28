@@ -4,7 +4,7 @@
  * Routes (all gated by <RequireAuth>):
  *   /         → <Dashboard />
  *   /tasks    → <TaskHistory />
- *   /dashboard → <ResaleDashboard />      unified Surplus + Vector metrics
+ *   /dashboard → <ResaleDashboard />      Capacity markets and sale proofs
  *   /pending  → <PendingReceipts />     UX-1: buyer-side Accept button
  *   /wallet   → <Wallet />
  *   /api-keys → <ApiKeys />             self-serve gateway API key generation
@@ -39,7 +39,7 @@ export default function App() {
       <div className="min-h-screen bg-gray-50 text-gray-900">
         <nav className="bg-white border-b border-gray-200 px-4 py-3 sm:px-6 flex flex-wrap items-center gap-x-6 gap-y-2">
           <Link to="/" className="font-medium hover:underline">Dashboard</Link>
-          <Link to="/dashboard" className="font-medium hover:underline">Resale</Link>
+          <Link to="/dashboard" className="font-medium hover:underline">Capacity</Link>
           {/* Book Summarizer tab hidden for now — the /book route and all PDF
               summarize code remain intact; restore by re-adding this link:
           <Link to="/book" className="font-medium hover:underline">Book Summarizer</Link> */}
