@@ -100,6 +100,24 @@ describe("loadConfig(env)", () => {
   it("throws when PDF_ENABLED is not 0 or 1", () => {
     expect(() => loadConfig({ ...VALID_ENV, PDF_ENABLED: "false" })).toThrow(/PDF_ENABLED/);
   });
+
+  it("normalizes the private resale dashboard URL", () => {
+    const config = loadConfig({
+      ...VALID_ENV,
+      SURPLUS_DASHBOARD_URL:
+        "http://surplus-seller:8080/internal/resale-dashboard/",
+    });
+    expect(config.resaleDashboardUrl).toBe(
+      "http://surplus-seller:8080/internal/resale-dashboard",
+    );
+  });
+
+  it("rejects a resale dashboard URL with an unsupported protocol", () => {
+    expect(() => loadConfig({
+      ...VALID_ENV,
+      SURPLUS_DASHBOARD_URL: "file:///tmp/dashboard.json",
+    })).toThrow(/SURPLUS_DASHBOARD_URL/);
+  });
 });
 
 // ─── createApp tests ──────────────────────────────────────────────────────────

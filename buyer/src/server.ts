@@ -114,6 +114,9 @@ export interface AppDeps {
    * `${gatewayUrl}/signup`. Public, non-secret value. When empty/omitted the
    * SPA derives "api." + its own host. */
   gatewayPublicUrl?: string;
+  /** Private supplier-network endpoint used to populate the resale dashboard.
+   * The browser only sees the redacted same-origin /v1/resale-dashboard proxy. */
+  resaleDashboardUrl?: string;
   /** PDF book summarizer job registry. When provided, the /v1/pdf-* routes
    * are live; when omitted they respond 503 (feature disabled). Built in
    * runMain from the same marketplace/chain/wallet/archive deps. */
@@ -316,6 +319,66 @@ export function createApp(deps: AppDeps): Express {
         fetchImpl: deps.fetchImpl ?? globalThis.fetch,
       }
     : null;
+
+  app.get("/v1/resale-dashboard", async (_req: Request, res: Response) => {
+    const dashboardUrl = (deps.resaleDashboardUrl ?? "").replace(/\/+$/, "");
+    if (dashboardUrl === "") {
+      return jsonError(
+        res,
+        503,
+        "service_unavailable",
+        "buyer-app booted without SURPLUS_DASHBOARD_URL",
+      );
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10_000);
+    try {
+      const upstream = await (deps.fetchImpl ?? globalThis.fetch)(dashboardUrl, {
+        headers: { accept: "application/json" },
+        redirect: "error",
+        signal: controller.signal,
+      });
+      const text = await upstream.text();
+      if (Buffer.byteLength(text, "utf8") > 1024 * 1024) {
+        return jsonError(
+          res,
+          502,
+          "dashboard_response_too_large",
+          "resale dashboard response exceeded 1 MiB",
+        );
+      }
+      if (!upstream.ok) {
+        return jsonError(
+          res,
+          502,
+          "dashboard_upstream_error",
+          `resale dashboard upstream returned ${upstream.status}`,
+        );
+      }
+      let payload: unknown;
+      try {
+        payload = JSON.parse(text);
+      } catch {
+        return jsonError(
+          res,
+          502,
+          "dashboard_invalid_json",
+          "resale dashboard upstream did not return JSON",
+        );
+      }
+      res.setHeader("Cache-Control", "no-store");
+      return res.status(200).json(payload);
+    } catch {
+      return jsonError(
+        res,
+        502,
+        "dashboard_unreachable",
+        "resale dashboard upstream is unavailable",
+      );
+    } finally {
+      clearTimeout(timer);
+    }
+  });
 
   app.get("/v1/pending-receipts", async (_req: Request, res: Response) => {
     if (!resolved) {

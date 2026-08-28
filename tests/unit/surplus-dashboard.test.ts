@@ -5,7 +5,6 @@ import {
   SurplusDashboardService,
   type SurplusDashboardSnapshot,
 } from "../../supplier/src/surplus/dashboard.js";
-import { renderSurplusDashboardPage } from "../../supplier/src/surplus/dashboardPage.js";
 import { createSurplusServer } from "../../supplier/src/cli/surplus-seller.js";
 import type { SurplusControllerStatus } from "../../supplier/src/surplus/controller.js";
 
@@ -222,38 +221,21 @@ describe("SurplusDashboardService", () => {
     expect(getOrderBook).toHaveBeenCalledTimes(1);
   });
 });
-
-describe("unified dashboard HTTP surface", () => {
-  it("serves the dashboard, cached API data, and security headers", async () => {
+describe("private supplier dashboard data surface", () => {
+  it("serves redacted data internally without hosting a dashboard page", async () => {
     const data = snapshot();
     const server = createSurplusServer(
       { snapshot: () => STATUS, healthy: () => true },
       { getSnapshot: async () => data },
     );
 
-    const page = await request(server).get("/reseller");
-    expect(page.status).toBe(200);
-    expect(page.text).toContain("One capacity pool.");
-    expect(page.text).toContain("Vector marketplace");
-    expect(page.headers["content-security-policy"]).toContain("frame-ancestors 'none'");
-
-    const api = await request(server).get("/dashboard/api");
+    const api = await request(server).get("/internal/resale-dashboard");
     expect(api.status).toBe(200);
     expect(api.body).toEqual(data);
     expect(JSON.stringify(api.body)).not.toContain("test-secret");
 
-    const root = await request(server).get("/");
-    expect(root.status).toBe(302);
-    expect(root.headers.location).toBe("/reseller");
+    expect((await request(server).get("/reseller")).status).toBe(404);
+    expect((await request(server).get("/")).status).toBe(404);
     server.close();
-  });
-
-  it("renders static HTML without embedding credentials", () => {
-    const html = renderSurplusDashboardPage();
-    expect(html).toContain("/dashboard/api");
-    expect(html).toContain("Surplus Intelligence");
-    expect(html).toContain("Vector marketplace");
-    expect(html).not.toContain("si_seller_");
-    expect(html).not.toContain("sk-or-v1-");
   });
 });

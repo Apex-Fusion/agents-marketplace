@@ -4,6 +4,7 @@
  * Routes (all gated by <RequireAuth>):
  *   /         → <Dashboard />
  *   /tasks    → <TaskHistory />
+ *   /dashboard → <ResaleDashboard />      unified Surplus + Vector metrics
  *   /pending  → <PendingReceipts />     UX-1: buyer-side Accept button
  *   /wallet   → <Wallet />
  *   /api-keys → <ApiKeys />             self-serve gateway API key generation
@@ -16,6 +17,7 @@ import Wallet from "./pages/Wallet.js";
 import PendingReceipts from "./pages/PendingReceipts.js";
 import BookSummarizer from "./pages/BookSummarizer.js";
 import ApiKeys from "./pages/ApiKeys.js";
+import ResaleDashboard from "./pages/ResaleDashboard.js";
 import { RequireAuth, useAuth } from "./state/AuthContext.js";
 
 function SignOutButton() {
@@ -37,6 +39,7 @@ export default function App() {
       <div className="min-h-screen bg-gray-50 text-gray-900">
         <nav className="bg-white border-b border-gray-200 px-6 py-3 flex items-center gap-6">
           <Link to="/" className="font-medium hover:underline">Dashboard</Link>
+          <Link to="/dashboard" className="font-medium hover:underline">Resale</Link>
           {/* Book Summarizer tab hidden for now — the /book route and all PDF
               summarize code remain intact; restore by re-adding this link:
           <Link to="/book" className="font-medium hover:underline">Book Summarizer</Link> */}
@@ -49,6 +52,7 @@ export default function App() {
         <main className="p-6">
           <Routes>
             <Route path="/" element={<Dashboard />} />
+            <Route path="/dashboard" element={<ResaleDashboard />} />
             <Route path="/book" element={<BookSummarizer />} />
             <Route path="/tasks" element={<TaskHistory />} />
             <Route path="/pending" element={<PendingReceipts />} />

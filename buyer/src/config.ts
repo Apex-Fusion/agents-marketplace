@@ -42,6 +42,9 @@
  *                         API key" page knows where to POST /signup. When
  *                         unset, the SPA falls back to deriving "api." +
  *                         current host.
+ *   SURPLUS_DASHBOARD_URL — Internal URL of the private Surplus dashboard
+ *                         snapshot endpoint. When unset, /v1/resale-dashboard
+ *                         responds 503 while the rest of the buyer stays live.
  *   PDF_ENABLED         — "1" (default) serves the PDF book summarizer
  *                         (/v1/pdf-* routes). Set "0" to disable the feature
  *                         entirely: no PDF job store is opened and every
@@ -68,6 +71,7 @@ export interface BuyerConfig {
   cookieSecure: boolean;
   pdfEnabled: boolean;
   gatewayPublicUrl: string;
+  resaleDashboardUrl: string;
 }
 
 function requireField(env: Record<string, string | undefined>, name: string): string {
@@ -169,6 +173,20 @@ export function loadConfig(env: Record<string, string | undefined>): BuyerConfig
   // the SPA via the boot block (no trailing slash). Empty string means the SPA
   // derives the URL from its own host ("api." + location.host).
   const gatewayPublicUrl = (env.GATEWAY_PUBLIC_URL ?? "").trim().replace(/\/+$/, "");
+  const resaleDashboardUrl = (env.SURPLUS_DASHBOARD_URL ?? "")
+    .trim()
+    .replace(/\/+$/, "");
+  if (resaleDashboardUrl !== "") {
+    let parsed: URL;
+    try {
+      parsed = new URL(resaleDashboardUrl);
+    } catch {
+      throw new Error("loadConfig: SURPLUS_DASHBOARD_URL must be a valid URL");
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      throw new Error("loadConfig: SURPLUS_DASHBOARD_URL must use http or https");
+    }
+  }
 
   return {
     privKeyHex,
@@ -186,5 +204,6 @@ export function loadConfig(env: Record<string, string | undefined>): BuyerConfig
     cookieSecure,
     pdfEnabled,
     gatewayPublicUrl,
+    resaleDashboardUrl,
   };
 }

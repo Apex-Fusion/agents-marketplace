@@ -23,19 +23,7 @@ services:
     volumes:
       - surplus-seller-state:/var/lib/surplus-manager
     networks:
-      - traefik-net
-    labels:
-      - "traefik.enable=true"
-      - "traefik.docker.network=traefik-net"
-      - "traefik.http.routers.mp-openrouter-reseller-mainnet.entrypoints=web"
-      - "traefik.http.routers.mp-openrouter-reseller-mainnet.rule=Host(`mp-suppliers-openrouter-reseller.vector.apexfusion.org`)"
-      - "traefik.http.routers.mp-openrouter-reseller-mainnet.middlewares=mp-openrouter-reseller-mainnet-https"
-      - "traefik.http.middlewares.mp-openrouter-reseller-mainnet-https.redirectscheme.scheme=https"
-      - "traefik.http.middlewares.mp-openrouter-reseller-mainnet-https.redirectscheme.permanent=true"
-      - "traefik.http.routers.mp-openrouter-reseller-mainnet-tls.entrypoints=websecure"
-      - "traefik.http.routers.mp-openrouter-reseller-mainnet-tls.rule=Host(`mp-suppliers-openrouter-reseller.vector.apexfusion.org`)"
-      - "traefik.http.routers.mp-openrouter-reseller-mainnet-tls.tls.certresolver=letsencrypt"
-      - "traefik.http.services.mp-openrouter-reseller-mainnet.loadbalancer.server.port=8080"
+      - marketplace-mainnet-net
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz >/dev/null || exit 1"]
       interval: 20s
@@ -53,6 +41,6 @@ volumes:
     name: marketplace-mainnet-surplus-seller-state
 
 networks:
-  traefik-net:
+  marketplace-mainnet-net:
     external: true
-    name: traefik-net
+    name: marketplace-mainnet-net

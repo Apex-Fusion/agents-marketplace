@@ -15,7 +15,6 @@ import {
   SurplusDashboardService,
   type SurplusDashboardSnapshot,
 } from "../surplus/dashboard.js";
-import { renderSurplusDashboardPage } from "../surplus/dashboardPage.js";
 
 export async function runSurplusSeller(
   env: Record<string, string | undefined>,
@@ -81,27 +80,6 @@ async function handleRequest(
   response.setHeader("x-content-type-options", "nosniff");
   response.setHeader("x-frame-options", "DENY");
   response.setHeader("referrer-policy", "no-referrer");
-  if (request.method === "GET" && path === "/") {
-    response.statusCode = 302;
-    response.setHeader("location", "/reseller");
-    response.end();
-    return;
-  }
-  if (
-    request.method === "GET" &&
-    (path === "/reseller" || path === "/reseller/")
-  ) {
-    response.statusCode = 200;
-    response.setHeader("content-type", "text/html; charset=utf-8");
-    response.setHeader(
-      "content-security-policy",
-      "default-src 'self'; style-src 'self' 'unsafe-inline'; " +
-        "script-src 'self' 'unsafe-inline'; connect-src 'self'; " +
-        "img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'",
-    );
-    response.end(renderSurplusDashboardPage());
-    return;
-  }
   const status = controller.snapshot();
   if (request.method === "GET" && path === "/healthz") {
     const healthy = controller.healthy();
@@ -116,7 +94,7 @@ async function handleRequest(
     response.end(JSON.stringify(status));
     return;
   }
-  if (request.method === "GET" && path === "/dashboard/api") {
+  if (request.method === "GET" && path === "/internal/resale-dashboard") {
     try {
       const snapshot = await dashboard.getSnapshot();
       response.statusCode = 200;

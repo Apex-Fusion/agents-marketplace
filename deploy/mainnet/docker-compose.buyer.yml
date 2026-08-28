@@ -34,6 +34,7 @@ services:
       # gateway must CORS-allow https://marketplace.vector.apexfusion.org (see
       # GATEWAY_CORS_ORIGINS in docker-compose.gateway.yml).
       GATEWAY_PUBLIC_URL: https://api.marketplace.vector.apexfusion.org
+      SURPLUS_DASHBOARD_URL: http://marketplace-mainnet-surplus-seller:8080/internal/resale-dashboard
       # NETWORK_ID intentionally not pinned — see supplier compose comment.
     volumes:
       - buyer-mainnet-archive:/repo/data/archive
