@@ -118,7 +118,7 @@ describe("Capacity markets dashboard", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     render(
-      <MemoryRouter initialEntries={["/dashboard"]}>
+      <MemoryRouter initialEntries={["/capacity"]}>
         <AuthProvider initialStatus="authenticated">
           <App />
         </AuthProvider>
@@ -126,7 +126,7 @@ describe("Capacity markets dashboard", () => {
     );
 
     expect(await screen.findByRole("heading", { name: "Capacity Markets" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Capacity" })).toHaveAttribute("href", "/dashboard");
+    expect(screen.getByRole("link", { name: "Capacity" })).toHaveAttribute("href", "/capacity");
     expect(screen.getByRole("heading", { name: "Surplus Intelligence" })).toBeInTheDocument();
     expect(screen.getByRole("columnheader", { name: "Vector proof" })).toBeInTheDocument();
     expect(screen.getByText("$0.2399")).toBeInTheDocument();
@@ -151,5 +151,22 @@ describe("Capacity markets dashboard", () => {
       "/v1/resale-dashboard",
       { cache: "no-store" },
     ));
+  });
+
+  it("removes the old dashboard route instead of keeping an alias", () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MemoryRouter initialEntries={["/dashboard"]}>
+        <AuthProvider initialStatus="authenticated">
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    expect(screen.queryByRole("heading", { name: "Capacity Markets" }))
+      .not.toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
