@@ -71,13 +71,16 @@ export function makeOpenSessionHandler(deps: GatewayDeps) {
  * Select a supplier, preflight the wallet, post+claim the session escrow and
  * persist the SessionRow. Chain work — the CALLER must hold the key mutex
  * (concurrent PostEscrow from one wallet double-spends the same UTxO).
+ * `onPreflightOk` fires once routing + preflight passed, right before the
+ * first chain op — the last point at which a failure is still a clean HTTP
+ * error rather than something already in flight.
  */
 export async function openSessionCore(
   deps: GatewayDeps,
   keyRow: ApiKeyRow,
   ctx: KeyContext,
   model: string,
-  opts?: { ignoreStatusFor?: ReadonlySet<string> },
+  opts?: { ignoreStatusFor?: ReadonlySet<string>; onPreflightOk?: () => void },
 ): Promise<SessionRow> {
   const candidates = await selectCandidates({
     indexerUrl: deps.config.indexerUrl,
@@ -104,6 +107,7 @@ export async function openSessionCore(
       },
     );
   }
+  opts?.onPreflightOk?.();
 
   // startChat posts the escrow + supplier Claim. Fall back to the next supplier
   // only on a pre-post error (TxConstructionError, or a busy supplier caught by

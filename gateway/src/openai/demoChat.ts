@@ -181,22 +181,25 @@ function isNoSupplierError(err: unknown): boolean {
 
 /** Open a session, evicting up to MAX_EVICTIONS LRU demo sessions when every
  * supplier is pinned. Eviction frees the supplier immediately (its slot
- * releases at Submit) but the indexer's status poll lags, so the retry passes
- * the freed pkhs through selectCandidates' ignoreStatusFor. Lock ordering is
- * safe: eviction holds only the session lock, the open holds only the key
- * mutex — never nested. */
+ * releases on /v1/chat/end), so the retry sees it as available even before
+ * the indexer's next poll (ignoreStatusFor). Each attempt runs under the key
+ * mutex — never nested. `onPreflightOk` is forwarded to every attempt. */
 async function openSessionWithEviction(
   deps: GatewayDeps,
   keyRow: ApiKeyRow,
   ctx: KeyContext,
   model: string,
+  onPreflightOk: () => void,
 ): Promise<SessionRow> {
   const freedPkhs = new Set<string>();
   const evicted = new Set<string>();
   for (let attempt = 0; ; attempt++) {
     try {
       return await ctx.mutex.run(() =>
-        openSessionCore(deps, keyRow, ctx, model, freedPkhs.size > 0 ? { ignoreStatusFor: freedPkhs } : undefined),
+        openSessionCore(deps, keyRow, ctx, model, {
+          ignoreStatusFor: freedPkhs.size > 0 ? freedPkhs : undefined,
+          onPreflightOk,
+        }),
       );
     } catch (err) {
       if (attempt >= MAX_EVICTIONS || !isNoSupplierError(err)) throw err;
@@ -217,6 +220,9 @@ type LockedTurnOutcome =
 
 /** Streaming sink shared across turn attempts on one response. */
 interface StreamSink {
+  /** Slow work (supplier turn or chain op) is about to start: open the SSE
+   * response so keepalives flow. Idempotent; no-op for non-stream requests. */
+  onCommit: () => void;
   onToken: (token: string) => void;
   emitToolCalls: (toolCalls: ToolCall[]) => void;
 }
@@ -243,7 +249,13 @@ export async function runDemoChat(
   const id = genId();
   let keepalive: ReturnType<typeof setInterval> | undefined;
   let roleSent = false;
-  if (parsed.stream) {
+  // The SSE response opens lazily — only once routing + wallet preflight have
+  // passed and slow work begins. Anything that fails before that (no
+  // supplier, underfunded wallet) still surfaces as a real HTTP 4xx instead of
+  // an error frame hidden inside a 200 stream, which OpenAI clients read as an
+  // empty completion.
+  const openStream = (): void => {
+    if (!parsed.stream || res.headersSent) return;
     res.status(200);
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache, no-transform");
@@ -257,14 +269,16 @@ export async function runDemoChat(
         /* client gone */
       }
     }, 10_000);
-  }
+  };
 
   const ensureRole = (): void => {
     if (roleSent) return;
     roleSent = true;
+    openStream();
     res.write(sseData(buildChunk({ id, model: parsed.model, delta: { role: "assistant" }, finishReason: null })));
   };
   const sink: StreamSink = {
+    onCommit: openStream,
     onToken: (token) => {
       if (!parsed.stream) return;
       ensureRole();
@@ -358,6 +372,7 @@ async function runWithAffinity(
       );
       if (!recheck) return { kind: "retry" };
 
+      sink.onCommit();
       try {
         const result = await streamSupplierTurn(
           deps,
@@ -386,7 +401,7 @@ async function runWithAffinity(
   // Miss: open a new session (chain work → key mutex; evicts an LRU demo
   // session when every supplier is pinned) and replay the full history as its
   // first turn.
-  const session = await openSessionWithEviction(deps, keyRow, ctx, parsed.model);
+  const session = await openSessionWithEviction(deps, keyRow, ctx, parsed.model, sink.onCommit);
   demoSessions.set(session.id, { keyId: keyRow.id, model: parsed.model, lastUsedAt: Date.now() });
   return getSessionLock(session.id).run(async () => {
     try {

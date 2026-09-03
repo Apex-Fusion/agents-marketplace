@@ -311,6 +311,58 @@ describe("gateway demo key", () => {
     expect(startChat).not.toHaveBeenCalled();
   });
 
+  // Regression: the mainnet demo float ran dry on 2026-08-26 and every
+  // stream:true request came back HTTP 200 with the 402 hidden as an SSE error
+  // frame — clients read it as an empty completion and fell back elsewhere.
+  it("returns a real 402 for an underfunded wallet even with stream:true", async () => {
+    const { fetchFn } = demoFetch([]);
+    const lowChain = {
+      queryUtxosByAddress: async () => [
+        { ref: { txHash: "ff".repeat(32), index: 0 }, address: "a", lovelace: 5_000_000n, assets: {}, datumHex: null, scriptRef: null },
+        { ref: { txHash: "ff".repeat(32), index: 1 }, address: "a", lovelace: 2_895_612n, assets: {}, datumHex: null, scriptRef: null },
+      ],
+    } as unknown as GatewayDeps["chain"];
+    const deps = makeDeps(fetchFn, { chain: lowChain });
+    const { rawKey, startChat } = setupDemoKey(deps);
+    const res = await request(createApp(deps))
+      .post("/openai/v1/chat/completions")
+      .set("authorization", `Bearer ${rawKey}`)
+      .send({ model: "kimi", messages: [{ role: "user", content: "hi" }], stream: true });
+    expect(res.status).toBe(402);
+    expect(res.headers["content-type"]).toMatch(/application\/json/);
+    expect(res.body.error.code).toBe("insufficient_funds");
+    expect(res.body.x_vector.available_lovelace).toBe("7895612");
+    expect(startChat).not.toHaveBeenCalled();
+  });
+
+  it("returns a real 404 when no chat supplier serves the model even with stream:true", async () => {
+    const { fetchFn } = demoFetch([]);
+    const deps = makeDeps(fetchFn, { chain: fundedChain });
+    const { rawKey, startChat } = setupDemoKey(deps);
+    const res = await request(createApp(deps))
+      .post("/openai/v1/chat/completions")
+      .set("authorization", `Bearer ${rawKey}`)
+      .send({ model: "no-such-model", messages: [{ role: "user", content: "hi" }], stream: true });
+    expect(res.status).toBe(404);
+    expect(res.body.error.code).toBe("model_not_found");
+    expect(startChat).not.toHaveBeenCalled();
+  });
+
+  it("keeps in-band SSE errors once the stream is open (supplier fails mid-turn)", async () => {
+    const { fetchFn } = demoFetch([() => new Response("boom", { status: 500 })]);
+    const deps = makeDeps(fetchFn, { chain: fundedChain });
+    const { rawKey, startChat } = setupDemoKey(deps);
+    const res = await request(createApp(deps))
+      .post("/openai/v1/chat/completions")
+      .set("authorization", `Bearer ${rawKey}`)
+      .send({ model: "kimi", messages: [{ role: "user", content: "hi" }], stream: true });
+    expect(res.status).toBe(200);
+    expect(res.headers["content-type"]).toMatch(/text\/event-stream/);
+    expect(startChat).toHaveBeenCalledTimes(1);
+    const frames = res.text.split("\n\n").filter((l) => l.startsWith("data: ")).map((l) => JSON.parse(l.slice(6)));
+    expect(frames.at(-1).error.code).toBe("upstream_error");
+  });
+
   it("answers a trailing-assistant history by trimming to the last user message (regenerate)", async () => {
     const { fetchFn, messageCalls } = demoFetch([
       () => supplierSse([{ type: "token", value: "Again" }, doneFrame({ role: "assistant", content: "Again" }, "stop")]),
