@@ -52,5 +52,10 @@ export default defineConfig({
     environment: "node",
     globals: true,
     setupFiles: ["./tests/setup.ts"],
+    // The first live tx build in a worker loads lucid's CML WASM (~2.5 s
+    // idle; past the 5 s default when the whole suite runs in parallel on a
+    // laptop). Whichever *-live*.test.ts file pays it first flakes, so the
+    // ceiling is raised suite-wide: it is warm-up, not a race.
+    testTimeout: 20_000,
   },
 });
