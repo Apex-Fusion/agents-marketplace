@@ -10,6 +10,7 @@
     "tx:retire-advert": "tsx src/cli/retire-advert.ts",
     "tx:publish-reference-scripts": "tsx src/cli/publish-reference-scripts.ts",
     "tx:consolidate-wallet": "tsx src/cli/consolidate-wallet.ts",
+    "tx:release-escrows": "tsx src/cli/release-escrows.ts",
     "reseller:setup": "tsx src/cli/setup-reseller.ts",
     "surplus:start": "tsx src/cli/surplus-seller.ts"
   },

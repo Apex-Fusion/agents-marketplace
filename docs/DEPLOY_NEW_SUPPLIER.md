@@ -252,6 +252,16 @@ requires `tx:retire-advert` (refunds the advert bond) + a fresh post-advert
   new `ADVERT_REF` in the env file → `up -d --force-recreate`.
 - **Wallet health**: keep the 2-UTxO shape; run `tx:consolidate-wallet` if
   script-spends start failing with collateral-selector errors.
+- **Stuck Submitted escrows**: a job you Submitted that the buyer never
+  Accepted (buyer-side timeout, crash) sits in `Submitted` holding the
+  payment and both bonds. After the 10 min accept window only your
+  `Release` can resolve it, and it pays you payment + both bonds. Run
+  `pnpm --filter @marketplace/supplier tx:release-escrows [--dry-run]`
+  (can be docker-exec'd inside the running supplier container like
+  `tx:consolidate-wallet`). It scans the escrow script address on chain for
+  Submitted escrows addressed to your wallet (the indexer misses some Submit
+  transitions, so it is not consulted), skips any still inside their window,
+  and releases the rest serially. Nothing does this automatically yet.
 - **Exit**: `tx:retire-advert` refunds the advert bond and delists you; the
   wallet keeps its funds.
 - **Monitoring (optional)**: the repo ships a balance monitor
