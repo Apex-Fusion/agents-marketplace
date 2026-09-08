@@ -197,4 +197,63 @@ describe("buildPostOcrEscrowTx — happy path locks the min-ada floor (C1 regres
     expect(escrowUtxo!.lovelace).toBe(expectedFloor);
     expect(escrowUtxo!.lovelace).toBeGreaterThan(ECONOMIC_TOTAL);
   });
+
+  describe("buildPostOcrEscrowTx — precomputed prompt_hash", () => {
+    it("stores a precomputed hash in lowercase without requiring request", async () => {
+      const chain = new MockChainProvider();
+      chain.advanceSlot(1_745_500_000);
+      seedOcrAdvert(chain);
+
+      const result = await buildPostOcrEscrowTx({
+        chain,
+        buyerKey: buildBuyerWalletKey(),
+        advertRef: ADVERT_REF,
+        prompt_hash: "CD".repeat(32),
+        payment_lovelace: PRICE,
+      });
+      const escrowUtxo = await chain.queryUtxo(result.escrowOutputRef);
+      const datum = decodeEscrowDatum(escrowUtxo!.datumHex!);
+
+      expect(datum.prompt_hash).toBe("cd".repeat(32));
+    });
+
+    it("rejects when neither request nor prompt_hash is provided", async () => {
+      await expect(buildPostOcrEscrowTx({
+        chain: new MockChainProvider(),
+        buyerKey: buildBuyerWalletKey(),
+        advertRef: ADVERT_REF,
+        payment_lovelace: PRICE,
+      })).rejects.toMatchObject({
+        name: "TxConstructionError",
+        reason: "request required",
+      });
+    });
+
+    it("rejects when both request and prompt_hash are provided", async () => {
+      await expect(buildPostOcrEscrowTx({
+        chain: new MockChainProvider(),
+        buyerKey: buildBuyerWalletKey(),
+        advertRef: ADVERT_REF,
+        request: validRequest(),
+        prompt_hash: "cd".repeat(32),
+        payment_lovelace: PRICE,
+      })).rejects.toMatchObject({
+        name: "TxConstructionError",
+        reason: "ambiguous prompt commitment",
+      });
+    });
+
+    it("rejects a malformed prompt_hash", async () => {
+      await expect(buildPostOcrEscrowTx({
+        chain: new MockChainProvider(),
+        buyerKey: buildBuyerWalletKey(),
+        advertRef: ADVERT_REF,
+        prompt_hash: "not-32-byte-hex",
+        payment_lovelace: PRICE,
+      })).rejects.toMatchObject({
+        name: "TxConstructionError",
+        reason: "prompt_hash malformed",
+      });
+    });
+  });
 });

@@ -2,21 +2,17 @@
  * tx/escrow/postTtsEscrow.ts — PostEscrow tx builder for the
  * `audio.synthesize.piper.v1` capability.
  *
- * Mirrors `postEscrow.ts` (chat) but commits a TTS-shaped prompt_hash
- * over the canonicalised request envelope `{text, voice, format, speed}`
- * — the SAME object the supplier hashes when validating the incoming
- * POST /v1/audio/synthesize body. Any mismatch on either side fails the
- * supplier-side prompt_mismatch gate.
+ * Accepts either the TTS request envelope or a precomputed prompt_hash. The
+ * request path hashes canonical `{text, voice, format, speed}`, the same object
+ * the supplier hashes when validating POST /v1/audio/synthesize.
  *
  * Off-chain invariants (mirror chat's, with TTS-shaped body validation):
  *   1. advert UTxO exists at advertRef
  *   2. advert datum.status === "Active"
  *   3. payment_lovelace === advert.price_lovelace
  *   4. buyerKey.pubKeyHash !== advert.supplier_pkh
- *   5. body.text is a non-empty string
- *   6. body.voice ∈ ALLOWED_VOICES
- *   7. body.format ∈ ALLOWED_FORMATS
- *   8. body.speed is finite and ∈ [0.5, 1.5]
+ *   5. exactly one of request or prompt_hash is provided
+ *   6. a supplied prompt_hash is 32-byte hex, or request passes TTS validation
  */
 
 import * as nodeCrypto from "crypto";
@@ -53,7 +49,11 @@ export interface PostTtsEscrowParams {
   chain: ChainProvider;
   buyerKey: WalletKey;
   advertRef: OutputReference;
-  request: TtsRequest;
+  request?: TtsRequest;
+  /** Precomputed prompt commitment: 32-byte hex, sha256 over whatever canonical
+   * envelope the caller and supplier agreed on. When provided, the builder uses
+   * it verbatim and does not require or hash request. */
+  prompt_hash?: string;
   payment_lovelace: bigint;
 }
 
@@ -75,24 +75,48 @@ export function ttsPromptHash(req: TtsRequest): string {
 export async function buildPostTtsEscrowTx(
   params: PostTtsEscrowParams,
 ): Promise<PostEscrowBuildResult> {
-  const { chain, buyerKey, advertRef, request, payment_lovelace } = params;
+  const { chain, buyerKey, advertRef, request, prompt_hash, payment_lovelace } = params;
 
-  // 5. Body validation.
-  if (typeof request?.text !== "string" || request.text.length === 0) {
-    throw new TxConstructionError("text required",
-      "request.text must be a non-empty string");
+  if (request === undefined && prompt_hash === undefined) {
+    throw new TxConstructionError(
+      "request required",
+      "provide request or a precomputed prompt_hash",
+    );
   }
-  if (!ALLOWED_TTS_VOICES.has(request.voice)) {
-    throw new TxConstructionError("voice invalid",
-      `voice must be one of: ${[...ALLOWED_TTS_VOICES].join(", ")}`);
+  if (request !== undefined && prompt_hash !== undefined) {
+    throw new TxConstructionError(
+      "ambiguous prompt commitment",
+      "provide either request or prompt_hash, not both",
+    );
   }
-  if (!ALLOWED_TTS_FORMATS.has(request.format)) {
-    throw new TxConstructionError("format invalid",
-      `format must be one of: ${[...ALLOWED_TTS_FORMATS].join(", ")}`);
-  }
-  if (!Number.isFinite(request.speed) || request.speed < 0.5 || request.speed > 1.5) {
-    throw new TxConstructionError("speed out of range",
-      "speed must be a finite number in [0.5, 1.5]");
+
+  let promptHash: string;
+  if (prompt_hash !== undefined) {
+    if (!/^[0-9a-fA-F]{64}$/.test(prompt_hash)) {
+      throw new TxConstructionError(
+        "prompt_hash malformed",
+        "prompt_hash must be 32-byte hex",
+      );
+    }
+    promptHash = prompt_hash.toLowerCase();
+  } else {
+    if (typeof request?.text !== "string" || request.text.length === 0) {
+      throw new TxConstructionError("text required",
+        "request.text must be a non-empty string");
+    }
+    if (!ALLOWED_TTS_VOICES.has(request.voice)) {
+      throw new TxConstructionError("voice invalid",
+        `voice must be one of: ${[...ALLOWED_TTS_VOICES].join(", ")}`);
+    }
+    if (!ALLOWED_TTS_FORMATS.has(request.format)) {
+      throw new TxConstructionError("format invalid",
+        `format must be one of: ${[...ALLOWED_TTS_FORMATS].join(", ")}`);
+    }
+    if (!Number.isFinite(request.speed) || request.speed < 0.5 || request.speed > 1.5) {
+      throw new TxConstructionError("speed out of range",
+        "speed must be a finite number in [0.5, 1.5]");
+    }
+    promptHash = ttsPromptHash(request);
   }
 
   // 1. Advert UTxO must exist.
@@ -148,7 +172,6 @@ export async function buildPostTtsEscrowTx(
     model: advertDatum.model,
   });
   const requestSpecHash = sha256Utf8Hex(requestSpecCanonical);
-  const promptHash = ttsPromptHash(request);
 
   const economicTotal =
     advertDatum.price_lovelace +

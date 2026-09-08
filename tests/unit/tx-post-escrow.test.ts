@@ -185,6 +185,65 @@ describe("buildPostEscrowTx() — happy path", () => {
   });
 });
 
+describe("buildPostEscrowTx() — precomputed prompt_hash", () => {
+  it("stores a precomputed hash in lowercase without requiring messages", async () => {
+    const chain = new MockChainProvider();
+    chain.advanceSlot(1_745_500_000);
+    seedAdvertUtxo(chain, makeActiveAdvert());
+
+    const result = await buildPostEscrowTx({
+      chain,
+      buyerKey: buildBuyerWalletKey(),
+      advertRef: ADVERT_REF,
+      prompt_hash: "AB".repeat(32),
+      payment_lovelace: PAYMENT,
+    });
+    const utxo = await chain.queryUtxo(result.escrowOutputRef);
+    const datum = decodeEscrowDatum(utxo!.datumHex!);
+
+    expect(datum.prompt_hash).toBe("ab".repeat(32));
+  });
+
+  it("rejects when neither messages nor prompt_hash is provided", async () => {
+    await expect(buildPostEscrowTx({
+      chain: new MockChainProvider(),
+      buyerKey: buildBuyerWalletKey(),
+      advertRef: ADVERT_REF,
+      payment_lovelace: PAYMENT,
+    })).rejects.toMatchObject({
+      name: "TxConstructionError",
+      reason: "prompt required",
+    });
+  });
+
+  it("rejects when both messages and prompt_hash are provided", async () => {
+    await expect(buildPostEscrowTx({
+      chain: new MockChainProvider(),
+      buyerKey: buildBuyerWalletKey(),
+      advertRef: ADVERT_REF,
+      messages: SAMPLE_MESSAGES,
+      prompt_hash: "ab".repeat(32),
+      payment_lovelace: PAYMENT,
+    })).rejects.toMatchObject({
+      name: "TxConstructionError",
+      reason: "ambiguous prompt commitment",
+    });
+  });
+
+  it("rejects a malformed prompt_hash", async () => {
+    await expect(buildPostEscrowTx({
+      chain: new MockChainProvider(),
+      buyerKey: buildBuyerWalletKey(),
+      advertRef: ADVERT_REF,
+      prompt_hash: "not-32-byte-hex",
+      payment_lovelace: PAYMENT,
+    })).rejects.toMatchObject({
+      name: "TxConstructionError",
+      reason: "prompt_hash malformed",
+    });
+  });
+});
+
 // ─── Rejection: advert UTxO not found ────────────────────────────────────────
 
 describe("buildPostEscrowTx() — rejects missing advert UTxO", () => {

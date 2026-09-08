@@ -2,11 +2,9 @@
  * tx/escrow/postOcrEscrow.ts — PostEscrow tx builder for model-scoped OCR
  * capabilities (`ocr.page.extract.<model-slug>.v1`, one page per job).
  *
- * Mirrors `postTtsEscrow.ts` but commits an OCR-shaped prompt_hash over the
- * canonicalised request envelope `{image_b64, mime, output_format}` — the
- * SAME object the supplier hashes when validating the incoming
- * POST /v1/ocr/extract body. Any mismatch on either side fails the
- * supplier-side prompt_mismatch gate.
+ * Accepts either the OCR request envelope or a precomputed prompt_hash. The
+ * request path hashes canonical `{image_b64, mime, output_format}`, the same
+ * object the supplier hashes when validating POST /v1/ocr/extract.
  *
  * The image travels off-chain (buyer → supplier HTTP body); the chain only
  * ever carries prompt_hash. Never place image bytes or extracted text in a
@@ -17,10 +15,8 @@
  *   2. advert datum.status === "Active"
  *   3. payment_lovelace === advert.price_lovelace
  *   4. buyerKey.pubKeyHash !== advert.supplier_pkh
- *   5. body.image_b64 is a non-empty plain-base64 string within size bounds
- *      (no data-URL prefix — the mime rides in its own field)
- *   6. body.mime ∈ ALLOWED_OCR_MIMES
- *   7. body.output_format ∈ ALLOWED_OCR_OUTPUT_FORMATS
+ *   5. exactly one of request or prompt_hash is provided
+ *   6. a supplied prompt_hash is 32-byte hex, or request passes OCR validation
  */
 
 import * as nodeCrypto from "crypto";
@@ -71,7 +67,11 @@ export interface PostOcrEscrowParams {
   chain: ChainProvider;
   buyerKey: WalletKey;
   advertRef: OutputReference;
-  request: OcrRequest;
+  request?: OcrRequest;
+  /** Precomputed prompt commitment: 32-byte hex, sha256 over whatever canonical
+   * envelope the caller and supplier agreed on. When provided, the builder uses
+   * it verbatim and does not require or hash request. */
+  prompt_hash?: string;
   payment_lovelace: bigint;
 }
 
@@ -117,10 +117,33 @@ export function validateOcrRequest(request: OcrRequest): void {
 export async function buildPostOcrEscrowTx(
   params: PostOcrEscrowParams,
 ): Promise<PostEscrowBuildResult> {
-  const { chain, buyerKey, advertRef, request, payment_lovelace } = params;
+  const { chain, buyerKey, advertRef, request, prompt_hash, payment_lovelace } = params;
 
-  // 5–7. Body validation before any chain access.
-  validateOcrRequest(request);
+  if (request !== undefined && prompt_hash !== undefined) {
+    throw new TxConstructionError(
+      "ambiguous prompt commitment",
+      "provide either request or prompt_hash, not both",
+    );
+  }
+
+  let promptHash: string;
+  if (prompt_hash !== undefined) {
+    if (!/^[0-9a-fA-F]{64}$/.test(prompt_hash)) {
+      throw new TxConstructionError(
+        "prompt_hash malformed",
+        "prompt_hash must be 32-byte hex",
+      );
+    }
+    promptHash = prompt_hash.toLowerCase();
+  } else if (request !== undefined) {
+    validateOcrRequest(request);
+    promptHash = ocrPromptHash(request);
+  } else {
+    throw new TxConstructionError(
+      "request required",
+      "provide request or a precomputed prompt_hash",
+    );
+  }
 
   // 1. Advert UTxO must exist.
   const advertUtxo = await chain.queryUtxo(advertRef);
@@ -175,7 +198,6 @@ export async function buildPostOcrEscrowTx(
     model: advertDatum.model,
   });
   const requestSpecHash = sha256Utf8Hex(requestSpecCanonical);
-  const promptHash = ocrPromptHash(request);
 
   const economicTotal =
     advertDatum.price_lovelace +
