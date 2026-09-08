@@ -561,6 +561,7 @@ function makeGetJobHandler(deps: ResolvedDeps) {
         receipt: payload.receipt,
         receipt_signature: payload.receipt_signature,
         escrow_ref: record.escrowRef,
+        submitted_ref: payload.submitted_ref,
       });
     }
     // failed
@@ -807,6 +808,7 @@ function makeGetTtsJobHandler(deps: ResolvedDeps) {
         receipt: payload.receipt,
         receipt_signature: payload.receipt_signature,
         escrow_ref: record.escrowRef,
+        submitted_ref: payload.submitted_ref,
       });
     }
     // failed
@@ -1104,6 +1106,7 @@ function makeGetOcrJobHandler(deps: ResolvedDeps) {
         receipt: payload.receipt,
         receipt_signature: payload.receipt_signature,
         escrow_ref: record.escrowRef,
+        submitted_ref: payload.submitted_ref,
       });
     }
     // failed

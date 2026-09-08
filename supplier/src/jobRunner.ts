@@ -306,6 +306,7 @@ export async function runChatJob(params: RunChatJobParams): Promise<void> {
       },
       receipt: signed.receipt as unknown as Record<string, unknown>,
       receipt_signature: signed.signature,
+      submitted_ref: submitOutcome.submittedRef,
     };
     deps.jobs.complete(jobId, payload);
   } finally {
@@ -416,12 +417,14 @@ export async function runTtsJob(params: RunTtsJobParams): Promise<void> {
       } catch (err) {
         return { kind: "build_failed" as const, err };
       }
+      // The Submit tx output (index 0) is the new Submitted UTxO the buyer Accepts.
+      const submittedRef = `${built.expectedTxHash}#0`;
       try {
         await deps.chain.awaitTx(built.expectedTxHash, 60_000);
       } catch (err) {
         return { kind: "await_failed" as const, err };
       }
-      return { kind: "ok" as const };
+      return { kind: "ok" as const, submittedRef };
     });
     if (submitOutcome.kind === "build_failed") {
       const message = submitOutcome.err instanceof Error ? submitOutcome.err.message : String(submitOutcome.err);
@@ -458,6 +461,7 @@ export async function runTtsJob(params: RunTtsJobParams): Promise<void> {
       byte_length: inference.audio.byteLength,
       receipt: signed.receipt as unknown as Record<string, unknown>,
       receipt_signature: signed.signature,
+      submitted_ref: submitOutcome.submittedRef,
     };
     deps.jobs.complete(jobId, payload);
   } finally {
@@ -584,12 +588,13 @@ export async function runOcrJob(params: RunOcrJobParams): Promise<void> {
       } catch (err) {
         return { kind: "build_failed" as const, err };
       }
+      const submittedRef = `${built.expectedTxHash}#0`;
       try {
         await deps.chain.awaitTx(built.expectedTxHash, 60_000);
       } catch (err) {
         return { kind: "await_failed" as const, err };
       }
-      return { kind: "ok" as const };
+      return { kind: "ok" as const, submittedRef };
     });
     if (submitOutcome.kind === "build_failed") {
       const message = submitOutcome.err instanceof Error ? submitOutcome.err.message : String(submitOutcome.err);
@@ -628,6 +633,7 @@ export async function runOcrJob(params: RunOcrJobParams): Promise<void> {
       },
       receipt: signed.receipt as unknown as Record<string, unknown>,
       receipt_signature: signed.signature,
+      submitted_ref: submitOutcome.submittedRef,
     };
     deps.jobs.complete(jobId, payload);
   } finally {

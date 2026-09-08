@@ -15,9 +15,10 @@ import { open as unseal } from "../crypto/seal.js";
 import { deriveWalletKey } from "../wallet.js";
 import type { ApiKeyRow } from "../db/store.js";
 
-/** Default per-run deadline. Chain reads and tx submits settle in seconds;
- * anything past this is the 2026-08-12 freeze mode (a fetch that never
- * settles), not a slow success. */
+/** Default per-run deadline for wallet ops that are one or two chain round
+ * trips (withdraw, consolidate, a sweeper Accept/Reclaim). Anything past this
+ * is the 2026-08-12 freeze mode (a fetch that never settles), not a slow
+ * success. One-shot jobs pass their own SLA-derived deadline to run(). */
 export const DEFAULT_MUTEX_TIMEOUT_MS = 180_000;
 
 /** Default queue bound per mutex. A healthy key drains its queue in seconds;
@@ -67,6 +68,11 @@ function runWithDeadline<T>(fn: () => Promise<T>, timeoutMs: number, label: stri
  * A zombie that settles later can at worst lose a UTxO-contention race with
  * the run that replaced it — strictly better than the alternative, where one
  * stuck chain call convoys every subsequent request on the key forever.
+ *
+ * The deadline must therefore exceed the run's legitimate worst case: a run
+ * abandoned mid-settle still pays (the zombie Accepts) while its caller has
+ * already been told the job failed (2026-09-07). Callers whose worst case
+ * derives from an advert SLA pass it as `timeoutMs`.
  */
 export class Mutex {
   private tail: Promise<unknown> = Promise.resolve();
@@ -74,8 +80,7 @@ export class Mutex {
 
   constructor(private readonly opts: { timeoutMs?: number; maxQueue?: number } = {}) {}
 
-  run<T>(fn: () => Promise<T>, label = "op"): Promise<T> {
-    const timeoutMs = this.opts.timeoutMs ?? DEFAULT_MUTEX_TIMEOUT_MS;
+  run<T>(fn: () => Promise<T>, label = "op", timeoutMs = this.opts.timeoutMs ?? DEFAULT_MUTEX_TIMEOUT_MS): Promise<T> {
     const maxQueue = this.opts.maxQueue ?? DEFAULT_MUTEX_MAX_QUEUE;
 
     if (this.depth >= maxQueue) {

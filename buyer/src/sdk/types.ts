@@ -23,6 +23,10 @@ export interface SubmitPromptResult {
   receiptSignature: string;
   /** The escrow OutputReference created for this prompt. */
   escrowRef: OutputReference;
+  /** The Submitted escrow UTxO the supplier's Submit tx produced, when the
+   * supplier reported it (`submitted_ref` on the done payload). Lets the
+   * buyer Accept from chain state alone instead of waiting on the indexer. */
+  submittedRef?: OutputReference;
 }
 
 /**
@@ -200,6 +204,8 @@ export interface SubmitTtsResult {
   receipt: Receipt;
   receiptSignature: string;
   escrowRef: OutputReference;
+  /** See SubmitPromptResult.submittedRef. */
+  submittedRef?: OutputReference;
 }
 
 /**
@@ -229,6 +235,8 @@ export interface SubmitOcrResult {
   receipt: Receipt;
   receiptSignature: string;
   escrowRef: OutputReference;
+  /** See SubmitPromptResult.submittedRef. */
+  submittedRef?: OutputReference;
 }
 
 /**

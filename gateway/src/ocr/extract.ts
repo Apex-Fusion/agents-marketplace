@@ -39,14 +39,16 @@ import {
   ALLOWED_OCR_OUTPUT_FORMATS,
   MAX_OCR_IMAGE_B64_CHARS,
 } from "@marketplace/shared/tx";
-import { SupplierError, type ProgressEvent } from "@marketplace/buyer/sdk";
+import { SupplierError, type ProgressEvent, type SubmitOcrResult } from "@marketplace/buyer/sdk";
+import { receiptResultHash } from "@marketplace/shared/receipt";
 import type { GatewayDeps } from "../deps.js";
 import type { GatewayStore } from "../db/store.js";
+import type { KeyContext } from "../sdk/registry.js";
 import { requireKey } from "../middleware/apiKeyAuth.js";
 import { asyncHandler } from "../middleware/http.js";
 import { selectCandidates, type SupplierCandidate } from "../routing/selectSupplier.js";
 import { preflight } from "../onchain/preflight.js";
-import { resolveSubmittedRef, acceptAndConfirm } from "../onchain/settle.js";
+import { resolveSubmittedRef, acceptAndConfirm, oneShotBudgetMs } from "../onchain/settle.js";
 import { ensureWalletHealthy } from "../walletHealth.js";
 import { badRequest, forbidden, notFound, paymentRequired, toGatewayError } from "../openai/errors.js";
 
@@ -197,15 +199,39 @@ export function makeOcrExtractHandler(deps: GatewayDeps) {
     const ctx = deps.registry.getContext(keyRow);
     const parsed = parseOcrRequest(req.body);
     const attribution = venueAttribution(req);
-    await ctx.mutex.run(() => runOcrOneShot(deps, keyRow.id, ctx, parsed, attribution, res));
+    const capabilityId = deps.config.ocrCapabilityId;
+
+    // Candidate selection is an indexer read, not a wallet op, so it runs
+    // outside the key mutex — and it yields the advert SLA the run's deadline
+    // derives from. Nothing is posted here, so a failure records no usage.
+    const candidates = await selectCandidates({
+      indexerUrl: deps.config.indexerUrl,
+      model: parsed.model,
+      capabilityId,
+      fetchFn: deps.fetchFn,
+    });
+    if (candidates.length === 0) {
+      throw notFound(
+        "model_not_found",
+        parsed.model === ""
+          ? `no available supplier for capability "${capabilityId}"`
+          : `no available supplier for model "${parsed.model}" under "${capabilityId}"`,
+      );
+    }
+    await ctx.mutex.run(
+      () => runOcrOneShot(deps, keyRow.id, ctx, parsed, candidates, attribution, res),
+      "ocr",
+      oneShotBudgetMs(Math.max(...candidates.map((c) => c.maxProcessingMs))),
+    );
   });
 }
 
 async function runOcrOneShot(
   deps: GatewayDeps,
   keyId: string,
-  ctx: ReturnType<GatewayDeps["registry"]["getContext"]>,
+  ctx: KeyContext,
   parsed: ParsedOcrRequest,
+  candidates: SupplierCandidate[],
   attribution: { venue: string; runUserHash: string },
   res: Response,
 ): Promise<void> {
@@ -218,26 +244,11 @@ async function runOcrOneShot(
   // reconciliation spine that joins on-chain settlement to platform
   // billing, and losing them makes paid-but-failed jobs unreconcilable
   // (I2 review finding).
-  let result: Awaited<ReturnType<typeof ctx.sdk.submitOcr>> | undefined;
+  let result: SubmitOcrResult | undefined;
   let used: SupplierCandidate | undefined;
   let escrowRefStr: string | null = null;
 
   try {
-    const candidates = await selectCandidates({
-      indexerUrl: config.indexerUrl,
-      model: parsed.model,
-      capabilityId,
-      fetchFn,
-    });
-    if (candidates.length === 0) {
-      throw notFound(
-        "model_not_found",
-        parsed.model === ""
-          ? `no available supplier for capability "${capabilityId}"`
-          : `no available supplier for model "${parsed.model}" under "${capabilityId}"`,
-      );
-    }
-
     const primary = candidates[0];
     const pf = await preflight(chain, ctx.walletKey.address, primary);
     if (!pf.ok) {
@@ -313,9 +324,14 @@ async function runOcrOneShot(
     // Settle: resolve the live Submitted ref, Accept, await confirmation.
     escrowRefStr = `${result.escrowRef.txHash}#${result.escrowRef.index}`;
     const submittedRef = await resolveSubmittedRef({
+      chain,
       indexerUrl: config.indexerUrl,
       buyerPkh: ctx.walletKey.pubKeyHash,
       originalRefStr: escrowRefStr,
+      hint: result.submittedRef && {
+        ref: result.submittedRef,
+        resultReceiptHash: receiptResultHash({ receipt: result.receipt, signature: result.receiptSignature }),
+      },
       fetchFn,
     });
     await acceptAndConfirm(chain, ctx.walletKey, submittedRef);

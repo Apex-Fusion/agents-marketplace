@@ -11,14 +11,16 @@
 import { randomUUID } from "crypto";
 import type { Request, Response } from "express";
 import { TxConstructionError } from "@marketplace/shared/tx";
+import { receiptResultHash } from "@marketplace/shared/receipt";
+import type { SubmitPromptResult } from "@marketplace/buyer/sdk";
 import type { GatewayDeps } from "../deps.js";
 import type { ApiKeyRow, GatewayStore } from "../db/store.js";
 import type { KeyContext } from "../sdk/registry.js";
 import { requireKey } from "../middleware/apiKeyAuth.js";
 import { asyncHandler } from "../middleware/http.js";
-import { selectCandidates } from "../routing/selectSupplier.js";
+import { selectCandidates, type SupplierCandidate } from "../routing/selectSupplier.js";
 import { preflight } from "../onchain/preflight.js";
-import { resolveSubmittedRef, acceptAndConfirm } from "../onchain/settle.js";
+import { resolveSubmittedRef, acceptAndConfirm, oneShotBudgetMs } from "../onchain/settle.js";
 import { ensureWalletHealthy } from "../walletHealth.js";
 import { parseChatRequest, type ParsedChatRequest } from "./validate.js";
 import { runDemoChat } from "./demoChat.js";
@@ -79,7 +81,25 @@ export function makeChatCompletionsHandler(deps: GatewayDeps) {
       return;
     }
     const parsed = parseChatRequest(req.body);
-    await ctx.mutex.run(() => runOneShot(deps, keyRow, ctx, parsed, res));
+    // Candidate selection is an indexer read, not a wallet op, so it runs
+    // outside the key mutex — and it yields the advert SLA the run's deadline
+    // derives from.
+    const candidates = await selectCandidates({
+      indexerUrl: deps.config.indexerUrl,
+      model: parsed.model,
+      capabilityId: CAPABILITY,
+      supplierPkh: parsed.supplierPkh,
+      preferredSupplierPkh: deps.config.preferredSupplierPkh,
+      fetchFn: deps.fetchFn,
+    });
+    if (candidates.length === 0) {
+      throw notFound("model_not_found", `no available supplier for model "${parsed.model}"`);
+    }
+    await ctx.mutex.run(
+      () => runOneShot(deps, keyRow, ctx, parsed, candidates, res),
+      "chat",
+      oneShotBudgetMs(Math.max(...candidates.map((c) => c.maxProcessingMs))),
+    );
   });
 }
 
@@ -88,21 +108,10 @@ async function runOneShot(
   keyRow: ApiKeyRow,
   ctx: KeyContext,
   parsed: ParsedChatRequest,
+  candidates: SupplierCandidate[],
   res: Response,
 ): Promise<void> {
   const { config, store, chain, fetchFn } = deps;
-
-  const candidates = await selectCandidates({
-    indexerUrl: config.indexerUrl,
-    model: parsed.model,
-    capabilityId: CAPABILITY,
-    supplierPkh: parsed.supplierPkh,
-    preferredSupplierPkh: config.preferredSupplierPkh,
-    fetchFn,
-  });
-  if (candidates.length === 0) {
-    throw notFound("model_not_found", `no available supplier for model "${parsed.model}"`);
-  }
 
   const primary = candidates[0];
   const pf = await preflight(chain, ctx.walletKey.address, primary);
@@ -144,8 +153,8 @@ async function runOneShot(
     // Submit. Fall back to the next supplier ONLY on a pre-post
     // TxConstructionError (no escrow was posted). A SupplierError means the
     // escrow is already posted — do not retry (the sweeper recovers it).
-    let result: Awaited<ReturnType<typeof ctx.sdk.submitPrompt>> | undefined;
-    let used: (typeof candidates)[number] | undefined;
+    let result: SubmitPromptResult | undefined;
+    let used: SupplierCandidate | undefined;
     let lastErr: unknown;
     for (const cand of candidates) {
       try {
@@ -174,9 +183,14 @@ async function runOneShot(
       res.setHeader("X-Vector-Escrow-Ref", originalRefStr);
     }
     const submittedRef = await resolveSubmittedRef({
+      chain,
       indexerUrl: config.indexerUrl,
       buyerPkh: ctx.walletKey.pubKeyHash,
       originalRefStr,
+      hint: result.submittedRef && {
+        ref: result.submittedRef,
+        resultReceiptHash: receiptResultHash({ receipt: result.receipt, signature: result.receiptSignature }),
+      },
       fetchFn,
     });
     await acceptAndConfirm(chain, ctx.walletKey, submittedRef);

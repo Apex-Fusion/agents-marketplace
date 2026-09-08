@@ -21,6 +21,7 @@ interface SupplierView {
   capability_id: string;
   model: string;
   max_output_tokens: number;
+  max_processing_ms: number;
   price_lovelace: string;
   supplier_bond_lovelace: string;
   buyer_bond_lovelace: string;
@@ -40,6 +41,8 @@ export interface SupplierCandidate {
   buyerBondLovelace: bigint;
   supplierBondLovelace: bigint;
   maxOutputTokens: number;
+  /** Advert SLA; every wait budget for a job against this supplier derives from it. */
+  maxProcessingMs: number;
   status: string;
 }
 
@@ -110,6 +113,7 @@ export async function selectCandidates(opts: SelectSupplierOpts): Promise<Suppli
       buyerBondLovelace: BigInt(raw.buyer_bond_lovelace),
       supplierBondLovelace: BigInt(raw.supplier_bond_lovelace),
       maxOutputTokens: raw.max_output_tokens,
+      maxProcessingMs: raw.max_processing_ms,
       status: raw.status,
     });
   }

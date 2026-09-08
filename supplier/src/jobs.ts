@@ -45,6 +45,10 @@ export interface ChatJobResponsePayload {
   };
   receipt: Record<string, unknown>;
   receipt_signature: string;
+  /** The Submitted escrow UTxO ("<submitTxHash>#0") the buyer must Accept.
+   * Reported so the buyer can settle from chain state without an indexer
+   * round-trip (same contract as ChatSessionEndResult.submitted_ref). */
+  submitted_ref: string;
 }
 
 /**
@@ -61,6 +65,7 @@ export interface TtsJobResponsePayload {
   byte_length: number;
   receipt: Record<string, unknown>;
   receipt_signature: string;
+  submitted_ref: string;
 }
 
 /**
@@ -80,6 +85,7 @@ export interface OcrJobResponsePayload {
   };
   receipt: Record<string, unknown>;
   receipt_signature: string;
+  submitted_ref: string;
 }
 
 /**

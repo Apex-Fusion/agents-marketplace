@@ -106,11 +106,13 @@ import type {
   GetTaskHistoryOptions,
   ProgressEvent,
   ProgressEventType,
+  Receipt,
 } from "./types.js";
 import { IndexerError, SupplierError, ReceiptVerificationError } from "./types.js";
 import type { TaskHistoryStore } from "./history.js";
 import { MemoryTaskHistoryStore } from "./history.js";
 import { HttpClient, HttpError } from "./httpClient.js";
+import { ESCROW_CONFIRM_TIMEOUT_MS, deliverByFor, supplierBudgetMs } from "./budget.js";
 
 const ZERO_SIGNATURE = "0".repeat(128);
 
@@ -404,7 +406,7 @@ export class Marketplace extends EventEmitterBase {
     // implement awaitTx (mock paths in tests), swallow and proceed —
     // queryUtxo retries on the next step provide adequate coverage there.
     try {
-      await this.chain.awaitTx(escrowResult.expectedTxHash, 120_000);
+      await this.chain.awaitTx(escrowResult.expectedTxHash, ESCROW_CONFIRM_TIMEOUT_MS);
     } catch {
       /* mock providers / test harnesses */
     }
@@ -433,13 +435,11 @@ export class Marketplace extends EventEmitterBase {
       throw new ReceiptVerificationError(reason);
     }
     if (deliverByMs === 0) {
-      deliverByMs =
-        postedAtMs + advertDatum.max_processing_ms + 30_000;
+      deliverByMs = deliverByFor(postedAtMs, advertDatum.max_processing_ms);
     }
-    const supplierCallTimeoutMs = Math.max(
-      30_000,
-      deliverByMs - Date.now() + 90_000,
-    );
+    // The initial POST returns only after the supplier's Claim confirms, so
+    // it needs the same SLA-derived budget as the job poll below.
+    const supplierCallTimeoutMs = supplierBudgetMs(deliverByMs);
 
     // ── 4. Call supplier /v1/chat/completions ─────────────────────────
 
@@ -491,10 +491,7 @@ export class Marketplace extends EventEmitterBase {
         throw sErr;
       }
       const POLL_INTERVAL_MS = 2_000;
-      const pollBudgetMs = Math.max(
-        30_000,
-        deliverByMs + 90_000 - Date.now(),
-      );
+      const pollBudgetMs = supplierBudgetMs(deliverByMs);
       const pollDeadline = Date.now() + pollBudgetMs;
       let polled = chatResult;
       // First poll runs immediately so a quickly-completed job doesn't pay
@@ -564,8 +561,9 @@ export class Marketplace extends EventEmitterBase {
 
     const responseBody = chatResult.body as {
       choices?: Array<{ message?: { role?: string; content?: string } }>;
-      receipt?: import("@marketplace/shared/receipt").Receipt;
+      receipt?: Receipt;
       receipt_signature?: string;
+      submitted_ref?: string;
     };
 
     if (!responseBody.receipt || !responseBody.receipt_signature) {
@@ -657,6 +655,7 @@ export class Marketplace extends EventEmitterBase {
       receipt,
       receiptSignature,
       escrowRef: escrowOutputRef,
+      submittedRef: parseRef(responseBody.submitted_ref ?? "") ?? undefined,
     };
   }
 
@@ -670,6 +669,7 @@ export class Marketplace extends EventEmitterBase {
     let escrowOutputRef: OutputReference | null = null;
     let escrowRefStr = "";
     let postedAtMs = Date.now();
+    let deliverByMs = 0;
 
     const recordFailure = (reason: string): void => {
       this.historyStore.save({
@@ -716,15 +716,16 @@ export class Marketplace extends EventEmitterBase {
 
     // ── 2. Wait for the escrow tx to confirm ──────────────────────────
     try {
-      await this.chain.awaitTx(escrowResult.expectedTxHash, 120_000);
+      await this.chain.awaitTx(escrowResult.expectedTxHash, ESCROW_CONFIRM_TIMEOUT_MS);
     } catch { /* mock providers / tests */ }
 
-    // ── 3. Re-fetch escrow datum to capture posted_at ─────────────────
+    // ── 3. Re-fetch escrow datum to capture posted_at / deliver_by ────
     try {
       const escrowUtxo = await this.chain.queryUtxo(escrowOutputRef);
       if (escrowUtxo && escrowUtxo.datumHex) {
         const ed = decodeEscrowDatum(escrowUtxo.datumHex);
         postedAtMs = ed.posted_at;
+        deliverByMs = ed.deliver_by;
       }
     } catch { /* metadata best-effort */ }
 
@@ -735,6 +736,9 @@ export class Marketplace extends EventEmitterBase {
     }
 
     // ── 4. Call supplier /v1/audio/synthesize ─────────────────────────
+    if (deliverByMs === 0) {
+      deliverByMs = deliverByFor(postedAtMs, advertDatum.max_processing_ms);
+    }
     const supplierBaseUrl = advertDatum.endpoint_url;
     const supplierHttp = new HttpClient({
       baseUrl: supplierBaseUrl,
@@ -746,6 +750,7 @@ export class Marketplace extends EventEmitterBase {
     try {
       synthResult = await supplierHttp.postJson("/v1/audio/synthesize", ttsBody, {
         headers: { "X-Escrow-Ref": escrowRefStr },
+        timeoutMs: supplierBudgetMs(deliverByMs),
       });
     } catch (err) {
       if (err instanceof HttpError) {
@@ -770,11 +775,10 @@ export class Marketplace extends EventEmitterBase {
         throw sErr;
       }
       const POLL_INTERVAL_MS = 2_000;
-      // TTS jobs run on CPU and finish in 1–3s for short text; the long
-      // tail is dominated by the Submit tx confirmation (slot rate). 180s
-      // mirrors the chat path so polled.status hits 200 cleanly.
-      const POLL_TIMEOUT_MS = 180_000;
-      const pollDeadline = Date.now() + POLL_TIMEOUT_MS;
+      // The supplier may Submit right up to deliver_by; wait for the SLA
+      // the advert committed to, not a fixed interval.
+      const pollBudgetMs = supplierBudgetMs(deliverByMs);
+      const pollDeadline = Date.now() + pollBudgetMs;
       let polled = synthResult;
       let firstIter = true;
       while (Date.now() < pollDeadline) {
@@ -808,7 +812,7 @@ export class Marketplace extends EventEmitterBase {
       if (polled.status !== 200) {
         const sErr = new SupplierError("timeout", {
           status: polled.status,
-          message: `supplier job ${jobId} not done within ${POLL_TIMEOUT_MS}ms`,
+          message: `supplier job ${jobId} not done within ${pollBudgetMs}ms`,
         });
         recordFailure("timeout");
         throw sErr;
@@ -842,8 +846,9 @@ export class Marketplace extends EventEmitterBase {
       format?: string;
       content_type?: string;
       byte_length?: number;
-      receipt?: import("@marketplace/shared/receipt").Receipt;
+      receipt?: Receipt;
       receipt_signature?: string;
+      submitted_ref?: string;
     };
     if (!responseBody.audio_b64 || !responseBody.receipt || !responseBody.receipt_signature) {
       const sErr = new SupplierError("malformed_response", {
@@ -917,6 +922,7 @@ export class Marketplace extends EventEmitterBase {
       receipt,
       receiptSignature,
       escrowRef: escrowOutputRef,
+      submittedRef: parseRef(responseBody.submitted_ref ?? "") ?? undefined,
     };
   }
 
@@ -930,6 +936,7 @@ export class Marketplace extends EventEmitterBase {
     let escrowOutputRef: OutputReference | null = null;
     let escrowRefStr = "";
     let postedAtMs = Date.now();
+    let deliverByMs = 0;
 
     const previewStr = `[ocr:${mime} ${output_format} ${image_b64.length}b64]`;
     const recordFailure = (reason: string): void => {
@@ -977,15 +984,16 @@ export class Marketplace extends EventEmitterBase {
 
     // ── 2. Wait for the escrow tx to confirm ──────────────────────────
     try {
-      await this.chain.awaitTx(escrowResult.expectedTxHash, 120_000);
+      await this.chain.awaitTx(escrowResult.expectedTxHash, ESCROW_CONFIRM_TIMEOUT_MS);
     } catch { /* mock providers / tests */ }
 
-    // ── 3. Re-fetch escrow datum to capture posted_at ─────────────────
+    // ── 3. Re-fetch escrow datum to capture posted_at / deliver_by ────
     try {
       const escrowUtxo = await this.chain.queryUtxo(escrowOutputRef);
       if (escrowUtxo && escrowUtxo.datumHex) {
         const ed = decodeEscrowDatum(escrowUtxo.datumHex);
         postedAtMs = ed.posted_at;
+        deliverByMs = ed.deliver_by;
       }
     } catch { /* metadata best-effort */ }
 
@@ -996,6 +1004,9 @@ export class Marketplace extends EventEmitterBase {
     }
 
     // ── 4. Call supplier /v1/ocr/extract ──────────────────────────────
+    if (deliverByMs === 0) {
+      deliverByMs = deliverByFor(postedAtMs, advertDatum.max_processing_ms);
+    }
     const supplierBaseUrl = advertDatum.endpoint_url;
     const supplierHttp = new HttpClient({
       baseUrl: supplierBaseUrl,
@@ -1007,6 +1018,7 @@ export class Marketplace extends EventEmitterBase {
     try {
       ocrResult = await supplierHttp.postJson("/v1/ocr/extract", ocrBody, {
         headers: { "X-Escrow-Ref": escrowRefStr },
+        timeoutMs: supplierBudgetMs(deliverByMs),
       });
     } catch (err) {
       if (err instanceof HttpError) {
@@ -1032,8 +1044,10 @@ export class Marketplace extends EventEmitterBase {
         throw sErr;
       }
       const POLL_INTERVAL_MS = 2_000;
-      const POLL_TIMEOUT_MS = 180_000;
-      const pollDeadline = Date.now() + POLL_TIMEOUT_MS;
+      // A cold upstream cache puts fresh conversions near the advert's SLA
+      // (230–250 s against a 300 s advert); the budget must cover the SLA.
+      const pollBudgetMs = supplierBudgetMs(deliverByMs);
+      const pollDeadline = Date.now() + pollBudgetMs;
       let polled = ocrResult;
       let firstIter = true;
       while (Date.now() < pollDeadline) {
@@ -1067,7 +1081,7 @@ export class Marketplace extends EventEmitterBase {
       if (polled.status !== 200) {
         const sErr = new SupplierError("timeout", {
           status: polled.status,
-          message: `supplier job ${jobId} not done within ${POLL_TIMEOUT_MS}ms`,
+          message: `supplier job ${jobId} not done within ${pollBudgetMs}ms`,
         });
         recordFailure("timeout");
         throw sErr;
@@ -1100,8 +1114,9 @@ export class Marketplace extends EventEmitterBase {
       output_format?: string;
       content?: string;
       usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
-      receipt?: import("@marketplace/shared/receipt").Receipt;
+      receipt?: Receipt;
       receipt_signature?: string;
+      submitted_ref?: string;
     };
     if (!responseBody.content || !responseBody.receipt || !responseBody.receipt_signature) {
       const sErr = new SupplierError("malformed_response", {
@@ -1189,6 +1204,7 @@ export class Marketplace extends EventEmitterBase {
       receipt,
       receiptSignature,
       escrowRef: escrowOutputRef,
+      submittedRef: parseRef(responseBody.submitted_ref ?? "") ?? undefined,
     };
   }
 
