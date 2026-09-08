@@ -41,6 +41,9 @@
   "pnpm": {
     "patchedDependencies": {
       "libsodium-wrappers-sumo@0.7.16": "patches/libsodium-wrappers-sumo@0.7.16.patch"
+    },
+    "overrides": {
+      "ip-address": "^10.7.0"
     }
   }
 }
