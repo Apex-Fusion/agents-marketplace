@@ -144,17 +144,39 @@ drain_supplier() { # drain_supplier <compose-file>
   echo "   WARNING: still busy after ${DRAIN_TIMEOUT_SECS}s — recreating anyway"
 }
 
+# Health state per container name BEFORE the rollout. The gate below exists
+# to catch regressions this deploy introduces; a service that was already
+# unhealthy (e.g. surplus-seller returns 503 from /healthz while its managed
+# offer is paused) must not block the remaining projects — suppliers roll
+# last, so aborting there leaves the fleet on the old image.
+declare -A PRE_HEALTH
+record_pre_health() { # record_pre_health <compose-file>
+  local cid name state
+  for cid in $(docker compose -f "$COMPOSE_DIR/$1" ps -q); do
+    name=$(docker inspect -f '{{.Name}}' "$cid")
+    state=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$cid")
+    PRE_HEALTH["$name"]="$state"
+  done
+}
+
 wait_healthy() { # wait_healthy <compose-file>
-  local deadline cid state
+  local deadline cid name state
   deadline=$(( $(date +%s) + HEALTH_TIMEOUT_SECS ))
   for cid in $(docker compose -f "$COMPOSE_DIR/$1" ps -q); do
+    name=$(docker inspect -f '{{.Name}}' "$cid")
     while :; do
       state=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$cid")
       case "$state" in
         healthy|running) break ;;
-        starting|unhealthy|created|restarting)
+        unhealthy)
+          if [ "${PRE_HEALTH[$name]:-}" = "unhealthy" ]; then
+            echo "   WARNING: $name is 'unhealthy' but was already unhealthy before this deploy — not a regression, continuing"
+            break
+          fi
+          ;&
+        starting|created|restarting)
           if [ "$(date +%s)" -ge "$deadline" ]; then
-            echo "   FAILED: $(docker inspect -f '{{.Name}}' "$cid") is '$state' after ${HEALTH_TIMEOUT_SECS}s; last logs:"
+            echo "   FAILED: $name is '$state' after ${HEALTH_TIMEOUT_SECS}s; last logs:"
             docker logs --tail 50 "$cid" 2>&1 | sed 's/^/   | /'
             return 1
           fi
@@ -168,6 +190,7 @@ wait_healthy() { # wait_healthy <compose-file>
 echo "== rollout phase =="
 for f in "${AFFECTED[@]}"; do
   echo "-- rolling out $f"
+  record_pre_health "$f"
   case "$f" in docker-compose.supplier*) drain_supplier "$f" ;; esac
   docker compose -f "$COMPOSE_DIR/$f" up -d
   wait_healthy "$f"
