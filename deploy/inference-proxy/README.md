@@ -1,8 +1,8 @@
-# inference-proxy box — suppliers `local` + `openclaw`
+# inference-proxy box — suppliers `local`, `openclaw`, and `qwen38-local`
 
 Compose projects for the **inference-proxy** host (`62.238.38.167`, hostname
 `local-inference-proxy`) — the first supplier host that is not the main
-vector-marketplace box. Both suppliers here are backed by the home machine
+vector-marketplace box. These suppliers use backends reached through
 `vuk` over the tailscale tailnet:
 
 - `local` fronts the llama.cpp rig (`llamacpp-multinode`) directly at
@@ -13,11 +13,15 @@ vector-marketplace box. Both suppliers here are backed by the home machine
   llama.cpp rig. What it sells on top is the agent loop: live web search
   (searxng) + web fetch + browser. Both suppliers contend for vuk's single
   llama.cpp slot; requests queue and the 1h deadline absorbs stalls.
+- `qwen38-local` fronts the vLLM load balancer at `100.77.146.49:8989`.
+  It serves `swarm-qwen38-27b-gptq4` (Qwen3.8-27B GPTQ Int4), with a
+  24,576-token context. The balancer uses four workers: `192.168.1.131`,
+  `192.168.1.201`, `192.168.1.202`, and `192.168.1.203`, each on port 8000.
 
 > **Tailnet (2026-08-13):** account `teamhaleight@`, tailnet
 > `taild99fee.ts.net`. Node IPs: inference-proxy `100.110.165.124`, vuk
 > `100.77.146.49`, web-tools `100.105.36.0`. If the tailnet/account changes
-> again, the raw IPs pinned in the two compose files (vuk `OPENAI_BASE_URL`
+> again, the raw IPs pinned in the supplier compose files (vuk `OPENAI_BASE_URL`
 > and the openclaw `extra_hosts`) must be updated, and the openclaw gateway
 > restarted so Serve re-attaches.
 
@@ -32,6 +36,7 @@ vector-marketplace box. Both suppliers here are backed by the home machine
 | `docker-compose.traefik.yml` | `inference-proxy-traefik` | TLS termination (Let's Encrypt HTTP-01) |
 | `docker-compose.supplier-local.yml` | `marketplace-mainnet-supplier-local` | Supplier `local`, `llm.chat.v1`, model `<vuk GGUF id>` |
 | `docker-compose.supplier-openclaw.yml` | `marketplace-mainnet-supplier-openclaw` | Supplier `openclaw`, `llm.chat.v1`, model `openclaw-web-agent` |
+| `docker-compose.supplier-qwen38-local.yml` | `marketplace-mainnet-supplier-qwen38-local` | Qwen3.8-27B, `llm.chat.v1`, model `swarm-qwen38-27b-gptq4` |
 
 Host env files (never committed):
 
@@ -47,6 +52,45 @@ Host env files (never committed):
   `OPENAI_UPSTREAM_API=chat-completions`, `OPENAI_BASE_URL`,
   `OPENAI_SESSION_PASSTHROUGH=1`, and
   `OPENAI_MODEL_OVERRIDE=openclaw`.
+- `supplier/.env.qwen38-local` — a separate wallet, mainnet plumbing, and
+  `ADVERT_REF` (chmod 600). The compose file selects `chat-completions`
+  upstream mode, `http://100.77.146.49:8989`, and a one-hour timeout.
+  It uses ticket settlement and one active chat session.
+
+## Qwen3.8 local supplier
+
+Use the [supplier deployment runbook](../../docs/DEPLOY_NEW_SUPPLIER.md)
+with the Qwen compose file above. Set the advert model to
+`swarm-qwen38-27b-gptq4`, capability to `llm.chat.v1`, output cap to `24576`,
+processing limit to `3600000` ms, and price to `200000` lovelace.
+The public endpoint is
+`https://mp-suppliers-qwen38-local.vector.apexfusion.org`.
+Its DNS-only A record must point to `62.238.38.167`.
+
+Live mainnet deployment (2026-09-21):
+
+- Advert: `61178359cabae3c25764001750639df3b71ce12d26726bfb8c5c04da1ff28be4#0`.
+- Wallet: `addr1v8n75g4u9376ul0cysp27l348t2w4u944h8g429u8lshu2s7q6ds9`.
+- Container: `marketplace-mainnet-supplier-qwen38-local`.
+- Source revision: `cbc2d85` (Responses API migration).
+- Public TLS, on-chain discovery, two streamed buyer turns, conversation
+  recall, and ticket-session close pass. The supplier returns to `free`.
+
+This deployment uses the load balancer without changes to the three remote
+workers. Plain text generation is verified through port 8989. Only the
+worker on `vuk` has verified tool support. Tool calls can fail when the
+balancer selects one of the other workers.
+
+Reliable tool support across the pool requires all workers to use
+`--enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3`.
+For the installed vLLM 0.29.0 image, forced tool calls also need
+`--structured-outputs-config '{"backend":"xgrammar","disable_any_whitespace":true}'`.
+The previous `guidance` setting rejects forced tool calls with
+`Invalid grammar specification: 'triggers'`.
+Do not treat a successful tool test on one worker as pool-wide support.
+
+The supplier exposes Responses-format turns and translates them to upstream
+Chat Completions. Check public HTTPS health before posting the advert.
 
 ## Bring-up order (fresh box)
 

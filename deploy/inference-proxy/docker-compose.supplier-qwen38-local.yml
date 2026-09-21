@@ -1,0 +1,61 @@
+# Qwen3.8-27B chat supplier on local-inference-proxy (Vector mainnet).
+# Upstream: vuk's vLLM load balancer over Tailscale, port 8989.
+# Model id: swarm-qwen38-27b-gptq4; loaded context: 24576 tokens.
+# Wallet and advert: supplier/.env.qwen38-local (host-only, mode 600).
+# DNS: mp-suppliers-qwen38-local.vector.apexfusion.org -> 62.238.38.167.
+
+name: marketplace-mainnet-supplier-qwen38-local
+
+services:
+  supplier:
+    build:
+      context: ../..
+      dockerfile: supplier/Dockerfile
+    container_name: marketplace-mainnet-supplier-qwen38-local
+    restart: unless-stopped
+    env_file:
+      - path: ../../supplier/.env.qwen38-local
+        required: false
+    environment:
+      CAPABILITY_KIND: chat-session
+      CHAT_IDLE_TIMEOUT_MS: "900000"
+      CHAT_SETTLE_MODE: ticket
+      MAX_CHAT_SESSIONS: "1"
+      LLM_BACKEND: openai
+      # The public supplier uses Responses; vLLM uses Chat Completions.
+      OPENAI_UPSTREAM_API: chat-completions
+      OPENAI_BASE_URL: http://100.77.146.49:8989
+      OPENAI_TIMEOUT_MS: "3600000"
+      PORT: "8080"
+      LIVE_CHAIN: "1"
+      # NETWORK_ID and OGMIOS_URL come from the mainnet env file.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz >/dev/null || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - traefik-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-net"
+      - "traefik.http.routers.mp-suppliers-qwen38-local-mainnet.entrypoints=web"
+      - "traefik.http.routers.mp-suppliers-qwen38-local-mainnet.rule=Host(`mp-suppliers-qwen38-local.vector.apexfusion.org`)"
+      - "traefik.http.routers.mp-suppliers-qwen38-local-mainnet.middlewares=mp-suppliers-qwen38-local-mainnet-https"
+      - "traefik.http.middlewares.mp-suppliers-qwen38-local-mainnet-https.redirectscheme.scheme=https"
+      - "traefik.http.middlewares.mp-suppliers-qwen38-local-mainnet-https.redirectscheme.permanent=true"
+      - "traefik.http.routers.mp-suppliers-qwen38-local-mainnet-tls.entrypoints=websecure"
+      - "traefik.http.routers.mp-suppliers-qwen38-local-mainnet-tls.rule=Host(`mp-suppliers-qwen38-local.vector.apexfusion.org`)"
+      - "traefik.http.routers.mp-suppliers-qwen38-local-mainnet-tls.tls.certresolver=letsencrypt"
+      - "traefik.http.services.mp-suppliers-qwen38-local-mainnet.loadbalancer.server.port=8080"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  traefik-net:
+    external: true
+    name: traefik-net
