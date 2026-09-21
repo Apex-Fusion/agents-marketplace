@@ -14,8 +14,15 @@ import { loadPdfCaps } from "../../buyer/src/pdf/caps.js";
 import type { Chunk } from "../../buyer/src/pdf/types.js";
 import type { Marketplace } from "../../buyer/src/sdk/Marketplace.js";
 import type { SupplierView } from "../../buyer/src/sdk/types.js";
-import type { ChainProvider } from "@marketplace/shared/chain";
-import type { WalletKey } from "@marketplace/shared/tx";
+import type { ChainProvider } from "../../packages/shared/src/chain/ChainProvider.js";
+import type { WalletKey } from "../../packages/shared/src/tx/types.js";
+import { canonicalize } from "../../packages/shared/src/cbor/canonical.js";
+import {
+  createResponse,
+  responseResultCommitment,
+  type ResponseObject,
+} from "../../packages/shared/src/responses.js";
+import type { ResponseArchive, PersistChatParams } from "../../buyer/src/db/archive.js";
 
 function supplierView(model: string, ref: string, price: string): SupplierView {
   return {
@@ -52,6 +59,18 @@ const CHAIN = {} as ChainProvider;
 
 function chunks(n: number): Chunk[] {
   return Array.from({ length: n }, (_, i) => ({ index: i, text: `chunk ${i} text`, tokenEstimate: 5 }));
+}
+
+function textResult(text: string, model: string): ResponseObject {
+  return createResponse({
+    id: `resp_${model}`,
+    model,
+    output: [{
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text }],
+    }],
+  });
 }
 
 function waitForDone(store: JobStore, job: { subscribe: (f: (frame: string) => void) => () => void }): Promise<void> {
@@ -105,7 +124,7 @@ describe("JobStore orchestrator", () => {
     const runCall: RunCallFn = async (sup, prompt) => {
       n += 1;
       return {
-        response: `S[${prompt.slice(0, 14)}]`,
+        result: textResult(`S[${prompt.slice(0, 14)}]`, sup.model),
         escrowRef: `${"f".repeat(64)}#${n}`,
         supplierPkh: sup.supplierPkh,
         model: sup.model,
@@ -143,7 +162,7 @@ describe("JobStore orchestrator", () => {
         throw new Error("supplier exploded");
       }
       return {
-        response: `S`,
+        result: textResult("S", sup.model),
         escrowRef: `${"f".repeat(64)}#${Math.floor(Math.random() * 1e6)}`,
         supplierPkh: sup.supplierPkh,
         model: sup.model,
@@ -170,11 +189,124 @@ describe("JobStore orchestrator", () => {
     expect(typeof job.finalSummary).toBe("string");
   });
 
+  it("counts a paid refusal as a gap and archives its native result", async () => {
+    const caps = loadPdfCaps({ PDF_RETRY_K: "0" });
+    const archived: PersistChatParams[] = [];
+    const archive = {
+      persistChat: (entry: PersistChatParams) => {
+        archived.push(entry);
+      },
+    } as unknown as ResponseArchive;
+    let n = 0;
+    let refusalCanonical: string | undefined;
+    const runCall: RunCallFn = async (sup, prompt) => {
+      n++;
+      const result = prompt.includes("[chunk 2]")
+        ? createResponse({
+          id: "resp_refusal",
+          model: sup.model,
+          output: [{
+            type: "message",
+            role: "assistant",
+            content: [{ type: "refusal", refusal: "I cannot summarize this passage." }],
+          }],
+        })
+        : textResult(prompt.startsWith("[reduce") ? "combined summary" : "map summary", sup.model);
+      const responseCanonical = canonicalize(responseResultCommitment(result));
+      if (result.id === "resp_refusal") refusalCanonical = responseCanonical;
+      return {
+        result,
+        escrowRef: `${"f".repeat(64)}#${n}`,
+        supplierPkh: sup.supplierPkh,
+        model: sup.model,
+        receipt: { response_id: result.id },
+        receiptSignature: `sig-${n}`,
+        requestEnvelope: {
+          input: [{
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: prompt }],
+          }],
+        },
+        responseCanonical,
+      };
+    };
+    const store = new JobStore({
+      marketplace: MARKETPLACE,
+      chain: CHAIN,
+      walletKey: WALLET,
+      indexerUrl: "http://indexer",
+      archive,
+      caps,
+      runCall,
+      walletBalance: async () => 10_000_000_000n,
+    });
+    const job = store.createJob("book.pdf", 3, chunks(3));
+    await waitForDone(store, job);
+
+    expect(job.status).toBe("completed_with_gaps");
+    expect(job.coverageDone).toBe(2);
+    expect(job.chunkResults[1]).toEqual(expect.objectContaining({
+      status: "gap",
+      escrowRef: expect.any(String),
+    }));
+    expect(job.finalSummary).toBe("combined summary");
+    expect(job.escrowRefs).toHaveLength(4);
+    expect(job.view().running_cost_lovelace).toBe("10000000");
+    expect(archived).toHaveLength(4);
+    expect(archived).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        response_canonical: refusalCanonical,
+        receipt: { response_id: "resp_refusal" },
+      }),
+    ]));
+  });
+
+  it("does not count truncated text as successful coverage", async () => {
+    const runCall: RunCallFn = async (sup) => ({
+      result: createResponse({
+        id: "resp_incomplete",
+        model: sup.model,
+        status: "incomplete",
+        incomplete_details: { reason: "max_output_tokens" },
+        output: [{
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "A partial summary" }],
+        }],
+      }),
+      escrowRef: `${"e".repeat(64)}#0`,
+      supplierPkh: sup.supplierPkh,
+      model: sup.model,
+      receipt: { response_id: "resp_incomplete" },
+      receiptSignature: "sig",
+    });
+    const store = new JobStore({
+      marketplace: MARKETPLACE,
+      chain: CHAIN,
+      walletKey: WALLET,
+      indexerUrl: "http://indexer",
+      caps: loadPdfCaps({ PDF_RETRY_K: "0" }),
+      runCall,
+      walletBalance: async () => 10_000_000_000n,
+    });
+    const job = store.createJob("book.pdf", 1, chunks(1));
+    await waitForDone(store, job);
+
+    expect(job.coverageDone).toBe(0);
+    expect(job.status).toBe("completed_with_gaps");
+    expect(job.chunkResults[0]).toEqual(expect.objectContaining({
+      status: "gap",
+      escrowRef: `${"e".repeat(64)}#0`,
+    }));
+    expect(job.runningCost).toBe(2_000_000n);
+  });
+
   it("persists a completed job durably across a JobStore 'restart'", async () => {
     const dir = mkdtempSync(join(tmpdir(), "pdfjobs-"));
     try {
       const canned: RunCallFn = async (sup) => ({
-        response: "S",
+        result: textResult("S", sup.model),
         escrowRef: `${"f".repeat(64)}#${Math.floor(Math.random() * 1e9)}`,
         supplierPkh: sup.supplierPkh,
         model: sup.model,

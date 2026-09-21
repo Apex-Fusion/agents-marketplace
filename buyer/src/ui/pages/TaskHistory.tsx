@@ -22,6 +22,10 @@
 
 import { useEffect, useState, useMemo } from "react";
 import { useMarketplace } from "../state/MarketplaceContext.js";
+import {
+  normalizeResponseInput,
+  normalizeResponseOutput,
+} from "@marketplace/shared/responses";
 
 interface IndexerEscrowRow {
   utxo_ref: string;
@@ -176,10 +180,10 @@ async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
 }
 
 /**
- * For chat: receipt.response_hash = sha256_utf8(canonicalize({role:"assistant",
- * content: ...})). The archive's response.json contains EXACTLY those bytes
- * (the canonical form, not pretty-printed) so a sha256 over the file bytes
- * yields the same hex as the receipt.
+ * For LLM Responses, receipt.response_hash covers the canonical
+ * `{output,status,incomplete_details}` result commitment. The archive's
+ * response.json contains exactly those canonical bytes, so hashing the file
+ * yields the receipt value.
  *
  * For TTS: receipt.response_hash = sha256(audio_bytes). The archive's
  * response.{mp3,wav,…} is the raw bytes.
@@ -389,28 +393,30 @@ function ArchivePanel({ row }: { row: ArchiveRow }): JSX.Element {
     }
   };
 
-  // Try to extract a human-readable summary from the request JSON:
-  // chat → first user message's content
-  // tts  → the `text` field
-  // anything else falls back to raw JSON
+  // Extract human-readable text while retaining canonical Items on disk.
   const requestSummary = (() => {
     if (requestText === null) return null;
     try {
-      const obj = JSON.parse(requestText) as {
-        messages?: Array<{ role?: string; content?: string }>;
-        text?: string;
-        voice?: string;
-        format?: string;
-        speed?: number;
-      };
-      if (obj.messages && Array.isArray(obj.messages)) {
-        const userMsg = obj.messages.find((m) => m?.role === "user") ?? obj.messages[0];
-        return userMsg?.content ?? requestText;
+      const parsed: unknown = JSON.parse(requestText);
+      if (parsed && typeof parsed === "object" && "input" in parsed) {
+        const input = normalizeResponseInput(parsed.input);
+        const userItem = input.find(
+          (item) => item.type === "message" && item.role === "user",
+        );
+        if (userItem?.type === "message") {
+          return userItem.content.map((part) =>
+            part.type === "refusal" ? part.refusal : part.text
+          ).join("");
+        }
       }
-      if (typeof obj.text === "string") {
-        const knobs = [obj.voice, obj.format, obj.speed != null ? `speed ${obj.speed}` : null]
-          .filter(Boolean).join(" · ");
-        return knobs ? `${obj.text}\n\n[ ${knobs} ]` : obj.text;
+      if (parsed && typeof parsed === "object" && "text" in parsed && typeof parsed.text === "string") {
+        const voice = "voice" in parsed && typeof parsed.voice === "string" ? parsed.voice : null;
+        const format = "format" in parsed && typeof parsed.format === "string" ? parsed.format : null;
+        const speed = "speed" in parsed && typeof parsed.speed === "number"
+          ? `speed ${parsed.speed}`
+          : null;
+        const knobs = [voice, format, speed].filter(Boolean).join(" · ");
+        return knobs ? `${parsed.text}\n\n[ ${knobs} ]` : parsed.text;
       }
       return requestText;
     } catch {
@@ -443,8 +449,19 @@ function ArchivePanel({ row }: { row: ArchiveRow }): JSX.Element {
           <pre className="whitespace-pre-wrap break-words rounded bg-white p-2 text-sm text-gray-800 max-h-64 overflow-auto">
             {(() => {
               try {
-                const parsed = JSON.parse(chatText) as { content?: string };
-                return parsed.content ?? chatText;
+                const parsed: unknown = JSON.parse(chatText);
+                if (parsed && typeof parsed === "object" && "output" in parsed) {
+                  const output = normalizeResponseOutput(parsed.output);
+                  const text = output.flatMap((item) =>
+                    item.type === "message"
+                      ? item.content.map((part) =>
+                          part.type === "refusal" ? part.refusal : part.text
+                        )
+                      : []
+                  ).join("");
+                  return text || chatText;
+                }
+                return chatText;
               } catch {
                 return chatText;
               }

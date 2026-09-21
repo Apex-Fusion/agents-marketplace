@@ -21,9 +21,9 @@ vector-marketplace box. Both suppliers here are backed by the home machine
 > and the openclaw `extra_hosts`) must be updated, and the openclaw gateway
 > restarted so Serve re-attaches.
 
-> **Manual deploys only.** This box is NOT covered by the CD pipeline
-> (`deploy/mainnet/deploy.sh` targets the main box). Update with
-> `git pull && docker compose ... up -d --build`.
+> **Manual deploys only.** This box is not covered by
+> `deploy/mainnet/deploy.sh`. Do not use a direct `git pull && compose up`
+> while work is active. Follow the drain procedure below.
 
 ## Layout
 
@@ -36,15 +36,17 @@ vector-marketplace box. Both suppliers here are backed by the home machine
 Host env files (never committed):
 
 - `deploy/inference-proxy/.env` — `ACME_EMAIL=<operator email>` for traefik.
-- `supplier/.env.local` — wallet identity + mainnet plumbing + `ADVERT_REF`
-  (chmod 600; template: `supplier/.env.hetzner.example`, but backend is
-  `OPENAI_BASE_URL=http://100.77.146.49:8002` with no `OPENAI_API_KEY`, and
-  `OPENAI_TIMEOUT_MS=3600000`).
-- `supplier/.env.openclaw` — same shape as `.env.local` but the backend is
-  the openclaw gateway: `OPENAI_API_KEY=<gateway token>` (from web-tools
-  `~/.openclaw/openclaw.json` → `.gateway.auth.token`). `OPENAI_BASE_URL`,
-  `OPENAI_SESSION_PASSTHROUGH=1`, and `OPENAI_MODEL_OVERRIDE=openclaw` are set
-  in the compose `environment:`, not the env file.
+- `supplier/.env.local` — wallet identity, mainnet plumbing, and
+  `ADVERT_REF` (modeled on `supplier/.env.hetzner.example`; chmod 600).
+  The compose file sets `OPENAI_UPSTREAM_API=chat-completions`,
+  `OPENAI_BASE_URL=http://100.77.146.49:8002`, and
+  `OPENAI_TIMEOUT_MS=3600000`. It uses no API key.
+- `supplier/.env.openclaw` — the same base shape. Set
+  `OPENAI_API_KEY=<gateway token>` from
+  `~/.openclaw/openclaw.json` → `.gateway.auth.token`. The compose file sets
+  `OPENAI_UPSTREAM_API=chat-completions`, `OPENAI_BASE_URL`,
+  `OPENAI_SESSION_PASSTHROUGH=1`, and
+  `OPENAI_MODEL_OVERRIDE=openclaw`.
 
 ## Bring-up order (fresh box)
 
@@ -89,6 +91,36 @@ Register the wallet in monitoring on the **main** box: add the address to
 `wallet-monitor/wallets.json` and `buyer/scripts/monitor-wallets.ts`
 (`OPERATOR_SOURCES`).
 
+
+## Safe manual updates
+
+Both upstreams remain explicit Chat Completions compatibility providers.
+Their public supplier interface is Responses. It returns authoritative
+`output` Items and canonical `usage.input_tokens`, `usage.output_tokens`, and
+`usage.total_tokens`. It rejects Responses reasoning Items and `text` controls
+that Chat Completions cannot represent. Do not change these suppliers to the
+default native mode until each upstream exposes `/v1/responses`.
+
+Before a normal restart:
+
+1. Create `/dev/shm/marketplace-draining` in each supplier container. This
+   blocks new admission.
+2. Poll `/status` from inside that container.
+3. Continue only when `active_sessions` is `0` and `status` is `free` or
+   `offline`. This proves that no session and no one-shot job is working.
+4. Treat an unknown value, unreadable response, or timeout as failure. Leave
+   the container running.
+5. Pull and build only after both suppliers are idle. Recreate one supplier
+   at a time.
+6. A recreated container loses the tmpfs marker. If an error leaves the old
+   container running, remove the marker before restoring admission. Failure
+   to remove it must keep the rollout failed.
+
+For the first rollout that adds drain-marker enforcement, put both supplier
+hosts behind ingress maintenance before the first restart. The old image does
+not block admission when the marker exists. Remove maintenance only after
+both new containers are healthy.
+
 ## Model swap on vuk
 
 The advert carries the exact model id (buyer-facing, routed on by the
@@ -128,13 +160,13 @@ gateway binds to loopback (`127.0.0.1:18789`) and is exposed tailnet-wide via
 TLS, gateway token auth). The agent's brain is the same vuk llama.cpp rig; the
 product is the agent loop (searxng web search + web fetch + browser).
 
-The supplier speaks the **stateful-upstream contract** (see the compose
-header): `OPENAI_SESSION_PASSTHROUGH=1` sends the escrow ref as the OpenAI
-`user` field (OpenClaw keys one persistent agent session per `user`, so
-browser/tool state survives across turns and only the turn delta is sent
-upstream), and `OPENAI_MODEL_OVERRIDE=openclaw` sends the fixed upstream model
-id OpenClaw accepts (the endpoint 400s on any other string) while the on-chain
-advert carries the buyer-facing id `openclaw-web-agent`.
+The supplier uses the **stateful Chat Completions compatibility contract**.
+`OPENAI_SESSION_PASSTHROUGH=1` sends the escrow ref as the upstream `user`
+field and sends only the new turn. OpenClaw uses that value as its persistent
+session key, so browser and tool state survives across turns without duplicate
+history. `OPENAI_MODEL_OVERRIDE=openclaw` sends the fixed model id that
+OpenClaw accepts. The advert keeps the buyer-facing id
+`openclaw-web-agent`.
 
 ## web-tools gateway configuration (one-time, already applied 2026-08-13)
 

@@ -32,10 +32,10 @@ kind (`CAPABILITY_KIND=tts`); this runbook covers the LLM kinds.
 |---|---|
 | Linux server | Public IPv4, Docker installed, ports 80 + 443 free (for the bundled Traefik). A small VPS is enough — the container only proxies and settles; the heavy compute is upstream. |
 | DNS name you control | One A record, e.g. `supplier.example.com` → your server IP. Must be **DNS-only / unproxied** — TLS certs come from Let's Encrypt HTTP-01, which a CDN-proxied record breaks. |
-| Upstream backend | Any OpenAI-compatible API: base URL + API key. Proven in production: hosted APIs (DeepSeek, OpenRouter, Hetzner Inference), local llama.cpp, agent gateways. |
-| Model id | Must be the **verbatim** upstream id (incl. prefixes like `Qwen/`). Verify against the backend's `/v1/models`. |
-| Capability | `llm.text.generate.v1` or `llm.chat.v1` (or both → two suppliers, two wallets). |
-| Advert params | Your call. Reference values used by the Apex Fusion fleet: price `200000` lovelace (0.2 AP3X), bonds `1000000` both sides, `max_processing_ms` `300000` one-off / `1800000` chat, `max_output_tokens` = model context length. |
+| Upstream backend | An OpenAI-compatible Responses API is preferred. Set `LLM_BACKEND=openai` and `OPENAI_UPSTREAM_API=responses`. Use `chat-completions` only for a backend that has not added Responses. Production Ollama also uses `LLM_BACKEND=openai` with its native `/v1/responses`; the legacy Ollama adapter has limited tool and reasoning support. |
+| Model id | Use the **verbatim** upstream id, including prefixes such as `Qwen/`. Verify it against the backend's model list. |
+| Capability | Use `llm.text.generate.v1` for one-shot keys or `llm.chat.v1` for demo session keys. One model with both capabilities needs two suppliers and two wallets. |
+| Advert params | Your call. Reference fleet values are price `200000` lovelace (0.2 AP3X), bonds `1000000` on both sides, and `max_processing_ms` `300000` for one-shot or `1800000` for chat. The advert `max_output_tokens` is a buyer limit, not permission to exceed the model context. |
 | Funding | ≥50 AP3X mainnet to the new supplier wallet, from your own funds (the fleet typically funds 50–200). Each advert locks a 1 AP3X supplier bond; each job rides another. |
 
 ## 3. Vector mainnet constants (same for every operator)
@@ -61,17 +61,35 @@ mainnet/testnet cross-wiring on re-up).
 
 ### 4.1 Smoke-test the backend first (before spending on-chain)
 
+Use the native Responses probe when the backend supports it:
+
+```bash
+curl -sS -X POST <BASE_URL>/v1/responses \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"model":"<MODEL_ID>","input":"ping","store":false}' \
+  | jq '{status,output,usage}'
+```
+
+The result must have `status: "completed"`, a non-empty `output` Item array,
+and canonical usage fields `input_tokens`, `output_tokens`, and
+`total_tokens`. Text is inside a message Item's `content` as an
+`output_text` part. Function tools use the flat Responses form:
+`{"type":"function","name":"...","parameters":{...}}`.
+
+Use this compatibility probe only when the backend needs
+`OPENAI_UPSTREAM_API=chat-completions`:
+
 ```bash
 curl -sS -X POST <BASE_URL>/v1/chat/completions \
   -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
   -d '{"model":"<MODEL_ID>","messages":[{"role":"user","content":"ping"}]}' \
-  | jq '.choices[0].message.content'
+  | jq '{content:.choices[0].message.content,usage}'
 ```
 
-Requirements: non-empty string content, **no `max_tokens` sent** (matches
-runtime behavior). For a chat supplier, also verify a `tools`/`tool_choice`
-round-trip. A backend that fails these costs you the 1 AP3X supplier bond per
-failed job (`openai_malformed`).
+Do not send an operator token limit during this probe unless you plan to set
+`OPENAI_MAX_TOKENS`. For tool-capable models, also verify a function-call and
+function-output round trip. A backend that fails the selected mode can cause
+`openai_malformed` and forfeit the 1 AP3X supplier bond.
 
 ### 4.2 Prepare the host
 
@@ -121,9 +139,31 @@ Rename consistently:
 - every Traefik label token `mp-suppliers-local-mainnet` → a token of your
   own (router names must be unique per Traefik instance)
 - `Host(...)` rules → your DNS name
-- `OPENAI_BASE_URL` → your backend, **without `/v1`** (the client appends
-  `/v1/chat/completions`)
-- `OPENAI_TIMEOUT_MS` ≤ the advert's `max_processing_ms`
+- `OPENAI_BASE_URL` → the backend root without a trailing `/v1`
+- `OPENAI_UPSTREAM_API` → `responses` for native Responses, or the explicit
+  compatibility value `chat-completions`
+- `OPENAI_TIMEOUT_MS` → no more than the advert's `max_processing_ms`
+
+
+For native mode, the client appends `/v1/responses`. Set
+`OPENAI_RESPONSES_URL` only when the provider needs an exact endpoint, such as
+`https://api.deepseek.com/responses`. Set
+`OPENAI_RESPONSES_STREAM_ONLY=1` only when a backend returns a complete result
+through native SSE but not through a buffered JSON call. This is required for
+the pinned Codex Responses proxy used with `gpt-5.6-sol`. The collector keeps
+complete Items from `response.output_item.done`; it does not rebuild them from
+partial deltas.
+
+Native OpenRouter, HuggingFace, and DeepSeek calls use `store:false` and replay
+the full Item history. Hetzner, local llama.cpp, and OpenClaw templates stay on
+`chat-completions` until those endpoints support Responses. There is no
+automatic HTTP fallback between modes.
+
+`OPENAI_REASONING=off` sets native `reasoning.effort` to `none`. In
+compatibility mode it sends the OpenRouter extension
+`reasoning.enabled=false`, so do not set it for Hetzner or HuggingFace Chat
+Completions. A supplier that disables reasoning advertises
+`reasoning_disabled: true` and rejects an incompatible request before Claim.
 
 Capability kind:
 
@@ -174,15 +214,22 @@ chmod 600 supplier/.env.<name>
 Must contain, at minimum:
 
 - **All four wallet vars**: `SUPPLIER_PRIV_KEY_HEX`, `SUPPLIER_ADDRESS`,
-  `SUPPLIER_PKH`, `SUPPLIER_PUB_KEY_HEX`. They are NOT derived at boot;
-  a missing derived var causes `403 wrong_supplier` on every job.
-- `OPENAI_API_KEY` (empty is legal only for unauthenticated backends).
+  `SUPPLIER_PKH`, `SUPPLIER_PUB_KEY_HEX`. They are not derived at boot.
+  A missing value causes `403 wrong_supplier` on every job.
+- `OPENAI_API_KEY`. An empty value is legal only for an unauthenticated
+  backend.
 - The shared plumbing block from §3.
-- `ADVERT_REF=` left as placeholder until §4.8.
+- `ADVERT_REF=` left as a placeholder until §4.8.
 
-Backend selection (`LLM_BACKEND=openai`, `OPENAI_BASE_URL`,
-`OPENAI_TIMEOUT_MS`, `CAPABILITY_KIND`) lives in the compose file (§4.4),
-not the env file.
+Backend selection normally lives in the compose file: `LLM_BACKEND=openai`,
+`OPENAI_UPSTREAM_API`, `OPENAI_BASE_URL`, `OPENAI_TIMEOUT_MS`, and
+`CAPABILITY_KIND`. Keep any secret API key in the env file.
+
+The supplier accepts string input and supported text, function, and reasoning
+Items. Hosted tools, unsupported modalities, and unsupported execution
+controls fail explicitly. `OPENAI_MAX_TOKENS` is an operator output ceiling.
+The advert cap still applies. A reseller `max_input_tokens` bound counts the
+full transmitted JSON UTF-8, including instructions and tools.
 
 ### 4.7 First start
 
@@ -197,8 +244,8 @@ Verify before going on-chain:
 - `curl https://<your-dns-name>/healthz` → `{"ok":true}` (proves DNS, cert
   issuance, and routing end-to-end).
 
-Every deploy on your box is manual: `git pull` +
-`docker compose ... up -d --build`. No CD pipeline covers it.
+Later updates are manual on this box. Follow the drain procedure in §6 before
+`git pull` and `docker compose ... up -d --build`.
 
 ### 4.8 Post the advert (go-live — do this LAST)
 
@@ -242,14 +289,25 @@ requires `tx:retire-advert` (refunds the advert bond) + a fresh post-advert
   `api.marketplace.vector.apexfusion.org` require buyer API keys; buyers with
   keys will see your model in the gateway's `/openai/v1/models`.)
 - Tail `docker logs -f marketplace-mainnet-supplier-<name>` through the
-  first paid jobs; watch for `openai_malformed` (reasoning-model
-  content-shape risk) and `403 wrong_supplier` (missing derived wallet vars).
+  first controlled mainnet jobs. Watch for `openai_malformed`,
+  `upstream_api_incompatible`, `reasoning_disabled`, and
+  `403 wrong_supplier`. The current testnet has no functional marketplace,
+  so use local checks and a controlled mainnet smoke for end-to-end proof.
 
 ## 6. Ongoing operations
 
-- **Update**: `git pull && docker compose -f ... up -d --build`.
+- **Update**: stop new admission before any restart. Create
+  `/dev/shm/marketplace-draining` in the supplier container. Wait until
+  `/status` reports `active_sessions: 0` and `status` is `free` or `offline`.
+  Treat an unreadable response, an unknown value, or a timeout as failure.
+  Leave the old container running. After a successful recreate, the tmpfs
+  marker disappears with the old container. If the old container survives an
+  aborted update, remove the marker before restoring traffic.
+- **First incompatible rollout**: the old image does not enforce the drain
+  marker. Put ingress into maintenance before any supplier restart. Remove
+  maintenance only after every supplier is healthy on the new image.
 - **Model swap**: `tx:retire-advert` → post-advert with the new `--model` →
-  new `ADVERT_REF` in the env file → `up -d --force-recreate`.
+  new `ADVERT_REF` in the env file → drain, then `up -d --force-recreate`.
 - **Wallet health**: keep the 2-UTxO shape; run `tx:consolidate-wallet` if
   script-spends start failing with collateral-selector errors.
 - **Stuck Submitted escrows**: a job you Submitted that the buyer never
@@ -270,11 +328,15 @@ requires `tx:retire-advert` (refunds the advert bond) + a fresh post-advert
 
 ## 7. Footguns (each has burned an operator before)
 
-1. `OPENAI_BASE_URL` must NOT end in `/v1`.
-2. Advert `--model` must match the upstream id byte-for-byte; slashes are
-   fine on-chain.
-3. Do not set `OPENAI_REASONING` unless the backend is OpenRouter.
-4. `OPENAI_TIMEOUT_MS` > advert `max_processing_ms` = bond-forfeit window.
+1. Match `OPENAI_BASE_URL`, `OPENAI_UPSTREAM_API`, and the real provider
+   endpoint. Native mode appends `/v1/responses`; compatibility mode appends
+   `/v1/chat/completions`. Use `OPENAI_RESPONSES_URL` for an exact native URL.
+2. Advert `--model` must match the upstream id byte-for-byte. Slashes are
+   valid on-chain.
+3. Apply `OPENAI_REASONING=off` only when the selected upstream mode supports
+   its wire control.
+4. `OPENAI_TIMEOUT_MS` above advert `max_processing_ms` creates a
+   bond-forfeit window.
 5. Model ids containing `kimi`, `deepseek`, or `gpt` (case-insensitive) are
    auto-enrolled in the marketplace buyer's PDF-summarizer pool
    (`buyer/src/pdf/caps.ts`), so expect PDF jobs too. The

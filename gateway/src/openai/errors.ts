@@ -79,6 +79,14 @@ export function toGatewayError(err: unknown): GatewayError {
         err.message,
       );
     }
+    if (err.reason === "supplier_adapter_incompatible") {
+      return new GatewayError(
+        400,
+        "invalid_request_error",
+        "unsupported_parameter",
+        err.message,
+      );
+    }
     if (err.reason === "supplier_preflight_failed") {
       return new GatewayError(
         503,

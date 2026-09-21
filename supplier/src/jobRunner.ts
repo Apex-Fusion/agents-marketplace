@@ -4,10 +4,10 @@
  * M1-F-async-chat-green — Catherine, 2026-04-28.
  * M1-F-async-chat-cleanup-green — Catherine, 2026-04-24.
  *
- * Invoked fire-and-forget from the POST chat handler after Claim tx confirms.
- * Steps (per Caroline's tests, ordering pinned):
- *   1. jobs.setRunning(jobId)                    [BEFORE callOllama — ordering pin]
- *   2. callOllama(...)                            [on rejection: jobs.fail("ollama_failure")]
+ * Invoked fire-and-forget from POST /v1/responses after Claim confirms.
+ * Steps:
+ *   1. jobs.setRunning(jobId)
+ *   2. call the configured Responses or Ollama adapter
  *   3. build + sign receipt
  *   4. construct + submit Submit tx via buildSubmitTx()
  *      [on rejection: jobs.fail("submit_failed")]
@@ -28,9 +28,16 @@
 import type { ChainProvider, OutputReference } from "@marketplace/shared/chain";
 import type { AdvertDatum, EscrowDatum } from "@marketplace/shared/cbor";
 import { canonicalize } from "@marketplace/shared/cbor";
-import type { WalletKey, ChatMessage } from "@marketplace/shared/tx";
+import type { WalletKey } from "@marketplace/shared/tx";
 import { buildSubmitTx } from "@marketplace/shared/tx";
 import { buildReceipt, signReceipt, receiptResultHash } from "@marketplace/shared/receipt";
+import {
+  createResponse,
+  responseInputToChatMessages,
+  responseResultCommitment,
+  type ResponseObject,
+  type ResponseRequest,
+} from "@marketplace/shared/responses";
 import { createHash } from "crypto";
 
 import type { SupplierState } from "./state.js";
@@ -43,7 +50,6 @@ import * as datalabOcr from "./datalabOcr.js";
 import type { OcrRequest } from "@marketplace/shared/tx";
 import type {
   JobStore,
-  JobResponsePayload,
   ChatJobResponsePayload,
   TtsJobResponsePayload,
   OcrJobResponsePayload,
@@ -67,7 +73,7 @@ export interface RunChatJobParams {
   claimedRef: OutputReference;
   advert: AdvertDatum;
   escrowDatum: EscrowDatum;
-  requestBody: { messages: ChatMessage[] };
+  requestBody: ResponseRequest;
 }
 
 function sha256Hex(s: string): string {
@@ -84,9 +90,9 @@ async function recordResellerFailure(
 }
 
 /**
- * Run Ollama → receipt → Submit in the background.
- * Always resolves (never rejects). Terminal state written to jobs store.
- * Supplier lock is released in try/finally regardless of outcome.
+ * Run the configured LLM → receipt → Submit in the background.
+ * Always resolves (never rejects). Terminal state is written to the job store.
+ * The supplier lock is released in try/finally regardless of outcome.
  */
 export async function runChatJob(params: RunChatJobParams): Promise<void> {
   const { deps, jobId, escrowRef, claimedRef, advert, escrowDatum, requestBody } = params;
@@ -110,10 +116,8 @@ export async function runChatJob(params: RunChatJobParams): Promise<void> {
     }
 
     // ── 2. Call upstream LLM ───────────────────────────────────────────
-    // Both backends return the same { content, prompt_tokens,
-    // completion_tokens, wallclock_ms } shape so receipt construction
-    // downstream is identical.
     let inference: {
+      response: ResponseObject;
       content: string;
       prompt_tokens: number;
       completion_tokens: number;
@@ -122,22 +126,54 @@ export async function runChatJob(params: RunChatJobParams): Promise<void> {
     };
     try {
       if (deps.config.llmBackend === "openai") {
-        inference = await openai.callOpenAi({
+        inference = await openai.callResponses({
           baseUrl: deps.config.openaiBaseUrl,
+          responsesUrl: deps.config.openaiResponsesUrl || undefined,
+          responsesStreamOnly: deps.config.openaiResponsesStreamOnly,
+          upstreamApi: deps.config.openaiUpstreamApi,
           model: deps.config.openaiModelOverride || advert.model,
-          messages: requestBody.messages,
+          ...requestBody,
           timeoutMs: deps.config.openaiTimeoutMs,
           apiKey: deps.config.openaiApiKey,
           maxTokens: deps.config.openaiMaxTokens,
           disableReasoning: deps.config.openaiReasoningDisabled,
         });
       } else {
-        inference = await ollama.callOllama({
+        const ollamaResult = await ollama.callOllama({
           ollamaUrl: deps.config.ollamaUrl,
           model: advert.model,
-          messages: requestBody.messages,
+          messages: responseInputToChatMessages(requestBody.input, requestBody.instructions),
           timeoutMs: deps.config.ollamaTimeoutMs,
+          maxOutputTokens: requestBody.max_output_tokens,
         });
+        const responseStatus =
+          ollamaResult.done_reason === "length" ? "incomplete" : "completed";
+        const response = createResponse({
+          id: `resp_${jobId}`,
+          model: advert.model,
+          status: responseStatus,
+          incomplete_details:
+            responseStatus === "incomplete" ? { reason: "max_output_tokens" } : null,
+          output: [{
+            type: "message",
+            id: `msg_${jobId}`,
+            role: "assistant",
+            status: responseStatus,
+            content: [{ type: "output_text", text: ollamaResult.content, annotations: [] }],
+          }],
+          usage: {
+            input_tokens: ollamaResult.prompt_tokens,
+            output_tokens: ollamaResult.completion_tokens,
+            total_tokens: ollamaResult.prompt_tokens + ollamaResult.completion_tokens,
+          },
+        });
+        inference = {
+          response,
+          content: ollamaResult.content,
+          prompt_tokens: ollamaResult.prompt_tokens,
+          completion_tokens: ollamaResult.completion_tokens,
+          wallclock_ms: ollamaResult.wallclock_ms,
+        };
       }
     } catch (err) {
       const rawReason =
@@ -164,8 +200,7 @@ export async function runChatJob(params: RunChatJobParams): Promise<void> {
     }
 
     // ── 3. Build + sign receipt ────────────────────────────────────────
-    const assistantMessage = { role: "assistant" as const, content: inference.content };
-    const responseHash = sha256Hex(canonicalize(assistantMessage));
+    const responseHash = sha256Hex(canonicalize(responseResultCommitment(inference.response)));
 
     const receipt = buildReceipt({
       prompt_hash: escrowDatum.prompt_hash,
@@ -182,7 +217,7 @@ export async function runChatJob(params: RunChatJobParams): Promise<void> {
     if (deps.reseller) {
       try {
         await deps.reseller.recordOutput(escrowRef, {
-          response: assistantMessage,
+          response: inference.response,
           receipt: {
             receipt: signed.receipt,
             signature: signed.signature,
@@ -291,19 +326,11 @@ export async function runChatJob(params: RunChatJobParams): Promise<void> {
 
     // ── 6. Mark complete ────────────────────────────────────────────────
     const payload: ChatJobResponsePayload = {
+      ...inference.response,
+      // The marketplace model is the advert's routing identity; providers may
+      // return a resolved snapshot name or an explicitly configured override.
+      model: advert.model,
       kind: "chat",
-      choices: [
-        {
-          index: 0,
-          message: assistantMessage,
-          finish_reason: "stop",
-        },
-      ],
-      usage: {
-        prompt_tokens: inference.prompt_tokens,
-        completion_tokens: inference.completion_tokens,
-        total_tokens: inference.prompt_tokens + inference.completion_tokens,
-      },
       receipt: signed.receipt as unknown as Record<string, unknown>,
       receipt_signature: signed.signature,
       submitted_ref: submitOutcome.submittedRef,
@@ -328,13 +355,10 @@ export async function runChatJob(params: RunChatJobParams): Promise<void> {
 // 7-step shape (setRunning → upstream → receipt → buildSubmit → awaitTx →
 // complete → finally release). Differences from chat path:
 //
-//   - Upstream is `piper.callPiper` returning audio bytes + content-type,
-//     not Ollama returning text + token counts.
-//   - response_hash = sha256(audio_bytes) — opaque-bytes commitment, in
-//     contrast to chat which hashes a canonicalised assistant message JSON.
-//   - prompt_tokens / completion_tokens are reported as 0 in the receipt;
-//     Piper has no token concept and the on-chain validator doesn't read
-//     these fields (they're off-chain billing metadata only).
+//   - Upstream is `piper.callPiper` returning audio bytes + content-type.
+//   - response_hash = sha256(audio_bytes), unlike the LLM terminal-result commitment.
+//   - prompt_tokens / completion_tokens are 0 because Piper has no token usage;
+//     the on-chain validator does not read these off-chain billing fields.
 //   - JobStore terminal payload is `TtsJobResponsePayload` with audio_b64.
 
 export interface RunTtsJobParams {

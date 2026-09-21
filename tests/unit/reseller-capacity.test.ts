@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from "vitest";
-import { chatInputTokenUpperBound } from "../../packages/shared/src/tx/inputBound.js";
 import { CapacityGate } from "../../supplier/src/reseller/capacityGate.js";
 import type {
   CapacityProvider,
@@ -24,33 +23,6 @@ function reading(remaining: bigint): ProviderCapacityReading {
   };
 }
 
-describe("chatInputTokenUpperBound", () => {
-  it("uses canonical UTF-8 bytes and fixed chat overhead", () => {
-    expect(chatInputTokenUpperBound([])).toBe(5);
-    expect(chatInputTokenUpperBound([{ role: "user", content: "a" }])).toBe(42);
-    expect(chatInputTokenUpperBound([{ role: "user", content: "é" }])).toBe(43);
-    expect(chatInputTokenUpperBound([{ role: "user", content: "🙂" }])).toBe(45);
-  });
-
-  it("adds each message independently", () => {
-    expect(chatInputTokenUpperBound([
-      { role: "system", content: "x" },
-      { role: "user", content: "yz" },
-    ])).toBe(83);
-  });
-
-  it("counts tool-call arguments present on direct SDK messages", () => {
-    expect(chatInputTokenUpperBound([{
-      role: "assistant",
-      content: "",
-      tool_calls: [{
-        id: "x",
-        type: "function",
-        function: { name: "f", arguments: "a".repeat(1000) },
-      }],
-    }])).toBe(1129);
-  });
-});
 
 describe("CapacityGate", () => {
   it("opens only when allowance above reserve covers a worst-case job", async () => {

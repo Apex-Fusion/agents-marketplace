@@ -253,11 +253,23 @@ describe("chat-session slots — MAX_CHAT_SESSIONS", () => {
     await request(h.app).post("/v1/chat/start").set("X-Escrow-Ref", refA).send({ session_nonce: NONCE });
     await request(h.app).post("/v1/chat/start").set("X-Escrow-Ref", refB).send({ session_nonce: NONCE });
 
-    const stream = [
-      `data: ${JSON.stringify({ choices: [{ delta: { content: "Hello" }, finish_reason: null }] })}\n\n`,
-      `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 3, completion_tokens: 2 } })}\n\n`,
-      "data: [DONE]\n\n",
-    ].join("");
+    const terminal = {
+      id: "resp_ticket",
+      object: "response",
+      created_at: 1,
+      model: "kimi",
+      status: "completed",
+      output: [{
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "Hello", annotations: [] }],
+      }],
+      usage: { input_tokens: 3, output_tokens: 2, total_tokens: 5 },
+      error: null,
+      incomplete_details: null,
+    };
+    const event = { type: "response.completed", sequence_number: 1, response: terminal };
+    const stream = `event: response.completed\ndata: ${JSON.stringify(event)}\n\n`;
     vi.stubGlobal(
       "fetch",
       vi.fn().mockImplementation(async () =>
@@ -265,11 +277,11 @@ describe("chat-session slots — MAX_CHAT_SESSIONS", () => {
     );
 
     const [ta, tb] = await Promise.all([
-      request(h.app).post("/v1/chat/message").set("X-Escrow-Ref", refA).send({ messages: [{ role: "user", content: "hi" }] }),
-      request(h.app).post("/v1/chat/message").set("X-Escrow-Ref", refB).send({ messages: [{ role: "user", content: "yo" }] }),
+      request(h.app).post("/v1/chat/message").set("X-Escrow-Ref", refA).send({ input: [{ role: "user", content: "hi" }] }),
+      request(h.app).post("/v1/chat/message").set("X-Escrow-Ref", refB).send({ input: [{ role: "user", content: "yo" }] }),
     ]);
-    expect(ta.text).toContain('"type":"done"');
-    expect(tb.text).toContain('"type":"done"');
+    expect(ta.text).toContain('"type":"response.completed"');
+    expect(tb.text).toContain('"type":"response.completed"');
     expect(h.chatSessions.get(refA)!.transcript).toHaveLength(2);
     expect(h.chatSessions.get(refB)!.transcript).toHaveLength(2);
     vi.unstubAllGlobals();

@@ -9,18 +9,12 @@
  *   getTaskHistory(opts?)               → reads from injected TaskHistoryStore
  *   on/off/close + emitProgress         → EventEmitter helpers
  *
- * Receipt verification (M1-E discipline):
- *   The SDK has no path to a 32-byte supplier public key in the test harness
- *   (Caroline's mocks return only the chat-completion body, no /capability
- *   pub-key plumbing). For M1-E we therefore verify receipts by:
- *     (a) field-equality checks against the advert datum and posted escrow:
- *         supplier_pkh, escrow_ref, prompt_hash, request_spec_hash
- *     (b) a structural signature check: 128-char hex, not the all-zero
- *         placeholder.
- *   Cryptographic Ed25519 verification is wired here as a NO-OP fallback
- *   when no pub-key is available; M1-F adds /capability pub-key fetch and
- *   replaces the structural check with a real verifyReceipt call. See
- *   ARCHITECTURE.md §5 + §9 for the broader plan.
+ * Receipt verification:
+ *   The buyer checks the canonical Responses request/result commitments,
+ *   supplier identity, model, escrow reference, and signature shape before it
+ *   returns a result. Supplier capability metadata is fetched before funds are
+ *   locked. Full Ed25519 verification remains outside this browser-safe SDK
+ *   path because the shared signing module imports Node crypto.
  */
 
 // Namespace imports — Vite/Rollup resolves these to browser stubs when
@@ -80,10 +74,21 @@ import {
   buildAcceptTx,
   buildReclaimTx,
   TxConstructionError,
-  chatInputTokenUpperBound,
   BOUNDED_INPUT_DETAIL_MARKER,
 } from "@marketplace/shared/tx";
 import { decodeAdvertDatum, decodeEscrowDatum, canonicalize } from "@marketplace/shared/cbor";
+import {
+  normalizeResponseOutput,
+  normalizeResponseRequest,
+  validateResponseToolOutputs,
+  responseInputTokenUpperBound,
+  responseOutputText,
+  responseRequestCommitment,
+  responseResultCommitment,
+  type ResponseItem,
+  type ResponseObject,
+  type ResponseRequest,
+} from "@marketplace/shared/responses";
 import type { AdvertDatum } from "@marketplace/shared/cbor";
 import type {
   SupplierView,
@@ -133,15 +138,28 @@ function validateSupplierCapability(
     capability.advert_ref !== expectedRef ||
     capability.capability_id !== advert.capability_id ||
     capability.model !== advert.model ||
-    capability.max_output_tokens !== advert.max_output_tokens ||
     capability.max_processing_ms !== advert.max_processing_ms ||
     capability.price_lovelace !== advert.price_lovelace.toString() ||
     capability.supplier_pkh !== advert.supplier_pkh ||
-    typeof capability.pub_key_hex !== "string"
+    typeof capability.pub_key_hex !== "string" ||
+    capability.inference_api !== "responses" ||
+    typeof capability.upstream_api !== "string" ||
+    !["responses", "chat-completions", "ollama"].includes(capability.upstream_api) ||
+    (capability.reasoning_disabled !== undefined && typeof capability.reasoning_disabled !== "boolean")
   ) {
     throw new TxConstructionError(
       "supplier_preflight_failed",
       "supplier /capability response does not match the on-chain advert",
+    );
+  }
+  if (
+    typeof capability.max_output_tokens !== "number" ||
+    !Number.isSafeInteger(capability.max_output_tokens) ||
+    capability.max_output_tokens <= 0
+  ) {
+    throw new TxConstructionError(
+      "supplier_preflight_failed",
+      "supplier max_output_tokens must be a positive safe integer",
     );
   }
   if (
@@ -223,10 +241,61 @@ function randomNonce(): string {
   return out;
 }
 
-function previewMessages(messages: { role: string; content: string }[]): string {
-  const firstUser = messages.find((m) => m.role === "user") ?? messages[0];
-  const text = firstUser?.content ?? "";
+function previewInput(input: readonly ResponseItem[]): string {
+  const firstUser = input.find(
+    (item) => item.type === "message" && item.role === "user",
+  );
+  const firstMessage = firstUser ?? input.find((item) => item.type === "message");
+  if (!firstMessage || firstMessage.type !== "message") return "";
+  const text = firstMessage.content
+    .filter((part) => part.type === "input_text" || part.type === "output_text")
+    .map((part) => "text" in part && typeof part.text === "string" ? part.text : "")
+    .join("");
   return text.length <= 100 ? text : text.slice(0, 100);
+}
+
+function responseDisplayText(output: readonly ResponseItem[]): string {
+  return output.flatMap((item) =>
+    item.type === "message" && item.role === "assistant"
+      ? item.content.map((part) =>
+          part.type === "refusal" ? part.refusal : part.text
+        )
+      : []
+  ).join("");
+}
+
+function adapterCompatibilityError(
+  request: ResponseRequest,
+  upstreamApi: SupplierCapabilityView["upstream_api"],
+  reasoningDisabled: boolean,
+): string | null {
+  if (reasoningDisabled && request.reasoning?.effort !== undefined && request.reasoning.effort !== "none") {
+    return "supplier operator policy disables the requested reasoning effort";
+  }
+  if (upstreamApi === "responses") return null;
+  if (
+    request.reasoning !== undefined ||
+    request.text !== undefined ||
+    request.input.some((item) => item.type === "reasoning")
+  ) {
+    return `${upstreamApi} suppliers cannot preserve Responses reasoning items or text options`;
+  }
+  if (
+    upstreamApi === "ollama" &&
+    (
+      request.tools !== undefined ||
+      request.tool_choice !== undefined ||
+      request.parallel_tool_calls !== undefined ||
+      request.temperature !== undefined ||
+      request.top_p !== undefined ||
+      request.input.some(
+        (item) => item.type === "function_call" || item.type === "function_call_output",
+      )
+    )
+  ) {
+    return "ollama suppliers cannot preserve Responses tools, function calls, or sampling options";
+  }
+  return null;
 }
 
 export class Marketplace extends EventEmitterBase {
@@ -293,13 +362,20 @@ export class Marketplace extends EventEmitterBase {
   // ─── submitPrompt — happy path + every adversarial branch ──────────────
 
   async submitPrompt(opts: SubmitPromptOptions): Promise<SubmitPromptResult> {
-    const {
-      advertRef,
-      messages,
-      payment_lovelace,
-      max_output_tokens,
-      public_preview,
-    } = opts;
+    const { advertRef, payment_lovelace, public_preview, ...requestOptions } = opts;
+    let request: ResponseRequest;
+    try {
+      request = normalizeResponseRequest(requestOptions);
+      if (request.input.length === 0 && !request.instructions?.trim()) {
+        throw new Error("input or instructions are required");
+      }
+      validateResponseToolOutputs(request.input);
+    } catch (error) {
+      throw new TxConstructionError(
+        "invalid_response_request",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
 
     let supplierHttp: HttpClient | null = null;
     let advertDatum: AdvertDatum | null = null;
@@ -313,73 +389,106 @@ export class Marketplace extends EventEmitterBase {
         escrow_ref: escrowRefStr || `${"0".repeat(64)}#0`,
         supplier_pkh: advertDatum?.supplier_pkh ?? "",
         capability_id: advertDatum?.capability_id ?? "",
-        prompt_preview: previewMessages(messages ?? []),
+        prompt_preview: previewInput(request.input),
         posted_at: postedAtMs,
         status: "failed",
         failure_reason: reason,
       });
     };
 
-    // ── 1. Resolve advert + post escrow tx via shared builder ────────
     let escrowResult;
     try {
-      // Pre-fetch advert datum for response/history bookkeeping. The shared
-      // builder repeats this query and enforces all invariants — we only peek
-      // here so failure paths can populate the history record with metadata.
       const utxo = await this.chain.queryUtxo(advertRef);
-      if (utxo && utxo.datumHex) {
+      if (utxo?.datumHex) {
         try {
           advertDatum = decodeAdvertDatum(utxo.datumHex);
         } catch {
-          /* swallow — builder will throw a structured error */
+          /* The escrow builder reports the canonical structured error. */
         }
       }
 
       if (advertDatum) {
+        if (advertDatum.status !== "Active") {
+          throw new TxConstructionError("advert is retired");
+        }
+        if (payment_lovelace !== advertDatum.price_lovelace) {
+          throw new TxConstructionError("payment must equal advertised price");
+        }
+        if (this.walletKey.pubKeyHash === advertDatum.supplier_pkh) {
+          throw new TxConstructionError("buyer cannot be supplier");
+        }
         supplierHttp = new HttpClient({
           baseUrl: advertDatum.endpoint_url,
           fetch: this.fetchImpl,
         });
-        if (advertDatum.detail_uri.endsWith(BOUNDED_INPUT_DETAIL_MARKER)) {
-          let capabilityResult;
-          try {
-            capabilityResult = await supplierHttp.getJson("/capability");
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            throw new TxConstructionError("supplier_preflight_failed", message);
-          }
-          if (!capabilityResult.ok || capabilityResult.parseError) {
-            throw new TxConstructionError(
-              "supplier_preflight_failed",
-              `supplier /capability returned HTTP ${capabilityResult.status}`,
-            );
-          }
-          const capability = validateSupplierCapability(
-            capabilityResult.body,
-            advertDatum,
-            advertRef,
+
+        let capabilityResult;
+        try {
+          capabilityResult = await supplierHttp.getJson("/capability");
+        } catch (error) {
+          throw new TxConstructionError(
+            "supplier_preflight_failed",
+            error instanceof Error ? error.message : String(error),
           );
+        }
+        if (!capabilityResult.ok || capabilityResult.parseError) {
+          throw new TxConstructionError(
+            "supplier_preflight_failed",
+            `supplier /capability returned HTTP ${capabilityResult.status}`,
+          );
+        }
+        const capability = validateSupplierCapability(
+          capabilityResult.body,
+          advertDatum,
+          advertRef,
+        );
+
+        const compatibilityError = adapterCompatibilityError(
+          request,
+          capability.upstream_api,
+          capability.reasoning_disabled === true,
+        );
+        if (compatibilityError) {
+          throw new TxConstructionError(
+            "supplier_adapter_incompatible",
+            compatibilityError,
+          );
+        }
+
+        if (advertDatum.detail_uri.endsWith(BOUNDED_INPUT_DETAIL_MARKER)) {
           if (capability.max_input_tokens === undefined) {
             throw new TxConstructionError(
               "supplier_preflight_failed",
               "bounded-input supplier omitted max_input_tokens",
             );
           }
-          const inputUnits = chatInputTokenUpperBound(messages);
-          if (inputUnits > capability.max_input_tokens) {
+          const requestUnits = responseInputTokenUpperBound(request);
+          if (requestUnits > capability.max_input_tokens) {
             throw new TxConstructionError(
               "input_cap_exceeded",
-              `input bound ${inputUnits} exceeds supplier cap ${capability.max_input_tokens}`,
+              `request bound ${requestUnits} exceeds supplier cap ${capability.max_input_tokens}`,
             );
           }
         }
+
+        if (request.max_output_tokens !== undefined) {
+          request = {
+            ...request,
+            max_output_tokens: Math.min(
+              request.max_output_tokens,
+              advertDatum.max_output_tokens,
+              capability.max_output_tokens,
+            ),
+          };
+        }
       }
 
+      const promptHash = sha256Hex(canonicalize(responseRequestCommitment(request)));
       escrowResult = await buildPostEscrowTx({
         chain: this.chain,
         buyerKey: this.walletKey,
         advertRef,
-        messages,
+        prompt_hash: promptHash,
         payment_lovelace,
       });
     } catch (err) {
@@ -387,7 +496,6 @@ export class Marketplace extends EventEmitterBase {
         recordFailure(err.reason);
         throw err;
       }
-      // Chain submission failures bubble through here too.
       this.emitProgress({ type: "chain_submit_failed", detail: (err as Error).message });
       recordFailure((err as Error).message);
       throw err;
@@ -395,267 +503,253 @@ export class Marketplace extends EventEmitterBase {
 
     escrowOutputRef = escrowResult.escrowOutputRef;
     escrowRefStr = refToString(escrowOutputRef);
-
-    // ── 2. progress: escrow_posted ────────────────────────────────────
     this.emitProgress({ type: "escrow_posted", escrow_ref: escrowRefStr });
 
-    // ── 2.5. Wait for the escrow UTxO to confirm on chain before calling
-    // the supplier. Without this, supplier.queryUtxo runs against a chain
-    // tip that doesn't yet contain the PostEscrow tx and the supplier 404s
-    // with escrow_not_found. Best-effort: if the chain provider doesn't
-    // implement awaitTx (mock paths in tests), swallow and proceed —
-    // queryUtxo retries on the next step provide adequate coverage there.
     try {
       await this.chain.awaitTx(escrowResult.expectedTxHash, ESCROW_CONFIRM_TIMEOUT_MS);
     } catch {
-      /* mock providers / test harnesses */
+      /* Mock providers can omit confirmation support. */
     }
 
-    // ── 3. Re-fetch escrow datum to capture posted_at for history ────
     try {
       const escrowUtxo = await this.chain.queryUtxo(escrowOutputRef);
-      if (escrowUtxo && escrowUtxo.datumHex) {
-        const ed = decodeEscrowDatum(escrowUtxo.datumHex);
-        postedAtMs = ed.posted_at;
-        deliverByMs = ed.deliver_by;
+      if (escrowUtxo?.datumHex) {
+        const escrowDatum = decodeEscrowDatum(escrowUtxo.datumHex);
+        postedAtMs = escrowDatum.posted_at;
+        deliverByMs = escrowDatum.deliver_by;
       }
     } catch {
-      /* posted_at is best-effort metadata */
+      /* posted_at remains best-effort history metadata */
     }
 
-    if (!advertDatum) {
-      // Should never happen — buildPostEscrowTx rejects missing or bad adverts.
-      const reason = "advert datum unavailable after escrow post";
-      recordFailure(reason);
-      throw new ReceiptVerificationError(reason);
-    }
-    if (!supplierHttp) {
-      const reason = "supplier client unavailable after escrow post";
+    if (!advertDatum || !supplierHttp) {
+      const reason = "supplier unavailable after escrow post";
       recordFailure(reason);
       throw new ReceiptVerificationError(reason);
     }
     if (deliverByMs === 0) {
       deliverByMs = deliverByFor(postedAtMs, advertDatum.max_processing_ms);
     }
-    // The initial POST returns only after the supplier's Claim confirms, so
-    // it needs the same SLA-derived budget as the job poll below.
-    const supplierCallTimeoutMs = supplierBudgetMs(deliverByMs);
 
-    // ── 4. Call supplier /v1/chat/completions ─────────────────────────
-
-    const requestedMax = max_output_tokens ?? advertDatum.max_output_tokens;
-    const cappedMax = Math.min(requestedMax, advertDatum.max_output_tokens);
-    const chatBody = {
-      model: advertDatum.model,
-      messages,
-      max_tokens: cappedMax,
-    };
-    let chatResult;
+    let responseResult;
     try {
-      chatResult = await supplierHttp.postJson("/v1/chat/completions", chatBody, {
-        headers: {
-          "X-Escrow-Ref": escrowRefStr,
-          ...(public_preview ? { "X-Vector-Public-Preview": "1" } : {}),
+      responseResult = await supplierHttp.postJson(
+        "/v1/responses",
+        { model: advertDatum.model, ...request },
+        {
+          headers: {
+            "X-Escrow-Ref": escrowRefStr,
+            ...(public_preview ? { "X-Vector-Public-Preview": "1" } : {}),
+          },
+          timeoutMs: supplierBudgetMs(deliverByMs),
         },
-        timeoutMs: supplierCallTimeoutMs,
-      });
+      );
     } catch (err) {
       if (err instanceof HttpError) {
-        // ARCH §9 #10 (resolved 2026-04-27, M1-F-1): the previous
-        // `isSyncThrow` sentinel branch has been removed. All HttpError
-        // paths — including fetch implementations that throw synchronously —
-        // now propagate normally as SupplierError to the caller.
         const reason = err.kind === "timeout" ? "timeout" : "network_error";
-        const sErr = new SupplierError(reason, { message: err.message });
         recordFailure(reason);
-        throw sErr;
+        throw new SupplierError(reason, { message: err.message });
       }
       recordFailure((err as Error).message);
       throw err;
     }
 
-    // Supplier shipped 202 + poll in M1-F-async-chat: the initial POST
-    // returns `{job_id, status: "accepted"}` and clients poll
-    // `GET /v1/chat/completions/:jobId` until the status becomes "done"
-    // (200 with receipt) or terminal-failed (4xx/5xx). Older synchronous
-    // suppliers still return 200 with the receipt immediately, so we
-    // dispatch on `chatResult.status === 202` to keep both supported.
-    if (chatResult.status === 202 && chatResult.body && typeof chatResult.body === "object") {
-      const jobId = (chatResult.body as { job_id?: string }).job_id;
+    if (responseResult.status === 202 && responseResult.body && typeof responseResult.body === "object") {
+      const jobId = (responseResult.body as { job_id?: string }).job_id;
       if (typeof jobId !== "string" || jobId.length === 0) {
-        const sErr = new SupplierError("malformed_response", {
-          status: chatResult.status,
+        recordFailure("malformed_response");
+        throw new SupplierError("malformed_response", {
+          status: responseResult.status,
           message: "supplier 202 response missing job_id",
         });
-        recordFailure("malformed_response");
-        throw sErr;
       }
-      const POLL_INTERVAL_MS = 2_000;
       const pollBudgetMs = supplierBudgetMs(deliverByMs);
       const pollDeadline = Date.now() + pollBudgetMs;
-      let polled = chatResult;
-      // First poll runs immediately so a quickly-completed job doesn't pay
-      // the leading delay; subsequent polls wait POLL_INTERVAL_MS.
-      let firstIter = true;
+      let polled = responseResult;
+      let firstPoll = true;
       while (Date.now() < pollDeadline) {
-        if (!firstIter) {
-          await new Promise<void>((r) => setTimeout(r, POLL_INTERVAL_MS));
+        if (!firstPoll) {
+          await new Promise<void>((resolve) => setTimeout(resolve, 2_000));
         }
-        firstIter = false;
+        firstPoll = false;
         try {
-          polled = await supplierHttp.getJson(`/v1/chat/completions/${jobId}`);
+          polled = await supplierHttp.getJson(`/v1/responses/${jobId}`);
         } catch (err) {
           if (err instanceof HttpError) {
             const reason = err.kind === "timeout" ? "timeout" : "network_error";
-            const sErr = new SupplierError(reason, { message: err.message });
             recordFailure(reason);
-            throw sErr;
+            throw new SupplierError(reason, { message: err.message });
           }
           throw err;
         }
         if (polled.status === 200) break;
         if (polled.status === 202) continue;
-        // 4xx/5xx on poll → terminal failure from supplier.
-        const failBody = (polled.body && typeof polled.body === "object")
+        const failure = polled.body && typeof polled.body === "object"
           ? polled.body as { reason?: string; message?: string }
           : {};
-        const sErr = new SupplierError(failBody.reason ?? "supplier_http_error", {
+        const reason = failure.reason ?? "supplier_http_error";
+        recordFailure(reason);
+        throw new SupplierError(reason, {
           status: polled.status,
-          message: failBody.message ?? `supplier returned ${polled.status}`,
+          message: failure.message ?? `supplier returned ${polled.status}`,
         });
-        recordFailure(sErr.reason);
-        throw sErr;
       }
       if (polled.status !== 200) {
-        const sErr = new SupplierError("timeout", {
+        recordFailure("timeout");
+        throw new SupplierError("timeout", {
           status: polled.status,
           message: `supplier job ${jobId} not done within ${pollBudgetMs}ms`,
         });
-        recordFailure("timeout");
-        throw sErr;
       }
-      chatResult = polled;
+      responseResult = polled;
     }
 
-    if (!chatResult.ok) {
-      const bodyReason =
-        chatResult.body && typeof chatResult.body === "object"
-          ? ((chatResult.body as { reason?: string }).reason ?? "supplier_http_error")
-          : "supplier_http_error";
-      const sErr = new SupplierError(bodyReason, {
-        status: chatResult.status,
-        message: `supplier returned ${chatResult.status}`,
+    if (!responseResult.ok) {
+      const failure = responseResult.body && typeof responseResult.body === "object"
+        ? responseResult.body as { reason?: string; message?: string }
+        : {};
+      const reason = failure.reason ?? "supplier_http_error";
+      recordFailure(reason);
+      throw new SupplierError(reason, {
+        status: responseResult.status,
+        message: failure.message ?? `supplier returned ${responseResult.status}`,
       });
-      recordFailure(bodyReason);
-      throw sErr;
     }
-
-    if (chatResult.parseError || !chatResult.body || typeof chatResult.body !== "object") {
-      const sErr = new SupplierError("malformed_response", {
-        status: chatResult.status,
+    if (responseResult.parseError || !responseResult.body || typeof responseResult.body !== "object") {
+      recordFailure("malformed_response");
+      throw new SupplierError("malformed_response", {
+        status: responseResult.status,
         message: "supplier body is not valid JSON",
       });
-      recordFailure("malformed_response");
-      throw sErr;
     }
 
-    const responseBody = chatResult.body as {
-      choices?: Array<{ message?: { role?: string; content?: string } }>;
-      receipt?: Receipt;
-      receipt_signature?: string;
-      submitted_ref?: string;
-    };
-
-    if (!responseBody.receipt || !responseBody.receipt_signature) {
-      const sErr = new SupplierError("malformed_response", {
-        status: chatResult.status,
-        message: "supplier response is missing receipt or receipt_signature",
-      });
-      recordFailure("malformed_response");
-      throw sErr;
-    }
-
+    const responseBody = responseResult.body as Record<string, unknown>;
     const receipt = responseBody.receipt;
     const receiptSignature = responseBody.receipt_signature;
-
-    const responseContent = responseBody.choices?.[0]?.message?.content;
-    if (typeof responseContent !== "string") {
-      const sErr = new SupplierError("malformed_response", {
-        status: chatResult.status,
-        message: "supplier response missing choices[0].message.content",
-      });
+    const submittedRef = responseBody.submitted_ref;
+    const rawResult = { ...responseBody };
+    delete rawResult.receipt;
+    delete rawResult.receipt_signature;
+    delete rawResult.escrow_ref;
+    delete rawResult.submitted_ref;
+    if (!receipt || typeof receipt !== "object" || typeof receiptSignature !== "string") {
       recordFailure("malformed_response");
-      throw sErr;
+      throw new SupplierError("malformed_response", {
+        status: responseResult.status,
+        message: "supplier response is missing receipt or receipt_signature",
+      });
     }
 
-    // ── 5. progress: supplier_called ──────────────────────────────────
+    let output: ResponseItem[];
+    try {
+      output = normalizeResponseOutput(rawResult.output);
+    } catch (error) {
+      recordFailure("malformed_response");
+      throw new SupplierError("malformed_response", {
+        status: responseResult.status,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+    const status = rawResult.status;
+    const usage = rawResult.usage;
+    const usageValid = usage === null || (
+      typeof usage === "object" &&
+      !Array.isArray(usage) &&
+      "input_tokens" in usage &&
+      typeof usage.input_tokens === "number" &&
+      "output_tokens" in usage &&
+      typeof usage.output_tokens === "number" &&
+      "total_tokens" in usage &&
+      typeof usage.total_tokens === "number"
+    );
+    const errorValid = rawResult.error === null ||
+      (typeof rawResult.error === "object" && !Array.isArray(rawResult.error));
+    const incompleteDetails = rawResult.incomplete_details;
+    const incompleteValid = status === "incomplete"
+      ? (
+          incompleteDetails !== null &&
+          typeof incompleteDetails === "object" &&
+          !Array.isArray(incompleteDetails) &&
+          "reason" in incompleteDetails &&
+          typeof incompleteDetails.reason === "string"
+        )
+      : incompleteDetails === null;
+    if (
+      rawResult.object !== "response" ||
+      typeof rawResult.id !== "string" ||
+      typeof rawResult.created_at !== "number" ||
+      typeof rawResult.model !== "string" ||
+      (status !== "completed" && status !== "incomplete") ||
+      !usageValid ||
+      !errorValid ||
+      !incompleteValid
+    ) {
+      recordFailure("malformed_response");
+      throw new SupplierError("malformed_response", {
+        status: responseResult.status,
+        message: "supplier did not return a terminal Response object",
+      });
+    }
+    const result = { ...rawResult, output } as ResponseObject;
+    const verifiedReceipt = receipt as unknown as Receipt;
+    const responseContent = responseOutputText(result.output);
+
     this.emitProgress({ type: "supplier_called", escrow_ref: escrowRefStr });
 
-    // ── 6. Receipt verification (field equality + signature shape) ───
-    if (receipt.supplier_pkh !== advertDatum.supplier_pkh) {
+    if (verifiedReceipt.supplier_pkh !== advertDatum.supplier_pkh) {
       recordFailure("wrong_supplier");
       throw new ReceiptVerificationError("wrong_supplier");
     }
-    if (receipt.escrow_ref !== escrowRefStr) {
+    if (verifiedReceipt.escrow_ref !== escrowRefStr) {
       recordFailure("wrong_escrow_ref");
       throw new ReceiptVerificationError("wrong_escrow_ref");
     }
-
-    const expectedPromptHash = sha256Hex(canonicalize(messages));
-    if (receipt.prompt_hash !== expectedPromptHash) {
+    const expectedPromptHash = sha256Hex(canonicalize(responseRequestCommitment(request)));
+    if (verifiedReceipt.prompt_hash !== expectedPromptHash) {
       recordFailure("prompt_hash_mismatch");
       throw new ReceiptVerificationError("prompt_hash_mismatch");
     }
-
-    // Receipt does not carry the full request_spec_hash — only `model`. Other
-    // request_spec components (capability_id, max_output_tokens) are bound on
-    // chain via the escrow datum, which the supplier already validated against
-    // the advert. So the SDK only needs to assert the receipt's model matches
-    // the advert it referenced.
-    if (receipt.model !== advertDatum.model) {
+    if (verifiedReceipt.model !== advertDatum.model || result.model !== advertDatum.model) {
       recordFailure("request_spec_hash_mismatch");
       throw new ReceiptVerificationError("request_spec_hash_mismatch");
     }
-
-    if (typeof receiptSignature !== "string" || !SIG_RE.test(receiptSignature)) {
+    const expectedResponseHash = sha256Hex(
+      canonicalize(responseResultCommitment(result)),
+    );
+    if (verifiedReceipt.response_hash !== expectedResponseHash) {
+      recordFailure("response_hash_mismatch");
+      throw new ReceiptVerificationError("response_hash_mismatch");
+    }
+    if (!SIG_RE.test(receiptSignature) || receiptSignature === ZERO_SIGNATURE) {
       recordFailure("invalid_signature");
       throw new ReceiptVerificationError("invalid_signature");
     }
-    if (receiptSignature === ZERO_SIGNATURE) {
-      // Structurally well-formed but cryptographically void. M1-F replaces
-      // this with a real verifyReceipt() call once pub-key plumbing is wired.
-      recordFailure("invalid_signature");
-      throw new ReceiptVerificationError("invalid_signature");
-    }
-
-    // Defensive: receipt fields should be 32-byte hex.
-    if (!HEX64_RE.test(receipt.prompt_hash) || !HEX64_RE.test(receipt.response_hash)) {
+    if (!HEX64_RE.test(verifiedReceipt.prompt_hash) || !HEX64_RE.test(verifiedReceipt.response_hash)) {
       recordFailure("malformed_receipt");
       throw new ReceiptVerificationError("malformed_receipt");
     }
 
-    // ── 7. progress: receipt_verified ─────────────────────────────────
     this.emitProgress({ type: "receipt_verified", escrow_ref: escrowRefStr });
-
-    // ── 8. Persist completed task ─────────────────────────────────────
     this.historyStore.save({
       escrow_ref: escrowRefStr,
       supplier_pkh: advertDatum.supplier_pkh,
       capability_id: advertDatum.capability_id,
-      prompt_preview: previewMessages(messages),
+      prompt_preview: previewInput(request.input),
       posted_at: postedAtMs,
       status: "completed",
-      response: responseContent,
-      receipt,
+      response: responseDisplayText(result.output),
+      receipt: verifiedReceipt,
       receipt_signature: receiptSignature,
     });
 
     return {
       response: responseContent,
-      receipt,
+      request,
+      result,
+      receipt: verifiedReceipt,
       receiptSignature,
       escrowRef: escrowOutputRef,
-      submittedRef: parseRef(responseBody.submitted_ref ?? "") ?? undefined,
+      submittedRef: parseRef(typeof submittedRef === "string" ? submittedRef : "") ?? undefined,
     };
   }
 
@@ -1223,8 +1317,41 @@ export class Marketplace extends EventEmitterBase {
       throw new TxConstructionError("advert ref not on chain", `no advert UTxO at ${refToString(advertRef)}`);
     }
     const advertDatum = decodeAdvertDatum(advertUtxo.datumHex);
+    if (advertDatum.status !== "Active") {
+      throw new TxConstructionError("advert is retired");
+    }
+    if (payment_lovelace !== advertDatum.price_lovelace) {
+      throw new TxConstructionError("payment must equal advertised price");
+    }
+    if (this.walletKey.pubKeyHash === advertDatum.supplier_pkh) {
+      throw new TxConstructionError("buyer cannot be supplier");
+    }
 
     const supplierHttp = new HttpClient({ baseUrl: advertDatum.endpoint_url, fetch: this.fetchImpl });
+
+    // Capability compatibility is authoritative and must pass before funds
+    // are locked. The buyer-app also keeps the declared upstream contract so
+    // later session turns can reject controls that an adapter cannot preserve.
+    let capabilityResult;
+    try {
+      capabilityResult = await supplierHttp.getJson("/capability");
+    } catch (error) {
+      throw new TxConstructionError(
+        "supplier_preflight_failed",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    if (!capabilityResult.ok || capabilityResult.parseError) {
+      throw new TxConstructionError(
+        "supplier_preflight_failed",
+        `supplier /capability returned HTTP ${capabilityResult.status}`,
+      );
+    }
+    const capability = validateSupplierCapability(
+      capabilityResult.body,
+      advertDatum,
+      advertRef,
+    );
 
     // Pre-flight: refuse to lock any funds if the supplier is already serving
     // another chat. The supplier is single-slot, so a second concurrent escrow
@@ -1300,14 +1427,38 @@ export class Marketplace extends EventEmitterBase {
       });
     }
 
+    if (!startRes.body || typeof startRes.body !== "object" || Array.isArray(startRes.body)) {
+      throw new SupplierError("malformed_response", {
+        status: startRes.status,
+        message: "supplier /v1/chat/start did not return an object",
+      });
+    }
+    const startBody = startRes.body as {
+      status?: unknown;
+      escrow_ref?: unknown;
+      settle_mode?: unknown;
+    };
+    if (
+      startBody.escrow_ref !== escrowRefStr ||
+      (
+        startBody.status !== "claimed" &&
+        !(startBody.status === "ticket" && startBody.settle_mode === "ticket")
+      )
+    ) {
+      throw new SupplierError("malformed_response", {
+        status: startRes.status,
+        message: "supplier /v1/chat/start returned an invalid session result",
+      });
+    }
     this.emitProgress({ type: "chat_started", escrow_ref: escrowRefStr });
-    // Ticket-mode suppliers answer {status:"ticket"} (no Claim); anything else
-    // — "claimed" or an older supplier without the field — is full settlement.
-    const startStatus = startRes.body && typeof startRes.body === "object"
-      ? (startRes.body as { status?: string }).status
-      : undefined;
-    const settleMode: ChatSettleMode = startStatus === "ticket" ? "ticket" : "full";
-    return { escrowRef: escrowOutputRef, sessionNonce, supplierBaseUrl: advertDatum.endpoint_url, settleMode };
+    const settleMode: ChatSettleMode = startBody.status === "ticket" ? "ticket" : "full";
+    return {
+      escrowRef: escrowOutputRef,
+      sessionNonce,
+      supplierBaseUrl: advertDatum.endpoint_url,
+      settleMode,
+      upstreamApi: capability.upstream_api,
+    };
   }
 
   /**
@@ -1335,10 +1486,22 @@ export class Marketplace extends EventEmitterBase {
       }
       throw err;
     }
-    if (!endRes.ok || !endRes.body || typeof endRes.body !== "object") {
-      const bodyReason = endRes.body && typeof endRes.body === "object"
-        ? ((endRes.body as { reason?: string }).reason ?? "supplier_http_error")
-        : "supplier_http_error";
+    if (
+      !endRes.ok ||
+      !endRes.body ||
+      typeof endRes.body !== "object" ||
+      Array.isArray(endRes.body)
+    ) {
+      let bodyReason = "supplier_http_error";
+      if (
+        endRes.body &&
+        typeof endRes.body === "object" &&
+        !Array.isArray(endRes.body) &&
+        "reason" in endRes.body &&
+        typeof endRes.body.reason === "string"
+      ) {
+        bodyReason = endRes.body.reason;
+      }
       throw new SupplierError(bodyReason, {
         status: endRes.status,
         message: `supplier /v1/chat/end returned ${endRes.status}`,
@@ -1347,20 +1510,33 @@ export class Marketplace extends EventEmitterBase {
     const endBody = endRes.body as {
       status?: string;
       settle_mode?: string;
-      receipt?: import("@marketplace/shared/receipt").Receipt;
+      escrow_ref?: string;
+      receipt?: Receipt;
       receipt_signature?: string;
       submitted_ref?: string;
     };
     // Ticket sessions produce no receipt and nothing to Accept — the Open
-    // escrow returns via reclaim after deliver_by. Trusting the supplier's
-    // response is incentive-safe: lying in either direction only forfeits the
-    // supplier's own payout (the buyer's sweeper reclaims unsettled escrows).
+    // escrow returns via reclaim after deliver_by.
     if (endBody.settle_mode === "ticket") {
+      if (endBody.status !== "ended" || endBody.escrow_ref !== escrowRefStr) {
+        throw new SupplierError("malformed_response", {
+          status: endRes.status,
+          message: "supplier /v1/chat/end returned an invalid ticket result",
+        });
+      }
       this.emitProgress({ type: "chat_ended", escrow_ref: escrowRefStr });
       return { settleMode: "ticket", escrowRef };
     }
-    if (!endBody.receipt || !endBody.receipt_signature) {
-      throw new SupplierError("malformed_response", { message: "supplier end response missing receipt" });
+    if (
+      endBody.status !== "submitted" ||
+      endBody.escrow_ref !== escrowRefStr ||
+      !endBody.receipt ||
+      !endBody.receipt_signature
+    ) {
+      throw new SupplierError("malformed_response", {
+        status: endRes.status,
+        message: "supplier /v1/chat/end returned an invalid submitted result",
+      });
     }
     const receipt = endBody.receipt;
     const receiptSignature = endBody.receipt_signature;
@@ -1387,7 +1563,7 @@ export class Marketplace extends EventEmitterBase {
     if (receipt.escrow_ref !== escrowRefStr) {
       throw new ReceiptVerificationError("wrong_escrow_ref");
     }
-    // prompt_hash is the session-init placeholder, NOT sha256(messages).
+    // prompt_hash is the session-init placeholder, not a transcript hash.
     if (receipt.prompt_hash !== chatSessionPromptHash({ session_nonce: sessionNonce })) {
       throw new ReceiptVerificationError("prompt_hash_mismatch");
     }
@@ -1400,14 +1576,13 @@ export class Marketplace extends EventEmitterBase {
     if (!HEX64_RE.test(receipt.prompt_hash) || !HEX64_RE.test(receipt.response_hash)) {
       throw new ReceiptVerificationError("malformed_receipt");
     }
-    // Optional: recompute the transcript hash from the browser's mirror.
-    if (transcript && transcript.length > 0) {
-      const localHash = sha256Hex(canonicalize(transcript));
-      if (localHash !== receipt.response_hash) {
-        console.warn(
-          `[marketplace] endChat transcript hash mismatch for ${escrowRefStr}: local ${localHash} != receipt ${receipt.response_hash}`,
-        );
-      }
+    // Recompute the full ordered Item transcript hash from the browser mirror.
+    const localHash = sha256Hex(canonicalize(transcript));
+    if (localHash !== receipt.response_hash) {
+      throw new ReceiptVerificationError(
+        "response_hash_mismatch",
+        `local transcript hash ${localHash} does not match receipt`,
+      );
     }
     // NOTE: cryptographic Ed25519 verifyReceipt is intentionally NOT called
     // here. It lives in @marketplace/shared/receipt/sign.ts, whose top-level

@@ -18,6 +18,12 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { ResponseArchive } from "../../buyer/src/db/archive.js";
 import { createApp } from "../../buyer/src/server.js";
+import { canonicalize } from "../../packages/shared/src/cbor/canonical.js";
+import {
+  createResponse,
+  responseResultCommitment,
+  type ResponseRequest,
+} from "../../packages/shared/src/responses.js";
 
 let dir: string;
 let archive: ResponseArchive;
@@ -47,6 +53,29 @@ function sampleReceipt() {
   };
 }
 
+function requestEnvelope(text: string): ResponseRequest {
+  return {
+    input: [{
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text }],
+    }],
+  };
+}
+
+function responseCanonical(text: string): string {
+  const response = createResponse({
+    id: "resp_archive_fixture",
+    model: "qwen2.5:0.5b",
+    output: [{
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text }],
+    }],
+  });
+  return canonicalize(responseResultCommitment(response));
+}
+
 // ─── ResponseArchive in isolation ────────────────────────────────────────
 
 describe("ResponseArchive — persistChat", () => {
@@ -58,15 +87,15 @@ describe("ResponseArchive — persistChat", () => {
       supplier_pkh: "d".repeat(56),
       model: "qwen2.5:0.5b",
       payment_lovelace: "2000000",
-      request_messages: [{ role: "user", content: "hi" }],
-      response_canonical: '{"role":"assistant","content":"hello there"}',
+      request_envelope: requestEnvelope("hi"),
+      response_canonical: responseCanonical("hello there"),
       receipt: sampleReceipt(),
       receipt_signature: "f".repeat(128),
     });
 
     expect(row.escrow_ref).toBe(SAMPLE_REF);
     expect(row.response_content_type).toBe("application/json");
-    expect(row.response_byte_length).toBe(44);
+    expect(row.response_byte_length).toBe(Buffer.byteLength(responseCanonical("hello there")));
 
     // Filesystem: <dir>/<txhash>_0/{request.json,response.json}
     const recDir = join(dir, `${"a".repeat(64)}_0`);
@@ -76,7 +105,7 @@ describe("ResponseArchive — persistChat", () => {
     // Response file matches what we passed in (byte-exact — important for
     // sha256 verification against receipt.response_hash).
     expect(readFileSync(join(recDir, "response.json"), "utf8"))
-      .toBe('{"role":"assistant","content":"hello there"}');
+      .toBe(responseCanonical("hello there"));
   });
 
   it("INSERT OR REPLACE on duplicate escrow_ref", () => {
@@ -87,19 +116,19 @@ describe("ResponseArchive — persistChat", () => {
       supplier_pkh: "d".repeat(56),
       model: "qwen2.5:0.5b",
       payment_lovelace: "2000000",
-      request_messages: [{ role: "user", content: "first" }],
-      response_canonical: '{"role":"assistant","content":"first"}',
+      request_envelope: requestEnvelope("first"),
+      response_canonical: responseCanonical("first"),
       receipt: sampleReceipt(),
       receipt_signature: "f".repeat(128),
     };
     archive.persistChat(baseParams);
     archive.persistChat({
       ...baseParams,
-      response_canonical: '{"role":"assistant","content":"second"}',
+      response_canonical: responseCanonical("second"),
     });
     expect(archive.list(10).length).toBe(1);
     const r = archive.readResponse(SAMPLE_REF);
-    expect(r?.bytes.toString("utf8")).toBe('{"role":"assistant","content":"second"}');
+    expect(r?.bytes.toString("utf8")).toBe(responseCanonical("second"));
   });
 });
 
@@ -173,8 +202,8 @@ describe("ResponseArchive — read helpers", () => {
       supplier_pkh: "d".repeat(56),
       model: "x",
       payment_lovelace: "1",
-      request_messages: [],
-      response_canonical: "first",
+      request_envelope: requestEnvelope("first"),
+      response_canonical: responseCanonical("first"),
       receipt: sampleReceipt(),
       receipt_signature: "f".repeat(128),
     });
@@ -188,8 +217,8 @@ describe("ResponseArchive — read helpers", () => {
       supplier_pkh: "d".repeat(56),
       model: "x",
       payment_lovelace: "1",
-      request_messages: [],
-      response_canonical: "second",
+      request_envelope: requestEnvelope("second"),
+      response_canonical: responseCanonical("second"),
       receipt: sampleReceipt(),
       receipt_signature: "f".repeat(128),
     });
@@ -208,8 +237,8 @@ describe("ResponseArchive — read helpers", () => {
         supplier_pkh: "d".repeat(56),
         model: "x",
         payment_lovelace: "1",
-        request_messages: [],
-        response_canonical: "x",
+        request_envelope: requestEnvelope(`request ${i}`),
+        response_canonical: responseCanonical("x"),
         receipt: sampleReceipt(),
         receipt_signature: "f".repeat(128),
       });
@@ -252,8 +281,8 @@ describe("GET /v1/responses* — happy paths", () => {
       supplier_pkh: "d".repeat(56),
       model: "qwen2.5:0.5b",
       payment_lovelace: "2000000",
-      request_messages: [{ role: "user", content: "hi" }],
-      response_canonical: '{"role":"assistant","content":"hello"}',
+      request_envelope: requestEnvelope("hi"),
+      response_canonical: responseCanonical("hello"),
       receipt: sampleReceipt(),
       receipt_signature: "f".repeat(128),
     });
@@ -310,8 +339,8 @@ describe("GET /v1/responses* — happy paths", () => {
       supplier_pkh: "d".repeat(56),
       model: "x",
       payment_lovelace: "1",
-      request_messages: [{ role: "user", content: "hello world" }],
-      response_canonical: '{"role":"assistant","content":"hi"}',
+      request_envelope: requestEnvelope("hello world"),
+      response_canonical: responseCanonical("hi"),
       receipt: sampleReceipt(),
       receipt_signature: "f".repeat(128),
     });
@@ -320,7 +349,7 @@ describe("GET /v1/responses* — happy paths", () => {
     const res = await request(app).get(`/v1/responses/${SAMPLE_REF.replace("#", "_")}/request`);
     expect(res.status).toBe(200);
     expect(res.headers["content-type"]).toMatch(/application\/json/);
-    expect(JSON.parse(res.text).messages[0].content).toBe("hello world");
+    expect(JSON.parse(res.text).input[0].content[0].text).toBe("hello world");
   });
 
   it("/response returns audio bytes with upstream Content-Type", async () => {

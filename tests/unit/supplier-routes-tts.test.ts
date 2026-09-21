@@ -46,19 +46,19 @@ function validBody() {
 }
 
 describe("Capability-routed mounting", () => {
-  it('TTS supplier exposes /v1/audio/synthesize and NOT /v1/chat/completions', async () => {
+  it("TTS supplier exposes /v1/audio/synthesize and not /v1/responses", async () => {
     const app = makeApp("tts");
     const tts = await request(app).post("/v1/audio/synthesize")
       .set("X-Escrow-Ref", ESCROW_REF_HEADER).send(validBody());
     // Whatever validation it lands on, it must not 404 (route exists).
     expect(tts.status).not.toBe(404);
 
-    const chat = await request(app).post("/v1/chat/completions")
-      .set("X-Escrow-Ref", ESCROW_REF_HEADER).send({ messages: [{ role: "user", content: "hi" }] });
+    const chat = await request(app).post("/v1/responses")
+      .set("X-Escrow-Ref", ESCROW_REF_HEADER).send({ input: [{ role: "user", content: "hi" }] });
     expect(chat.status).toBe(404);
   });
 
-  it('chat supplier exposes /v1/chat/completions and NOT /v1/audio/synthesize', async () => {
+  it("chat supplier exposes /v1/responses and not /v1/audio/synthesize", async () => {
     const app = makeApp("chat");
     const tts = await request(app).post("/v1/audio/synthesize")
       .set("X-Escrow-Ref", ESCROW_REF_HEADER).send(validBody());

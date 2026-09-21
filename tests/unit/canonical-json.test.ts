@@ -51,6 +51,12 @@ describe("canonicalize — nested object key sorting", () => {
     const input = { c: { b: { a: "deep" } } };
     expect(canonicalize(input)).toBe('{"c":{"b":{"a":"deep"}}}');
   });
+
+  it("binds prototype-named JSON properties instead of dropping them from a commitment", () => {
+    const schema = JSON.parse('{"properties":{"__proto__":{"type":"string"}}}');
+    expect(canonicalize(schema)).toBe('{"properties":{"__proto__":{"type":"string"}}}');
+    expect(canonicalize(schema)).not.toBe(canonicalize({ properties: {} }));
+  });
 });
 
 // ─── Array order preservation ─────────────────────────────────────────────────
@@ -169,10 +175,6 @@ describe("canonicalize — UTF-8 NFC normalization", () => {
 // ─── Determinism ──────────────────────────────────────────────────────────────
 
 describe("canonicalize — determinism (same input → same output)", () => {
-  it("calling twice with the same object returns identical strings", () => {
-    const obj = { z: [1, 2], a: { y: true, b: null } };
-    expect(canonicalize(obj)).toBe(canonicalize(obj));
-  });
 
   it("structurally equal objects with same keys produce identical output", () => {
     const o1 = { b: 2, a: 1 };

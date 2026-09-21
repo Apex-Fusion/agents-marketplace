@@ -19,6 +19,12 @@
 import { useState } from "react";
 import type { SubmitPromptResult } from "../../sdk/types.js";
 import type { OutputReference } from "@marketplace/shared/chain";
+import {
+  normalizeResponseOutput,
+  responseOutputText,
+  type ResponseObject,
+  type ResponseRequest,
+} from "@marketplace/shared/responses";
 
 export interface PromptFormProps {
   advertRef: OutputReference;
@@ -26,21 +32,29 @@ export interface PromptFormProps {
   onSubmit?: (result: SubmitPromptResult) => void;
 }
 
-interface ServerResponse {
-  choices?: Array<{ message?: { role: string; content: string } }>;
-  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+type ServerResponse = Omit<Partial<ResponseObject>, "error"> & {
   receipt?: SubmitPromptResult["receipt"];
   receipt_signature?: string;
   escrow_ref?: string;
-  error?: string;
+  error?: ResponseObject["error"] | string;
   message?: string;
-}
+};
 
 function refToOutput(refStr: string | undefined): OutputReference | null {
   if (!refStr) return null;
   const m = /^([0-9a-f]{64})#(\d+)$/.exec(refStr);
   if (!m) return null;
   return { txHash: m[1], index: Number(m[2]) };
+}
+
+function responseDisplay(result: ResponseObject): string {
+  return result.output.flatMap((item) =>
+    item.type === "message"
+      ? item.content.map((part) =>
+          part.type === "refusal" ? part.refusal : part.text
+        )
+      : []
+  ).join("");
 }
 
 export default function PromptForm({ advertRef, payment_lovelace, onSubmit }: PromptFormProps) {
@@ -54,13 +68,20 @@ export default function PromptForm({ advertRef, payment_lovelace, onSubmit }: Pr
     if (content.trim().length === 0) return;
     setLoading(true);
     setError(null);
+    const request: ResponseRequest = {
+      input: [{
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: content }],
+      }],
+    };
     try {
       const resp = await fetch("/v1/submit-prompt", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           advert_ref: `${advertRef.txHash}#${advertRef.index}`,
-          messages: [{ role: "user", content }],
+          ...request,
           payment_lovelace: payment_lovelace.toString(),
         }),
       });
@@ -69,11 +90,67 @@ export default function PromptForm({ advertRef, payment_lovelace, onSubmit }: Pr
         throw new Error(`${body.error ?? resp.statusText}: ${body.message ?? ""}`);
       }
       const escrow = refToOutput(body.escrow_ref);
-      if (!escrow || !body.receipt || !body.receipt_signature) {
-        throw new Error("server response missing escrow/receipt fields");
+      if (
+        !escrow ||
+        !body.receipt ||
+        !body.receipt_signature ||
+        body.object !== "response" ||
+        typeof body.id !== "string" ||
+        typeof body.created_at !== "number" ||
+        typeof body.model !== "string" ||
+        (body.status !== "completed" && body.status !== "incomplete") ||
+        (body.usage !== null && (
+          typeof body.usage !== "object" ||
+          Array.isArray(body.usage) ||
+          !("input_tokens" in body.usage) ||
+          !("output_tokens" in body.usage) ||
+          !("total_tokens" in body.usage) ||
+          typeof body.usage.input_tokens !== "number" ||
+          typeof body.usage.output_tokens !== "number" ||
+          typeof body.usage.total_tokens !== "number"
+        )) ||
+        (body.error !== null && (
+          typeof body.error !== "object" || Array.isArray(body.error)
+        )) ||
+        (
+          body.status === "incomplete"
+            ? (
+                body.incomplete_details === null ||
+                typeof body.incomplete_details !== "object" ||
+                Array.isArray(body.incomplete_details) ||
+                !("reason" in body.incomplete_details) ||
+                typeof body.incomplete_details.reason !== "string"
+              )
+            : body.incomplete_details !== null
+        )
+      ) {
+        throw new Error("server response missing canonical response or receipt fields");
       }
+      // The guard validates these fields, but TypeScript does not retain
+      // property-level narrowing when assigning the complete objects.
+      const usage = body.usage as ResponseObject["usage"];
+      const incompleteDetails = body.incomplete_details as ResponseObject["incomplete_details"];
+      const responseFields = { ...body };
+      delete responseFields.receipt;
+      delete responseFields.receipt_signature;
+      delete responseFields.escrow_ref;
+      delete responseFields.message;
+      const resultObject: ResponseObject = {
+        ...responseFields,
+        object: "response",
+        id: body.id,
+        created_at: body.created_at,
+        model: body.model,
+        status: body.status,
+        output: normalizeResponseOutput(body.output),
+        usage,
+        error: body.error ?? null,
+        incomplete_details: incompleteDetails,
+      };
       const r: SubmitPromptResult = {
-        response: body.choices?.[0]?.message?.content ?? "",
+        response: responseOutputText(resultObject.output),
+        request,
+        result: resultObject,
         receipt: body.receipt,
         receiptSignature: body.receipt_signature,
         escrowRef: escrow,
@@ -120,7 +197,7 @@ export default function PromptForm({ advertRef, payment_lovelace, onSubmit }: Pr
       {result && !error && (
         <div className="rounded border border-green-300 bg-green-50 p-3 text-sm text-green-800">
           <p className="font-medium">Response</p>
-          <pre className="whitespace-pre-wrap font-mono text-xs">{result.response}</pre>
+          <pre className="whitespace-pre-wrap font-mono text-xs">{responseDisplay(result.result)}</pre>
         </div>
       )}
     </form>

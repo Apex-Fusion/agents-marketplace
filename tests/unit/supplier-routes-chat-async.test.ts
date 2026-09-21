@@ -35,7 +35,7 @@ import {
   CAPABILITY_ID,
   TEST_MODEL,
   TEST_MAX_OUTPUT_TOKENS,
-  TEST_MESSAGES,
+  TEST_RESPONSE_INPUT,
 } from "../fixtures/supplier-side/sample-escrow-state.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -48,8 +48,8 @@ const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9
 function validChatBody() {
   return {
     model: TEST_MODEL,
-    messages: TEST_MESSAGES,
-    max_tokens: TEST_MAX_OUTPUT_TOKENS,
+    input: TEST_RESPONSE_INPUT,
+    max_output_tokens: TEST_MAX_OUTPUT_TOKENS,
   };
 }
 
@@ -112,6 +112,7 @@ function mockOllamaOk(content = "I am a helpful assistant.") {
     json: async () => ({
       message: { role: "assistant", content },
       done: true,
+      done_reason: "stop",
       prompt_eval_count: 12,
       eval_count: 48,
       total_duration: 3_200_000_000,
@@ -145,7 +146,7 @@ describe("POST /v1/chat/completions (async) — happy path 202", () => {
     // RED — stub throws / server returns 200 currently
     // SPEC FIX 2026-04-28 M1-F-async-chat: response is now async (202, not 200)
     const res = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
       .send(validChatBody());
     expect(res.status).toBe(202);
@@ -154,7 +155,7 @@ describe("POST /v1/chat/completions (async) — happy path 202", () => {
   it("202 body contains job_id, status=accepted, escrow_ref", async () => {
     // RED — stub throws
     const res = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
       .send(validChatBody());
     expect(res.status).toBe(202);
@@ -163,14 +164,13 @@ describe("POST /v1/chat/completions (async) — happy path 202", () => {
     expect(res.body.escrow_ref).toBe(OPEN_ESCROW_REF_HEADER);
   });
 
-  it("202 body contains no choices/usage/receipt (those come via GET)", async () => {
-    // RED — stub throws
+  it("202 body contains no terminal result or settlement data", async () => {
     const res = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
       .send(validChatBody());
     expect(res.status).toBe(202);
-    expect(res.body.choices).toBeUndefined();
+    expect(res.body.output).toBeUndefined();
     expect(res.body.usage).toBeUndefined();
     expect(res.body.receipt).toBeUndefined();
   });
@@ -178,7 +178,7 @@ describe("POST /v1/chat/completions (async) — happy path 202", () => {
   it("jobs.count() === 1 after 202 lands", async () => {
     // RED — stub throws
     const res = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
       .send(validChatBody());
     expect(res.status).toBe(202);
@@ -195,7 +195,7 @@ describe("POST /v1/chat/completions (async) — happy path 202", () => {
     // POST response must have arrived before it could have settled.
     // The key assertion: the HTTP response is 202 even though fetch never resolves.
     const res = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
       .send(validChatBody());
     // If we got here, the response arrived even though fetch never resolved
@@ -224,7 +224,7 @@ describe("POST /v1/chat/completions (async) — lock contention", () => {
     mockOllamaDeferred();
 
     const res = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
       .send(validChatBody());
     expect(res.status).toBe(409);
@@ -245,7 +245,7 @@ describe("POST /v1/chat/completions (async) — lock contention", () => {
     mockOllamaDeferred();
 
     await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
       .send(validChatBody());
     expect(jobs.count()).toBe(0);
@@ -275,7 +275,7 @@ describe("POST /v1/chat/completions (async) — Claim tx failure", () => {
     mockOllamaDeferred();
 
     const res = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
       .send(validChatBody());
     expect(res.status).toBe(503);
@@ -295,7 +295,7 @@ describe("POST /v1/chat/completions (async) — Claim tx failure", () => {
     mockOllamaDeferred();
 
     await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
       .send(validChatBody());
 
@@ -319,7 +319,7 @@ describe("POST /v1/chat/completions (async) — Claim tx failure", () => {
     mockOllamaDeferred();
 
     const res = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
       .send(validChatBody());
     expect(res.status).toBe(504);
@@ -374,7 +374,7 @@ describe("POST /v1/chat/completions (async) — background job completion", () =
     });
 
     const res = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
       .send(validChatBody());
 

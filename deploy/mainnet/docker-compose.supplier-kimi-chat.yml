@@ -45,7 +45,8 @@ services:
       # Multi-turn chat session capability (mounts /v1/chat/{start,message,end}).
       CAPABILITY_KIND: chat-session
       LLM_BACKEND: openai
-      # No /v1 suffix — supplier/src/openai.ts appends /v1/chat/completions.
+      OPENAI_UPSTREAM_API: responses
+      # No /v1 suffix — the native adapter appends /v1/responses.
       OPENAI_BASE_URL: https://openrouter.ai/api
       # Kimi K2.6 generations can be slow; mirror the one-off Kimi compose.
       OPENAI_TIMEOUT_MS: "300000"

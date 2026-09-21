@@ -63,18 +63,24 @@ function buildActiveAdvertDatum(): AdvertDatum {
 
 function sampleResponsePayload(): JobResponsePayload {
   return {
-    choices: [
-      {
-        index: 0,
-        message: { role: "assistant", content: "The answer is 42." },
-        finish_reason: "stop",
-      },
-    ],
+    id: "resp_test",
+    object: "response",
+    created_at: 1_745_500_000,
+    model: TEST_MODEL,
+    status: "completed",
+    output: [{
+      type: "message",
+      role: "assistant",
+      status: "completed",
+      content: [{ type: "output_text", text: "The answer is 42.", annotations: [] }],
+    }],
     usage: {
-      prompt_tokens: 12,
-      completion_tokens: 48,
+      input_tokens: 12,
+      output_tokens: 48,
       total_tokens: 60,
     },
+    error: null,
+    incomplete_details: null,
     receipt: {
       prompt_hash: PROMPT_HASH,
       response_hash: "b".repeat(64),
@@ -86,6 +92,7 @@ function sampleResponsePayload(): JobResponsePayload {
       escrow_ref: ESCROW_REF_STR,
     },
     receipt_signature: "d".repeat(128),
+    submitted_ref: `${"9".repeat(64)}#0`,
   };
 }
 
@@ -121,7 +128,7 @@ describe("GET /v1/chat/completions/:jobId — not found", () => {
 
   it("404 with reason=job_not_found for unknown jobId", async () => {
     // RED — GET route does not exist yet
-    const res = await request(app).get(`/v1/chat/completions/${NONEXISTENT_JOB_ID}`);
+    const res = await request(app).get(`/v1/responses/${NONEXISTENT_JOB_ID}`);
     expect(res.status).toBe(404);
     expect(res.body.reason ?? res.body.error).toMatch(/job_not_found/i);
   });
@@ -137,7 +144,7 @@ describe("GET /v1/chat/completions/:jobId — not found", () => {
     // Evict the job
     jobs.evictExpired(1_000 + JOB_TTL_MS + 1);
 
-    const res = await request(app).get(`/v1/chat/completions/${jobId}`);
+    const res = await request(app).get(`/v1/responses/${jobId}`);
     expect(res.status).toBe(404);
     expect(res.body.reason ?? res.body.error).toMatch(/job_not_found/i);
 
@@ -146,7 +153,7 @@ describe("GET /v1/chat/completions/:jobId — not found", () => {
 
   it("400 with reason=invalid_job_id for malformed jobId (not UUIDv4)", async () => {
     // RED — GET route does not exist yet
-    const res = await request(app).get(`/v1/chat/completions/${MALFORMED_JOB_ID}`);
+    const res = await request(app).get(`/v1/responses/${MALFORMED_JOB_ID}`);
     expect(res.status).toBe(400);
     expect(res.body.reason ?? res.body.error).toMatch(/invalid_job_id/i);
   });
@@ -166,7 +173,7 @@ describe("GET /v1/chat/completions/:jobId — status=accepted", () => {
   it("202 with {status: 'accepted', escrow_ref} for a freshly created job", async () => {
     // RED — GET route does not exist yet
     const jobId = jobs.create(ESCROW_REF_STR);
-    const res = await request(app).get(`/v1/chat/completions/${jobId}`);
+    const res = await request(app).get(`/v1/responses/${jobId}`);
     expect(res.status).toBe(202);
     expect(res.body.status).toBe("accepted");
     expect(res.body.escrow_ref).toBe(ESCROW_REF_STR);
@@ -175,7 +182,7 @@ describe("GET /v1/chat/completions/:jobId — status=accepted", () => {
   it("Content-Type is application/json for 202 accepted response", async () => {
     // RED — GET route does not exist yet
     const jobId = jobs.create(ESCROW_REF_STR);
-    const res = await request(app).get(`/v1/chat/completions/${jobId}`);
+    const res = await request(app).get(`/v1/responses/${jobId}`);
     expect(res.headers["content-type"]).toMatch(/application\/json/i);
   });
 });
@@ -195,7 +202,7 @@ describe("GET /v1/chat/completions/:jobId — status=running", () => {
     // RED — GET route does not exist yet
     const jobId = jobs.create(ESCROW_REF_STR);
     jobs.setRunning(jobId);
-    const res = await request(app).get(`/v1/chat/completions/${jobId}`);
+    const res = await request(app).get(`/v1/responses/${jobId}`);
     expect(res.status).toBe(202);
     expect(res.body.status).toBe("running");
     expect(res.body.escrow_ref).toBe(ESCROW_REF_STR);
@@ -221,30 +228,28 @@ describe("GET /v1/chat/completions/:jobId — status=done", () => {
     jobs.setRunning(jobId);
     jobs.complete(jobId, sampleResponsePayload());
 
-    const res = await request(app).get(`/v1/chat/completions/${jobId}`);
+    const res = await request(app).get(`/v1/responses/${jobId}`);
     expect(res.status).toBe(200);
   });
 
-  it("200 body contains choices[0].message.content", async () => {
-    // RED — GET route does not exist yet
+  it("200 body contains the full typed output", async () => {
     const jobId = jobs.create(ESCROW_REF_STR);
     jobs.setRunning(jobId);
     jobs.complete(jobId, sampleResponsePayload());
 
-    const res = await request(app).get(`/v1/chat/completions/${jobId}`);
-    expect(res.body.choices[0].message.content).toBe("The answer is 42.");
-    expect(res.body.choices[0].message.role).toBe("assistant");
+    const res = await request(app).get(`/v1/responses/${jobId}`);
+    expect(res.body.output[0].content[0].text).toBe("The answer is 42.");
+    expect(res.body.output[0].role).toBe("assistant");
   });
 
-  it("200 body contains usage with prompt_tokens, completion_tokens, total_tokens", async () => {
-    // RED — GET route does not exist yet
+  it("200 body contains Responses usage", async () => {
     const jobId = jobs.create(ESCROW_REF_STR);
     jobs.setRunning(jobId);
     jobs.complete(jobId, sampleResponsePayload());
 
-    const res = await request(app).get(`/v1/chat/completions/${jobId}`);
-    expect(typeof res.body.usage.prompt_tokens).toBe("number");
-    expect(typeof res.body.usage.completion_tokens).toBe("number");
+    const res = await request(app).get(`/v1/responses/${jobId}`);
+    expect(typeof res.body.usage.input_tokens).toBe("number");
+    expect(typeof res.body.usage.output_tokens).toBe("number");
     expect(typeof res.body.usage.total_tokens).toBe("number");
   });
 
@@ -254,7 +259,7 @@ describe("GET /v1/chat/completions/:jobId — status=done", () => {
     jobs.setRunning(jobId);
     jobs.complete(jobId, sampleResponsePayload());
 
-    const res = await request(app).get(`/v1/chat/completions/${jobId}`);
+    const res = await request(app).get(`/v1/responses/${jobId}`);
     const { receipt } = res.body;
     expect(receipt).toBeTruthy();
     expect(receipt.prompt_hash).toBe(PROMPT_HASH);
@@ -273,7 +278,7 @@ describe("GET /v1/chat/completions/:jobId — status=done", () => {
     jobs.setRunning(jobId);
     jobs.complete(jobId, sampleResponsePayload());
 
-    const res = await request(app).get(`/v1/chat/completions/${jobId}`);
+    const res = await request(app).get(`/v1/responses/${jobId}`);
     expect(res.body.receipt_signature).toMatch(/^[0-9a-f]{128}$/i);
   });
 
@@ -283,7 +288,7 @@ describe("GET /v1/chat/completions/:jobId — status=done", () => {
     jobs.setRunning(jobId);
     jobs.complete(jobId, sampleResponsePayload());
 
-    const res = await request(app).get(`/v1/chat/completions/${jobId}`);
+    const res = await request(app).get(`/v1/responses/${jobId}`);
     expect(res.body.escrow_ref).toBe(ESCROW_REF_STR);
   });
 
@@ -293,7 +298,7 @@ describe("GET /v1/chat/completions/:jobId — status=done", () => {
     jobs.setRunning(jobId);
     jobs.complete(jobId, sampleResponsePayload());
 
-    const res = await request(app).get(`/v1/chat/completions/${jobId}`);
+    const res = await request(app).get(`/v1/responses/${jobId}`);
     expect(res.headers["content-type"]).toMatch(/application\/json/i);
   });
 });
@@ -315,7 +320,7 @@ describe("GET /v1/chat/completions/:jobId — status=failed", () => {
     jobs.setRunning(jobId);
     jobs.fail(jobId, { httpStatus: 502, reason: "ollama_failure", message: "Ollama is down" });
 
-    const res = await request(app).get(`/v1/chat/completions/${jobId}`);
+    const res = await request(app).get(`/v1/responses/${jobId}`);
     expect(res.status).toBe(502);
   });
 
@@ -325,7 +330,7 @@ describe("GET /v1/chat/completions/:jobId — status=failed", () => {
     jobs.setRunning(jobId);
     jobs.fail(jobId, { httpStatus: 502, reason: "submit_failed", message: "tx rejected" });
 
-    const res = await request(app).get(`/v1/chat/completions/${jobId}`);
+    const res = await request(app).get(`/v1/responses/${jobId}`);
     expect(res.body.status).toBe("failed");
     expect(res.body.reason).toBe("submit_failed");
     expect(res.body.message).toBe("tx rejected");
@@ -338,7 +343,7 @@ describe("GET /v1/chat/completions/:jobId — status=failed", () => {
     jobs.setRunning(jobId);
     jobs.fail(jobId, { httpStatus: 503, reason: "chain_submit_failed", message: "chain down" });
 
-    const res = await request(app).get(`/v1/chat/completions/${jobId}`);
+    const res = await request(app).get(`/v1/responses/${jobId}`);
     expect(res.status).toBe(503);
   });
 });

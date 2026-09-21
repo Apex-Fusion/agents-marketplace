@@ -35,6 +35,7 @@ import type { Application } from "express";
 import { MockChainProvider } from "../../packages/shared/src/chain/MockChainProvider.js";
 import { encodeAdvertDatum } from "../../packages/shared/src/cbor/AdvertDatum.js";
 import type { AdvertDatum } from "../../packages/shared/src/cbor/types.js";
+import type { SupplierConfig } from "../../supplier/src/config.js";
 import { SupplierState } from "../../supplier/src/state.js";
 import { JobStore } from "../../supplier/src/jobs.js";
 import { createApp } from "../../supplier/src/server.js";
@@ -53,7 +54,7 @@ import {
   CAPABILITY_ID,
   TEST_MODEL,
   TEST_MAX_OUTPUT_TOKENS,
-  TEST_MESSAGES,
+  TEST_RESPONSE_INPUT,
 } from "../fixtures/supplier-side/sample-escrow-state.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -72,8 +73,8 @@ const WRONG_PROMPT_HASH_ESCROW_REF_HEADER = `${ESCROW_TX_HASH}#7`;
 function validChatBody() {
   return {
     model: TEST_MODEL,
-    messages: TEST_MESSAGES,
-    max_tokens: TEST_MAX_OUTPUT_TOKENS,
+    input: TEST_RESPONSE_INPUT,
+    max_output_tokens: TEST_MAX_OUTPUT_TOKENS,
   };
 }
 
@@ -117,6 +118,7 @@ function mockOllamaOk(content = "I am a helpful assistant.") {
     json: async () => ({
       message: { role: "assistant", content },
       done: true,
+      done_reason: "stop",
       prompt_eval_count: 12,
       eval_count: 48,
       total_duration: 3_200_000_000,
@@ -134,11 +136,15 @@ function mockOllamaFailure() {
 
 // ─── App factory ─────────────────────────────────────────────────────────────
 
-function makeApp(chain: MockChainProvider, state?: SupplierState): Application {
+function makeApp(
+  chain: MockChainProvider,
+  state?: SupplierState,
+  configOverrides: Partial<SupplierConfig> = {},
+): Application {
   return createApp({
     chain,
     state: state ?? new SupplierState(),
-    config: buildSampleConfig(),
+    config: { ...buildSampleConfig(), ...configOverrides },
     supplierKey: buildSupplierWalletKey(),
   });
 }
@@ -193,7 +199,7 @@ describe("POST /v1/chat/completions — header validation", () => {
 
   it("400 when X-Escrow-Ref header is missing", async () => {
     const res = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .send(validChatBody());
     expect(res.status).toBe(400);
     expect(res.body.reason ?? res.body.error).toMatch(/escrow_ref_required/i);
@@ -201,7 +207,7 @@ describe("POST /v1/chat/completions — header validation", () => {
 
   it("400 when X-Escrow-Ref is malformed (not <hex>#<int>)", async () => {
     const res = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", "not-valid-ref")
       .send(validChatBody());
     expect(res.status).toBe(400);
@@ -209,7 +215,7 @@ describe("POST /v1/chat/completions — header validation", () => {
 
   it("400 when X-Escrow-Ref txHash part is too short", async () => {
     const res = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", "abc#0")
       .send(validChatBody());
     expect(res.status).toBe(400);
@@ -231,25 +237,25 @@ describe("POST /v1/chat/completions — body validation", () => {
 
   it("400 when stream: true is requested", async () => {
     const res = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
       .send({ ...validChatBody(), stream: true });
     expect(res.status).toBe(400);
     expect(res.body.reason ?? res.body.error).toMatch(/streaming_not_supported/i);
   });
 
-  it("400 when tools array is present", async () => {
+  it("rejects legacy Chat Completions tool definitions", async () => {
     const res = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
       .send({ ...validChatBody(), tools: [{ type: "function", function: { name: "f" } }] });
     expect(res.status).toBe(400);
-    expect(res.body.reason ?? res.body.error).toMatch(/tools_not_supported/i);
+    expect(res.body.reason).toBe("invalid_request");
   });
 
   it("400 when tool_choice is present", async () => {
     const res = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
       .send({ ...validChatBody(), tool_choice: "auto" });
     expect(res.status).toBe(400);
@@ -257,35 +263,97 @@ describe("POST /v1/chat/completions — body validation", () => {
 
   it("400 when functions array is present", async () => {
     const res = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
       .send({ ...validChatBody(), functions: [{ name: "f", parameters: {} }] });
     expect(res.status).toBe(400);
   });
 
+  it("rejects reasoning options for Ollama before Claim", async () => {
+    const submitSpy = vi.spyOn(chain, "submitTx");
+    const res = await request(app)
+      .post("/v1/responses")
+      .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
+      .send({ ...validChatBody(), reasoning: { effort: "high" } });
+    expect(res.status).toBe(400);
+    expect(res.body.reason).toBe("upstream_api_incompatible");
+    expect(submitSpy).not.toHaveBeenCalled();
+  });
+
+  it("rejects Ollama function call history before Claim", async () => {
+    const state = new SupplierState();
+    const ollamaApp = makeApp(chain, state);
+    const submitSpy = vi.spyOn(chain, "submitTx");
+    const res = await request(ollamaApp)
+      .post("/v1/responses")
+      .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
+      .send({
+        ...validChatBody(),
+        input: [
+          {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: "Use the tool" }],
+          },
+          {
+            type: "function_call",
+            call_id: "call_1",
+            name: "lookup",
+            arguments: "{}",
+          },
+          {
+            type: "function_call_output",
+            call_id: "call_1",
+            output: "done",
+          },
+        ],
+      });
+    expect(res.status).toBe(400);
+    expect(res.body.reason).toBe("upstream_api_incompatible");
+    expect(submitSpy).not.toHaveBeenCalled();
+    expect(state.snapshot().status).toBe("free");
+  });
+
+  it("rejects policy-conflicting native reasoning before Claim", async () => {
+    const nativeState = new SupplierState();
+    const nativeApp = makeApp(chain, nativeState, {
+      llmBackend: "openai",
+      openaiUpstreamApi: "responses",
+      openaiReasoningDisabled: true,
+    });
+    const submitSpy = vi.spyOn(chain, "submitTx");
+    const res = await request(nativeApp)
+      .post("/v1/responses")
+      .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
+      .send({ ...validChatBody(), reasoning: { effort: "high" } });
+    expect(res.status).toBe(400);
+    expect(res.body.reason).toBe("reasoning_disabled");
+    expect(submitSpy).not.toHaveBeenCalled();
+    expect(nativeState.snapshot().status).toBe("free");
+  });
+
   it("400 when messages is empty array", async () => {
     const res = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
-      .send({ ...validChatBody(), messages: [] });
+      .send({ ...validChatBody(), input: [] });
     expect(res.status).toBe(400);
   });
 
   it("400 when messages is absent", async () => {
     const res = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
-      .send({ model: TEST_MODEL, max_tokens: TEST_MAX_OUTPUT_TOKENS });
+      .send({ model: TEST_MODEL, max_output_tokens: TEST_MAX_OUTPUT_TOKENS });
     expect(res.status).toBe(400);
   });
 
-  it("400 when max_tokens exceeds advertised max_output_tokens", async () => {
+  it("caps max_output_tokens at the advertised limit", async () => {
     const res = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
-      .send({ ...validChatBody(), max_tokens: TEST_MAX_OUTPUT_TOKENS + 1 });
-    expect(res.status).toBe(400);
-    expect(res.body.reason ?? res.body.error).toMatch(/output_cap_exceeded/i);
+      .send({ ...validChatBody(), max_output_tokens: TEST_MAX_OUTPUT_TOKENS + 1 });
+    expect(res.status).not.toBe(400);
   });
 });
 
@@ -307,7 +375,7 @@ describe("POST /v1/chat/completions — on-chain validation", () => {
     // Don't seed any escrow UTxO
     const app = makeApp(chain);
     const res = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
       .send(validChatBody());
     expect(res.status).toBe(404);
@@ -318,7 +386,7 @@ describe("POST /v1/chat/completions — on-chain validation", () => {
     chain.seed(buildClaimedEscrowUtxo());
     const app = makeApp(chain);
     const res = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", CLAIMED_ESCROW_REF_HEADER)
       .send(validChatBody());
     expect(res.status).toBe(409);
@@ -329,7 +397,7 @@ describe("POST /v1/chat/completions — on-chain validation", () => {
     chain.seed(buildClaimedEscrowUtxo());
     const app = makeApp(chain);
     const res = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", CLAIMED_ESCROW_REF_HEADER)
       .send(validChatBody());
     expect(JSON.stringify(res.body).toLowerCase()).toMatch(/claimed/i);
@@ -339,7 +407,7 @@ describe("POST /v1/chat/completions — on-chain validation", () => {
     chain.seed(buildSubmittedEscrowUtxo());
     const app = makeApp(chain);
     const res = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", SUBMITTED_ESCROW_REF_HEADER)
       .send(validChatBody());
     expect(res.status).toBe(409);
@@ -350,7 +418,7 @@ describe("POST /v1/chat/completions — on-chain validation", () => {
     chain.seed(buildWrongSupplierEscrowUtxo());
     const app = makeApp(chain);
     const res = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", WRONG_SUPPLIER_ESCROW_REF_HEADER)
       .send(validChatBody());
     expect(res.status).toBe(403);
@@ -361,7 +429,7 @@ describe("POST /v1/chat/completions — on-chain validation", () => {
     chain.seed(buildWrongCapabilityEscrowUtxo());
     const app = makeApp(chain);
     const res = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", WRONG_CAPABILITY_ESCROW_REF_HEADER)
       .send(validChatBody());
     expect(res.status).toBe(409);
@@ -372,7 +440,7 @@ describe("POST /v1/chat/completions — on-chain validation", () => {
     chain.seed(buildWrongRequestSpecHashEscrowUtxo());
     const app = makeApp(chain);
     const res = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", WRONG_REQUEST_SPEC_ESCROW_REF_HEADER)
       .send(validChatBody());
     expect(res.status).toBe(409);
@@ -383,7 +451,7 @@ describe("POST /v1/chat/completions — on-chain validation", () => {
     chain.seed(buildWrongPromptHashEscrowUtxo());
     const app = makeApp(chain);
     const res = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", WRONG_PROMPT_HASH_ESCROW_REF_HEADER)
       .send(validChatBody());
     expect(res.status).toBe(409);
@@ -394,7 +462,7 @@ describe("POST /v1/chat/completions — on-chain validation", () => {
     chain.seed(buildPastDeliverByEscrowUtxo());
     const app = makeApp(chain);
     const res = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", PAST_DELIVER_BY_ESCROW_REF_HEADER)
       .send(validChatBody());
     expect(res.status).toBe(408);
@@ -418,7 +486,7 @@ describe("POST /v1/chat/completions — single-slot lock", () => {
     const app = makeApp(chain, state);
 
     const res = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
       .send(validChatBody());
     expect(res.status).toBe(409);
@@ -454,7 +522,7 @@ describe("POST /v1/chat/completions — happy path", () => {
   // supplier-routes-chat-jobs-get.test.ts (GET handler).
   it("returns 202 Accepted on successful end-to-end flow", async () => {
     const res = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
       .send(validChatBody());
     expect(res.status).toBe(202);
@@ -462,74 +530,70 @@ describe("POST /v1/chat/completions — happy path", () => {
 
   // SPEC FIX 2026-04-28 M1-F-async-chat-cleanup
   // Migrated from sync (full body in POST) to async (POST→202, GET→200).
-  it("response body contains choices array", async () => {
+  it("response body contains typed output items", async () => {
     const postRes = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
       .send(validChatBody());
     expect(postRes.status).toBe(202);
     const { job_id: jobId } = postRes.body as { job_id: string };
     await drainRunner(state);
-    const getRes = await request(app).get(`/v1/chat/completions/${jobId}`);
+    const getRes = await request(app).get(`/v1/responses/${jobId}`);
     expect(getRes.status).toBe(200);
-    expect(Array.isArray(getRes.body.choices)).toBe(true);
-    expect(getRes.body.choices.length).toBeGreaterThan(0);
+    expect(getRes.body.output).toHaveLength(1);
   });
-
   // SPEC FIX 2026-04-28 M1-F-async-chat-cleanup
-  it("choices[0].message.role is 'assistant'", async () => {
+  it("output message role is assistant", async () => {
     const postRes = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
       .send(validChatBody());
     expect(postRes.status).toBe(202);
     const { job_id: jobId } = postRes.body as { job_id: string };
     await drainRunner(state);
-    const getRes = await request(app).get(`/v1/chat/completions/${jobId}`);
+    const getRes = await request(app).get(`/v1/responses/${jobId}`);
     expect(getRes.status).toBe(200);
-    expect(getRes.body.choices[0].message.role).toBe("assistant");
+    expect(getRes.body.output[0].role).toBe("assistant");
   });
-
   // SPEC FIX 2026-04-28 M1-F-async-chat-cleanup
-  it("choices[0].message.content matches Ollama output", async () => {
+  it("output text matches Ollama output", async () => {
     const postRes = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
       .send(validChatBody());
     expect(postRes.status).toBe(202);
     const { job_id: jobId } = postRes.body as { job_id: string };
     await drainRunner(state);
-    const getRes = await request(app).get(`/v1/chat/completions/${jobId}`);
+    const getRes = await request(app).get(`/v1/responses/${jobId}`);
     expect(getRes.status).toBe(200);
-    expect(getRes.body.choices[0].message.content).toBe("I am a helpful AI assistant.");
+    expect(getRes.body.output[0].content[0].text).toBe("I am a helpful AI assistant.");
   });
-
   // SPEC FIX 2026-04-28 M1-F-async-chat-cleanup
   it("response body contains usage object", async () => {
     const postRes = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
       .send(validChatBody());
     expect(postRes.status).toBe(202);
     const { job_id: jobId } = postRes.body as { job_id: string };
     await drainRunner(state);
-    const getRes = await request(app).get(`/v1/chat/completions/${jobId}`);
+    const getRes = await request(app).get(`/v1/responses/${jobId}`);
     expect(getRes.status).toBe(200);
     expect(getRes.body.usage).toBeTruthy();
-    expect(typeof getRes.body.usage.prompt_tokens).toBe("number");
-    expect(typeof getRes.body.usage.completion_tokens).toBe("number");
+    expect(typeof getRes.body.usage.input_tokens).toBe("number");
+    expect(typeof getRes.body.usage.output_tokens).toBe("number");
   });
 
   // SPEC FIX 2026-04-28 M1-F-async-chat-cleanup
   it("response body contains receipt object", async () => {
     const postRes = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
       .send(validChatBody());
     expect(postRes.status).toBe(202);
     const { job_id: jobId } = postRes.body as { job_id: string };
     await drainRunner(state);
-    const getRes = await request(app).get(`/v1/chat/completions/${jobId}`);
+    const getRes = await request(app).get(`/v1/responses/${jobId}`);
     expect(getRes.status).toBe(200);
     expect(getRes.body.receipt).toBeTruthy();
   });
@@ -537,13 +601,13 @@ describe("POST /v1/chat/completions — happy path", () => {
   // SPEC FIX 2026-04-28 M1-F-async-chat-cleanup
   it("receipt has required fields", async () => {
     const postRes = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
       .send(validChatBody());
     expect(postRes.status).toBe(202);
     const { job_id: jobId } = postRes.body as { job_id: string };
     await drainRunner(state);
-    const getRes = await request(app).get(`/v1/chat/completions/${jobId}`);
+    const getRes = await request(app).get(`/v1/responses/${jobId}`);
     expect(getRes.status).toBe(200);
     const { receipt } = getRes.body;
     expect(receipt.prompt_hash).toMatch(/^[0-9a-f]{64}$/);
@@ -559,13 +623,13 @@ describe("POST /v1/chat/completions — happy path", () => {
   // SPEC FIX 2026-04-28 M1-F-async-chat-cleanup
   it("receipt.response_hash is sha256 of canonical(assistant message object)", async () => {
     const postRes = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
       .send(validChatBody());
     expect(postRes.status).toBe(202);
     const { job_id: jobId } = postRes.body as { job_id: string };
     await drainRunner(state);
-    const getRes = await request(app).get(`/v1/chat/completions/${jobId}`);
+    const getRes = await request(app).get(`/v1/responses/${jobId}`);
     expect(getRes.status).toBe(200);
     // response_hash must be a 32-byte hex string (64 chars)
     expect(getRes.body.receipt.response_hash).toMatch(/^[0-9a-f]{64}$/);
@@ -574,13 +638,13 @@ describe("POST /v1/chat/completions — happy path", () => {
   // SPEC FIX 2026-04-28 M1-F-async-chat-cleanup
   it("response body contains receipt_signature", async () => {
     const postRes = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
       .send(validChatBody());
     expect(postRes.status).toBe(202);
     const { job_id: jobId } = postRes.body as { job_id: string };
     await drainRunner(state);
-    const getRes = await request(app).get(`/v1/chat/completions/${jobId}`);
+    const getRes = await request(app).get(`/v1/responses/${jobId}`);
     expect(getRes.status).toBe(200);
     expect(getRes.body.receipt_signature ?? getRes.body.signature).toMatch(/^[0-9a-fA-F]{128}$/);
   });
@@ -589,7 +653,7 @@ describe("POST /v1/chat/completions — happy path", () => {
   // Lock is released in runChatJob's finally block; drain before asserting.
   it("supplier lock is released after successful flow", async () => {
     const postRes = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
       .send(validChatBody());
     expect(postRes.status).toBe(202);
@@ -621,7 +685,7 @@ describe("POST /v1/chat/completions — error recovery", () => {
     const app = makeApp(chain);
 
     const res = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
       .send(validChatBody());
     expect(res.status).toBe(503);
@@ -643,7 +707,7 @@ describe("POST /v1/chat/completions — error recovery", () => {
     const app = makeApp(chain, state);
 
     await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
       .send(validChatBody());
 
@@ -666,13 +730,13 @@ describe("POST /v1/chat/completions — error recovery", () => {
     const { app, jobs } = makeAppWithJobs(chain, state);
 
     const postRes = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
       .send(validChatBody());
     expect(postRes.status).toBe(202);
     const { job_id: jobId } = postRes.body as { job_id: string };
     await drainRunner(state);
-    const getRes = await request(app).get(`/v1/chat/completions/${jobId}`);
+    const getRes = await request(app).get(`/v1/responses/${jobId}`);
     expect(getRes.status).toBe(502);
     expect(getRes.body.reason ?? getRes.body.error).toMatch(/ollama_failure/i);
     void jobs;
@@ -692,7 +756,7 @@ describe("POST /v1/chat/completions — error recovery", () => {
     const { app } = makeAppWithJobs(chain, state);
 
     await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
       .send(validChatBody());
 
@@ -722,13 +786,13 @@ describe("POST /v1/chat/completions — error recovery", () => {
     const { app } = makeAppWithJobs(chain, state);
 
     const postRes = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
       .send(validChatBody());
     expect(postRes.status).toBe(202);
     const { job_id: jobId } = postRes.body as { job_id: string };
     await drainRunner(state);
-    const getRes = await request(app).get(`/v1/chat/completions/${jobId}`);
+    const getRes = await request(app).get(`/v1/responses/${jobId}`);
     expect(getRes.status).toBe(502);
     expect(getRes.body.reason ?? getRes.body.error).toMatch(/submit_failed/i);
     // Per spec: keep it simple — no receipt returned, buyer reclaims
@@ -753,7 +817,7 @@ describe("POST /v1/chat/completions — error recovery", () => {
     const { app } = makeAppWithJobs(chain, state);
 
     await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
       .send(validChatBody());
 
@@ -793,6 +857,7 @@ describe("POST /v1/chat/completions — operation ordering (Claim before Ollama)
         json: async () => ({
           message: { role: "assistant", content: "Hi" },
           done: true,
+          done_reason: "stop",
           prompt_eval_count: 5,
           eval_count: 10,
           total_duration: 1_000_000_000,
@@ -807,7 +872,7 @@ describe("POST /v1/chat/completions — operation ordering (Claim before Ollama)
     const { app } = makeAppWithJobs(chain, state);
 
     const postRes = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
       .send(validChatBody());
     // Claim-submitTx MUST have been called before POST returned 202.

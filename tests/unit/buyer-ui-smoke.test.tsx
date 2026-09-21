@@ -1,13 +1,11 @@
 // @vitest-environment happy-dom
 /**
- * buyer-ui-smoke.test.tsx — RED phase (M1-E)
+ * buyer-ui-smoke.test.tsx — buyer SPA behavior checks.
  *
- * Category G: UI smoke tests with React Testing Library + happy-dom (~15 tests)
+ * Covers supplier discovery, the server-side one-shot Responses lifecycle,
+ * canonical chat streams, lifecycle history, wallet display, and form states.
  *
- * All tests FAIL until M1-E-green because the UI components currently
- * render "NOT IMPLEMENTED" stubs and the Marketplace methods throw.
- *
- * Design contract encoded for Catherine:
+ * Core UI contract:
  * - <App /> must render a <nav> with links to /, /tasks, /wallet
  * - <Dashboard /> must call marketplace.discoverSuppliers() on mount
  * - <PromptForm /> must call marketplace.submitPrompt() with correct args on submit
@@ -27,8 +25,10 @@ import App from "../../buyer/src/ui/App.js";
 import Dashboard from "../../buyer/src/ui/pages/Dashboard.js";
 import TaskHistory from "../../buyer/src/ui/pages/TaskHistory.js";
 import Wallet from "../../buyer/src/ui/pages/Wallet.js";
+import ApiKeys from "../../buyer/src/ui/pages/ApiKeys.js";
 import SupplierCard from "../../buyer/src/ui/components/SupplierCard.js";
 import PromptForm from "../../buyer/src/ui/components/PromptForm.js";
+import ChatForm from "../../buyer/src/ui/components/ChatForm.js";
 import { MarketplaceProvider } from "../../buyer/src/ui/state/MarketplaceContext.js";
 import { AuthProvider } from "../../buyer/src/ui/state/AuthContext.js";
 import type { SupplierView } from "../../buyer/src/sdk/types.js";
@@ -159,7 +159,19 @@ describe("<PromptForm /> smoke", () => {
       const body = init?.body ? JSON.parse(init.body as string) : {};
       (stubFetchOk as unknown as { lastBody?: unknown }).lastBody = body;
       return new Response(JSON.stringify({
-        choices: [{ index: 0, message: { role: "assistant", content: "4" }, finish_reason: "stop" }],
+        id: "resp_ui",
+        object: "response",
+        created_at: 1_745_500_000,
+        model: "test-model",
+        status: "completed",
+        output: [{
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "4" }],
+        }],
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        error: null,
+        incomplete_details: null,
         receipt: receiptObj,
         receipt_signature: signature,
         escrow_ref: `${"a".repeat(64)}#0`,
@@ -167,7 +179,7 @@ describe("<PromptForm /> smoke", () => {
     });
   }
 
-  it("POSTs /v1/submit-prompt with correct messages when form is submitted", async () => {
+  it("POSTs /v1/submit-prompt with canonical input when submitted", async () => {
     const user = userEvent.setup();
     const mp = makeMockMarketplace();
     const fetchSpy = stubFetchOk(TASK_COMPLETED.receipt!, TASK_COMPLETED.receipt_signature!);
@@ -182,8 +194,10 @@ describe("<PromptForm /> smoke", () => {
     const submitBtn = screen.getByRole("button", { name: /submit/i });
     await user.click(submitBtn);
     await waitFor(() => expect(fetchSpy).toHaveBeenCalled());
-    const lastBody = (stubFetchOk as unknown as { lastBody?: { messages: Array<{ content: string }> } }).lastBody;
-    expect(lastBody?.messages.some((m) => m.content.includes("What is 2+2?"))).toBe(true);
+    const lastBody = (stubFetchOk as unknown as {
+      lastBody?: { input: Array<{ content: Array<{ text: string }> }> };
+    }).lastBody;
+    expect(lastBody?.input[0].content[0].text).toBe("What is 2+2?");
     vi.unstubAllGlobals();
   });
 
@@ -245,6 +259,213 @@ describe("<PromptForm /> smoke", () => {
     await waitFor(() => {
       const errEl = screen.queryByRole("alert") ?? screen.queryByText(/error|failed|offline/i);
       expect(errEl).not.toBeNull();
+    });
+    vi.unstubAllGlobals();
+  });
+});
+
+describe("<ApiKeys /> Responses example", () => {
+  it("shows a native Responses request after key creation", async () => {
+    const user = userEvent.setup();
+    Reflect.set(window, "__BUYER_BOOT__", {
+      gatewayUrl: "https://api.marketplace.example",
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      api_key: "vmp_live_secret",
+      key_prefix: "vmp_live",
+      deposit_address: "addr1deposit",
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    })));
+
+    render(<ApiKeys />);
+    await user.click(screen.getByTestId("generate-api-key"));
+    await screen.findByTestId("api-key-result");
+
+    const snippet = document.querySelector("pre")?.textContent ?? "";
+    expect(snippet).toContain("https://api.marketplace.example/openai/v1/responses");
+    expect(snippet).toContain("\"input\"");
+    expect(snippet).not.toContain("chat/completions");
+
+    Reflect.deleteProperty(window, "__BUYER_BOOT__");
+    vi.unstubAllGlobals();
+  });
+});
+
+describe("<ChatForm /> Responses streams", () => {
+  it("renders a refusal from the exact terminal output Items", async () => {
+    const user = userEvent.setup();
+    const terminal = {
+      id: "resp_refusal",
+      object: "response",
+      created_at: 1_745_500_000,
+      model: "kimi",
+      status: "completed",
+      output: [{
+        type: "message",
+        role: "assistant",
+        content: [{ type: "refusal", refusal: "I cannot help with that." }],
+      }],
+      usage: { input_tokens: 2, output_tokens: 5, total_tokens: 7 },
+      error: null,
+      incomplete_details: null,
+    };
+    const event = {
+      type: "response.completed",
+      sequence_number: 1,
+      response: terminal,
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      `event: response.completed\ndata: ${JSON.stringify(event)}\n\n`,
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    )));
+
+    render(<ChatForm />);
+    await user.type(screen.getByTestId("chat-input"), "unsafe request");
+    await user.click(screen.getByTestId("chat-send"));
+
+    await waitFor(() => {
+      expect(screen.getByText("I cannot help with that.")).toBeTruthy();
+    });
+    vi.unstubAllGlobals();
+  });
+
+  it("replays every terminal output Item on the next demo turn", async () => {
+    const user = userEvent.setup();
+    const firstOutput = [
+      {
+        type: "reasoning",
+        id: "reasoning_1",
+        encrypted_content: "opaque-bytes",
+        summary: [{ type: "summary_text", text: "checking" }],
+      },
+      {
+        type: "function_call",
+        id: "call_item_1",
+        call_id: "call_1",
+        name: "lookup",
+        arguments: "{\"id\":1}",
+        status: "completed",
+      },
+      {
+        type: "message",
+        id: "msg_1",
+        role: "assistant",
+        content: [{ type: "output_text", text: "Use the tool." }],
+      },
+    ];
+    const postedBodies: Array<{ input?: unknown[] }> = [];
+    let call = 0;
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      postedBodies.push(JSON.parse(String(init?.body)) as { input?: unknown[] });
+      call += 1;
+      const response = {
+        id: `resp_${call}`,
+        object: "response",
+        created_at: 1_745_500_000,
+        model: "kimi",
+        status: "completed",
+        output: call === 1
+          ? firstOutput
+          : [{
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "Done." }],
+            }],
+        usage: { input_tokens: 2, output_tokens: 5, total_tokens: 7 },
+        error: null,
+        incomplete_details: null,
+      };
+      const event = {
+        type: "response.completed",
+        sequence_number: 1,
+        response,
+      };
+      return new Response(
+        `event: response.completed\ndata: ${JSON.stringify(event)}\n\n`,
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      );
+    }));
+
+    render(<ChatForm />);
+    await user.type(screen.getByTestId("chat-input"), "first");
+    await user.click(screen.getByTestId("chat-send"));
+    await screen.findByText("Use the tool.");
+    await user.type(screen.getByTestId("chat-input"), "continue");
+    await user.click(screen.getByTestId("chat-send"));
+    await screen.findByText("Done.");
+
+    expect(postedBodies[1]?.input).toEqual([
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "first" }],
+      },
+      ...firstOutput,
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "continue" }],
+      },
+    ]);
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps incomplete output but reports the terminal truncation reason", async () => {
+    const user = userEvent.setup();
+    const response = {
+      id: "resp_incomplete",
+      object: "response",
+      created_at: 1_745_500_000,
+      model: "kimi",
+      status: "incomplete",
+      output: [{
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "Partial answer" }],
+      }],
+      usage: { input_tokens: 2, output_tokens: 5, total_tokens: 7 },
+      error: null,
+      incomplete_details: { reason: "max_output_tokens" },
+    };
+    const event = {
+      type: "response.incomplete",
+      sequence_number: 1,
+      response,
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      `event: response.incomplete\ndata: ${JSON.stringify(event)}\n\n`,
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    )));
+
+    render(<ChatForm />);
+    await user.type(screen.getByTestId("chat-input"), "hello");
+    await user.click(screen.getByTestId("chat-send"));
+
+    await screen.findByText("Partial answer");
+    expect(screen.getByTestId("chat-error").textContent).toMatch(/max_output_tokens/);
+    vi.unstubAllGlobals();
+  });
+
+  it("shows an error when the stream ends without a terminal event", async () => {
+    const user = userEvent.setup();
+    const delta = {
+      type: "response.output_text.delta",
+      sequence_number: 1,
+      delta: "partial",
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      `event: response.output_text.delta\ndata: ${JSON.stringify(delta)}\n\n`,
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    )));
+
+    render(<ChatForm />);
+    await user.type(screen.getByTestId("chat-input"), "hello");
+    await user.click(screen.getByTestId("chat-send"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("chat-error").textContent).toMatch(/without a terminal/i);
     });
     vi.unstubAllGlobals();
   });

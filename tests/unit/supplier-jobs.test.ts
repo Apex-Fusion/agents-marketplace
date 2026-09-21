@@ -11,7 +11,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { JobStore, JOB_TTL_MS } from "../../supplier/src/jobs.js";
-import type { JobResponsePayload } from "../../supplier/src/jobs.js";
+import type { ChatJobResponsePayload, JobResponsePayload } from "../../supplier/src/jobs.js";
 
 // ─── Fixture helpers ──────────────────────────────────────────────────────────
 
@@ -20,20 +20,26 @@ const OTHER_ESCROW_REF  = `${"e".repeat(64)}#1`;
 
 const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-function samplePayload(): JobResponsePayload {
+function samplePayload(): ChatJobResponsePayload {
   return {
-    choices: [
-      {
-        index: 0,
-        message: { role: "assistant", content: "Hello there!" },
-        finish_reason: "stop",
-      },
-    ],
+    id: "resp_test",
+    object: "response",
+    created_at: 1_745_500_000,
+    model: "qwen2.5:0.5b",
+    status: "completed",
+    output: [{
+      type: "message",
+      role: "assistant",
+      status: "completed",
+      content: [{ type: "output_text", text: "Hello there!", annotations: [] }],
+    }],
     usage: {
-      prompt_tokens: 10,
-      completion_tokens: 20,
+      input_tokens: 10,
+      output_tokens: 20,
       total_tokens: 30,
     },
+    error: null,
+    incomplete_details: null,
     receipt: {
       prompt_hash: "a".repeat(64),
       response_hash: "b".repeat(64),
@@ -45,6 +51,7 @@ function samplePayload(): JobResponsePayload {
       escrow_ref: SAMPLE_ESCROW_REF,
     },
     receipt_signature: "d".repeat(128),
+    submitted_ref: `${"9".repeat(64)}#0`,
   };
 }
 
@@ -153,15 +160,17 @@ describe("JobStore — complete", () => {
     // Second complete with different payload — must not overwrite
     const payload2: JobResponsePayload = {
       ...payload1,
-      choices: [
-        { index: 0, message: { role: "assistant", content: "second" }, finish_reason: "stop" },
-      ],
+      output: [{
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "second", annotations: [] }],
+      }],
     };
     store.complete(jobId, payload2);
     const record = store.get(jobId);
-    // Status still done, and first payload is preserved
     expect(record!.status).toBe("done");
-    expect(record!.responsePayload!.choices[0].message.content).toBe("Hello there!");
+    const first = record!.responsePayload!;
+    expect("output" in first && first.output[0]).toEqual(payload1.output[0]);
   });
 
   it("complete on unknown jobId does not throw", () => {

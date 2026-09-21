@@ -43,7 +43,7 @@ import {
   CAPABILITY_ID,
   TEST_MODEL,
   TEST_MAX_OUTPUT_TOKENS,
-  TEST_MESSAGES,
+  TEST_RESPONSE_INPUT,
   REQUEST_SPEC_HASH,
   PROMPT_HASH,
   PAYMENT_LOVELACE,
@@ -296,8 +296,8 @@ function makeAppWithLiveChain(escrowDatumHex: string): {
 function validChatBody() {
   return {
     model: TEST_MODEL,
-    messages: TEST_MESSAGES,
-    max_tokens: TEST_MAX_OUTPUT_TOKENS,
+    input: TEST_RESPONSE_INPUT,
+    max_output_tokens: TEST_MAX_OUTPUT_TOKENS,
   };
 }
 
@@ -333,6 +333,7 @@ describe("supplier chat route [live backend] — deliver_by > Date.now() → not
           json: async () => ({
             message: { role: "assistant", content: "Hello from live chain test." },
             done: true,
+            done_reason: "stop",
             prompt_eval_count: 10,
             eval_count: 20,
             total_duration: 1_000_000_000,
@@ -343,7 +344,7 @@ describe("supplier chat route [live backend] — deliver_by > Date.now() → not
     }));
 
     const res = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
       .send(validChatBody());
 
@@ -365,7 +366,7 @@ describe("supplier chat route [live backend] — deliver_by < Date.now() → 408
     const { app } = makeAppWithLiveChain(escrowDatumHex);
 
     const res = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
       .send(validChatBody());
 
@@ -383,7 +384,7 @@ describe("supplier chat route [live backend] — deliver_by < Date.now() → 408
     const { app } = makeAppWithLiveChain(escrowDatumHex);
 
     const res = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
       .send(validChatBody());
 
@@ -442,6 +443,7 @@ describe("supplier chat route [mock backend] — mockSlotToWallclockMs conventio
       json: async () => ({
         message: { role: "assistant", content: "Mock response." },
         done: true,
+        done_reason: "stop",
         prompt_eval_count: 5,
         eval_count: 10,
         total_duration: 500_000_000,
@@ -456,7 +458,7 @@ describe("supplier chat route [mock backend] — mockSlotToWallclockMs conventio
     });
 
     const res = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
       .send(validChatBody());
 
@@ -504,7 +506,7 @@ describe("supplier chat route [mock backend] — mockSlotToWallclockMs conventio
     });
 
     const res = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
       .send(validChatBody());
 
@@ -554,7 +556,7 @@ describe("supplier chat route [mock backend] — mockSlotToWallclockMs conventio
     });
 
     const res = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
       .send(validChatBody());
 

@@ -33,6 +33,11 @@ import {
   buildAcceptTx,
   TxConstructionError,
 } from "@marketplace/shared/tx";
+import { canonicalize } from "@marketplace/shared/cbor";
+import {
+  responseRequestCommitment,
+  type ResponseRequest,
+} from "@marketplace/shared/responses";
 import { Marketplace, MemoryTaskHistoryStore } from "../src/sdk/index.js";
 import { runAccept } from "../src/cli/acceptFlow.js";
 import { deriveWalletKey } from "../src/index.js";
@@ -70,6 +75,23 @@ const ADVERT_REF_RETIRED: OutputReference = {
 };
 const ADVERT_PRICE_LOVELACE = 5_000_000n;
 const SUPPLIER_URL = "https://supplier.summitstak.ing";
+
+function responseRequest(text: string, maxOutputTokens?: number): ResponseRequest {
+  return {
+    input: [{
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text }],
+    }],
+    ...(maxOutputTokens === undefined ? {} : { max_output_tokens: maxOutputTokens }),
+  };
+}
+
+function promptHash(request: ResponseRequest): string {
+  return createHash("sha256")
+    .update(canonicalize(responseRequestCommitment(request)), "utf8")
+    .digest("hex");
+}
 
 // Hard caps. Raised burn cap on the continuation run (reclaim now works after
 // the reclaim.ts live-mode fix landed mid-session). The original 10 AP3X cap
@@ -201,11 +223,11 @@ async function attack_A4(): Promise<AttackResult> {
   checkCapsBeforePost();
   const startBal = await walletLovelace();
   try {
-    const messages = [{ role: "user" as const, content: "A4 probe: do not respond, will be reclaimed." }];
+    const request = responseRequest("A4 probe: do not respond, will be reclaimed.");
     log("A4: posting escrow for reclaim attempt");
     const submitResult = await marketplace.submitPrompt({
       advertRef: ADVERT_REF_ACTIVE,
-      messages,
+      ...request,
       payment_lovelace: ADVERT_PRICE_LOVELACE,
     }).catch((err) => err);
 
@@ -256,18 +278,21 @@ async function attack_A4(): Promise<AttackResult> {
 
 async function attack_B2(): Promise<AttackResult> {
   const id = "B2";
-  const what = "PostEscrow with prompt_hash sha256(messages_A), send chat body with messages_B (different).";
+  const what = "PostEscrow with a Responses request commitment, then send different input.";
   const expected = "supplier 409 prompt_mismatch (server.ts:278).";
   checkCapsBeforePost();
   const startBal = await walletLovelace();
   try {
-    // Post an honest escrow first (prompt = canonical messages_A)
-    const messagesA = [{ role: "user" as const, content: "B2 probe: commit-this-prompt" }];
-    log("B2: posting escrow with messages_A");
+    const requestA = responseRequest("B2 probe: commit-this-prompt", 100);
+    log("B2: posting escrow with request A");
     let escrowRef: OutputReference;
     try {
-      const escrowResult = await (await import("@marketplace/shared/tx")).buildPostEscrowTx({
-        chain, buyerKey: wk, advertRef: ADVERT_REF_ACTIVE, messages: messagesA, payment_lovelace: ADVERT_PRICE_LOVELACE,
+      const escrowResult = await buildPostEscrowTx({
+        chain,
+        buyerKey: wk,
+        advertRef: ADVERT_REF_ACTIVE,
+        prompt_hash: promptHash(requestA),
+        payment_lovelace: ADVERT_PRICE_LOVELACE,
       });
       escrowRef = escrowResult.escrowOutputRef;
       await chain.awaitTx(escrowResult.expectedTxHash, 120_000);
@@ -278,14 +303,13 @@ async function attack_B2(): Promise<AttackResult> {
     }
     counters.escrowsPosted += 1;
     const escrowRefStr = `${escrowRef.txHash}#${escrowRef.index}`;
-    log(`B2: escrow=${escrowRefStr}; sending chat body with messages_B`);
+    log(`B2: escrow=${escrowRefStr}; sending different request B`);
 
-    // Send chat body with DIFFERENT messages_B
-    const messagesB = [{ role: "user", content: "B2 probe: but-actually-this-prompt" }];
-    const resp = await rateLimitedFetch(`${SUPPLIER_URL}/v1/chat/completions`, {
+    const requestB = responseRequest("B2 probe: but-actually-this-prompt", 100);
+    const resp = await rateLimitedFetch(`${SUPPLIER_URL}/v1/responses`, {
       method: "POST",
       headers: { "content-type": "application/json", "X-Escrow-Ref": escrowRefStr },
-      body: JSON.stringify({ model: "qwen3.6:35b", messages: messagesB, max_tokens: 100 }),
+      body: JSON.stringify({ model: "qwen3.6:35b", ...requestB }),
     });
     const text = await resp.text();
     // Reclaim after the supplier rejects so we get our money back.
@@ -306,13 +330,13 @@ async function attack_B2(): Promise<AttackResult> {
 
 async function attack_B3(): Promise<AttackResult> {
   const id = "B3";
-  const what = "POST /v1/chat/completions with X-Escrow-Ref pointing at a random non-existent ref.";
+  const what = "POST /v1/responses with X-Escrow-Ref pointing at a random non-existent ref.";
   const expected = "404 escrow_not_found or 400 — should not reach inference.";
   const bogus = "0".repeat(63) + "1#0";
-  const resp = await rateLimitedFetch(`${SUPPLIER_URL}/v1/chat/completions`, {
+  const resp = await rateLimitedFetch(`${SUPPLIER_URL}/v1/responses`, {
     method: "POST",
     headers: { "content-type": "application/json", "X-Escrow-Ref": bogus },
-    body: JSON.stringify({ model: "qwen3.6:35b", messages: [{ role: "user", content: "B3 probe" }], max_tokens: 50 }),
+    body: JSON.stringify({ model: "qwen3.6:35b", ...responseRequest("B3 probe", 50) }),
   });
   const text = await resp.text();
   const verdict: Verdict = (resp.status >= 400 && resp.status < 500) ? "BLOCKED" : "GAP";
@@ -324,8 +348,8 @@ async function attack_B5(): Promise<AttackResult> {
   const what = "Call buildPostEscrowTx with payment_lovelace strictly less than advert.price_lovelace.";
   const expected = "TxConstructionError 'payment must equal advertised price' (postEscrow.ts:96) — build-time rejection, no chain spend.";
   try {
-    const messages = [{ role: "user" as const, content: "B5 probe" }];
-    await buildPostEscrowTx({ chain, buyerKey: wk, advertRef: ADVERT_REF_ACTIVE, messages, payment_lovelace: 1_000_000n });
+    const request = responseRequest("B5 probe");
+    await buildPostEscrowTx({ chain, buyerKey: wk, advertRef: ADVERT_REF_ACTIVE, prompt_hash: promptHash(request), payment_lovelace: 1_000_000n });
     return { id, category: "B", what, expected, what_happened: "builder accepted underpayment — GAP", verdict: "GAP", evidence: "buildPostEscrowTx succeeded with payment=1_000_000 vs advert.price=5_000_000" };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -341,10 +365,10 @@ async function attack_C1(): Promise<AttackResult> {
   const what = "Send a request body >100KB.";
   const expected = "413 or 400 before LLM invocation.";
   const big = "A".repeat(120_000);
-  const resp = await rateLimitedFetch(`${SUPPLIER_URL}/v1/chat/completions`, {
+  const resp = await rateLimitedFetch(`${SUPPLIER_URL}/v1/responses`, {
     method: "POST",
     headers: { "content-type": "application/json", "X-Escrow-Ref": "0".repeat(64) + "#0" },
-    body: JSON.stringify({ model: "qwen3.6:35b", messages: [{ role: "user", content: big }], max_tokens: 50 }),
+    body: JSON.stringify({ model: "qwen3.6:35b", ...responseRequest(big, 50) }),
   });
   const text = await resp.text();
   const verdict: Verdict = (resp.status >= 400 && resp.status < 500) ? "BLOCKED" : "GAP";
@@ -358,19 +382,23 @@ async function attack_C2(): Promise<AttackResult> {
   checkCapsBeforePost();
   const startBal = await walletLovelace();
   try {
-    const messages = [{ role: "user" as const, content: "C2 probe — request huge output." }];
-    log("C2: posting honest escrow then sending oversized max_tokens");
+    const request = responseRequest("C2 probe — request huge output.", 999_999);
+    log("C2: posting honest escrow then sending oversized max_output_tokens");
     const escrowResult = await buildPostEscrowTx({
-      chain, buyerKey: wk, advertRef: ADVERT_REF_ACTIVE, messages, payment_lovelace: ADVERT_PRICE_LOVELACE,
+      chain,
+      buyerKey: wk,
+      advertRef: ADVERT_REF_ACTIVE,
+      prompt_hash: promptHash(request),
+      payment_lovelace: ADVERT_PRICE_LOVELACE,
     });
     counters.escrowsPosted += 1;
     await chain.awaitTx(escrowResult.expectedTxHash, 120_000);
     const escrowRefStr = `${escrowResult.escrowOutputRef.txHash}#${escrowResult.escrowOutputRef.index}`;
 
-    const resp = await rateLimitedFetch(`${SUPPLIER_URL}/v1/chat/completions`, {
+    const resp = await rateLimitedFetch(`${SUPPLIER_URL}/v1/responses`, {
       method: "POST",
       headers: { "content-type": "application/json", "X-Escrow-Ref": escrowRefStr },
-      body: JSON.stringify({ model: "qwen3.6:35b", messages, max_tokens: 999_999 }),
+      body: JSON.stringify({ model: "qwen3.6:35b", ...request }),
     });
     const text = await resp.text();
     const verdict: Verdict = resp.status === 400 && text.includes("output_cap_exceeded") ? "BLOCKED" : (resp.status === 200 ? "GAP" : "UNCLEAR");
@@ -404,10 +432,10 @@ async function attack_C4(): Promise<AttackResult> {
       if (wait > 0) await new Promise((r) => setTimeout(r, wait));
       lastReqMs = Date.now();
       counters.requestsSent += 1;
-      const resp = await fetch(`${SUPPLIER_URL}/v1/chat/completions`, {
+      const resp = await fetch(`${SUPPLIER_URL}/v1/responses`, {
         method: "POST",
         headers: { "content-type": "application/json", "X-Escrow-Ref": bogus },
-        body: JSON.stringify({ model: "qwen3.6:35b", messages: [{ role: "user", content: `probe-${i}` }], max_tokens: 1 }),
+        body: JSON.stringify({ model: "qwen3.6:35b", ...responseRequest(`probe-${i}`, 1) }),
       });
       results.push(resp.status);
       if (resp.status >= 400 && resp.status < 500) ok4xx += 1; else other += 1;
@@ -459,12 +487,12 @@ async function attack_C5(): Promise<AttackResult> {
 
 async function attack_D1(): Promise<AttackResult> {
   const id = "D1";
-  const what = "POST /v1/chat/completions with NO X-Escrow-Ref header.";
-  const expected = "400 escrow_ref_required (server.ts:184).";
-  const resp = await rateLimitedFetch(`${SUPPLIER_URL}/v1/chat/completions`, {
+  const what = "POST /v1/responses with NO X-Escrow-Ref header.";
+  const expected = "400 escrow_ref_required.";
+  const resp = await rateLimitedFetch(`${SUPPLIER_URL}/v1/responses`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ model: "qwen3.6:35b", messages: [{ role: "user", content: "D1 probe" }], max_tokens: 50 }),
+    body: JSON.stringify({ model: "qwen3.6:35b", ...responseRequest("D1 probe", 50) }),
   });
   const text = await resp.text();
   const isBlocked = resp.status === 400 && text.includes("escrow_ref_required");
@@ -473,23 +501,27 @@ async function attack_D1(): Promise<AttackResult> {
 
 async function attack_D3(): Promise<AttackResult> {
   const id = "D3";
-  const what = "PostEscrow honestly (model=qwen3.6:35b), send chat body with model=gpt-4.";
-  const expected = "409 request_spec_mismatch (server.ts:273) — model is part of request_spec_hash.";
+  const what = "PostEscrow honestly (model=qwen3.6:35b), send Responses body with model=gpt-4.";
+  const expected = "409 request_spec_mismatch — model is part of request_spec_hash.";
   checkCapsBeforePost();
   const startBal = await walletLovelace();
   try {
-    const messages = [{ role: "user" as const, content: "D3 probe" }];
+    const request = responseRequest("D3 probe", 50);
     log("D3: posting honest escrow then sending wrong model");
     const escrowResult = await buildPostEscrowTx({
-      chain, buyerKey: wk, advertRef: ADVERT_REF_ACTIVE, messages, payment_lovelace: ADVERT_PRICE_LOVELACE,
+      chain,
+      buyerKey: wk,
+      advertRef: ADVERT_REF_ACTIVE,
+      prompt_hash: promptHash(request),
+      payment_lovelace: ADVERT_PRICE_LOVELACE,
     });
     counters.escrowsPosted += 1;
     await chain.awaitTx(escrowResult.expectedTxHash, 120_000);
     const escrowRefStr = `${escrowResult.escrowOutputRef.txHash}#${escrowResult.escrowOutputRef.index}`;
-    const resp = await rateLimitedFetch(`${SUPPLIER_URL}/v1/chat/completions`, {
+    const resp = await rateLimitedFetch(`${SUPPLIER_URL}/v1/responses`, {
       method: "POST",
       headers: { "content-type": "application/json", "X-Escrow-Ref": escrowRefStr },
-      body: JSON.stringify({ model: "gpt-4", messages, max_tokens: 50 }),
+      body: JSON.stringify({ model: "gpt-4", ...request }),
     });
     const text = await resp.text();
     const verdict: Verdict = resp.status === 409 && text.includes("request_spec_mismatch") ? "BLOCKED" : (resp.status === 200 ? "GAP" : "UNCLEAR");
@@ -509,8 +541,8 @@ async function attack_D4(): Promise<AttackResult> {
   const what = "buildPostEscrowTx pointing at the RETIRED advert ref (386d30…004040#0).";
   const expected = "Builder rejects because advert UTxO is no longer on chain — chain.queryUtxo returns null.";
   try {
-    const messages = [{ role: "user" as const, content: "D4 probe" }];
-    await buildPostEscrowTx({ chain, buyerKey: wk, advertRef: ADVERT_REF_RETIRED, messages, payment_lovelace: ADVERT_PRICE_LOVELACE });
+    const request = responseRequest("D4 probe");
+    await buildPostEscrowTx({ chain, buyerKey: wk, advertRef: ADVERT_REF_RETIRED, prompt_hash: promptHash(request), payment_lovelace: ADVERT_PRICE_LOVELACE });
     return { id, category: "D", what, expected, what_happened: "builder accepted post against retired advert", verdict: "GAP", evidence: `retired_advert=${ADVERT_REF_RETIRED.txHash}#${ADVERT_REF_RETIRED.index}` };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -527,10 +559,10 @@ async function attack_A1(): Promise<AttackResult> {
   checkCapsBeforePost();
   const startBal = await walletLovelace();
   try {
-    const messages = [{ role: "user" as const, content: "A1 probe: receive but do not accept." }];
+    const request = responseRequest("A1 probe: receive but do not accept.");
     log("A1: posting escrow then skipping Accept");
     const submitResult = await marketplace.submitPrompt({
-      advertRef: ADVERT_REF_ACTIVE, messages, payment_lovelace: ADVERT_PRICE_LOVELACE,
+      advertRef: ADVERT_REF_ACTIVE, ...request, payment_lovelace: ADVERT_PRICE_LOVELACE,
     });
     counters.escrowsPosted += 1;
     const escrowRefStr = `${submitResult.escrowRef.txHash}#${submitResult.escrowRef.index}`;

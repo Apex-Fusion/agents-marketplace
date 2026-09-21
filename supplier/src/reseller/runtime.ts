@@ -1,5 +1,5 @@
 import type { ChainProvider, OutputReference } from "@marketplace/shared/chain";
-import type { ChatMessage } from "@marketplace/shared/tx";
+import type { ResponseRequest } from "@marketplace/shared/responses";
 import type { AdvertDatum } from "@marketplace/shared/cbor";
 import type { SupplierState } from "../state.js";
 import { CapacityGate, type CapacitySnapshot } from "./capacityGate.js";
@@ -130,7 +130,7 @@ export class ResellerRuntime {
 
   async recordReceived(
     escrowRef: string,
-    messages: ChatMessage[],
+    request: ResponseRequest,
     publicPreview: boolean,
   ): Promise<void> {
     const snapshot = this.gate.snapshot();
@@ -139,7 +139,7 @@ export class ResellerRuntime {
       provider: snapshot.provider,
       providerModel: this.providerModel,
       marketplaceModel: this.advert.model,
-      messages,
+      request,
       publicPreview,
       balanceBeforeUsdNanos: snapshot.remainingAllowanceUsdNanos,
       worstCaseCostUsdNanos: snapshot.worstCaseJobUsdNanos,

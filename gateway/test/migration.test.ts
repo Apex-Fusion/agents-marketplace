@@ -66,6 +66,27 @@ describe("GatewayStore demo-column migration", () => {
     const legacy = store.getKeyByHash("hash-legacy");
     expect(legacy?.demo).toBe(0);
 
+    const migrated = new Database(join(dir, "gateway.db"), { readonly: true });
+    const responseTable = migrated.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'responses'",
+    ).get() as { name?: string } | undefined;
+    const sessionColumns = migrated.pragma("table_info(sessions)") as Array<{ name: string }>;
+    const responseIndexes = migrated.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'responses'",
+    ).all() as Array<{ name: string }>;
+    expect(responseTable?.name).toBe("responses");
+    expect(sessionColumns.map((column) => column.name)).toEqual(expect.arrayContaining([
+      "last_used_at", "head_response_id", "managed_demo", "max_output_tokens",
+      "max_processing_ms", "transcript_nonce", "transcript_ct", "transcript_tag",
+    ]));
+    expect(responseIndexes.map((index) => index.name)).toEqual(expect.arrayContaining([
+      "idx_responses_owner",
+      "idx_responses_parent",
+      "idx_responses_session",
+      "idx_responses_expiry",
+    ]));
+    migrated.close();
+
     store.insertKey({ ...keyRow("demo-key"), demo: 1 });
     expect(store.getKeyByHash("hash-demo-key")?.demo).toBe(1);
   });

@@ -79,6 +79,8 @@ services:
       # back), already shared with supplier `local`.
       MAX_CHAT_SESSIONS: "1"
       LLM_BACKEND: openai
+      # Keep the configured endpoint until OpenClaw Responses is enabled.
+      OPENAI_UPSTREAM_API: chat-completions
       # No /v1 suffix — supplier/src/openai.ts appends /v1/chat/completions.
       # Tailscale Serve endpoint (HTTPS, valid *.ts.net cert). The MagicDNS
       # name is pinned to web-tools' tailnet IP via extra_hosts below (see

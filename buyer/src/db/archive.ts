@@ -66,11 +66,9 @@ export interface PersistChatParams {
   supplier_pkh: string;
   model: string;
   payment_lovelace: string;
-  /** The full messages[] array, pre-canonicalisation. */
-  request_messages: unknown;
-  /** The assistant message object — `{role:"assistant", content:"..."}` —
-   * canonicalised by canonical(...) on the supplier side, so the bytes
-   * stored here MUST match exactly what was hashed for the receipt. */
+  /** Exact normalized Responses request envelope committed by prompt_hash. */
+  request_envelope: unknown;
+  /** Exact canonical responseResultCommitment bytes covered by response_hash. */
   response_canonical: string;
   receipt: Record<string, unknown>;
   receipt_signature: string;
@@ -136,7 +134,7 @@ export class ResponseArchive {
     return dir;
   }
 
-  /** Persist a completed chat lifecycle. Idempotent on escrow_ref. */
+  /** Persist a completed Responses lifecycle. Idempotent on escrow_ref. */
   persistChat(p: PersistChatParams): ArchiveRow {
     const dir = this.artefactDir(p.escrow_ref);
     const requestFilename = "request.json";
@@ -144,11 +142,10 @@ export class ResponseArchive {
 
     writeFileSync(
       join(dir, requestFilename),
-      JSON.stringify({ messages: p.request_messages }, null, 2),
+      JSON.stringify(p.request_envelope, null, 2),
       "utf8",
     );
-    // Store the EXACT canonical bytes the supplier hashed for response_hash —
-    // not pretty-printed JSON. This is what verification reads back.
+    // Keep the exact canonical commitment bytes used by response_hash.
     writeFileSync(join(dir, responseFilename), p.response_canonical, "utf8");
 
     const responseBytes = Buffer.byteLength(p.response_canonical, "utf8");

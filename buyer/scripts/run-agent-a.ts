@@ -254,10 +254,14 @@ async function runCycle(idx: number, prompt: string): Promise<CycleResult> {
   console.log(`bal_before=${balBefore} lovelace (~${Number(balBefore) / 1e6} AP3X), slot=${slotBefore}`);
 
   try {
-    const messages = [{ role: "user" as const, content: prompt }];
+    const input = [{
+      type: "message" as const,
+      role: "user" as const,
+      content: [{ type: "input_text" as const, text: prompt }],
+    }];
     const submitResult = await marketplace.submitPrompt({
       advertRef: ADVERT_REF,
-      messages,
+      input,
       payment_lovelace: 5_000_000n,
     });
     result.escrowRef = `${submitResult.escrowRef.txHash}#${submitResult.escrowRef.index}`;

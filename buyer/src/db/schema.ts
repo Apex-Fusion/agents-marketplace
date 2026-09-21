@@ -4,13 +4,13 @@
  * Persists every completed lifecycle (chat or TTS) so the buyer has an
  * off-chain audit trail to pair with the on-chain receipt commitment.
  *
- * The actual artefacts (the assistant message JSON for chat, the audio
- * bytes for TTS, the request envelope) live as files under ARCHIVE_DIR;
+ * The actual artefacts (the canonical Responses result commitment for LLMs,
+ * the audio bytes for TTS, and the request envelope) live under ARCHIVE_DIR;
  * this DB only stores metadata + the receipt.
  *
  * Verification flow per record (for disputes):
  *   1. Read response file → bytes B
- *   2. Confirm sha256(B-or-canonical(B)) === receipt.response_hash
+ *   2. Confirm sha256(B) === receipt.response_hash
  *   3. Verify Ed25519(receipt_json, supplier_pkh.pubkey) === receipt_signature
  *   4. Confirm receipt's escrow_ref's Submit tx on chain commits to
  *      sha256(canonical(receipt_json))

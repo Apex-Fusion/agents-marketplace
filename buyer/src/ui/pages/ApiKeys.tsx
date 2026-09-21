@@ -102,10 +102,10 @@ export default function ApiKeys() {
     result === null
       ? ""
       : [
-          `curl ${baseUrl}/chat/completions \\`,
+          `curl ${baseUrl}/responses \\`,
           `  -H "Authorization: Bearer ${result.api_key}" \\`,
           `  -H "Content-Type: application/json" \\`,
-          `  -d '{"model": "<model>", "messages": [{"role": "user", "content": "Hello"}]}'`,
+          `  -d '{"model": "<model>", "input": [{"type":"message","role":"user","content":[{"type":"input_text","text":"Hello"}]}]}'`,
         ].join("\n");
 
   return (

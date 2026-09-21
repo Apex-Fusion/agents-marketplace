@@ -29,8 +29,8 @@
  *                         endpoint responds 503 (the paid chat path is
  *                         unaffected — it talks to on-chain suppliers).
  *   OPENROUTER_BASE_URL — Base URL for the demo proxy (default
- *                         "https://openrouter.ai/api"; the "/v1/chat/completions"
- *                         suffix is appended by the proxy).
+ *                         "https://openrouter.ai/api"; the native
+ *                         "/v1/responses" suffix is appended by the proxy).
  *   ARCHIVE_DIR         — Directory where the response archive (SQLite
  *                         metadata + per-escrow artefact files) lives.
  *                         Defaults to "./data/archive" relative to cwd.
@@ -125,8 +125,7 @@ export function loadConfig(env: Record<string, string | undefined>): BuyerConfig
   const ttsPiperBaseUrl = env.TTS_PIPER_BASE_URL ?? "";
 
   // OPENROUTER_API_KEY — optional. Empty string disables the free Kimi chat
-  // demo (/v1/chat-demo/message responds 503). The base URL defaults to the
-  // public OpenRouter host; the proxy appends "/v1/chat/completions".
+  // demo. The proxy uses OpenRouter's native /v1/responses endpoint.
   const openrouterApiKey = env.OPENROUTER_API_KEY ?? "";
   const openrouterBaseUrl = (env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api").replace(/\/+$/, "");
 

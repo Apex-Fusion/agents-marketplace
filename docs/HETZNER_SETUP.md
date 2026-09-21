@@ -13,12 +13,13 @@
 
 ## 1. What this is
 
-Hetzner Inference is an OpenAI-compatible hosted API. Because the supplier's
-upstream client (`supplier/src/openai.ts`) already speaks plain
-`POST /v1/chat/completions` with a Bearer token, pointing it at Hetzner is
-**pure configuration**: `LLM_BACKEND=openai` + `OPENAI_BASE_URL` + the API key.
-This is the same pattern as the DeepSeek-direct and OpenRouter suppliers, and
-the direct sibling of `docs/HUGGINGFACE_ROUTER_SETUP.md`.
+Hetzner Inference is an OpenAI-compatible Chat Completions backend. Configure
+it explicitly with `LLM_BACKEND=openai`,
+`OPENAI_UPSTREAM_API=chat-completions`, `OPENAI_BASE_URL`, and the API key.
+Do not let the default native Responses mode select the wrong path. The
+supplier still exposes the marketplace Responses contract and translates
+supported text and function Items for Hetzner. There is no HTTP fallback.
+This is the compatibility pattern for all four Hetzner suppliers.
 
 One supplier per (model × capability) — both the one-off
 `llm.text.generate.v1` and the multi-turn `llm.chat.v1` capability:
@@ -39,9 +40,10 @@ still hold funds and their env files remain on the host.
 Shared advert parameters: price **200000 lovelace (0.2 AP3X)** flat per job,
 bonds **1000000 lovelace (1 AP3X)** both sides, `max_processing_ms` **300000**
 for one-off / **1800000** for chat (the session spans the whole conversation).
-`max_output_tokens` is set to the model's context length: no `max_tokens` is
-forwarded upstream (`OPENAI_MAX_TOKENS` unset), so the advert value only gates
-what buyers may request.
+`max_output_tokens` is set to the model context length. With
+`OPENAI_MAX_TOKENS` unset, the supplier forwards a buyer
+`max_output_tokens` request as Chat Completions `max_tokens`, clamped to the
+advert cap. When the buyer omits it, no token limit is sent upstream.
 
 Names follow the brand-by-model convention; the retired `ds-flash-htz`
 carried a `-htz` suffix only because `deepseek-flash-*` was already taken by
@@ -65,23 +67,25 @@ the OpenRouter fleet serving `deepseek/deepseek-v4-flash`.
 
 ## 3. Verify the backend before spending on-chain
 
-The model ids come from `GET https://inference.hetzner.com/api/v1/models`
-(this list changes — Hetzner retires models; re-check before any advert)
-and are sent **verbatim** as the upstream `model` param (the runtime uses
-`advert.model`). Before posting adverts, smoke-test each model:
+The model ids come from `GET https://inference.hetzner.com/api/v1/models`.
+This list changes, so check it before every new advert. The supplier sends
+the advert model verbatim. Probe the configured compatibility API before
+posting:
 
 ```bash
 curl -sS -X POST https://inference.hetzner.com/api/v1/chat/completions \
   -H "Authorization: Bearer $HETZNER_KEY" -H "Content-Type: application/json" \
   -d '{"model":"Qwen3.8-27B","messages":[{"role":"user","content":"ping"}]}' \
-  | jq '.choices[0].message.content'
+  | jq '{content:.choices[0].message.content,usage}'
 ```
 
-`choices[0].message.content` must be a non-empty string with **no `max_tokens`
-sent** (matches runtime config) — the supplier throws `openai_malformed`
-otherwise and forfeits its 1 AP3X bond per failed job. For chat suppliers also
-verify a `tools`/`tool_choice` round-trip. The original four models passed
-both checks on 2026-08-11; `Qwen3.8-27B` passed both on 2026-08-21.
+The content must be a non-empty string. Usage must include prompt,
+completion, and total token counts so the adapter can produce canonical
+Responses usage as `input_tokens`, `output_tokens`, and `total_tokens`.
+Do not send `max_tokens` in this probe because the fleet operator ceiling is
+unset. Also verify a tools and `tool_choice` round trip for chat suppliers.
+The public supplier result is a Response object with authoritative `output`
+Items, not a Chat Completions `choices` array.
 
 ## 4. Per-supplier bring-up (repeat per supplier)
 
@@ -93,15 +97,15 @@ pnpm --filter @marketplace/supplier tx:gen-keypair --network 1
 # 2. env file on the mainnet host
 cp supplier/.env.hetzner.example /root/agents-marketplace/supplier/.env.<name>
 chmod 600 /root/agents-marketplace/supplier/.env.<name>
-# fill in: ALL FOUR wallet vars (PRIV_KEY_HEX, ADDRESS, PKH, PUB_KEY_HEX —
-# they are NOT derived at boot; missing derived vars ⇒ 403 wrong_supplier),
-# OPENAI_API_KEY, and the ADVERT_* values from the table above.
+# fill in all four wallet vars (PRIV_KEY_HEX, ADDRESS, PKH, PUB_KEY_HEX),
+# OPENAI_API_KEY, and the ADVERT_* values from the table above. The wallet
+# values are not derived at boot; a missing value causes 403 wrong_supplier.
 
 # 3. advert (one-off shown; chat: --capability-id llm.chat.v1 --max-processing-ms 1800000)
 pnpm --filter @marketplace/supplier tx:post-advert \
   --capability-id llm.text.generate.v1 \
-  --model 'GLM-5.2-NVFP4' \
-  --max-output-tokens 512000 \
+  --model 'Qwen3.8-27B' \
+  --max-output-tokens 262144 \
   --max-processing-ms 300000 \
   --price-lovelace 200000 \
   --endpoint-url https://mp-suppliers-<name>.vector.apexfusion.org
@@ -117,25 +121,33 @@ docker compose -f deploy/mainnet/docker-compose.supplier-<name>.yml up -d
 
 ## 5. Verification
 
-- `curl https://mp-suppliers-<name>.vector.apexfusion.org/healthz` → `{"ok":true}`;
-  `/capability` shows the right model + pkh.
-- Indexer: buyer `GET /v1/indexer/suppliers` lists the new entries with
-  `advert_status: Active`, `status: free`.
-- Gateway `GET /openai/v1/models` includes the four Hetzner model ids.
-- Watch `docker logs -f marketplace-mainnet-supplier-<name>` through the first
-  jobs for `openai_malformed` (reasoning-model content-shape risk).
+- `curl https://mp-suppliers-<name>.vector.apexfusion.org/healthz` returns
+  `{"ok":true}`. `/capability` shows the right model and pkh, plus
+  `inference_api: "responses"`, `upstream_api: "chat-completions"`, and
+  `reasoning_disabled: false`.
+- The indexer supplier list contains the advert with `advert_status: Active`
+  and `status: free`.
+- Gateway `GET /openai/v1/models` includes the Hetzner model ids.
+- Use `POST /openai/v1/responses` for a controlled mainnet smoke. The current
+  testnet has no functional marketplace.
+- Watch supplier logs for `openai_malformed` or
+  `upstream_api_incompatible`.
 
 ## 6. Footguns
 
-- `OPENAI_BASE_URL=https://inference.hetzner.com/api` — **no `/v1`**; the
-  client appends `/v1/chat/completions`.
-- Do **not** set `OPENAI_REASONING` — `reasoning:{enabled:false}` is an
-  OpenRouter-only param.
-- The advert `--model` must match the Hetzner id exactly, including the
-  `Qwen/` prefix on `Qwen/Qwen3.6-35B-A3B-FP8` (slash is fine on-chain;
-  precedent `moonshotai/kimi-k2.6`).
-- `Kimi-K2.7-Code` and `DeepSeek-V4-Flash-0731` auto-join the buyer's PDF pool
-  (case-insensitive substring allowlist `["kimi","deepseek","gpt"]` in
-  `buyer/src/pdf/caps.ts`); GLM and Qwen stay out. Deliberate — adjust
-  `PDF_MODEL_ALLOWLIST`/`PDF_MODEL_DENYLIST` in the buyer env to change it.
-- `OPENAI_TIMEOUT_MS` must stay ≤ the advert's `max_processing_ms`.
+- Keep `OPENAI_UPSTREAM_API=chat-completions`. Hetzner does not use the
+  default native Responses path.
+- Set `OPENAI_BASE_URL=https://inference.hetzner.com/api`. Do not add `/v1`;
+  the compatibility adapter appends `/v1/chat/completions`.
+- Leave `OPENAI_RESPONSES_URL` and `OPENAI_RESPONSES_STREAM_ONLY` unset.
+- Leave `OPENAI_REASONING` unset. In Chat Completions mode, `off` sends the
+  OpenRouter-only `reasoning:{enabled:false}` extension.
+- The advert model must match the Hetzner id exactly, including the `Qwen/`
+  prefix on `Qwen/Qwen3.6-35B-A3B-FP8`.
+- Retired Kimi and DeepSeek ids matched the buyer PDF allowlist. Current Qwen
+  ids do not. Buyer operators can change `PDF_MODEL_ALLOWLIST` and
+  `PDF_MODEL_DENYLIST`.
+- Keep `OPENAI_TIMEOUT_MS` at or below advert `max_processing_ms`.
+- Chat compatibility cannot represent Responses reasoning Items or `text`
+  controls. It rejects those requests before Claim. Supported function tools
+  are translated to Chat Completions form.

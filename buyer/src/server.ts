@@ -24,8 +24,14 @@ import { bech32 } from "bech32";
 import type { ChainProvider } from "@marketplace/shared/chain";
 import type { WalletKey } from "@marketplace/shared/tx";
 import type { Marketplace } from "./sdk/Marketplace.js";
-import type { ChatMessage } from "@marketplace/shared/tx";
 import { canonicalize } from "@marketplace/shared/cbor";
+import {
+  normalizeResponseInput,
+  normalizeResponseRequest,
+  responseResultCommitment,
+  type ResponseItem,
+  type ResponseRequest,
+} from "@marketplace/shared/responses";
 import { runAccept } from "./cli/acceptFlow.js";
 import type { ResponseArchive } from "./db/archive.js";
 import { registerPdfRoutes } from "./pdf/routes.js";
@@ -145,6 +151,69 @@ function jsonError(
 function readBody(reqBody: unknown): Record<string, unknown> {
   if (typeof reqBody !== "object" || reqBody === null) return {};
   return reqBody as Record<string, unknown>;
+}
+
+const RESPONSE_EXECUTION_FIELDS = [
+  "instructions",
+  "max_output_tokens",
+  "tools",
+  "tool_choice",
+  "parallel_tool_calls",
+  "reasoning",
+  "text",
+  "temperature",
+  "top_p",
+] as const;
+
+/** Select only Responses execution fields from a route body. */
+function responseRequestFromBody(body: Record<string, unknown>): ResponseRequest {
+  const raw: Record<string, unknown> = { input: body.input };
+  for (const field of RESPONSE_EXECUTION_FIELDS) {
+    if (field in body) raw[field] = body[field];
+  }
+  return normalizeResponseRequest(raw);
+}
+
+function adapterCompatibilityError(
+  request: ResponseRequest,
+  upstreamApi: "responses" | "chat-completions" | "ollama",
+): string | null {
+  if (upstreamApi === "responses") return null;
+  if (
+    request.reasoning !== undefined ||
+    request.text !== undefined ||
+    request.input.some((item) => item.type === "reasoning")
+  ) {
+    return `${upstreamApi} suppliers cannot preserve Responses reasoning items or text options`;
+  }
+  if (
+    upstreamApi === "ollama" &&
+    (
+      request.tools !== undefined ||
+      request.tool_choice !== undefined ||
+      request.parallel_tool_calls !== undefined ||
+      request.temperature !== undefined ||
+      request.top_p !== undefined ||
+      request.input.some(
+        (item) => item.type === "function_call" || item.type === "function_call_output",
+      )
+    )
+  ) {
+    return "ollama suppliers cannot preserve Responses tools, function calls, or sampling options";
+  }
+  return null;
+}
+
+function unsupportedResponseFields(
+  body: Record<string, unknown>,
+  metadataFields: readonly string[],
+): string[] {
+  const allowed = [
+    "input",
+    ...RESPONSE_EXECUTION_FIELDS,
+    ...metadataFields,
+  ];
+  return Object.keys(body).filter((field) => !allowed.includes(field));
 }
 
 /** Mainnet enterprise (vkh) bech32 address for a given 28-byte PKH hex. The
@@ -515,14 +584,9 @@ export function createApp(deps: AppDeps): Express {
     }
   });
 
-  // ── POST /v1/submit-prompt — full server-side buyer lifecycle.
-  // Body: { advert_ref: "<txhash>#<idx>", messages: ChatMessage[],
-  //         payment_lovelace?: string|number, max_output_tokens?: number }
-  // Returns: { receipt, receipt_signature, escrow_ref, choices?, usage? }
-  // This endpoint blocks for the duration of the lifecycle (PostEscrow
-  // confirm → supplier inference → on-chain verify, typically 30–60s on
-  // testnet). The SDK's submitPrompt() handles every adversarial branch;
-  // we just translate body↔SDK-shape and re-throw structured errors.
+  // ── POST /v1/submit-prompt — server-side Responses lifecycle.
+  // Body: { advert_ref, payment_lovelace, input, ...execution options }
+  // Returns the canonical terminal Response object plus payment receipt fields.
   app.post("/v1/submit-prompt", async (req: Request, res: Response) => {
     if (!deps.marketplace) {
       return jsonError(
@@ -542,17 +606,40 @@ export function createApp(deps: AppDeps): Express {
         'body must include { "advert_ref": "<64-hex-txhash>#<index>" }',
       );
     }
-    const messages = body.messages;
-    if (!Array.isArray(messages) || messages.length === 0) {
+    const unsupported = unsupportedResponseFields(body, [
+      "advert_ref",
+      "payment_lovelace",
+      "public_preview",
+    ]);
+    if (unsupported.length > 0) {
       return jsonError(
         res,
         400,
-        "messages_required",
-        "body must include a non-empty messages[] array",
+        "unsupported_response_field",
+        `unsupported field: ${unsupported[0]}`,
       );
     }
-    const m = ESCROW_REF_RE.exec(rawRef)!;
-    const advertRef = { txHash: m[1], index: Number(m[2]) };
+    if (body.public_preview !== undefined && typeof body.public_preview !== "boolean") {
+      return jsonError(
+        res,
+        400,
+        "public_preview_invalid",
+        "public_preview must be a boolean",
+      );
+    }
+    let request: ResponseRequest;
+    try {
+      request = responseRequestFromBody(body);
+    } catch (error) {
+      return jsonError(
+        res,
+        400,
+        "response_request_invalid",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    const refMatch = ESCROW_REF_RE.exec(rawRef)!;
+    const advertRef = { txHash: refMatch[1], index: Number(refMatch[2]) };
     let payment_lovelace: bigint;
     try {
       payment_lovelace = BigInt(body.payment_lovelace as string | number);
@@ -564,31 +651,17 @@ export function createApp(deps: AppDeps): Express {
         'body must include `payment_lovelace` (numeric string)',
       );
     }
-    const max_output_tokens =
-      typeof body.max_output_tokens === "number" ? body.max_output_tokens : undefined;
     try {
       const result = await deps.marketplace.submitPrompt({
         advertRef,
-        messages: messages as ChatMessage[],
         payment_lovelace,
-        max_output_tokens,
+        public_preview: body.public_preview === true ? true : undefined,
+        ...request,
       });
       const escrowRefStr = `${result.escrowRef.txHash}#${result.escrowRef.index}`;
 
-      // Persist BEFORE returning so navigation away never loses the audit
-      // trail. Best-effort — a write failure is logged but doesn't fail
-      // the response (the on-chain receipt is still authoritative).
       if (deps.archive) {
         try {
-          // Reproduce the EXACT bytes the supplier hashed for response_hash:
-          // sha256(canonicalize({role:"assistant", content: ...})). canonicalize
-          // sorts keys alphabetically (content < role) per JCS — JSON.stringify
-          // would preserve insertion order and yield different bytes → wrong
-          // sha256 → "Verify hash" mismatch on the SPA.
-          const canonicalAssistant = canonicalize({
-            role: "assistant",
-            content: result.response,
-          });
           deps.archive.persistChat({
             escrow_ref: escrowRefStr,
             posted_at: Date.now(),
@@ -596,8 +669,8 @@ export function createApp(deps: AppDeps): Express {
             supplier_pkh: result.receipt.supplier_pkh,
             model: result.receipt.model,
             payment_lovelace: payment_lovelace.toString(),
-            request_messages: messages,
-            response_canonical: canonicalAssistant,
+            request_envelope: result.request,
+            response_canonical: canonicalize(responseResultCommitment(result.result)),
             receipt: result.receipt as unknown as Record<string, unknown>,
             receipt_signature: result.receiptSignature,
           });
@@ -609,22 +682,20 @@ export function createApp(deps: AppDeps): Express {
         }
       }
 
-      // Wrap the assistant text in OpenAI-shape `choices[0].message` so
-      // downstream clients (PromptForm) can unpack uniformly.
       return res.status(200).json({
-        choices: [{ index: 0, message: { role: "assistant", content: result.response }, finish_reason: "stop" }],
+        ...result.result,
         receipt: result.receipt,
         receipt_signature: result.receiptSignature,
         escrow_ref: escrowRefStr,
+        submitted_ref: result.submittedRef
+          ? `${result.submittedRef.txHash}#${result.submittedRef.index}`
+          : undefined,
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const reason = err instanceof Error && "reason" in err
-        ? String((err as { reason: unknown }).reason)
+        ? String(err.reason)
         : "submit_prompt_failed";
-      // Surface the failure to logs so 502 responses aren't a silent black
-      // hole during deploy debugging. SDK errors carry .reason; raw Errors
-      // carry stack — we want both.
       console.error(
         `[buyer] /v1/submit-prompt failed reason=${reason} message=${message}`,
         err instanceof Error && err.stack ? `\n${err.stack}` : "",
@@ -731,31 +802,13 @@ export function createApp(deps: AppDeps): Express {
     }
   });
 
-  // ── POST /v1/chat-demo/message — free Kimi K2.6 chat demo (streaming).
-  // Body: { messages: ChatMessage[] }  (full running transcript)
-  // Returns: an SSE stream of normalized frames the ChatForm understands:
-  //   data: {"type":"token","value":"<delta>"}\n\n   (repeated)
-  //   data: {"type":"done"}\n\n
-  //   data: {"type":"error","message":"…"}\n\n
-  //
-  // Mirrors /v1/synth-speech (Path B of the demo story): a direct proxy that
-  // bypasses escrow entirely so anyone can try the new chat capability for
-  // free. We re-shape OpenRouter's raw OpenAI SSE deltas into the uniform
-  // frame format so the browser parser is identical for demo and paid chat.
+  // ── Free native OpenRouter Responses demo. The proxy preserves every SSE
+  // event. The browser treats the terminal response as the only output
+  // authority and reports a missing/incomplete/failed terminal as an error.
   const openrouterApiKey = deps.openrouterApiKey ?? "";
   const openrouterBaseUrl = (deps.openrouterBaseUrl ?? "https://openrouter.ai/api").replace(/\/+$/, "");
   const demoFetch = deps.fetchImpl ?? globalThis.fetch;
   const DEMO_CHAT_MODEL = "moonshotai/kimi-k2.6";
-
-  function isChatMessageArray(v: unknown): v is ChatMessage[] {
-    // The free chat demo stays text-only: the `tool` role (added to
-    // ChatMessage for the gateway demo endpoint) is not accepted here.
-    return Array.isArray(v) && v.length > 0 && v.every(
-      (m) => m && typeof m === "object"
-        && ["system", "user", "assistant"].includes((m as ChatMessage).role)
-        && typeof (m as ChatMessage).content === "string",
-    );
-  }
 
   app.post("/v1/chat-demo/message", async (req: Request, res: Response) => {
     if (!openrouterApiKey) {
@@ -767,89 +820,73 @@ export function createApp(deps: AppDeps): Express {
       );
     }
     const body = readBody(req.body);
-    if (!isChatMessageArray(body.messages)) {
+    const unsupported = unsupportedResponseFields(body, []);
+    if (unsupported.length > 0) {
       return jsonError(
         res,
         400,
-        "messages_required",
-        "body must include a non-empty messages[] array of {role,content}",
+        "unsupported_response_field",
+        `unsupported field: ${unsupported[0]}`,
       );
     }
-    const messages = body.messages as ChatMessage[];
-
-    // Open the SSE response to the browser up front so errors after the first
-    // byte are delivered as in-band `error` frames (the status line is already
-    // committed once we start streaming).
-    res.status(200);
-    res.setHeader("Content-Type", "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache, no-transform");
-    res.setHeader("Connection", "keep-alive");
-    res.setHeader("X-Accel-Buffering", "no");
-    if (typeof (res as Response & { flushHeaders?: () => void }).flushHeaders === "function") {
-      (res as Response & { flushHeaders: () => void }).flushHeaders();
+    let request: ResponseRequest;
+    try {
+      request = responseRequestFromBody(body);
+    } catch (error) {
+      return jsonError(
+        res,
+        400,
+        "response_request_invalid",
+        error instanceof Error ? error.message : String(error),
+      );
     }
-    const sse = (frame: Record<string, unknown>): void => {
-      res.write(`data: ${JSON.stringify(frame)}\n\n`);
-    };
 
     try {
-      const upstream = await demoFetch(`${openrouterBaseUrl}/v1/chat/completions`, {
+      const upstream = await demoFetch(`${openrouterBaseUrl}/v1/responses`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
           accept: "text/event-stream",
           authorization: `Bearer ${openrouterApiKey}`,
         },
-        body: JSON.stringify({ model: DEMO_CHAT_MODEL, messages, stream: true }),
+        body: JSON.stringify({
+          model: DEMO_CHAT_MODEL,
+          ...request,
+          stream: true,
+          store: false,
+          include: ["reasoning.encrypted_content"],
+        }),
       });
       if (!upstream.ok || !upstream.body) {
         const detail = await upstream.text().catch(() => "");
-        sse({ type: "error", message: `OpenRouter ${upstream.status}: ${detail.slice(0, 200)}` });
-        return res.end();
+        return jsonError(
+          res,
+          502,
+          "openrouter_error",
+          `OpenRouter ${upstream.status}: ${detail.slice(0, 200)}`,
+        );
       }
 
-      const reader = (upstream.body as ReadableStream<Uint8Array>).getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      const handleData = (payload: string): void => {
-        const trimmed = payload.trim();
-        if (trimmed.length === 0 || trimmed === "[DONE]") return;
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(trimmed);
-        } catch {
-          return;
-        }
-        const choices = (parsed as Record<string, unknown>)?.choices;
-        if (Array.isArray(choices) && choices.length > 0) {
-          const delta = (choices[0] as Record<string, unknown>)?.delta as
-            | Record<string, unknown>
-            | undefined;
-          const content = delta?.content;
-          if (typeof content === "string" && content.length > 0) {
-            sse({ type: "token", value: content });
-          }
-        }
-      };
+      res.status(200);
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache, no-transform");
+      res.setHeader("Connection", "keep-alive");
+      res.setHeader("X-Accel-Buffering", "no");
+      if (typeof res.flushHeaders === "function") res.flushHeaders();
+
+      const reader = upstream.body.getReader();
       for (;;) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        let sepIdx: number;
-        while ((sepIdx = buffer.indexOf("\n\n")) >= 0) {
-          const frame = buffer.slice(0, sepIdx);
-          buffer = buffer.slice(sepIdx + 2);
-          for (const line of frame.split("\n")) {
-            if (line.startsWith("data:")) handleData(line.slice(5));
-          }
-        }
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        res.write(Buffer.from(chunk.value));
       }
-      sse({ type: "done" });
       return res.end();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[buyer] /v1/chat-demo/message failed: ${message}`);
-      sse({ type: "error", message });
+      if (!res.headersSent) {
+        return jsonError(res, 502, "openrouter_unreachable", message);
+      }
       return res.end();
     }
   });
@@ -862,7 +899,10 @@ export function createApp(deps: AppDeps): Express {
   // The supplier base URL discovered at start is cached so the per-turn
   // message route doesn't re-query the chain. In-memory is fine: single
   // operator, single active chat.
-  const chatRouteState = new Map<string, { supplierBaseUrl: string }>();
+  const chatRouteState = new Map<string, {
+    supplierBaseUrl: string;
+    upstreamApi: "responses" | "chat-completions" | "ollama";
+  }>();
   const chatFetch = deps.fetchImpl ?? globalThis.fetch;
 
   function chatErrorResponse(res: Response, err: unknown): Response {
@@ -899,8 +939,15 @@ export function createApp(deps: AppDeps): Express {
     try {
       const result = await deps.marketplace.startChat({ advertRef, payment_lovelace });
       const escrowRefStr = `${result.escrowRef.txHash}#${result.escrowRef.index}`;
-      chatRouteState.set(escrowRefStr, { supplierBaseUrl: result.supplierBaseUrl });
-      return res.status(200).json({ escrow_ref: escrowRefStr, session_nonce: result.sessionNonce });
+      chatRouteState.set(escrowRefStr, {
+        supplierBaseUrl: result.supplierBaseUrl,
+        upstreamApi: result.upstreamApi,
+      });
+      return res.status(200).json({
+        escrow_ref: escrowRefStr,
+        session_nonce: result.sessionNonce,
+        settle_mode: result.settleMode,
+      });
     } catch (err) {
       return chatErrorResponse(res, err);
     }
@@ -913,26 +960,39 @@ export function createApp(deps: AppDeps): Express {
       return jsonError(res, 400, "escrow_ref_invalid",
         'body must include { "escrow_ref": "<64-hex-txhash>#<index>" }');
     }
-    const content = typeof body.content === "string" ? body.content : "";
-    if (content.length === 0) {
-      return jsonError(res, 400, "content_required", "body.content must be a non-empty string");
+    let request: ResponseRequest;
+    const unsupported = unsupportedResponseFields(body, ["escrow_ref"]);
+    if (unsupported.length > 0) {
+      return jsonError(
+        res,
+        400,
+        "unsupported_response_field",
+        `unsupported field: ${unsupported[0]}`,
+      );
+    }
+    try {
+      request = responseRequestFromBody(body);
+    } catch (error) {
+      return jsonError(
+        res,
+        400,
+        "response_request_invalid",
+        error instanceof Error ? error.message : String(error),
+      );
     }
     const state = chatRouteState.get(rawRef);
     if (!state) {
       return jsonError(res, 404, "chat_session_not_found", `no active chat session for ${rawRef}`);
     }
-
-    res.status(200);
-    res.setHeader("Content-Type", "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache, no-transform");
-    res.setHeader("Connection", "keep-alive");
-    res.setHeader("X-Accel-Buffering", "no");
-    if (typeof (res as Response & { flushHeaders?: () => void }).flushHeaders === "function") {
-      (res as Response & { flushHeaders: () => void }).flushHeaders();
+    const compatibilityError = adapterCompatibilityError(request, state.upstreamApi);
+    if (compatibilityError) {
+      return jsonError(
+        res,
+        400,
+        "supplier_adapter_incompatible",
+        compatibilityError,
+      );
     }
-    const sse = (frame: Record<string, unknown>): void => {
-      res.write(`data: ${JSON.stringify(frame)}\n\n`);
-    };
 
     try {
       const upstream = await chatFetch(`${state.supplierBaseUrl.replace(/\/+$/, "")}/v1/chat/message`, {
@@ -942,24 +1002,35 @@ export function createApp(deps: AppDeps): Express {
           accept: "text/event-stream",
           "X-Escrow-Ref": rawRef,
         },
-        body: JSON.stringify({ content }),
+        body: JSON.stringify(request),
       });
       if (!upstream.ok || !upstream.body) {
         const detail = await upstream.text().catch(() => "");
-        sse({ type: "error", message: `supplier ${upstream.status}: ${detail.slice(0, 200)}` });
-        return res.end();
+        return jsonError(
+          res,
+          502,
+          "supplier_error",
+          `supplier ${upstream.status}: ${detail.slice(0, 200)}`,
+        );
       }
-      // Pipe the supplier's SSE frames (already in {type:token|done|error}
-      // form) through verbatim.
-      const reader = (upstream.body as ReadableStream<Uint8Array>).getReader();
+
+      res.status(200);
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache, no-transform");
+      res.setHeader("Connection", "keep-alive");
+      res.setHeader("X-Accel-Buffering", "no");
+      if (typeof res.flushHeaders === "function") res.flushHeaders();
+
+      const reader = upstream.body.getReader();
       for (;;) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        res.write(Buffer.from(value));
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        res.write(Buffer.from(chunk.value));
       }
       return res.end();
     } catch (err) {
-      sse({ type: "error", message: err instanceof Error ? err.message : String(err) });
+      const message = err instanceof Error ? err.message : String(err);
+      if (!res.headersSent) return jsonError(res, 502, "supplier_unreachable", message);
       return res.end();
     }
   });
@@ -979,9 +1050,17 @@ export function createApp(deps: AppDeps): Express {
     if (sessionNonce.length === 0) {
       return jsonError(res, 400, "session_nonce_required", "body.session_nonce is required");
     }
-    const transcript = Array.isArray(body.transcript)
-      ? (body.transcript as ChatMessage[])
-      : undefined;
+    let transcript: ResponseItem[];
+    try {
+      transcript = normalizeResponseInput(body.transcript);
+    } catch (error) {
+      return jsonError(
+        res,
+        400,
+        "transcript_invalid",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
     const state = chatRouteState.get(rawRef);
     if (!state) {
       return jsonError(res, 404, "chat_session_not_found",

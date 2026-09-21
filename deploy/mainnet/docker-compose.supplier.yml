@@ -34,8 +34,10 @@ services:
       - path: ../../supplier/.env
         required: false
     environment:
-      LLM_BACKEND: ollama
-      OLLAMA_URL: http://marketplace-mainnet-ollama:11434
+      LLM_BACKEND: openai
+      OPENAI_UPSTREAM_API: responses
+      OPENAI_BASE_URL: http://marketplace-mainnet-ollama:11434
+      OPENAI_TIMEOUT_MS: "120000"
       PORT: "8080"
       # Enable LiveOgmiosProvider so submitTx/awaitTx actually broadcast.
       # Mirrors the testnet supplier compose; without this the supplier

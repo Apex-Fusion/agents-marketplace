@@ -1,16 +1,15 @@
-/**
- * gateway/src/openai/shapes.ts — OpenAI response object builders.
- *
- * Produces spec-clean ChatCompletion / ChatCompletionChunk / model-list objects
- * plus the `x_vector` receipt extension. SSE helpers frame chunks for streaming.
- */
-
 import { randomBytes } from "crypto";
 import type { Receipt } from "@marketplace/shared/receipt";
-import type { ToolCall } from "@marketplace/shared/tx";
+import {
+  createResponse,
+  responseEvents,
+  type ResponseObject,
+  type ResponseStreamEvent,
+  type ResponseUsage,
+} from "@marketplace/shared/responses";
 
 export function genId(): string {
-  return `chatcmpl-${randomBytes(16).toString("hex")}`;
+  return `resp_${randomBytes(24).toString("hex")}`;
 }
 
 export function nowSec(): number {
@@ -23,77 +22,108 @@ export interface VectorReceipt {
   escrow_ref: string;
 }
 
-export interface Usage {
-  prompt_tokens: number;
-  completion_tokens: number;
-  total_tokens: number;
+export function usageFromReceipt(receipt: Receipt): ResponseUsage {
+  const input = receipt.prompt_tokens ?? 0;
+  const output = receipt.completion_tokens ?? 0;
+  return { input_tokens: input, output_tokens: output, total_tokens: input + output };
 }
 
-export function usageFromReceipt(receipt: Receipt): Usage {
-  const prompt = receipt.prompt_tokens ?? 0;
-  const completion = receipt.completion_tokens ?? 0;
-  return { prompt_tokens: prompt, completion_tokens: completion, total_tokens: prompt + completion };
+export function isResponseObject(value: unknown): value is ResponseObject {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  return "object" in value && value.object === "response" &&
+    "id" in value && typeof value.id === "string" &&
+    "model" in value && typeof value.model === "string" &&
+    "status" in value && typeof value.status === "string" &&
+    ["in_progress", "completed", "incomplete", "failed"].includes(value.status) &&
+    "output" in value && Array.isArray(value.output);
 }
 
-/** Non-streaming chat.completion object. */
-export function buildChatCompletion(args: {
+export function publicResponse(args: {
   id: string;
   model: string;
-  content: string;
-  usage: Usage;
-  toolCalls?: ToolCall[];
-  finishReason?: "stop" | "tool_calls";
+  createdAt?: number;
+  result: ResponseObject;
+  previousResponseId?: string;
+  metadata?: Record<string, unknown>;
   vector?: VectorReceipt;
-}): Record<string, unknown> {
+}): ResponseObject {
+  const {
+    id: _providerId,
+    model: _providerModel,
+    created_at: _providerCreatedAt,
+    previous_response_id: _providerPreviousId,
+    x_vector: _providerVector,
+    metadata: _providerMetadata,
+    ...native
+  } = args.result;
   return {
-    id: args.id,
-    object: "chat.completion",
-    created: nowSec(),
-    model: args.model,
-    choices: [
-      {
-        index: 0,
-        message: {
-          role: "assistant",
-          content: args.content,
-          ...(args.toolCalls?.length ? { tool_calls: args.toolCalls } : {}),
-        },
-        finish_reason: args.finishReason ?? "stop",
-      },
-    ],
-    usage: args.usage,
+    ...native,
+    ...createResponse({
+      id: args.id,
+      model: args.model,
+      output: args.result.output,
+      usage: args.result.usage,
+      status: args.result.status,
+      created_at: args.createdAt ?? nowSec(),
+      incomplete_details: args.result.incomplete_details,
+      error: args.result.error,
+    }),
+    previous_response_id: args.previousResponseId ?? null,
+    ...(args.metadata ? { metadata: args.metadata } : {}),
     ...(args.vector ? { x_vector: args.vector } : {}),
   };
 }
-
-/** A streaming chat.completion.chunk. `delta` is the incremental content (or {}). */
-export function buildChunk(args: {
-  id: string;
-  model: string;
-  delta:
-    | { role?: string; content?: string; tool_calls?: Array<{ index: number } & ToolCall> }
-    | Record<string, never>;
-  finishReason: "stop" | "tool_calls" | null;
-  usage?: Usage;
-  vector?: VectorReceipt;
-}): Record<string, unknown> {
+export function publicStreamEvent(
+  event: ResponseStreamEvent,
+  args: {
+    id: string;
+    model: string;
+    previousResponseId?: string;
+    metadata?: Record<string, unknown>;
+    createdAt?: number;
+  },
+): ResponseStreamEvent {
+  const { sequence_number: _sequence, response: rawResponse, ...fields } = event;
+  if (!isResponseObject(rawResponse)) return fields;
   return {
-    id: args.id,
-    object: "chat.completion.chunk",
-    created: nowSec(),
-    model: args.model,
-    choices: [{ index: 0, delta: args.delta, finish_reason: args.finishReason }],
-    ...(args.usage ? { usage: args.usage } : {}),
-    ...(args.vector ? { x_vector: args.vector } : {}),
+    ...fields,
+    response: publicResponse({
+      ...args,
+      result: rawResponse,
+    }),
   };
 }
-
-/** Frame any object as an SSE `data:` event. */
-export function sseData(obj: unknown): string {
-  return `data: ${JSON.stringify(obj)}\n\n`;
+export function responseSse(response: ResponseObject): string {
+  return responseEvents(response).map((event) => {
+    const terminal = event.type === "response.completed" ||
+      event.type === "response.incomplete" ||
+      event.type === "response.failed";
+    if (terminal || !isResponseObject(event.response) || !("x_vector" in event.response)) {
+      return sseEvent(event);
+    }
+    const responseWithoutVector: ResponseObject = { ...event.response };
+    delete responseWithoutVector.x_vector;
+    return sseEvent({ ...event, response: responseWithoutVector });
+  }).join("");
 }
 
-export const SSE_DONE = "data: [DONE]\n\n";
+export function sseEvent(event: ResponseStreamEvent): string {
+  return `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
+}
+
+export function streamFailure(id: string, model: string, error: { code: string; message: string }): ResponseStreamEvent[] {
+  const failed = createResponse({
+    id,
+    model,
+    status: "failed",
+    output: [],
+    error: { code: error.code, message: error.message },
+  });
+  return [
+    { type: "error", code: error.code, message: error.message },
+    { type: "response.failed", response: failed },
+  ];
+}
 
 export function buildModelsList(models: string[]): Record<string, unknown> {
   const created = nowSec();
@@ -101,15 +131,4 @@ export function buildModelsList(models: string[]): Record<string, unknown> {
     object: "list",
     data: models.map((id) => ({ id, object: "model", created, owned_by: "vector-marketplace" })),
   };
-}
-
-/** Render OpenAI messages[] into a single prompt string for the chat.v1 session
- * supplier (which has no system-role channel — see docs/gateway.md). */
-export function renderMessages(messages: Array<{ role: string; content: string }>): string {
-  return messages
-    .map((m) => {
-      const role = m.role === "assistant" ? "Assistant" : m.role === "system" ? "System" : "User";
-      return `${role}: ${m.content}`;
-    })
-    .join("\n\n");
 }

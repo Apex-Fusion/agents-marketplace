@@ -7,8 +7,8 @@
  * Routes:
  *   GET  /capability                        — ARCHITECTURE.md §5.1
  *   GET  /status                            — ARCHITECTURE.md §5.1
- *   POST /v1/chat/completions               — async claim+enqueue (M1-F-async-chat)
- *   GET  /v1/chat/completions/:jobId        — poll job status
+ *   POST /v1/responses                      — async claim+enqueue
+ *   GET  /v1/responses/:jobId               — poll job status
  *
  * Async chat flow (M1-F-async-chat-green):
  *   POST validates → acquires lock → buildClaimTx → awaitTx Claim
@@ -33,23 +33,31 @@
 
 import express, { type Application, type Request, type Response, type NextFunction } from "express";
 import { createHash } from "crypto";
+import { existsSync } from "node:fs";
 
 import type { ChainProvider, OutputReference } from "@marketplace/shared/chain";
 import { decodeAdvertDatum, decodeEscrowDatum, canonicalize } from "@marketplace/shared/cbor";
 import type { AdvertDatum, EscrowDatum } from "@marketplace/shared/cbor";
-import type { ChatMessage, WalletKey } from "@marketplace/shared/tx";
-import { chatInputTokenUpperBound } from "@marketplace/shared/tx";
+import type { WalletKey } from "@marketplace/shared/tx";
 import {
   buildClaimTx,
   chatSessionPromptHash,
   mockSlotToWallclockMs,
   detectCborBackend,
-  normalizeChatMessage,
   ocrPromptHash,
   ALLOWED_OCR_MIMES,
   ALLOWED_OCR_OUTPUT_FORMATS,
   MAX_OCR_IMAGE_B64_CHARS,
 } from "@marketplace/shared/tx";
+import {
+  normalizeResponseRequest,
+  responseInputToChatMessages,
+  responseInputTokenUpperBound,
+  responseRequestCommitment,
+  validateResponseToolOutputs,
+  type ResponseRequest,
+  type ResponseStreamEvent,
+} from "@marketplace/shared/responses";
 import type { OcrRequest } from "@marketplace/shared/tx";
 
 import type { SupplierState } from "./state.js";
@@ -60,7 +68,7 @@ import { probeRevision } from "./ocrVision.js";
 import { probeDatalabHealth } from "./datalabOcr.js";
 import { ChatSessionStore, type ChatSessionRecord } from "./chatSession.js";
 import { endChatSession, type EndChatSessionDeps } from "./chatSessionRunner.js";
-import { callOpenAiStream } from "./openai.js";
+import { callResponsesStream } from "./openai.js";
 import { healthzRouter } from "./routes/healthz.js";
 import { triggerOnFailureConsolidate } from "./walletHealth.js";
 import type { ResellerRuntime } from "./reseller/runtime.js";
@@ -82,6 +90,19 @@ export interface SupplierDeps {
 
 const ESCROW_REF_RE = /^[0-9a-fA-F]{64}#(?:0|[1-9]\d*)$/;
 const UUID_V4_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/;
+const DRAIN_MARKER_PATH = "/dev/shm/marketplace-draining";
+const RESPONSE_REQUEST_FIELDS: Record<string, true> = {
+  input: true,
+  instructions: true,
+  max_output_tokens: true,
+  tools: true,
+  tool_choice: true,
+  parallel_tool_calls: true,
+  reasoning: true,
+  text: true,
+  temperature: true,
+  top_p: true,
+};
 
 function sha256Hex(s: string): string {
   return createHash("sha256").update(s, "utf8").digest("hex");
@@ -115,6 +136,9 @@ function makeCapabilityHandler(deps: ResolvedDeps) {
   return async (_req: Request, res: Response, next: NextFunction) => {
     try {
       res.setHeader("Cache-Control", "no-store");
+      if (existsSync(DRAIN_MARKER_PATH)) {
+        return jsonError(res, 503, "supplier_draining", "supplier is draining");
+      }
 
       const utxo = await deps.chain.queryUtxo(deps.config.advertRef);
       if (utxo === null || !utxo.datumHex) {
@@ -135,6 +159,9 @@ function makeCapabilityHandler(deps: ResolvedDeps) {
       }
 
       const advertRefStr = `${deps.config.advertRef.txHash}#${deps.config.advertRef.index}`;
+      const llmCapability =
+        deps.config.capabilityKind === "chat" ||
+        deps.config.capabilityKind === "chat-session";
       return res.status(200).json({
         capability_id: datum.capability_id,
         model: datum.model,
@@ -143,8 +170,16 @@ function makeCapabilityHandler(deps: ResolvedDeps) {
         price_lovelace: datum.price_lovelace.toString(),
         advert_ref: advertRefStr,
         supplier_pkh: datum.supplier_pkh,
-        // SPEC FIX 2026-04-25: pub_key_hex required for buyer-side receipt verification
         pub_key_hex: deps.supplierKey.pubKeyHex,
+        ...(llmCapability
+          ? {
+              inference_api: "responses",
+              upstream_api: deps.config.llmBackend === "ollama"
+                ? "ollama"
+                : deps.config.openaiUpstreamApi,
+              reasoning_disabled: deps.config.openaiReasoningDisabled,
+            }
+          : {}),
         ...(deps.reseller
           ? { max_input_tokens: deps.reseller.maxInputTokens }
           : {}),
@@ -186,16 +221,11 @@ function makeStatusHandler(deps: ResolvedDeps) {
   };
 }
 
-// ─── /v1/chat/completions ──────────────────────────────────────────────────
+// ─── /v1/responses ────────────────────────────────────────────────────────
 
-interface ChatBody {
+interface ResponsesBody extends Partial<ResponseRequest> {
   model?: unknown;
-  messages?: unknown;
-  max_tokens?: unknown;
   stream?: unknown;
-  tools?: unknown;
-  tool_choice?: unknown;
-  functions?: unknown;
 }
 
 type AdvertResult =
@@ -227,6 +257,9 @@ function makeChatHandler(deps: ResolvedDeps) {
     let evidenceRecorded = false;
     let evidenceEscrowRef: string | null = null;
     try {
+      if (existsSync(DRAIN_MARKER_PATH)) {
+        return jsonError(res, 503, "supplier_draining", "supplier is draining");
+      }
       // ── 1. Header validation ──────────────────────────────────────────
       const headerVal = req.header("X-Escrow-Ref");
       if (!headerVal) {
@@ -241,32 +274,55 @@ function makeChatHandler(deps: ResolvedDeps) {
       evidenceEscrowRef = escrowRefStr;
 
       // ── 2. Body shape validation ─────────────────────────────────────
-      const body = (req.body ?? {}) as ChatBody;
+      const body = (req.body ?? {}) as ResponsesBody;
       if (body.stream === true) {
         return jsonError(res, 400, "streaming_not_supported", "stream:true is not supported");
       }
-      if (body.tools !== undefined) {
-        return jsonError(res, 400, "tools_not_supported", "tools[] is not supported");
+      const rawRequest = { ...(body as Record<string, unknown>) };
+      delete rawRequest.model;
+      delete rawRequest.stream;
+      const unknownField = Object.keys(rawRequest).find(
+        (key) => RESPONSE_REQUEST_FIELDS[key] !== true,
+      );
+      if (unknownField !== undefined) {
+        return jsonError(
+          res,
+          400,
+          "unsupported_parameter",
+          `unsupported Responses parameter: ${unknownField}`,
+        );
       }
-      if (body.tool_choice !== undefined) {
-        return jsonError(res, 400, "tools_not_supported", "tool_choice is not supported");
-      }
-      if (body.functions !== undefined) {
-        return jsonError(res, 400, "tools_not_supported", "functions[] is not supported");
-      }
-      if (!Array.isArray(body.messages) || body.messages.length === 0) {
-        return jsonError(res, 400, "messages_required", "messages must be a non-empty array");
-      }
-      const messages = body.messages as Array<{ role: unknown; content: unknown }>;
-      for (const m of messages) {
-        if (!m || typeof m !== "object" || typeof m.role !== "string" || typeof m.content !== "string") {
-          return jsonError(res, 400, "messages_required",
-            "each message must have string role and string content");
+      let responseRequest: ResponseRequest;
+      try {
+        responseRequest = normalizeResponseRequest(rawRequest);
+        if (responseRequest.input.length === 0 && responseRequest.instructions === undefined) {
+          throw new Error("input must not be empty without instructions");
         }
+        validateResponseToolOutputs(responseRequest.input);
+      } catch (error) {
+        return jsonError(
+          res,
+          400,
+          "invalid_request",
+          error instanceof Error ? error.message : String(error),
+        );
       }
-      const validatedMessages = messages as Array<{ role: "system" | "user" | "assistant"; content: string }>;
+      if (
+        deps.config.llmBackend === "openai" &&
+        deps.config.openaiUpstreamApi === "responses" &&
+        deps.config.openaiReasoningDisabled &&
+        responseRequest.reasoning?.effort !== undefined &&
+        responseRequest.reasoning.effort !== "none"
+      ) {
+        return jsonError(
+          res,
+          400,
+          "reasoning_disabled",
+          "reasoning is disabled by supplier policy",
+        );
+      }
       if (deps.reseller) {
-        const inputUnits = chatInputTokenUpperBound(validatedMessages);
+        const inputUnits = responseInputTokenUpperBound(responseRequest);
         if (inputUnits > deps.reseller.maxInputTokens) {
           return jsonError(
             res,
@@ -277,7 +333,6 @@ function makeChatHandler(deps: ResolvedDeps) {
         }
       }
 
-
       // ── 3. Resolve advert ────────────────────────────────────────────
       const advertResult = await fetchActiveAdvert(deps);
       if ("error" in advertResult) {
@@ -285,16 +340,70 @@ function makeChatHandler(deps: ResolvedDeps) {
         return jsonError(res, e.status, e.reason, e.message);
       }
       const advert = advertResult.datum;
+      if (body.model !== undefined && body.model !== advert.model) {
+        return jsonError(res, 400, "model_mismatch", "model does not match the advertised model");
+      }
+      if (responseRequest.max_output_tokens !== undefined) {
+        responseRequest = {
+          ...responseRequest,
+          max_output_tokens: Math.min(
+            responseRequest.max_output_tokens,
+            advert.max_output_tokens,
+          ),
+        };
+      }
 
-      const maxTokensRaw = body.max_tokens;
-      if (maxTokensRaw !== undefined) {
-        if (typeof maxTokensRaw !== "number" || !Number.isFinite(maxTokensRaw) || maxTokensRaw < 0) {
-          return jsonError(res, 400, "max_tokens_invalid",
-            "max_tokens must be a non-negative number");
+      const compatibilityApi = deps.config.llmBackend === "ollama"
+        ? "ollama"
+        : deps.config.openaiUpstreamApi;
+      if (compatibilityApi !== "responses") {
+        if (
+          compatibilityApi === "ollama" &&
+          responseRequest.input.some(
+            (item) => item.type === "function_call" || item.type === "function_call_output",
+          )
+        ) {
+          return jsonError(
+            res,
+            400,
+            "upstream_api_incompatible",
+            "ollama upstream does not support function call history",
+          );
         }
-        if (maxTokensRaw > advert.max_output_tokens) {
-          return jsonError(res, 400, "output_cap_exceeded",
-            `max_tokens ${maxTokensRaw} exceeds advertised cap ${advert.max_output_tokens}`);
+        try {
+          responseInputToChatMessages(responseRequest.input, responseRequest.instructions);
+        } catch (error) {
+          return jsonError(
+            res,
+            400,
+            "upstream_api_incompatible",
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+        if (responseRequest.reasoning !== undefined || responseRequest.text !== undefined) {
+          return jsonError(
+            res,
+            400,
+            "upstream_api_incompatible",
+            `${compatibilityApi} upstream does not support Responses reasoning or text options`,
+          );
+        }
+        if (
+          compatibilityApi === "ollama" &&
+          (
+            responseRequest.tools !== undefined ||
+            responseRequest.tool_choice !== undefined ||
+            responseRequest.parallel_tool_calls !== undefined ||
+            responseRequest.temperature !== undefined ||
+            responseRequest.top_p !== undefined
+          )
+        ) {
+          return jsonError(
+            res,
+            400,
+            "upstream_api_incompatible",
+            "ollama upstream does not support these Responses execution options",
+          );
         }
       }
 
@@ -335,10 +444,12 @@ function makeChatHandler(deps: ResolvedDeps) {
         return jsonError(res, 409, "request_spec_mismatch",
           "request_spec_hash in escrow does not match advert spec");
       }
-      const expectedPromptHash = sha256Hex(canonicalize(validatedMessages));
+      const expectedPromptHash = sha256Hex(
+        canonicalize(responseRequestCommitment(responseRequest)),
+      );
       if (escrowDatum.prompt_hash !== expectedPromptHash) {
         return jsonError(res, 409, "prompt_mismatch",
-          "prompt_hash in escrow does not match request body messages");
+          "prompt_hash in escrow does not match the Responses request");
       }
 
       // ── 7. Deadline ──────────────────────────────────────────────────
@@ -385,7 +496,7 @@ function makeChatHandler(deps: ResolvedDeps) {
         try {
           await deps.reseller.recordReceived(
             escrowRefStr,
-            validatedMessages,
+            responseRequest,
             req.header("X-Vector-Public-Preview") === "1",
           );
           evidenceRecorded = true;
@@ -500,7 +611,7 @@ function makeChatHandler(deps: ResolvedDeps) {
         claimedRef,
         advert,
         escrowDatum,
-        requestBody: { messages: validatedMessages },
+        requestBody: responseRequest,
       });
 
       // ── 12. 202 Accepted ─────────────────────────────────────────────
@@ -524,7 +635,7 @@ function makeChatHandler(deps: ResolvedDeps) {
   };
 }
 
-// ─── GET /v1/chat/completions/:jobId ───────────────────────────────────────
+// ─── GET /v1/responses/:jobId ─────────────────────────────────────────────
 
 function makeGetJobHandler(deps: ResolvedDeps) {
   return (req: Request, res: Response) => {
@@ -555,13 +666,11 @@ function makeGetJobHandler(deps: ResolvedDeps) {
         return jsonError(res, 500, "wrong_payload_kind",
           "non-chat payload returned to chat poll route");
       }
+      const { kind: _kind, ...responsePayload } = payload;
+      void _kind;
       return res.status(200).json({
-        choices: payload.choices,
-        usage: payload.usage,
-        receipt: payload.receipt,
-        receipt_signature: payload.receipt_signature,
+        ...responsePayload,
         escrow_ref: record.escrowRef,
-        submitted_ref: payload.submitted_ref,
       });
     }
     // failed
@@ -1125,7 +1234,7 @@ function makeGetOcrJobHandler(deps: ResolvedDeps) {
 // Escrow bookends with off-chain turns:
 //   start   → validate (mirror makeChatHandler 1-7, but no messages) → Claim
 //             (Open→Claimed) → create session + arm idle/hard-cap watchdog → 200
-//   message → SSE stream a turn via callOpenAiStream; zero chain interaction
+//   message → canonical Responses SSE via callResponsesStream; zero chain interaction
 //   end     → endChatSession (Submit transcript receipt; Claimed→Submitted) → 200
 //
 // The buyer then Accepts off this route (server-side, in the buyer-app),
@@ -1171,6 +1280,9 @@ function makeChatSessionHandlers(deps: ResolvedDeps) {
     // record takes ownership) — the catch-all only releases its own.
     let acquiredRef: string | null = null;
     try {
+      if (existsSync(DRAIN_MARKER_PATH)) {
+        return jsonError(res, 503, "supplier_draining", "supplier is draining");
+      }
       // ── 1. Header ───────────────────────────────────────────────────
       const headerVal = req.header("X-Escrow-Ref");
       if (!headerVal) {
@@ -1337,47 +1449,83 @@ function makeChatSessionHandlers(deps: ResolvedDeps) {
         return jsonError(res, 404, "chat_session_not_found",
           `no active chat session for ${escrowRefStr}`);
       }
-      // Two body shapes: legacy {content} (single user turn) and
-      // {messages, tools?, tool_choice?} (multi-message delta — e.g. tool
-      // results — appended to the transcript as one turn).
-      const body = (req.body ?? {}) as {
-        content?: unknown;
-        messages?: unknown;
-        tools?: unknown;
-        tool_choice?: unknown;
-      };
-      let delta: ChatMessage[];
-      if (Array.isArray(body.messages)) {
-        const normalized: ChatMessage[] = [];
-        for (const raw of body.messages) {
-          const msg = normalizeChatMessage(raw);
-          if (!msg) {
-            return jsonError(res, 400, "invalid_messages",
-              "body.messages must be OpenAI-shaped {role, content, tool_calls?, tool_call_id?} objects");
-          }
-          normalized.push(msg);
-        }
-        const last = normalized[normalized.length - 1];
-        if (!last || (last.role !== "user" && last.role !== "tool")) {
-          return jsonError(res, 400, "invalid_messages",
-            "body.messages must end with a user or tool message");
-        }
-        delta = normalized;
-      } else {
-        const content = typeof body.content === "string" ? body.content : "";
-        if (content.length === 0) {
-          return jsonError(res, 400, "content_required", "body.content must be a non-empty string");
-        }
-        delta = [{ role: "user", content }];
+      if (record.turnInFlight) {
+        return jsonError(res, 409, "chat_turn_in_progress", "another turn is already in progress");
       }
-      const tools = Array.isArray(body.tools) && body.tools.length > 0 ? body.tools : undefined;
-      const toolChoice = tools !== undefined ? body.tool_choice : undefined;
+      const rawTurnRequest = req.body ?? {};
+      const unknownField = Object.keys(rawTurnRequest).find(
+        (key) => RESPONSE_REQUEST_FIELDS[key] !== true,
+      );
+      if (unknownField !== undefined) {
+        return jsonError(
+          res,
+          400,
+          "unsupported_parameter",
+          `unsupported Responses parameter: ${unknownField}`,
+        );
+      }
 
-      // Pause the idle timer while a turn is in flight; re-arm when it ends so
-      // a long generation never trips the auto-end mid-stream.
-      if (record.idleTimer) { clearTimeout(record.idleTimer); record.idleTimer = undefined; }
-      const transcriptLenBefore = record.transcript.length;
-      deps.chatSessions.appendMessages(escrowRefStr, delta);
+      let turnRequest: ResponseRequest;
+      let prospectiveTranscript: ResponseRequest["input"];
+      try {
+        turnRequest = normalizeResponseRequest(rawTurnRequest);
+        if (turnRequest.max_output_tokens !== undefined) {
+          turnRequest = {
+            ...turnRequest,
+            max_output_tokens: Math.min(
+              turnRequest.max_output_tokens,
+              record.advert.max_output_tokens,
+            ),
+          };
+        }
+        prospectiveTranscript = [...record.transcript, ...turnRequest.input];
+        validateResponseToolOutputs(prospectiveTranscript);
+      } catch (error) {
+        return jsonError(
+          res,
+          400,
+          "invalid_request",
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+
+      if (
+        deps.config.openaiUpstreamApi === "responses" &&
+        deps.config.openaiReasoningDisabled &&
+        turnRequest.reasoning?.effort !== undefined &&
+        turnRequest.reasoning.effort !== "none"
+      ) {
+        return jsonError(
+          res,
+          400,
+          "reasoning_disabled",
+          "reasoning is disabled by supplier policy",
+        );
+      }
+
+      if (deps.config.openaiUpstreamApi !== "responses") {
+        try {
+          responseInputToChatMessages(
+            prospectiveTranscript,
+            turnRequest.instructions,
+          );
+        } catch (error) {
+          return jsonError(
+            res,
+            400,
+            "upstream_api_incompatible",
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+        if (turnRequest.reasoning !== undefined || turnRequest.text !== undefined) {
+          return jsonError(
+            res,
+            400,
+            "upstream_api_incompatible",
+            "chat-completions upstream does not support Responses reasoning or text options",
+          );
+        }
+      }
 
       res.status(200);
       res.setHeader("Content-Type", "text/event-stream");
@@ -1387,57 +1535,46 @@ function makeChatSessionHandlers(deps: ResolvedDeps) {
       if (typeof (res as Response & { flushHeaders?: () => void }).flushHeaders === "function") {
         (res as Response & { flushHeaders: () => void }).flushHeaders();
       }
-      const sse = (frame: Record<string, unknown>): void => {
-        res.write(`data: ${JSON.stringify(frame)}\n\n`);
+      const sendEvent = (event: ResponseStreamEvent): void => {
+        res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
       };
+      record.turnInFlight = true;
+      if (record.idleTimer) {
+        clearTimeout(record.idleTimer);
+        record.idleTimer = undefined;
+      }
+      const transcriptLenBefore = record.transcript.length;
+      deps.chatSessions.appendInput(escrowRefStr, turnRequest.input);
 
       try {
-        // Stateful upstreams (OpenClaw) key a persistent agent session off the
-        // OpenAI `user` field and carry the history themselves — send only this
-        // turn's delta or the transcript duplicates into the upstream context
-        // every turn. Stateless upstreams get the full transcript as before.
         const stateful = deps.config.openaiSessionPassthrough;
-        const result = await callOpenAiStream(
+        const result = await callResponsesStream(
           {
             baseUrl: deps.config.openaiBaseUrl,
+            responsesUrl: deps.config.openaiResponsesUrl || undefined,
+            responsesStreamOnly: deps.config.openaiResponsesStreamOnly,
+            upstreamApi: deps.config.openaiUpstreamApi,
             model: deps.config.openaiModelOverride || record.advert.model,
-            messages: stateful ? delta : record.transcript,
+            ...turnRequest,
+            input: stateful ? turnRequest.input : prospectiveTranscript,
             timeoutMs: deps.config.openaiTimeoutMs,
             apiKey: deps.config.openaiApiKey,
             maxTokens: deps.config.openaiMaxTokens,
             disableReasoning: deps.config.openaiReasoningDisabled,
-            tools,
-            toolChoice,
             user: stateful ? escrowRefStr : undefined,
           },
-          (tok) => sse({ type: "token", value: tok }),
+          sendEvent,
         );
-        // Build the assistant message once and send it VERBATIM in the done
-        // frame: the gateway mirrors this object so both transcripts stay
-        // hash-identical for the receipt (field presence matters).
-        const assistantMsg: ChatMessage = { role: "assistant", content: result.content };
-        if (result.tool_calls && result.tool_calls.length > 0) assistantMsg.tool_calls = result.tool_calls;
-        deps.chatSessions.appendAssistant(escrowRefStr, assistantMsg, {
-          prompt_tokens: result.prompt_tokens,
-          completion_tokens: result.completion_tokens,
-        });
-        const finishReason =
-          result.finish_reason === "tool_calls" || (result.tool_calls?.length ?? 0) > 0
-            ? "tool_calls"
-            : "stop";
-        sse({
-          type: "done",
-          message: assistantMsg,
-          finish_reason: finishReason,
-          usage: { prompt_tokens: result.prompt_tokens, completion_tokens: result.completion_tokens },
-        });
+        deps.chatSessions.appendResponse(escrowRefStr, result.response);
       } catch (err) {
-        // Failed turn: the gateway mirror never saw this delta, so drop it here
-        // too — otherwise a retry re-sends it and the transcripts diverge.
         deps.chatSessions.truncateTranscript(escrowRefStr, transcriptLenBefore);
-        const errMsg = err instanceof Error ? err.message : String(err);
-        sse({ type: "error", message: errMsg });
+        const message = err instanceof Error ? err.message : String(err);
+        sendEvent({
+          type: "error",
+          error: { type: "supplier_error", message },
+        });
       } finally {
+        record.turnInFlight = false;
         if (record.status === "active") armIdleTimer(record);
         res.end();
       }
@@ -1459,8 +1596,12 @@ function makeChatSessionHandlers(deps: ResolvedDeps) {
         return jsonError(res, 400, "escrow_ref_malformed", 'X-Escrow-Ref must match "<64-hex>#<int>"');
       }
       const escrowRefStr = `${escrowRef.txHash}#${escrowRef.index}`;
-      if (!deps.chatSessions.get(escrowRefStr)) {
+      const existing = deps.chatSessions.get(escrowRefStr);
+      if (!existing) {
         return jsonError(res, 404, "chat_session_not_found", `no chat session for ${escrowRefStr}`);
+      }
+      if (existing.turnInFlight) {
+        return jsonError(res, 409, "chat_turn_in_progress", "cannot end a session during a turn");
       }
       const record = await endChatSession({ deps: endDeps, escrowRef: escrowRefStr, trigger: "end" });
       if (!record) {
@@ -1576,8 +1717,8 @@ export function createApp(deps: SupplierDeps): Application {
     app.post("/v1/chat/message", chat.message);
     app.post("/v1/chat/end", chat.end);
   } else {
-    app.post("/v1/chat/completions", makeChatHandler(resolved));
-    app.get("/v1/chat/completions/:jobId", makeGetJobHandler(resolved));
+    app.post("/v1/responses", makeChatHandler(resolved));
+    app.get("/v1/responses/:jobId", makeGetJobHandler(resolved));
   }
 
   // Centralised error handler (4 args required by Express).

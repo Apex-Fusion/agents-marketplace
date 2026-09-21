@@ -1,8 +1,8 @@
 # Local Agents Marketplace — Architecture (v1)
 
-> Status: accepted for M0–M1 implementation
-> Dated: 2026-04-24
-> Scope: MVP validating "can agents drive prompts through a buyer → on-chain escrow → supplier inference path on Vector L2 / Cardano" — starting with a CPU-bound supplier on Hetzner.
+> Status: historical M0–M1 foundation with the current Responses interface documented below
+> Dated: 2026-04-24; Responses interface updated 2026-09-21
+> Scope: the original MVP validates buyer → bonded escrow → supplier inference on Vector. Sections 1.1 and 5 define the current inference API.
 
 ---
 
@@ -10,15 +10,26 @@
 
 **What this is.** A two-sided marketplace where buyers (agents or humans) submit prompts to suppliers running inference on their own hardware, with each job settled in AP3X through on-chain bonded escrow on Vector L2, and receive signed-receipt responses. The primary validation goal is **technical feasibility + lifecycle** ("can it be done end-to-end"), not demand modelling or economic stress testing.
 
-**What v1 is NOT.**
-- Not agentic on the supplier side. Suppliers answer single prompts. Buyer agents drive multiple prompts.
-- Not LLM-only in design. Capability model is open from day 1 (whisper / kokoro / image generation are planned siblings), but the first supplier is an LLM.
-- Not multi-slot. Single-slot per supplier process. Multi-capability operators run multiple processes.
-- Not multi-chain. Vector only (testnet and mainnet).
-- Not disputed. M1 ships happy-path escrow only. Module-1 disputes wire in M2.
-- Not streaming. `stream: true` is rejected by suppliers.
-- Not tool-calling. `tools` / `tool_choice` / `functions` are rejected by suppliers.
-- Not privacy-preserving end-to-end. TLS to supplier only, SaaS-parity model, documented in supplier ToS.
+**Historical M0–M1 scope.** These limits describe the first supplier milestone. They are not the current gateway contract.
+- Suppliers answered one prompt. Buyer agents drove multi-prompt work.
+- The capability model was open, but the first supplier was a CPU LLM.
+- Each supplier process exposed one capability and one execution slot.
+- Vector was the only chain.
+- M1 shipped the happy-path escrow without disputes.
+- The first direct supplier route rejected streaming and tools.
+- TLS protected supplier transport. Suppliers still saw plaintext prompts.
+
+### 1.1 Current Responses interface
+
+The public gateway exposes `POST /openai/v1/responses` and owned `GET`/`DELETE /openai/v1/responses/:id`. It has no Chat Completions alias. Normal keys create one `llm.text.generate.v1` escrow per request. Demo keys use managed `llm.chat.v1` sessions with one escrow per session.
+
+Clients continue with `previous_response_id`. The gateway replays complete input and output Items. It never guesses a session from a text prefix. Stored chains accept completed and incomplete parents, require the same owner and model, honor supplier pins, and fork when the parent is not the current session head.
+
+`store:true` is the default and keeps encrypted response chains for 30 days. A `store:false` result is not available for later lookup or continuation, although that request can cite an existing stored parent. An active escrow session still keeps encrypted operational transcript checkpoints until close, invalidation, or reclaim. Partial in-flight output is not a resumable stored response. Master-key rotation reseals wallets, stored Responses, and active transcripts together.
+
+The supported input is a string or typed text, function-call, function-call-output, and reasoning Items. Function tools use the flat Responses shape. Unsupported hosted tools, modalities, and execution controls fail explicitly. Supplier capability fields `inference_api`, `upstream_api`, and `reasoning_disabled` prevent incompatible requests before escrow funding.
+
+Streaming uses typed Responses SSE and ends with `response.completed`, `response.incomplete`, or `response.failed`. It has no public `[DONE]` sentinel. One-shot output stays buffered through settlement. Session text can stream live. Full terminal output Items are authoritative for replay.
 
 ## 2. Decisions resolved (Q&A → architecture inputs)
 
@@ -49,7 +60,7 @@
 │  (web UI + lib   │────────────────────────▶│  FastAPI / Node        │
 │   for agents)    │                         │  /capability           │
 │                  │                         │  /status               │
-│  optional:       │                         │  /v1/chat/completions  │
+│  Responses:      │                         │  /v1/responses         │
 │  OpenRouter      │                         │          │             │
 │  client-side     │                         │          ▼             │
 │  fallback        │                         │   Ollama (local LLM)   │
@@ -107,8 +118,8 @@ EscrowDatum {
   supplier_pkh:           VerificationKeyHash,
   advert_ref:             OutputReference,    // SPEC-LOCK to ad UTxO
   capability_id:          ByteArray,          // duplicated for indexer filter
-  request_spec_hash:      ByteArray(32),      // sha256 canonical JSON of request envelope
-  prompt_hash:            ByteArray(32),      // sha256 of messages
+  request_spec_hash:      ByteArray(32),      // sha256 of canonical advert execution limits
+  prompt_hash:            ByteArray(32),      // one-shot execution request or session-nonce commitment
   payment_lovelace:       Int,
   buyer_bond_lovelace:    Int,
   supplier_bond_lovelace: Int,
@@ -164,55 +175,100 @@ EscrowState = Open | Claimed | Submitted | Accepted | Reclaimed | Released
 
 Terminal states: `Accepted`, `Reclaimed`, `Released`.
 
-## 5. HTTP contracts
+## 5. HTTP and receipt contracts
 
-### 5.1 Supplier endpoints
+### 5.1 Public gateway
 
+```text
+POST /openai/v1/responses
+GET  /openai/v1/responses/{response_id}
+DELETE /openai/v1/responses/{response_id}
+GET  /openai/v1/models
 ```
+
+The client sets its OpenAI SDK base URL to `https://<gateway>/openai/v1` and calls `client.responses.create(...)`. The request uses `input`, not Chat Completions `messages`. Public controls include `model`, `stream`, `store`, `previous_response_id`, `metadata`, `include`, `public_preview`, and `x_vector.supplier_pkh`.
+
+The public result is an OpenAI Response object. A normal one-shot result adds `x_vector:{receipt,receipt_signature,escrow_ref}`. Consumers must inspect `status`, `incomplete_details`, refusals, and every output Item. Derived output text is not the replay record.
+
+The retained Vector extension uses:
+
+```text
+POST /openai/v1/chat/sessions
+POST /openai/v1/chat/sessions/{id}/messages
+POST /openai/v1/chat/sessions/{id}/close
+```
+
+Turn bodies use Responses execution fields and Items. These routes are not OpenAI standard routes.
+
+### 5.2 Supplier endpoints
+
+```text
 GET /capability
   → { capability_id, model, max_output_tokens, max_processing_ms,
-      price_lovelace, advert_ref, supplier_pkh }
-  Must match on-chain advertisement. Buyer SHOULD verify.
+      price_lovelace, advert_ref, supplier_pkh, pub_key_hex,
+      inference_api?, upstream_api?, reasoning_disabled?,
+      max_input_tokens? }
 
 GET /status
   → { status: "free"|"working"|"offline",
-      current_escrow_ref?: "txHash#ix",
-      last_seen: iso8601 }
+      current_escrow_ref?, active_sessions, max_sessions, last_seen }
 
-POST /v1/chat/completions
-  Headers: X-Escrow-Ref: <txHash>#<ix>
-  Body: OpenAI-compatible ChatCompletionRequest
-  Rejects: stream=true, tools[], tool_choice, functions
-  Rejects: capability mismatch, max_output_tokens > advertised
-  Flow:
-    1. Pull escrow UTxO by ref (via Ogmios query)
-    2. Verify: state=Open, supplier_pkh=me, capability_id matches,
-       request_spec_hash = sha256(canonical(envelope)),
-       prompt_hash = sha256(messages)
-    3. Submit Claim tx (Open → Claimed)
-    4. Call local LLM
-    5. Build receipt: { prompt_hash, response_hash, model,
-                        prompt_tokens, completion_tokens, wallclock_ms,
-                        supplier_pkh, escrow_ref }
-    6. Sign receipt (Ed25519 with supplier key)
-    7. Submit Submit tx with result_receipt_hash = sha256(canonical(receipt))
-    8. Return { choices, usage, receipt, receipt_signature }
+POST /v1/responses
+  Header: X-Escrow-Ref: <txHash>#<ix>
+  Body: normalized Responses execution request plus advertised model
 ```
 
-### 5.2 Indexer endpoints
+The one-shot supplier route performs this flow:
 
+1. Validate the request and upstream compatibility.
+2. Load the referenced Open escrow and Active advert.
+3. Verify supplier, capability, `request_spec_hash`, `prompt_hash`, and deadline.
+4. Claim the escrow.
+5. Run the configured native Responses or explicit compatibility adapter.
+6. Build a terminal Response with complete output Items.
+7. Sign the receipt and Submit its hash on chain.
+8. Return the terminal Response, receipt, signature, and Submitted reference.
+
+Native Responses, chat-completions compatibility, and legacy Ollama modes are explicit. There is no HTTP fallback. Compatibility adapters reject reasoning, replay, tool, or text features that they cannot represent.
+
+The chat-session supplier routes are `/v1/chat/start`, `/v1/chat/message`, and `/v1/chat/end`. Message output is typed Responses SSE. The session records ordered input and output Items for its close receipt. Native providers can place complete Items only in `response.output_item.done`; the adapter collects those Items by output index and never rebuilds them from partial deltas.
+
+### 5.3 Receipt hashes
+
+The canonical JSON function recursively sorts object keys in code-unit order, NFC-normalizes keys and strings, preserves array order, drops undefined object fields, and uses compact `JSON.stringify` number output. This is the repository's defined subset. It is not plain RFC 8785 JCS.
+
+For a one-shot response:
+
+```text
+prompt_hash   = sha256(canonical(normalized_execution_request))
+response_hash = sha256(canonical({output,status,incomplete_details}))
 ```
-GET /suppliers                       — all Active adverts + cached status
-GET /suppliers/{pkh}                 — single supplier detail + recent jobs
-GET /capabilities                    — distinct capability_id list with counts
-GET /capabilities/{id}/suppliers     — filtered list, sortable by price/latency
-GET /escrows/{ref}                   — state lookup by OutputReference
+
+The request commitment includes `input` and each present execution control: `instructions`, `max_output_tokens`, `tools`, `tool_choice`, `parallel_tool_calls`, `reasoning`, `text`, `temperature`, and `top_p`. It excludes model routing, streaming, storage, metadata, and continuation IDs.
+
+For a chat session:
+
+```text
+prompt_hash   = sha256(canonical({kind:"llm.chat.v1",session_nonce}))
+response_hash = sha256(canonical(ordered_input_and_output_items))
+```
+
+Receipt fields keep the existing `prompt_tokens` and `completion_tokens` names. Input bounds count the full transmitted execution JSON in UTF-8, including instructions and tools, without NFC reduction.
+
+### 5.4 Indexer endpoints
+
+```text
+GET /suppliers
+GET /suppliers/{pkh}
+GET /capabilities
+GET /capabilities/{id}/suppliers
+GET /escrows/{ref}
 GET /escrows?buyer={pkh}|supplier={pkh}
-GET /events?stream=1                 — SSE: new ads, escrow transitions
-GET /health                          — sync cursor, Ogmios status
+GET /events?stream=1
+GET /health
 ```
 
-Every field traces back to chain via `advert_ref` / `escrow_ref`. Indexer serves cached data for speed.
+Every field traces back to chain through `advert_ref` or `escrow_ref`. The indexer serves cached data for discovery and state lookup.
 
 ## 6. Chain-follower extension (from apex-dashboard)
 
@@ -244,7 +300,7 @@ packages/
     cbor/
       AdvertDatum.ts
       EscrowDatum.ts
-      canonical.ts                   # deterministic JSON (RFC-8785 subset)
+      canonical.ts                   # sorted/NFC compact JSON subset; not plain RFC 8785 JCS
     receipt/
       build.ts  sign.ts  verify.ts
 buyer/
@@ -287,7 +343,7 @@ Malformed datum · escrow to wrong script · supplier claims escrow addressed to
 ## 9. Open follow-ups (not blocking M0 / M1)
 
 1. **Locate Module-1 contract source** before M2. Initial grep across local checkouts failed — possibly on another machine or in a private repo.
-2. **Canonical JSON** for `request_spec_hash`, `prompt_hash`, receipt. Proposal: RFC-8785 JCS subset (sorted keys, UTF-8 NFC, no whitespace).
+2. **Resolved — canonical JSON.** Hashes use the repository sorted-key, NFC-normalized, compact JSON subset defined in section 5.3. It is not plain RFC 8785 JCS.
 3. **`ACCEPT_WINDOW` and `network_buffer` constants**. Proposed 10 min / 30 s.
 4. **Receipt signing key**: same wallet key as `supplier_pkh`, or derived Ed25519 sub-key? Same-key is simpler; sub-key isolates risk.
 5. **Mainnet safety**: env-gate + explicit flag + wallet allowlist before any mainnet Tier-3 run.

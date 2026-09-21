@@ -1,130 +1,152 @@
-/**
- * gateway/src/openai/validate.ts — request body validation for chat endpoints.
- */
-
-import { normalizeChatMessage, type ChatMessage } from "@marketplace/shared/tx";
+import { normalizeResponseRequest, type ResponseRequest } from "@marketplace/shared/responses";
 import { badRequest } from "./errors.js";
 
-export interface ParsedChatRequest {
+export interface ParsedResponseRequest extends ResponseRequest {
   model: string;
-  messages: ChatMessage[];
-  maxTokens?: number;
   stream: boolean;
-  tools?: unknown[];
-  toolChoice?: unknown;
+  store: boolean;
+  previousResponseId?: string;
+  metadata?: Record<string, unknown>;
+  include?: ["reasoning.encrypted_content"];
   publicPreview: boolean;
   supplierPkh?: string;
 }
 
-const ROLES = new Set(["system", "user", "assistant"]);
+const EXECUTION_FIELDS: Record<string, true> = {
+  input: true,
+  instructions: true,
+  max_output_tokens: true,
+  tools: true,
+  tool_choice: true,
+  parallel_tool_calls: true,
+  reasoning: true,
+  text: true,
+  temperature: true,
+  top_p: true,
+};
+const PUBLIC_FIELDS: Record<string, true> = {
+  model: true,
+  stream: true,
+  store: true,
+  previous_response_id: true,
+  metadata: true,
+  include: true,
+  x_vector: true,
+  public_preview: true,
+};
 
-/** Validate an OpenAI chat.completions-style body. Default path rejects
- * tools/functions; `allowTools` (demo keys) accepts tools/tool_choice, the
- * `tool` role, null content and assistant tool_calls, normalizing every
- * message into canonical mirror shape. Silently ignores temperature/n/stop/
- * top_p/etc (documented). */
-export function parseChatRequest(body: unknown, opts?: { allowTools?: boolean }): ParsedChatRequest {
-  const allowTools = opts?.allowTools === true;
-  if (typeof body !== "object" || body === null) {
+function normalizeExecution(raw: Record<string, unknown>): ResponseRequest {
+  const execution: Record<string, unknown> = {};
+  for (const field of Object.keys(EXECUTION_FIELDS)) {
+    if (field in raw) execution[field] = raw[field];
+  }
+  if (!("input" in execution)) execution.input = [];
+  try {
+    return normalizeResponseRequest(execution);
+  } catch (error) {
+    throw badRequest("invalid_request", error instanceof Error ? error.message : String(error));
+  }
+}
+
+export function parseResponseRequest(body: unknown): ParsedResponseRequest {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
     throw badRequest("invalid_body", "request body must be a JSON object");
   }
-  const b = body as Record<string, unknown>;
-
-  if (!allowTools && ("tools" in b || "tool_choice" in b || "functions" in b || "function_call" in b)) {
-    throw badRequest("unsupported_parameter", "tools and function-calling are not supported by this gateway");
+  const raw = body as Record<string, unknown>;
+  for (const field of Object.keys(raw)) {
+    if (EXECUTION_FIELDS[field] !== true && PUBLIC_FIELDS[field] !== true) {
+      throw badRequest("unsupported_parameter", `unsupported parameter: ${field}`);
+    }
   }
-  if (allowTools && ("functions" in b || "function_call" in b)) {
-    throw badRequest("unsupported_parameter", "legacy functions/function_call are not supported; use tools");
-  }
-
-  const model = b.model;
-  if (typeof model !== "string" || model === "") {
+  if (typeof raw.model !== "string" || raw.model.length === 0) {
     throw badRequest("invalid_model", "`model` is required and must be a non-empty string");
   }
-
-  const rawMessages = b.messages;
-  if (!Array.isArray(rawMessages) || rawMessages.length === 0) {
-    throw badRequest("invalid_messages", "`messages` is required and must be a non-empty array");
+  if (raw.stream !== undefined && typeof raw.stream !== "boolean") {
+    throw badRequest("invalid_stream", "`stream` must be a boolean");
   }
-  const messages: ChatMessage[] = [];
-  for (const m of rawMessages) {
-    if (allowTools) {
-      const msg = normalizeChatMessage(m);
-      if (!msg) {
-        throw badRequest("invalid_messages", "each message must be OpenAI-shaped {role, content, tool_calls?, tool_call_id?}");
-      }
-      messages.push(msg);
-      continue;
+  if (raw.store !== undefined && typeof raw.store !== "boolean") {
+    throw badRequest("invalid_store", "`store` must be a boolean");
+  }
+  if (raw.previous_response_id !== undefined &&
+      (typeof raw.previous_response_id !== "string" || raw.previous_response_id.length === 0)) {
+    throw badRequest("invalid_previous_response_id", "`previous_response_id` must be a non-empty string");
+  }
+  if (raw.metadata !== undefined &&
+      (typeof raw.metadata !== "object" || raw.metadata === null || Array.isArray(raw.metadata))) {
+    throw badRequest("invalid_metadata", "`metadata` must be an object");
+  }
+
+  let include: ["reasoning.encrypted_content"] | undefined;
+  if (raw.include !== undefined) {
+    if (!Array.isArray(raw.include) || raw.include.some((value) => value !== "reasoning.encrypted_content")) {
+      throw badRequest("unsupported_parameter", "only `reasoning.encrypted_content` is supported in `include`");
     }
-    if (
-      typeof m !== "object" ||
-      m === null ||
-      typeof (m as { role?: unknown }).role !== "string" ||
-      typeof (m as { content?: unknown }).content !== "string" ||
-      !ROLES.has((m as { role: string }).role)
-    ) {
-      throw badRequest("invalid_messages", "each message must be {role: system|user|assistant, content: string}");
-    }
-    const mm = m as { role: "system" | "user" | "assistant"; content: string };
-    messages.push({ role: mm.role, content: mm.content });
+    if (raw.include.length > 0) include = ["reasoning.encrypted_content"];
   }
-
-  let tools: unknown[] | undefined;
-  let toolChoice: unknown;
-  if (allowTools && Array.isArray(b.tools) && b.tools.length > 0) {
-    tools = b.tools;
-    toolChoice = b.tool_choice;
+  if (raw.public_preview !== undefined && typeof raw.public_preview !== "boolean") {
+    throw badRequest("invalid_public_preview", "`public_preview` must be a boolean when provided");
   }
-
-  let maxTokens: number | undefined;
-  const mt = b.max_tokens ?? b.max_completion_tokens;
-  if (mt !== undefined && mt !== null) {
-    if (typeof mt !== "number" || !Number.isInteger(mt) || mt <= 0) {
-      throw badRequest("invalid_max_tokens", "`max_tokens` must be a positive integer");
-    }
-    maxTokens = mt;
-  }
-
-  if (b.public_preview !== undefined && typeof b.public_preview !== "boolean") {
-    throw badRequest(
-      "invalid_public_preview",
-      "`public_preview` must be a boolean when provided",
-    );
-  }
-  const publicPreview = b.public_preview === true;
 
   let supplierPkh: string | undefined;
-  if (b.x_vector !== undefined) {
-    if (
-      typeof b.x_vector !== "object" ||
-      b.x_vector === null ||
-      Array.isArray(b.x_vector)
-    ) {
+  if (raw.x_vector !== undefined) {
+    if (typeof raw.x_vector !== "object" || raw.x_vector === null || Array.isArray(raw.x_vector)) {
       throw badRequest("invalid_x_vector", "`x_vector` must be an object");
     }
-    const requested = (b.x_vector as Record<string, unknown>).supplier_pkh;
-    if (
-      requested !== undefined &&
-      (typeof requested !== "string" || !/^[0-9a-fA-F]{56}$/.test(requested))
-    ) {
-      throw badRequest(
-        "invalid_supplier_pkh",
-        "`x_vector.supplier_pkh` must be a 28-byte hex payment-key hash",
-      );
+    const vector = raw.x_vector as Record<string, unknown>;
+    for (const field of Object.keys(vector)) {
+      if (field !== "supplier_pkh") throw badRequest("unsupported_parameter", `unsupported x_vector parameter: ${field}`);
+    }
+    const requested = vector.supplier_pkh;
+    if (requested !== undefined && (typeof requested !== "string" || !/^[0-9a-fA-F]{56}$/.test(requested))) {
+      throw badRequest("invalid_supplier_pkh", "`x_vector.supplier_pkh` must be a 28-byte hex payment-key hash");
     }
     if (typeof requested === "string") supplierPkh = requested.toLowerCase();
   }
 
-
-  const stream = b.stream === true;
+  const request = normalizeExecution(raw);
+  const previousResponseId = raw.previous_response_id as string | undefined;
+  if (request.input.length === 0 && request.instructions === undefined && previousResponseId === undefined) {
+    throw badRequest("invalid_input", "`input` must not be empty without instructions or previous_response_id");
+  }
   return {
-    model,
-    messages,
-    maxTokens,
-    stream,
-    tools,
-    toolChoice,
-    publicPreview,
+    ...request,
+    model: raw.model,
+    stream: raw.stream === true,
+    store: raw.store !== false,
+    previousResponseId,
+    metadata: raw.metadata as Record<string, unknown> | undefined,
+    include,
+    publicPreview: raw.public_preview === true,
     supplierPkh,
   };
+}
+
+export function executionRequest(parsed: ParsedResponseRequest): ResponseRequest {
+  const request: ResponseRequest & Record<string, unknown> = { input: parsed.input };
+  for (const field of Object.keys(EXECUTION_FIELDS)) {
+    if (field === "input") continue;
+    const value = parsed[field as keyof ParsedResponseRequest];
+    if (value !== undefined) request[field] = value;
+  }
+  return request;
+}
+
+export function parseSessionTurnRequest(body: unknown): ResponseRequest & { stream: boolean } {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    throw badRequest("invalid_body", "request body must be a JSON object");
+  }
+  const raw = body as Record<string, unknown>;
+  for (const field of Object.keys(raw)) {
+    if (field !== "stream" && EXECUTION_FIELDS[field] !== true) {
+      throw badRequest("unsupported_parameter", `unsupported parameter: ${field}`);
+    }
+  }
+  if (raw.stream !== undefined && typeof raw.stream !== "boolean") {
+    throw badRequest("invalid_stream", "`stream` must be a boolean");
+  }
+  const request = normalizeExecution(raw);
+  if (request.input.length === 0 && request.instructions === undefined) {
+    throw badRequest("invalid_input", "`input` must not be empty without instructions");
+  }
+  return { ...request, stream: raw.stream !== false };
 }

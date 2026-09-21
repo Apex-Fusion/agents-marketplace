@@ -39,18 +39,17 @@ export const REQUEST_SPEC_HASH =
   "fd14d4c9bb9a1dcefa63f9d5581e3adc9a3e2a984e5e762c8e8589fb1bc61d61";
 
 /**
- * PROMPT_HASH = sha256(canonical(TEST_MESSAGES))
- * = sha256(canonical([{role:"user", content:"Hello, who are you?"}]))
- *
- * CATHERINE M1-C-green: replaced Caroline placeholder hashes with computed values
- * matching the on-chain hash convention used by buildPostEscrowTx.
+ * PROMPT_HASH = sha256(canonical(responseRequestCommitment(TEST_RESPONSE_REQUEST))).
  */
 export const PROMPT_HASH =
-  "570efb953417ae9974db00aba826e8e67110c26de86a486b1abb196ef7228581";
+  "29e5230dde416ad49901baf3ef90e411df401f3aaedba5d8e98e969e48472c9e";
 
-/** The messages array that corresponds to PROMPT_HASH. */
-export const TEST_MESSAGES = [
-  { role: "user" as const, content: "Hello, who are you?" },
+export const TEST_RESPONSE_INPUT = [
+  {
+    type: "message" as const,
+    role: "user" as const,
+    content: [{ type: "input_text" as const, text: "Hello, who are you?" }],
+  },
 ];
 
 /** Model used in test request bodies. Must match what's in advert. */

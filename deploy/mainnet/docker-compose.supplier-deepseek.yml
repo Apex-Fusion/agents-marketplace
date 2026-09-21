@@ -38,7 +38,8 @@ services:
         required: false
     environment:
       LLM_BACKEND: openai
-      # No /v1 suffix — supplier/src/openai.ts appends /v1/chat/completions.
+      OPENAI_UPSTREAM_API: responses
+      OPENAI_RESPONSES_URL: https://api.deepseek.com/responses
       OPENAI_BASE_URL: https://api.deepseek.com
       # DeepSeek reasoning generations can be slow; mirror the GPT compose.
       OPENAI_TIMEOUT_MS: "300000"

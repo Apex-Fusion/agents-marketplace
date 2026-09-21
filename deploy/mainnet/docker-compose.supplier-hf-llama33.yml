@@ -43,7 +43,8 @@ services:
         required: false
     environment:
       LLM_BACKEND: openai
-      # No /v1 suffix — supplier/src/openai.ts appends /v1/chat/completions
+      OPENAI_UPSTREAM_API: responses
+      # No /v1 suffix — the native adapter appends /v1/responses
       # (HF router serves at https://router.huggingface.co/v1/...).
       OPENAI_BASE_URL: https://router.huggingface.co
       # First-token latency across hosted providers can exceed local backends;

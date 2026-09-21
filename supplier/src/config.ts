@@ -124,6 +124,9 @@ export type OcrUpstream = "openai-vision" | "datalab";
 /** LLM backend selected for the chat capability. */
 export type LlmBackend = "ollama" | "openai";
 
+/** Wire protocol used by the OpenAI-compatible LLM upstream. */
+export type OpenAiUpstreamApi = "responses" | "chat-completions";
+
 /** Chain settlement mode for chat sessions.
  *   "full"   — Claim at start, Submit receipt at end (buyer Accepts). Default.
  *   "ticket" — the buyer's escrow post is the only chain op; the supplier
@@ -160,17 +163,21 @@ export interface SupplierConfig {
    * proxies). Required for hosted OpenAI-compatible APIs (DeepSeek, OpenAI, etc.).
    */
   openaiApiKey: string;
+  /** Explicit upstream protocol. Defaults to the native Responses API. */
+  openaiUpstreamApi: OpenAiUpstreamApi;
+  /** Optional full native Responses endpoint. Empty uses OPENAI_BASE_URL/v1/responses. */
+  openaiResponsesUrl: string;
+  /** Collect the native SSE result for providers whose JSON aggregate omits output. */
+  openaiResponsesStreamOnly: boolean;
   /**
-   * When true, upstream OpenAI/OpenRouter calls send `reasoning:{enabled:false}`
-   * to disable "thinking" tokens (faster/cheaper straight answers; avoids
-   * reasoning starving the completion into a length-truncated empty answer).
-   * Set via OPENAI_REASONING=off. Default false. OpenRouter-only.
+   * When true, native Responses calls send `reasoning:{effort:"none"}`.
+   * Explicit Chat Completions adapters send the documented OpenRouter
+   * `reasoning:{enabled:false}` extension. Set via OPENAI_REASONING=off.
    */
   openaiReasoningDisabled: boolean;
   /**
-   * Optional `max_tokens` ceiling forwarded on upstream calls. 0 = omit (the
-   * provider then grants the max available = context − prompt). Must stay below
-   * the model context or the provider 400s (e.g. kimi context = 262144).
+   * Optional upstream output-token ceiling. 0 means omit it unless the buyer
+   * explicitly supplies max_output_tokens.
    */
   openaiMaxTokens: number;
   /**
@@ -404,11 +411,22 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
 
   const openaiApiKey = env.OPENAI_API_KEY ?? "";
 
-  // OPENAI_REASONING — "off"/"false"/"0"/"no" disables OpenRouter reasoning
-  // ("thinking") by sending reasoning:{enabled:false} on every upstream call.
-  // Unset/any other value leaves the model's own default untouched (no param
-  // sent). Only valid for OpenRouter-backed suppliers — do NOT set for
-  // ChatMock/DeepSeek-direct, which reject the param.
+  const upstreamApiRaw = env.OPENAI_UPSTREAM_API ?? "responses";
+  if (upstreamApiRaw !== "responses" && upstreamApiRaw !== "chat-completions") {
+    throw new Error(
+      'loadConfig: OPENAI_UPSTREAM_API must be "responses" or "chat-completions"',
+    );
+  }
+  const openaiUpstreamApi: OpenAiUpstreamApi = upstreamApiRaw;
+  const openaiResponsesUrl = env.OPENAI_RESPONSES_URL ?? "";
+  const openaiResponsesStreamOnly = env.OPENAI_RESPONSES_STREAM_ONLY === "1";
+  if (openaiResponsesStreamOnly && openaiUpstreamApi !== "responses") {
+    throw new Error("loadConfig: OPENAI_RESPONSES_STREAM_ONLY requires OPENAI_UPSTREAM_API=responses");
+  }
+
+  // OPENAI_REASONING — "off"/"false"/"0"/"no" disables upstream reasoning.
+  // Native Responses calls send reasoning:{effort:"none"}. Explicit
+  // Chat Completions adapters retain the documented OpenRouter extension.
   const reasoningRaw = (env.OPENAI_REASONING ?? "").trim().toLowerCase();
   const openaiReasoningDisabled =
     reasoningRaw === "off" ||
@@ -416,28 +434,23 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
     reasoningRaw === "0" ||
     reasoningRaw === "no";
 
-  // HuggingFace router guard. The `reasoning:{enabled:false}` param is
-  // OpenRouter-specific; the HF Inference Providers router
-  // (router.huggingface.co) rejects it with HTTP 400 on EVERY request. This is
-  // the easy footgun when copying an OpenRouter env to the HF preset, so fail
-  // fast at boot with a clear message instead of 400-ing every job.
-  // See docs/HUGGINGFACE_ROUTER_SETUP.md.
+  // The Hugging Face Chat Completions endpoint rejects OpenRouter's
+  // reasoning:{enabled:false} extension. Its native Responses endpoint uses
+  // the standard effort control instead, so only guard explicit Chat mode.
   if (
     llmBackend === "openai" &&
     openaiReasoningDisabled &&
+    openaiUpstreamApi === "chat-completions" &&
     hostnameOf(openaiBaseUrl) === "router.huggingface.co"
   ) {
     throw new Error(
-      "loadConfig: OPENAI_REASONING must be unset for the HuggingFace router " +
-        "(OPENAI_BASE_URL=https://router.huggingface.co) — it rejects " +
-        "reasoning:{enabled:false} with HTTP 400. Remove OPENAI_REASONING.",
+      "loadConfig: OPENAI_REASONING must be unset for the HuggingFace " +
+        "Chat Completions upstream — it rejects reasoning:{enabled:false}.",
     );
   }
 
-  // OPENAI_MAX_TOKENS — optional hard ceiling forwarded as `max_tokens`. Unset
-  // or non-positive omits it (provider grants max available = context − prompt).
-  // Keep it below the model context (kimi 262144) or the provider 400s when
-  // prompt+max_tokens exceeds context.
+  // OPENAI_MAX_TOKENS — optional operator output-token ceiling. Unset omits
+  // the field unless the buyer explicitly supplies max_output_tokens.
   const maxTokStr = env.OPENAI_MAX_TOKENS;
   let openaiMaxTokens = 0;
   if (maxTokStr !== undefined && maxTokStr !== "") {
@@ -690,6 +703,9 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
     ollamaUrl,
     openaiBaseUrl,
     openaiApiKey,
+    openaiUpstreamApi,
+    openaiResponsesUrl,
+    openaiResponsesStreamOnly,
     openaiReasoningDisabled,
     openaiMaxTokens,
     openaiSessionPassthrough,

@@ -29,6 +29,32 @@ Monorepo managed with pnpm workspaces.
 
 Developer docs: [Vector AI documentation](https://apex-fusion.github.io/vector-ai-documentation/). For the contract-level picture, start with [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
+## Responses API
+
+The public gateway uses the OpenAI Responses API. It does not expose a Chat Completions alias.
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    api_key="vma_...",
+    base_url="https://gateway.example/openai/v1",
+)
+response = client.responses.create(
+    model="the-advertised-model",
+    input="Give one concise deployment check.",
+)
+continuation = client.responses.create(
+    model=response.model,
+    previous_response_id=response.id,
+    input="Explain why it matters.",
+)
+```
+
+Normal keys use one `llm.text.generate.v1` escrow per call. Demo keys use managed `llm.chat.v1` sessions with one escrow per session. Use `previous_response_id` for session reuse and continuation. Keep all returned output Items when you replay history manually.
+
+See [`docs/gateway.md`](docs/gateway.md) for Items, typed streaming events, storage, receipts, and migration guidance.
+
 ## Related
 
 - [mcp-server](https://github.com/Apex-Fusion/mcp-server) - hosted MCP server for Vector (testnet and mainnet)

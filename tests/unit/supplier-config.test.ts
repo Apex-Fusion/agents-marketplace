@@ -184,43 +184,60 @@ describe("loadConfig() — LIVE_CHAIN parsing", () => {
   });
 });
 
-// ─── loadConfig — HuggingFace router preset (W1) ────────────────────────────
-// The HF Inference Providers router (router.huggingface.co) is OpenAI-compatible
-// and reuses LLM_BACKEND=openai, but rejects the OpenRouter-specific
-// reasoning:{enabled:false} param with HTTP 400 — so OPENAI_REASONING must stay
-// unset for it. loadConfig fails fast at boot to catch the copy-from-OpenRouter
-// footgun. See docs/HUGGINGFACE_ROUTER_SETUP.md.
-
-describe("loadConfig() — HuggingFace router guard", () => {
-  const hfEnv = (over: Record<string, string> = {}) => ({
+describe("loadConfig() — upstream Responses protocol", () => {
+  const openAiEnv = (over: Record<string, string> = {}) => ({
     ...buildSampleEnv(),
     LLM_BACKEND: "openai",
     OPENAI_BASE_URL: "https://router.huggingface.co",
-    OPENAI_API_KEY: "hf_sampletoken",
     ...over,
   });
 
-  it("accepts the HF router with OPENAI_REASONING unset", () => {
-    const cfg = loadConfig(hfEnv());
-    expect(cfg.openaiBaseUrl).toBe("https://router.huggingface.co");
-    expect(cfg.llmBackend).toBe("openai");
-    expect(cfg.openaiReasoningDisabled).toBe(false);
+  it("defaults to native Responses with the derived endpoint", () => {
+    const cfg = loadConfig(openAiEnv());
+    expect(cfg.openaiUpstreamApi).toBe("responses");
+    expect(cfg.openaiResponsesUrl).toBe("");
   });
 
-  it("throws when OPENAI_REASONING=off is set against the HF router", () => {
-    expect(() => loadConfig(hfEnv({ OPENAI_REASONING: "off" }))).toThrow(
-      /OPENAI_REASONING must be unset for the HuggingFace router/i,
+  it("accepts an explicit full Responses endpoint", () => {
+    const cfg = loadConfig(openAiEnv({
+      OPENAI_UPSTREAM_API: "responses",
+      OPENAI_RESPONSES_URL: "https://api.deepseek.com/responses",
+    }));
+    expect(cfg.openaiUpstreamApi).toBe("responses");
+    expect(cfg.openaiResponsesUrl).toBe("https://api.deepseek.com/responses");
+  });
+
+  it("allows streaming-only native Responses and rejects a mixed protocol setting", () => {
+    expect(loadConfig(openAiEnv({
+      OPENAI_RESPONSES_STREAM_ONLY: "1",
+    })).openaiResponsesStreamOnly).toBe(true);
+    expect(() => loadConfig(openAiEnv({
+      OPENAI_UPSTREAM_API: "chat-completions",
+      OPENAI_RESPONSES_STREAM_ONLY: "1",
+    }))).toThrow(/requires OPENAI_UPSTREAM_API=responses/);
+  });
+
+  it("selects Chat Completions only when configured explicitly", () => {
+    expect(loadConfig(openAiEnv({
+      OPENAI_UPSTREAM_API: "chat-completions",
+    })).openaiUpstreamApi).toBe("chat-completions");
+  });
+
+  it("rejects unknown protocol values", () => {
+    expect(() => loadConfig(openAiEnv({ OPENAI_UPSTREAM_API: "auto" }))).toThrow(
+      /OPENAI_UPSTREAM_API/,
     );
   });
 
-  it("still allows OPENAI_REASONING=off for non-HF openai backends (e.g. OpenRouter)", () => {
-    const cfg = loadConfig({
-      ...buildSampleEnv(),
-      LLM_BACKEND: "openai",
-      OPENAI_BASE_URL: "https://openrouter.ai/api",
+  it("uses standard effort control for native Hugging Face Responses calls", () => {
+    expect(loadConfig(openAiEnv({ OPENAI_REASONING: "off" })).openaiReasoningDisabled).toBe(true);
+  });
+
+  it("rejects the OpenRouter reasoning extension for explicit Hugging Face Chat mode", () => {
+    expect(() => loadConfig(openAiEnv({
+      OPENAI_UPSTREAM_API: "chat-completions",
       OPENAI_REASONING: "off",
-    });
-    expect(cfg.openaiReasoningDisabled).toBe(true);
+    }))).toThrow(/HuggingFace.*Chat Completions/i);
   });
 });
 

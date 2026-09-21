@@ -34,8 +34,8 @@
  * Ticket mode (config.chatSettleMode === "ticket"): session escrows are never
  * Claimed — they sit Open until reclaimed here after deliver_by. Reclaiming
  * an Open ticket does NOT close a still-open session row: nothing re-checks
- * the escrow after /v1/chat/start, so the conversation (and its affinity
- * mirror) lives on, bounded only by the idle janitor.
+ * the escrow after /v1/chat/start, so the typed conversation state lives on,
+ * bounded by the idle janitor.
  */
 
 import { randomUUID } from "crypto";
@@ -44,7 +44,7 @@ import type { SessionRow } from "./db/store.js";
 import { fetchEscrows, acceptAndConfirm, reclaimAndConfirm, type EscrowRow } from "./onchain/settle.js";
 import { parseRef } from "./routing/selectSupplier.js";
 import { dropSessionState } from "./openai/transcripts.js";
-import { dropDemoSession, sweepIdleDemoSessions } from "./openai/demoChat.js";
+import { sweepIdleDemoSessions } from "./openai/demoChat.js";
 import { CAPABILITY as CHAT_CAPABILITY } from "./openai/sessions.js";
 
 // Don't touch escrows newer than this — an in-flight request is settling them.
@@ -83,10 +83,9 @@ function closeSessionRow(
 ): void {
   // Re-read: an in-flight close (route handler or demo executor) may have won.
   const current = deps.store.getSession(session.id);
-  if (!current || current.state !== "open") return;
+  if (!current || (current.state !== "open" && current.state !== "invalid")) return;
   deps.store.setSessionState(session.id, "closed", Date.now());
   dropSessionState(session.id);
-  dropDemoSession(session.id);
   deps.store.insertUsage({
     id: randomUUID(),
     key_id: session.key_id,
@@ -122,6 +121,7 @@ export async function runSweepOnce(
   );
 
   const now = Date.now();
+  deps.store.deleteExpiredResponses(now);
   for (const keyRow of deps.store.listKeys()) {
     let rows: EscrowRow[];
     try {
@@ -134,7 +134,7 @@ export async function runSweepOnce(
     // Lineage-match open sessions: the session stores its ORIGINAL Open ref;
     // rows sharing that row's posted_at are the same escrow in later states.
     const sessionByPostedAt = new Map<number, SessionRow>();
-    for (const session of deps.store.listOpenSessionsByKey(keyRow.id)) {
+    for (const session of deps.store.listRecoverableSessionsByKey(keyRow.id)) {
       const origin = rows.find((r) => r.utxo_ref === session.escrow_ref);
       if (origin) sessionByPostedAt.set(origin.posted_at, session);
     }
@@ -184,7 +184,8 @@ export async function runSweepOnce(
             log(`reclaimed stranded ${row.state} escrow ${row.utxo_ref}`);
             markSettled(row.utxo_ref);
             if (chatSession) {
-              const ticketOpen = deps.config.chatSettleMode === "ticket" && row.state === "Open";
+              const ticketOpen = deps.config.chatSettleMode === "ticket" &&
+                row.state === "Open" && chatSession.state === "open";
               if (ticketOpen) {
                 // Ticket escrow reclaimed out from under a LIVE session —
                 // by design. Keep the session row + mirror; only the idle

@@ -121,7 +121,11 @@ describe("sweeper — ticket-mode reclaim/close decoupling", () => {
     const row = openRow("1");
     const { deps, keyRow } = makeSweepDeps({ chatSettleMode: "ticket", escrows: [row] });
     const sessionId = insertOpenSession(deps, keyRow.id, row.utxo_ref);
-    transcripts.set(sessionId, [{ role: "user", content: "hi" }]);
+    transcripts.set(sessionId, [{
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: "hi" }],
+    }]);
     const settle = settleOk();
 
     await runSweepOnce(deps, settle);

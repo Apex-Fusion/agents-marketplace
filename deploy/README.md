@@ -8,6 +8,10 @@ files under `deploy/testnet/` and `deploy/mainnet/`, `.env.example`s) have
 not been deployed end-to-end. Run the stack only after a careful review
 per-section below.
 
+> The current testnet has no functional marketplace. The testnet commands
+> below remain useful for local service checks only. Use controlled mainnet
+> smoke work for an end-to-end marketplace check.
+
 ---
 
 ## 1. Concepts
@@ -26,9 +30,8 @@ deploy/testnet/
   docker-compose.buyer.yml       project name: marketplace-buyer
 ```
 
-A parallel `deploy/mainnet/` directory mirrors the testnet layout with
-`marketplace-mainnet-` prefixes and the mainnet ogmios network. The
-mainnet stubs are wired but **deferred** — see §7.
+The `deploy/mainnet/` directory contains the controlled mainnet projects with
+`marketplace-mainnet-` prefixes. Use the rollout rules in §10.
 
 ### Three-axis network model
 
@@ -125,17 +128,66 @@ openssl rand -hex 32   # → SUPPLIER_PRIV_KEY_HEX (64 hex chars)
 openssl rand -hex 32   # → BUYER_PRIV_KEY_HEX
 ```
 
-Fund the supplier address with ~5 AP3X via the Vector testnet faucet
-before starting the supplier.
+Fund the supplier wallet only when you intend to run chain-writing work on a
+network that has a functional deployment. The current testnet is not an
+end-to-end marketplace venue.
 
-`ADVERT_REF` is left empty until the post-advert CLI ships (see §8 known
-gaps). Until then, supplier `/capability` returns 503 and the buyer
-chat endpoint will fail at the Claim stage.
+`ADVERT_REF` must name a real advert UTxO before `/capability` can be ready.
 
 The `env_file:` directive uses `required: false`, so the compose files
 parse and come up even with an empty/missing `.env` — the service will
 crash at boot if mandatory env vars are absent, which is the desired
 loud-fail behavior.
+
+### Upstream API selection
+
+The public gateway uses `POST /openai/v1/responses` and
+`GET` or `DELETE /openai/v1/responses/:id`. It has no
+`chat/completions` alias.
+
+Each OpenAI-compatible supplier must select one upstream mode:
+
+| Provider | `OPENAI_UPSTREAM_API` | Endpoint configuration |
+|---|---|---|
+| OpenRouter | `responses` | base URL; native adapter appends `/v1/responses` |
+| HuggingFace router | `responses` | base URL; native adapter appends `/v1/responses` |
+| DeepSeek direct | `responses` | set exact `OPENAI_RESPONSES_URL=https://api.deepseek.com/responses` |
+| Codex Responses proxy v1.40 for `gpt-5.6-sol` | `responses` | set `OPENAI_RESPONSES_STREAM_ONLY=1` |
+| Hetzner Inference | `chat-completions` | base URL; adapter appends `/v1/chat/completions` |
+| Local llama.cpp and OpenClaw | `chat-completions` | keep the explicit compatibility mode |
+| Production Ollama | `responses` with `LLM_BACKEND=openai` | point the base URL at Ollama's native `/v1/responses` service |
+
+There is no HTTP fallback between modes. Native OpenRouter, HuggingFace, and
+DeepSeek requests use `store:false` and full Item replay. The Codex stream
+collector takes complete Items from `response.output_item.done`; it never
+builds authoritative output from partial deltas.
+
+The GPT rollout replaces the v1.36 Chat Completions pin with v1.40 native
+Responses and `gpt-5.6-sol`. Keep its existing advert price and bonds. An
+old-model restriction is not a reason to renew the Codex token.
+
+`OPENAI_REASONING=off` means native `reasoning.effort:"none"`. In Chat
+Completions mode it means the OpenRouter extension
+`reasoning.enabled:false`. Leave it unset for Hetzner and HF compatibility
+calls. `/capability` reports `inference_api`, `upstream_api`, and
+`reasoning_disabled`, so incompatible requests can fail before funding or
+Claim.
+
+Native responses contain an `output` Item array and canonical usage fields
+`input_tokens`, `output_tokens`, and `total_tokens`. Text is an `output_text`
+part in a message Item. Function tools use the flat Responses shape with
+`type`, `name`, and `parameters`.
+
+Public streaming emits canonical typed events and ends with
+`response.completed`, `response.incomplete`, or `response.failed`. It does not
+emit a public `[DONE]` sentinel. One-shot text stays buffered until settlement.
+Session text can stream live.
+
+Gateway `store:true` is the default. It keeps encrypted response chains for
+30 days. `store:false` disables saved-response lookup and continuation.
+However, an active demo escrow session keeps encrypted operational transcript
+checkpoints until close or reclaim. Master-key rotation must cover custodial
+wallets, stored responses, and active transcript checkpoints.
 
 ## 4. Per-service operations (testnet)
 
@@ -186,9 +238,11 @@ docker compose -f deploy/testnet/docker-compose.buyer.yml logs -f
 docker compose -f deploy/testnet/docker-compose.buyer.yml down
 ```
 
-## 5. Bringing up the whole testnet stack
+## 5. Legacy testnet service bring-up
 
-End-to-end first-time bring-up:
+This sequence starts the old testnet service layout. It is not an end-to-end
+marketplace verification path.
+
 
 ```bash
 # One-shot (skip if marketplace-net already exists)
@@ -236,14 +290,14 @@ The supplier and buyer don't own volumes; their `down` is sufficient.
 
 ## 7. Mainnet
 
-See `deploy/mainnet/`. **Deferred** per ARCHITECTURE.md §9 #5 — do not
-`docker compose up` until the mainnet safety env-gate, wallet allowlist,
-and `MAINNET=1` flag are wired in. The compose files parse cleanly so the
-operator can flip them on later by removing the warning headers.
+Use the mainnet compose projects only through a controlled rollout. Apply the
+safe drain and health gates in §10. Use ingress maintenance for the first
+incompatible drain-protocol rollout.
 
-## 8. Known gaps (post-M1-F-1)
+## 8. Historical M1-F gaps
 
-These ARCHITECTURE.md §9 follow-ups affect *deployment*:
+The items below preserve the original M1-F review record. They do not describe
+the current deployment state:
 
 - **#5 mainnet safety** — hard requirement before any mainnet attempt.
 - **#6 Ollama-failure leaves Claimed** — if Ollama crashes mid-request,
@@ -299,13 +353,23 @@ Merges to `main` deploy automatically to the mainnet host once CI is green:
    (secret `DEPLOY_SSH_KEY`, host key pinned in the workflow) and executes
    `deploy/mainnet/deploy.sh` **at the new commit** (`git show FETCH_HEAD:...`),
    so deploy logic always matches the code being deployed.
-3. The script hard-resets `/root/agents-marketplace` to `origin/main`, maps the
-   old..new diff to affected compose projects (changes under `packages/`,
-   `patches/`, `contracts/` or root manifests rebuild everything), builds all
-   affected images up front, then does a rolling `up -d` with a health gate per
-   project. Suppliers are drained first: `/status` is polled until not
-   `working` (up to `DRAIN_TIMEOUT_SECS`, default 600) so an in-flight job
-   isn't killed and its escrow bond forfeited.
+3. The script checks out `origin/main`, maps the old-to-new diff to affected
+   compose projects, and builds all affected images before restarts.
+4. Before each supplier restart, it creates
+   `/dev/shm/marketplace-draining`. This blocks new admission.
+5. It waits for `/status` to report `active_sessions: 0` and no working job.
+   An unknown value, unreadable status, or drain timeout fails closed and
+   leaves the supplier running.
+6. A health gate follows each restart. A stopped container loses the tmpfs
+   marker. If a container survives an aborted rollout, the script clears the
+   marker before it exits. Failure to clear it is a deployment failure.
+
+
+The first rollout that introduces this drain protocol is incompatible with
+the old supplier image because the old image does not enforce the marker.
+Put supplier ingress into maintenance before any restart in that rollout.
+Keep maintenance active until all suppliers run the new image and pass their
+health gates.
 
 Manual controls:
 
@@ -313,9 +377,13 @@ Manual controls:
   (check *force* to redeploy the same sha), or on the host:
   `bash /root/agents-marketplace/deploy/mainnet/deploy.sh` (`FORCE=1` to
   redeploy, `DRY_RUN=1` to preview which projects would restart).
-- **Rollback**: `cd /root/agents-marketplace && git reset --hard <old-sha> &&
-  FORCE=1 bash deploy/mainnet/deploy.sh`. Every deploy appends
-  `old -> new (projects)` to `/var/log/marketplace-deploy.log`.
+- **Rollback**: choose the known good commit from
+  `/var/log/marketplace-deploy.log`, then run
+  `cp /root/agents-marketplace/deploy/mainnet/deploy.sh /run/marketplace-rollback.sh`.
+  Run `DEPLOY_REF=<old-sha> FORCE=1 bash /run/marketplace-rollback.sh`.
+  `DEPLOY_REF` selects an existing local commit without fetching main.
+  Do not reset the checkout and then run a script that resets back to
+  `origin/main`.
 
 Projects with no running containers on the host (e.g. wallet-monitor) are
 skipped; image-only projects (ollama, chatmock, tts-piper) redeploy only when

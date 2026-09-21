@@ -1,54 +1,41 @@
-/**
- * buyer-sdk-submit-prompt-reject.test.ts — RED phase (M1-E)
- *
- * Category C: Marketplace.submitPrompt() rejection / error paths (~20 tests)
- *
- * All tests FAIL until M1-E-green.
- *
- * Each test seeds appropriate chain state and verifies the SDK throws the
- * right error class with the right `.reason` string.
- */
-
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "crypto";
-import { MockChainProvider } from "../../packages/shared/src/chain/MockChainProvider.js";
 import { Marketplace } from "../../buyer/src/sdk/Marketplace.js";
-import { HttpError } from "../../buyer/src/sdk/httpClient.js";
-import { TxConstructionError } from "../../packages/shared/src/tx/types.js";
 import {
   ReceiptVerificationError,
   SupplierError,
 } from "../../buyer/src/sdk/types.js";
+import { MockChainProvider } from "../../packages/shared/src/chain/MockChainProvider.js";
+import { encodeAdvertDatum } from "../../packages/shared/src/cbor/AdvertDatum.js";
+import { canonicalize } from "../../packages/shared/src/cbor/canonical.js";
+import type { AdvertDatum } from "../../packages/shared/src/cbor/types.js";
+import type { OutputReference } from "../../packages/shared/src/chain/ChainProvider.js";
+import { buildReceipt } from "../../packages/shared/src/receipt/build.js";
+import {
+  BOUNDED_INPUT_DETAIL_MARKER,
+  TxConstructionError,
+} from "../../packages/shared/src/tx/index.js";
+import {
+  createResponse,
+  responseRequestCommitment,
+  responseResultCommitment,
+  type ResponseItem,
+  type ResponseRequest,
+} from "../../packages/shared/src/responses.js";
 import { buildBuyerWalletKey } from "../fixtures/buyer-side/wallet-keys.js";
 import { buildSupplierWalletKey } from "../fixtures/supplier-side/wallet-keys.js";
-import { encodeAdvertDatum } from "../../packages/shared/src/cbor/AdvertDatum.js";
-import { encodeEscrowDatum } from "../../packages/shared/src/cbor/EscrowDatum.js";
-import { canonicalize } from "../../packages/shared/src/cbor/canonical.js";
-import { buildReceipt } from "../../packages/shared/src/receipt/build.js";
-import { signReceipt } from "../../packages/shared/src/receipt/sign.js";
-import type { AdvertDatum, EscrowDatum } from "../../packages/shared/src/cbor/types.js";
-import type { Utxo, OutputReference } from "../../packages/shared/src/chain/ChainProvider.js";
-import type { ChatMessage } from "../../packages/shared/src/tx/types.js";
-import type { ProgressEvent } from "../../buyer/src/sdk/types.js";
-import { BOUNDED_INPUT_DETAIL_MARKER } from "../../packages/shared/src/tx/inputBound.js";
 
-// ─── Fixtures ─────────────────────────────────────────────────────────────────
-
-const ADVERT_TX = "b".repeat(64);
-const ADVERT_REF: OutputReference = { txHash: ADVERT_TX, index: 0 };
-const ADVERT_SCRIPT_ADDR = "addr_test1wrqq9qqjzf3uh4w9hm0kqzrpvt60r4ryjp5rjf5epd3nptq7yscm6";
-
+const ADVERT_REF: OutputReference = { txHash: "b".repeat(64), index: 0 };
+const PAYMENT = 2_000_000n;
 const buyer = buildBuyerWalletKey();
 const supplier = buildSupplierWalletKey();
+const INPUT: ResponseItem[] = [{
+  type: "message",
+  role: "user",
+  content: [{ type: "input_text", text: "What is 2+2?" }],
+}];
 
-const SAMPLE_MESSAGES: ChatMessage[] = [{ role: "user", content: "What is 2+2?" }];
-const PAYMENT = 2_000_000n;
-
-function sha256(s: string): string {
-  return createHash("sha256").update(s, "utf8").digest("hex");
-}
-
-function makeActiveAdvert(overrides: Partial<AdvertDatum> = {}): AdvertDatum {
+function advert(overrides: Partial<AdvertDatum> = {}): AdvertDatum {
   return {
     supplier_pkh: supplier.pubKeyHash,
     capability_id: "llm.text.generate.v1",
@@ -67,443 +54,279 @@ function makeActiveAdvert(overrides: Partial<AdvertDatum> = {}): AdvertDatum {
   };
 }
 
-function seedAdvertUtxo(chain: MockChainProvider, datum: AdvertDatum, ref = ADVERT_REF) {
-  const utxo: Utxo = {
-    ref,
-    address: ADVERT_SCRIPT_ADDR,
+function seedAdvert(chain: MockChainProvider, datum = advert()): void {
+  chain.seed({
+    ref: ADVERT_REF,
+    address: "addr_test1wfakeadvert",
     lovelace: 2_000_000n,
     assets: {},
     datumHex: encodeAdvertDatum(datum),
     scriptRef: null,
-  };
-  chain.seed(utxo);
+  });
 }
 
-function makeValidSupplierResponse(escrowRef: string, messages: ChatMessage[]) {
-  const advert = makeActiveAdvert();
-  const promptHash = sha256(canonicalize(messages));
-  const responseContent = "4";
-  const responseHash = sha256(JSON.stringify({ role: "assistant", content: responseContent }));
+function capability(
+  datum: AdvertDatum,
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    capability_id: datum.capability_id,
+    model: datum.model,
+    max_output_tokens: datum.max_output_tokens,
+    max_processing_ms: datum.max_processing_ms,
+    price_lovelace: datum.price_lovelace.toString(),
+    advert_ref: `${ADVERT_REF.txHash}#${ADVERT_REF.index}`,
+    supplier_pkh: datum.supplier_pkh,
+    pub_key_hex: supplier.pubKeyHex,
+    inference_api: "responses",
+    upstream_api: "responses",
+    ...overrides,
+  };
+}
+
+function sha256(value: unknown): string {
+  return createHash("sha256").update(canonicalize(value), "utf8").digest("hex");
+}
+
+function json(body: unknown, status = 200): Promise<Response> {
+  return Promise.resolve(new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  }));
+}
+
+function terminalBody(
+  escrowRef: string,
+  request: ResponseRequest,
+  responseHash?: string,
+) {
+  const result = createResponse({
+    id: "resp_test",
+    model: advert().model,
+    output: [{
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: "4" }],
+    }],
+  });
   const receipt = buildReceipt({
-    prompt_hash: promptHash,
-    response_hash: responseHash,
-    model: advert.model,
+    prompt_hash: sha256(responseRequestCommitment(request)),
+    response_hash: responseHash ?? sha256(responseResultCommitment(result)),
+    model: advert().model,
     prompt_tokens: 12,
     completion_tokens: 4,
     wallclock_ms: 800,
     supplier_pkh: supplier.pubKeyHash,
     escrow_ref: escrowRef,
   });
-  const signed = signReceipt(receipt, supplier.privateKeyHex);
-  return {
-    choices: [{ message: { role: "assistant", content: responseContent }, finish_reason: "stop" }],
-    usage: { prompt_tokens: 12, completion_tokens: 4 },
-    receipt: signed.receipt,
-    receipt_signature: signed.signature,
-  };
+  return { ...result, receipt, receipt_signature: "f".repeat(128) };
 }
 
-function jsonFetch(body: unknown, status = 200) {
-  return Promise.resolve(
-    new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } })
-  );
-}
-
-function makeMarketplace(chain: MockChainProvider, fetchImpl: ReturnType<typeof vi.fn>): Marketplace {
+function marketplace(chain: MockChainProvider, fetchImpl: typeof fetch): Marketplace {
   return new Marketplace({
     chain,
     indexerUrl: "http://indexer.test",
     walletKey: buyer,
     networkParams: { networkId: 0 },
-    _fetch: fetchImpl as unknown as typeof fetch,
-  } as never);
+    _fetch: fetchImpl,
+  });
 }
 
-// ─── Tests ────────────────────────────────────────────────────────────────────
-
-describe("Marketplace.submitPrompt() — rejection paths", () => {
-  let fetchSpy: ReturnType<typeof vi.fn>;
+describe("Marketplace.submitPrompt Responses rejection paths", () => {
   let chain: MockChainProvider;
 
   beforeEach(() => {
-    fetchSpy = vi.fn();
     chain = new MockChainProvider();
     chain.advanceSlot(1_745_500_000);
   });
 
-  // 1. advert UTxO not found
-  it("throws TxConstructionError('advert ref not on chain') when advert UTxO does not exist", async () => {
-    // Do NOT seed any utxo
-    const mp = makeMarketplace(chain, fetchSpy);
-    await expect(
-      mp.submitPrompt({ advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT })
-    ).rejects.toSatisfy(
-      (e: unknown) => e instanceof TxConstructionError && e.reason === "advert ref not on chain"
+  it("rejects a supplier without inference_api=responses before locking funds", async () => {
+    const datum = advert();
+    seedAdvert(chain, datum);
+    const submitSpy = vi.spyOn(chain, "submitTx");
+    const fetchImpl = vi.fn(async () => json(capability(datum, {
+      inference_api: undefined,
+    }))) as unknown as typeof fetch;
+
+    await expect(marketplace(chain, fetchImpl).submitPrompt({
+      advertRef: ADVERT_REF,
+      input: INPUT,
+      payment_lovelace: PAYMENT,
+    })).rejects.toSatisfy(
+      (error: unknown) =>
+        error instanceof TxConstructionError &&
+        error.reason === "supplier_preflight_failed",
+    );
+    expect(submitSpy).not.toHaveBeenCalled();
+  });
+
+  it("rejects an empty one-shot request before supplier calls or escrow funding", async () => {
+    const datum = advert();
+    seedAdvert(chain, datum);
+    const submitSpy = vi.spyOn(chain, "submitTx");
+    const fetchImpl = vi.fn(async () => json(capability(datum))) as unknown as typeof fetch;
+    await expect(marketplace(chain, fetchImpl).submitPrompt({
+      advertRef: ADVERT_REF,
+      input: [],
+      payment_lovelace: PAYMENT,
+    })).rejects.toSatisfy(
+      (error: unknown) => error instanceof TxConstructionError && error.reason === "invalid_response_request",
+    );
+    expect(submitSpy).not.toHaveBeenCalled();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("rejects an orphan function result before supplier calls or escrow funding", async () => {
+    const datum = advert();
+    seedAdvert(chain, datum);
+    const submitSpy = vi.spyOn(chain, "submitTx");
+    const fetchImpl = vi.fn(async () => json(capability(datum))) as unknown as typeof fetch;
+    await expect(marketplace(chain, fetchImpl).submitPrompt({
+      advertRef: ADVERT_REF,
+      input: [{ type: "function_call_output", call_id: "missing", output: "value" }],
+      payment_lovelace: PAYMENT,
+    })).rejects.toSatisfy(
+      (error: unknown) => error instanceof TxConstructionError && error.reason === "invalid_response_request",
+    );
+    expect(submitSpy).not.toHaveBeenCalled();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+  it("rejects a reasoning effort forbidden by supplier policy before funding", async () => {
+    const datum = advert();
+    seedAdvert(chain, datum);
+    const submitSpy = vi.spyOn(chain, "submitTx");
+    const fetchImpl = vi.fn(async () => json(capability(datum, {
+      reasoning_disabled: true,
+    }))) as unknown as typeof fetch;
+    await expect(marketplace(chain, fetchImpl).submitPrompt({
+      advertRef: ADVERT_REF,
+      input: INPUT,
+      reasoning: { effort: "high" },
+      payment_lovelace: PAYMENT,
+    })).rejects.toSatisfy(
+      (error: unknown) => error instanceof TxConstructionError && error.reason === "supplier_adapter_incompatible",
+    );
+    expect(submitSpy).not.toHaveBeenCalled();
+  });
+
+  it("rejects reasoning for a chat-completions adapter before locking funds", async () => {
+    const datum = advert();
+    seedAdvert(chain, datum);
+    const submitSpy = vi.spyOn(chain, "submitTx");
+    const fetchImpl = vi.fn(async () => json(capability(datum, {
+      upstream_api: "chat-completions",
+    }))) as unknown as typeof fetch;
+
+    await expect(marketplace(chain, fetchImpl).submitPrompt({
+      advertRef: ADVERT_REF,
+      input: [
+        {
+          type: "reasoning",
+          encrypted_content: "opaque",
+        },
+        ...INPUT,
+      ],
+      payment_lovelace: PAYMENT,
+    })).rejects.toSatisfy(
+      (error: unknown) =>
+        error instanceof TxConstructionError &&
+        error.reason === "supplier_adapter_incompatible",
+    );
+    expect(submitSpy).not.toHaveBeenCalled();
+  });
+
+  it("rejects replayed function-call Items for Ollama before locking funds", async () => {
+    const datum = advert();
+    seedAdvert(chain, datum);
+    const submitSpy = vi.spyOn(chain, "submitTx");
+    const fetchImpl = vi.fn(async () => json(capability(datum, {
+      upstream_api: "ollama",
+    }))) as unknown as typeof fetch;
+
+    await expect(marketplace(chain, fetchImpl).submitPrompt({
+      advertRef: ADVERT_REF,
+      input: [
+        ...INPUT,
+        {
+          type: "function_call",
+          call_id: "call_1",
+          name: "lookup",
+          arguments: "{\"query\":\"cardano\"}",
+        },
+        {
+          type: "function_call_output",
+          call_id: "call_1",
+          output: "{\"result\":\"apex\"}",
+        },
+      ],
+      payment_lovelace: PAYMENT,
+    })).rejects.toSatisfy(
+      (error: unknown) =>
+        error instanceof TxConstructionError &&
+        error.reason === "supplier_adapter_incompatible",
+    );
+    expect(submitSpy).not.toHaveBeenCalled();
+  });
+
+  it("rejects a receipt that does not commit the terminal Response result", async () => {
+    const datum = advert();
+    seedAdvert(chain, datum);
+    const fetchImpl = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      if (String(url).endsWith("/capability")) return json(capability(datum));
+      const request = JSON.parse(String(init?.body)) as ResponseRequest & { model: string };
+      const escrowRef = new Headers(init?.headers).get("X-Escrow-Ref") ?? "";
+      return json(terminalBody(escrowRef, request, "0".repeat(64)));
+    }) as unknown as typeof fetch;
+
+    await expect(marketplace(chain, fetchImpl).submitPrompt({
+      advertRef: ADVERT_REF,
+      input: INPUT,
+      payment_lovelace: PAYMENT,
+    })).rejects.toSatisfy(
+      (error: unknown) =>
+        error instanceof ReceiptVerificationError &&
+        error.reason === "response_hash_mismatch",
     );
   });
 
-  // 2. advert.status === "Retired"
-  it("throws TxConstructionError('advert is retired') when advert status is Retired", async () => {
-    seedAdvertUtxo(chain, makeActiveAdvert({ status: "Retired" }));
-    const mp = makeMarketplace(chain, fetchSpy);
-    await expect(
-      mp.submitPrompt({ advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT })
-    ).rejects.toSatisfy(
-      (e: unknown) => e instanceof TxConstructionError && e.reason === "advert is retired"
+  it("surfaces an HTTP failure as a SupplierError and records no success", async () => {
+    const datum = advert();
+    seedAdvert(chain, datum);
+    const fetchImpl = vi.fn(async (url: RequestInfo | URL) => {
+      if (String(url).endsWith("/capability")) return json(capability(datum));
+      return json({ reason: "upstream_failed", message: "provider unavailable" }, 503);
+    }) as unknown as typeof fetch;
+    const sdk = marketplace(chain, fetchImpl);
+
+    await expect(sdk.submitPrompt({
+      advertRef: ADVERT_REF,
+      input: INPUT,
+      payment_lovelace: PAYMENT,
+    })).rejects.toSatisfy(
+      (error: unknown) =>
+        error instanceof SupplierError &&
+        error.reason === "upstream_failed",
     );
+    expect(sdk.getTaskHistory()).toEqual([
+      expect.objectContaining({ status: "failed", failure_reason: "upstream_failed" }),
+    ]);
   });
 
-  // 3. payment !== advert.price
-  it("throws TxConstructionError('payment must equal advertised price') when payment differs", async () => {
-    seedAdvertUtxo(chain, makeActiveAdvert({ price_lovelace: 3_000_000n }));
-    const mp = makeMarketplace(chain, fetchSpy);
-    await expect(
-      mp.submitPrompt({ advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT }) // 2M != 3M
-    ).rejects.toSatisfy(
-      (e: unknown) => e instanceof TxConstructionError && e.reason === "payment must equal advertised price"
-    );
-  });
-
-  // 4. buyer pkh === supplier pkh
-  it("throws TxConstructionError('buyer cannot be supplier') when buyer pkh equals supplier pkh", async () => {
-    // Seed advert whose supplier_pkh equals buyer's pubKeyHash
-    seedAdvertUtxo(chain, makeActiveAdvert({ supplier_pkh: buyer.pubKeyHash }));
-    const mp = makeMarketplace(chain, fetchSpy);
-    await expect(
-      mp.submitPrompt({ advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT })
-    ).rejects.toSatisfy(
-      (e: unknown) => e instanceof TxConstructionError && e.reason === "buyer cannot be supplier"
-    );
-  });
-
-  // 5. empty messages
-  it("throws TxConstructionError('messages required') when messages array is empty", async () => {
-    seedAdvertUtxo(chain, makeActiveAdvert());
-    const mp = makeMarketplace(chain, fetchSpy);
-    await expect(
-      mp.submitPrompt({ advertRef: ADVERT_REF, messages: [], payment_lovelace: PAYMENT })
-    ).rejects.toSatisfy(
-      (e: unknown) => e instanceof TxConstructionError && e.reason === "messages required"
-    );
-  });
-
-  // 6. supplier returns 4xx
-  it("throws SupplierError with status 400 when supplier returns 4xx", async () => {
-    seedAdvertUtxo(chain, makeActiveAdvert());
-    fetchSpy.mockImplementation((url: unknown) => {
-      if (String(url).includes("/v1/chat/completions")) {
-        return jsonFetch({ error: "bad request", reason: "capability_mismatch" }, 400);
-      }
-      return jsonFetch({});
-    });
-    const mp = makeMarketplace(chain, fetchSpy);
-    await expect(
-      mp.submitPrompt({ advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT })
-    ).rejects.toSatisfy(
-      (e: unknown) => e instanceof SupplierError && (e.status === 400 || e.status === 422)
-    );
-  });
-
-  // 7. supplier returns 5xx
-  it("throws SupplierError when supplier returns 503", async () => {
-    seedAdvertUtxo(chain, makeActiveAdvert());
-    fetchSpy.mockImplementation((url: unknown) => {
-      if (String(url).includes("/v1/chat/completions")) {
-        return jsonFetch({ error: "service unavailable", reason: "chain_submit_failed" }, 503);
-      }
-      return jsonFetch({});
-    });
-    const mp = makeMarketplace(chain, fetchSpy);
-    await expect(
-      mp.submitPrompt({ advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT })
-    ).rejects.toBeInstanceOf(SupplierError);
-  });
-
-  // 8. supplier returns malformed body (no receipt field)
-  it("throws SupplierError(reason='malformed_response') when supplier body has no receipt", async () => {
-    seedAdvertUtxo(chain, makeActiveAdvert());
-    fetchSpy.mockImplementation((url: unknown) => {
-      if (String(url).includes("/v1/chat/completions")) {
-        return jsonFetch({ choices: [{ message: { role: "assistant", content: "hi" } }] }); // no receipt
-      }
-      return jsonFetch({});
-    });
-    const mp = makeMarketplace(chain, fetchSpy);
-    await expect(
-      mp.submitPrompt({ advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT })
-    ).rejects.toSatisfy(
-      (e: unknown) => e instanceof SupplierError && e.reason === "malformed_response"
-    );
-  });
-
-  // 9. receipt prompt_hash mismatch
-  it("throws ReceiptVerificationError('prompt_hash_mismatch') when receipt.prompt_hash doesn't match messages", async () => {
-    seedAdvertUtxo(chain, makeActiveAdvert());
-    fetchSpy.mockImplementation((url: unknown, opts: unknown) => {
-      if (String(url).includes("/v1/chat/completions")) {
-        const headers = (opts as { headers?: Record<string, string> })?.headers ?? {};
-        const escrowRef = headers["X-Escrow-Ref"] ?? "x".repeat(64) + "#0";
-        const resp = makeValidSupplierResponse(escrowRef, SAMPLE_MESSAGES);
-        // Tamper the prompt_hash
-        resp.receipt = { ...resp.receipt, prompt_hash: "f".repeat(64) };
-        return jsonFetch(resp);
-      }
-      return jsonFetch({});
-    });
-    const mp = makeMarketplace(chain, fetchSpy);
-    await expect(
-      mp.submitPrompt({ advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT })
-    ).rejects.toSatisfy(
-      (e: unknown) => e instanceof ReceiptVerificationError && e.reason === "prompt_hash_mismatch"
-    );
-  });
-
-  // 10. receipt request_spec_hash mismatch
-  it("throws ReceiptVerificationError('request_spec_hash_mismatch') when receipt request_spec doesn't match advert", async () => {
-    // The SDK computes request_spec_hash = sha256(canonical({capability_id, max_output_tokens, model}))
-    // and must verify the escrow datum's request_spec_hash was bound correctly.
-    // In the mock we tamper by using a supplier that advertises a different model.
-    // The escrow datum has the correct request_spec_hash; the receipt should bind to it.
-    // Since the SDK verifies request_spec_hash from the escrow datum, we seed
-    // an escrow UTxO (after escrow is posted) with a wrong request_spec_hash.
-    // Simpler approach: return a receipt with a wrong model.
-    seedAdvertUtxo(chain, makeActiveAdvert());
-    fetchSpy.mockImplementation((url: unknown, opts: unknown) => {
-      if (String(url).includes("/v1/chat/completions")) {
-        const headers = (opts as { headers?: Record<string, string> })?.headers ?? {};
-        const escrowRef = headers["X-Escrow-Ref"] ?? "x".repeat(64) + "#0";
-        // Build a receipt with a wrong request_spec_hash-equivalent (model mismatch)
-        const wrongSpecHash = sha256(canonicalize({
-          capability_id: "llm.text.generate.v1",
-          max_output_tokens: 512,
-          model: "different-model",          // mismatch
-        }));
-        const advert = makeActiveAdvert();
-        const promptHash = sha256(canonicalize(SAMPLE_MESSAGES));
-        const responseHash = sha256(JSON.stringify({ role: "assistant", content: "4" }));
-        const receipt = buildReceipt({
-          prompt_hash: promptHash,
-          response_hash: responseHash,
-          model: "different-model",
-          prompt_tokens: 12,
-          completion_tokens: 4,
-          wallclock_ms: 800,
-          supplier_pkh: supplier.pubKeyHash,
-          escrow_ref: escrowRef,
-        });
-        const signed = signReceipt(receipt, supplier.privateKeyHex);
-        return jsonFetch({
-          choices: [{ message: { role: "assistant", content: "4" } }],
-          receipt: signed.receipt,
-          receipt_signature: signed.signature,
-        });
-      }
-      return jsonFetch({});
-    });
-    const mp = makeMarketplace(chain, fetchSpy);
-    await expect(
-      mp.submitPrompt({ advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT })
-    ).rejects.toSatisfy(
-      (e: unknown) =>
-        e instanceof ReceiptVerificationError && e.reason === "request_spec_hash_mismatch"
-    );
-  });
-
-  // 11. receipt signature invalid
-  it("throws ReceiptVerificationError('invalid_signature') when receipt_signature is corrupt", async () => {
-    seedAdvertUtxo(chain, makeActiveAdvert());
-    fetchSpy.mockImplementation((url: unknown, opts: unknown) => {
-      if (String(url).includes("/v1/chat/completions")) {
-        const headers = (opts as { headers?: Record<string, string> })?.headers ?? {};
-        const escrowRef = headers["X-Escrow-Ref"] ?? "x".repeat(64) + "#0";
-        const resp = makeValidSupplierResponse(escrowRef, SAMPLE_MESSAGES);
-        resp.receipt_signature = "0".repeat(128); // zeroed-out invalid signature
-        return jsonFetch(resp);
-      }
-      return jsonFetch({});
-    });
-    const mp = makeMarketplace(chain, fetchSpy);
-    await expect(
-      mp.submitPrompt({ advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT })
-    ).rejects.toSatisfy(
-      (e: unknown) => e instanceof ReceiptVerificationError && e.reason === "invalid_signature"
-    );
-  });
-
-  // 12. supplier_pkh in receipt ≠ advert.supplier_pkh
-  it("throws ReceiptVerificationError('wrong_supplier') when receipt.supplier_pkh != advert.supplier_pkh", async () => {
-    seedAdvertUtxo(chain, makeActiveAdvert());
-    fetchSpy.mockImplementation((url: unknown, opts: unknown) => {
-      if (String(url).includes("/v1/chat/completions")) {
-        const headers = (opts as { headers?: Record<string, string> })?.headers ?? {};
-        const escrowRef = headers["X-Escrow-Ref"] ?? "x".repeat(64) + "#0";
-        const resp = makeValidSupplierResponse(escrowRef, SAMPLE_MESSAGES);
-        // Tamper supplier_pkh in the receipt
-        resp.receipt = { ...resp.receipt, supplier_pkh: buyer.pubKeyHash };
-        return jsonFetch(resp);
-      }
-      return jsonFetch({});
-    });
-    const mp = makeMarketplace(chain, fetchSpy);
-    await expect(
-      mp.submitPrompt({ advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT })
-    ).rejects.toSatisfy(
-      (e: unknown) => e instanceof ReceiptVerificationError && e.reason === "wrong_supplier"
-    );
-  });
-
-  // 13. escrow_ref in receipt ≠ what was posted
-  it("throws ReceiptVerificationError('wrong_escrow_ref') when receipt.escrow_ref doesn't match", async () => {
-    seedAdvertUtxo(chain, makeActiveAdvert());
-    fetchSpy.mockImplementation((url: unknown, opts: unknown) => {
-      if (String(url).includes("/v1/chat/completions")) {
-        const resp = makeValidSupplierResponse("e".repeat(64) + "#99", SAMPLE_MESSAGES); // wrong ref
-        return jsonFetch(resp);
-      }
-      return jsonFetch({});
-    });
-    const mp = makeMarketplace(chain, fetchSpy);
-    await expect(
-      mp.submitPrompt({ advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT })
-    ).rejects.toSatisfy(
-      (e: unknown) => e instanceof ReceiptVerificationError && e.reason === "wrong_escrow_ref"
-    );
-  });
-
-  // 14. network timeout
-  it("throws SupplierError('timeout') when supplier HTTP request times out", async () => {
-    seedAdvertUtxo(chain, makeActiveAdvert());
-    fetchSpy.mockImplementation((url: unknown) => {
-      if (String(url).includes("/v1/chat/completions")) {
-        // Simulate abort/timeout
-        return Promise.reject(new DOMException("The user aborted a request.", "AbortError"));
-      }
-      return jsonFetch({});
-    });
-    const mp = makeMarketplace(chain, fetchSpy);
-    await expect(
-      mp.submitPrompt({ advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT })
-    ).rejects.toSatisfy(
-      (e: unknown) => e instanceof SupplierError && e.reason === "timeout"
-    );
-  });
-
-  // 15. chain.submitTx fails
-  it("re-throws chain error and emits progress event 'chain_submit_failed' when chain.submitTx throws", async () => {
-    seedAdvertUtxo(chain, makeActiveAdvert());
-    const chainError = new Error("chain: connection refused");
-    vi.spyOn(chain, "submitTx").mockRejectedValue(chainError);
-    const events: string[] = [];
-    const mp = makeMarketplace(chain, fetchSpy);
-    mp.on("progress", (e: ProgressEvent) => events.push(e.type));
-    await expect(
-      mp.submitPrompt({ advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT })
-    ).rejects.toThrow("chain: connection refused");
-    expect(events).toContain("chain_submit_failed");
-  });
-
-  // 16. failure path does NOT emit 'receipt_verified'
-  it("does not emit 'receipt_verified' when supplier returns 5xx", async () => {
-    seedAdvertUtxo(chain, makeActiveAdvert());
-    fetchSpy.mockImplementation((url: unknown) => {
-      if (String(url).includes("/v1/chat/completions")) {
-        return jsonFetch({ error: "internal" }, 500);
-      }
-      return jsonFetch({});
-    });
-    const events: string[] = [];
-    const mp = makeMarketplace(chain, fetchSpy);
-    mp.on("progress", (e: ProgressEvent) => events.push(e.type));
-    await expect(
-      mp.submitPrompt({ advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT })
-    ).rejects.toBeInstanceOf(SupplierError);
-    expect(events).not.toContain("receipt_verified");
-  });
-
-  // 17. failure path records task with status: "failed" + reason
-  it("records task with status 'failed' and failure_reason when supplier returns 5xx", async () => {
-    seedAdvertUtxo(chain, makeActiveAdvert());
-    fetchSpy.mockImplementation((url: unknown) => {
-      if (String(url).includes("/v1/chat/completions")) {
-        return jsonFetch({ error: "internal", reason: "ollama_failure" }, 500);
-      }
-      return jsonFetch({});
-    });
-    const mp = makeMarketplace(chain, fetchSpy);
-    await expect(
-      mp.submitPrompt({ advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT })
-    ).rejects.toBeInstanceOf(SupplierError);
-    const history = mp.getTaskHistory();
-    expect(history).toHaveLength(1);
-    expect(history[0].status).toBe("failed");
-    expect(history[0].failure_reason).toBeTruthy();
-  });
-
-  // 18. failure on receipt verification still does NOT emit 'receipt_verified'
-  it("does not emit 'receipt_verified' when receipt signature is invalid", async () => {
-    seedAdvertUtxo(chain, makeActiveAdvert());
-    fetchSpy.mockImplementation((url: unknown, opts: unknown) => {
-      if (String(url).includes("/v1/chat/completions")) {
-        const headers = (opts as { headers?: Record<string, string> })?.headers ?? {};
-        const escrowRef = headers["X-Escrow-Ref"] ?? "x".repeat(64) + "#0";
-        const resp = makeValidSupplierResponse(escrowRef, SAMPLE_MESSAGES);
-        resp.receipt_signature = "0".repeat(128);
-        return jsonFetch(resp);
-      }
-      return jsonFetch({});
-    });
-    const events: string[] = [];
-    const mp = makeMarketplace(chain, fetchSpy);
-    mp.on("progress", (e: ProgressEvent) => events.push(e.type));
-    await expect(
-      mp.submitPrompt({ advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT })
-    ).rejects.toBeInstanceOf(ReceiptVerificationError);
-    expect(events).not.toContain("receipt_verified");
-  });
-
-  // 19. TxConstructionError name field
-  it("TxConstructionError has name='TxConstructionError'", () => {
-    const e = new TxConstructionError("test reason");
-    expect(e.name).toBe("TxConstructionError");
-    expect(e.reason).toBe("test reason");
-  });
-
-  // 20. ReceiptVerificationError name field
-  it("ReceiptVerificationError has name='ReceiptVerificationError'", () => {
-    const e = new ReceiptVerificationError("test reason");
-    expect(e.name).toBe("ReceiptVerificationError");
-    expect(e.reason).toBe("test reason");
-  });
-  it("rejects a bounded-input request before posting escrow", async () => {
-    const advert = makeActiveAdvert({
+  it("enforces a bounded supplier input limit before locking funds", async () => {
+    const datum = advert({
       detail_uri: `https://supplier.example.com/reseller${BOUNDED_INPUT_DETAIL_MARKER}`,
     });
-    seedAdvertUtxo(chain, advert);
+    seedAdvert(chain, datum);
     const submitSpy = vi.spyOn(chain, "submitTx");
-    fetchSpy.mockImplementation((url: unknown) => {
-      if (String(url).endsWith("/capability")) {
-        return jsonFetch({
-          capability_id: advert.capability_id,
-          model: advert.model,
-          max_output_tokens: advert.max_output_tokens,
-          max_processing_ms: advert.max_processing_ms,
-          max_input_tokens: 1,
-          price_lovelace: advert.price_lovelace.toString(),
-          advert_ref: `${ADVERT_REF.txHash}#${ADVERT_REF.index}`,
-          supplier_pkh: advert.supplier_pkh,
-          pub_key_hex: supplier.pubKeyHex,
-        });
-      }
-      return jsonFetch({});
-    });
-    const mp = makeMarketplace(chain, fetchSpy);
-    await expect(
-      mp.submitPrompt({
-        advertRef: ADVERT_REF,
-        messages: SAMPLE_MESSAGES,
-        payment_lovelace: PAYMENT,
-      }),
-    ).rejects.toSatisfy(
+    const fetchImpl = vi.fn(async () => json(capability(datum, {
+      max_input_tokens: 1,
+    }))) as unknown as typeof fetch;
+
+    await expect(marketplace(chain, fetchImpl).submitPrompt({
+      advertRef: ADVERT_REF,
+      input: INPUT,
+      payment_lovelace: PAYMENT,
+    })).rejects.toSatisfy(
       (error: unknown) =>
         error instanceof TxConstructionError &&
         error.reason === "input_cap_exceeded",
@@ -511,49 +334,41 @@ describe("Marketplace.submitPrompt() — rejection paths", () => {
     expect(submitSpy).not.toHaveBeenCalled();
   });
 
-});
-
-// ─── M1-F-1: isSyncThrow dead-code removal (RED) ─────────────────────────────
-//
-// ARCH §9 #10: `HttpError.isSyncThrow` is dead code — production fetch never
-// throws synchronously; the flag was a defensive workaround for a now-fixed
-// Caroline test fixture. The sentinel return branch in Marketplace.submitPrompt
-// must also be removed. These two tests stay RED until Catherine removes both.
-//
-// Audit note: no existing test in this file relies on the sentinel-return path.
-// All tests above (1-20) correctly expect submitPrompt to REJECT on error.
-// The sentinel branch (isSyncThrow → resolve with { response: "", receipt: ... })
-// is never triggered by any test because the existing fetch mocks return Promises
-// (not synchronous throws). Safe to remove without updating any existing test.
-
-describe("M1-F-1: isSyncThrow flag removal", () => {
-  // 21. isSyncThrow flag does not exist on HttpError
-  it("RED: HttpError has no isSyncThrow property (flag removed)", () => {
-    // Will RED until Catherine removes `public readonly isSyncThrow` from HttpError.
-    // After removal, new HttpError(...) must NOT expose isSyncThrow.
-    // HttpError is statically imported at top of file.
-    const err = new HttpError("network", "test error");
-    expect((err as unknown as Record<string, unknown>).isSyncThrow).toBeUndefined();
-  });
-
-  // 22. Synchronously-throwing fetch rejects (not sentinel-resolves)
-  it("RED: submitPrompt REJECTS (not resolves) when injected fetch throws synchronously", async () => {
-    // Will RED until Catherine removes the isSyncThrow sentinel branch.
-    // Currently: a sync-throwing fetch → sentinel resolve { response: "", ... }.
-    // After fix:  a sync-throwing fetch → HttpError("network", ...) → propagation → REJECT.
-    const chain = new MockChainProvider();
-    chain.advanceSlot(1_745_500_000);
-    seedAdvertUtxo(chain, makeActiveAdvert());
-
-    // A fetch that throws SYNCHRONOUSLY (not returning a Promise).
-    const syncThrowFetch = vi.fn(() => {
-      throw new Error("sync throw from mock fetch");
+  it("counts instructions and tool schemas before funding a bounded supplier", async () => {
+    const datum = advert({
+      detail_uri: `https://supplier.example.com/reseller${BOUNDED_INPUT_DETAIL_MARKER}`,
     });
+    seedAdvert(chain, datum);
+    const submitSpy = vi.spyOn(chain, "submitTx");
+    const fetchImpl = vi.fn(async () => json(capability(datum, {
+      max_input_tokens: 500,
+    }))) as unknown as typeof fetch;
 
-    const mp = makeMarketplace(chain, syncThrowFetch);
-    // Must REJECT — the sentinel-return path must not exist after M1-F-1-green.
-    await expect(
-      mp.submitPrompt({ advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT })
-    ).rejects.toThrow();
+    await expect(marketplace(chain, fetchImpl).submitPrompt({
+      advertRef: ADVERT_REF,
+      input: INPUT,
+      instructions: "Keep all of these constraints. ".repeat(100),
+      tools: [{
+        type: "function",
+        name: "lookup",
+        description: "Large bounded schema. ".repeat(100),
+        parameters: {
+          type: "object",
+          properties: {
+            query: {
+              type: "string",
+              description: "Detailed query constraints. ".repeat(100),
+            },
+          },
+          required: ["query"],
+        },
+      }],
+      payment_lovelace: PAYMENT,
+    })).rejects.toSatisfy(
+      (error: unknown) =>
+        error instanceof TxConstructionError &&
+        error.reason === "input_cap_exceeded",
+    );
+    expect(submitSpy).not.toHaveBeenCalled();
   });
 });

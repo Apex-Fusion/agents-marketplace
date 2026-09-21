@@ -46,7 +46,8 @@ services:
         required: false
     environment:
       LLM_BACKEND: openai
-      # No /v1 suffix — supplier/src/openai.ts appends /v1/chat/completions.
+      OPENAI_UPSTREAM_API: responses
+      # No /v1 suffix — the native adapter appends /v1/responses.
       OPENAI_BASE_URL: https://openrouter.ai/api
       # Raised to match the advert's max_processing_ms=3600000 (60 min) so the
       # upstream call isn't aborted before the advertised processing deadline

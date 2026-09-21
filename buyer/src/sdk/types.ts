@@ -1,12 +1,15 @@
 /**
- * buyer/src/sdk/types.ts — SDK-specific types for M1-E.
- *
- * Stub — all runtime values throw until M1-E-green.
+ * buyer/src/sdk/types.ts — public buyer SDK types.
  */
 
 import type { Receipt } from "@marketplace/shared/receipt";
 import type { SignedReceipt } from "@marketplace/shared/receipt";
 import type { OutputReference } from "@marketplace/shared/chain";
+import type {
+  ResponseItem,
+  ResponseObject,
+  ResponseRequest,
+} from "@marketplace/shared/responses";
 
 // Re-export for consumers
 export type { Receipt, SignedReceipt };
@@ -15,8 +18,12 @@ export type { Receipt, SignedReceipt };
  * SubmitPromptResult — returned from Marketplace.submitPrompt() on success.
  */
 export interface SubmitPromptResult {
-  /** The assistant content string from the supplier's response. */
+  /** Derived assistant text convenience. Refusals remain in `result.output`. */
   response: string;
+  /** Canonical terminal Responses object. */
+  result: ResponseObject;
+  /** Exact normalized, capped request committed by prompt_hash. */
+  request: ResponseRequest;
   /** Full receipt object, validated and canonical. */
   receipt: Receipt;
   /** Ed25519 hex signature over canonical(receipt), 64 bytes. */
@@ -153,6 +160,10 @@ export interface SupplierCapabilityView {
   supplier_pkh: string;
   pub_key_hex: string;
   max_input_tokens?: number;
+  inference_api: "responses";
+  upstream_api: "responses" | "chat-completions" | "ollama";
+  /** Operator policy; an explicit effort other than none cannot be accepted when true. */
+  reasoning_disabled?: boolean;
 }
 
 /**
@@ -166,14 +177,12 @@ export interface DiscoverSuppliersOptions {
 /**
  * SubmitPromptOptions — arguments to Marketplace.submitPrompt().
  */
-export interface SubmitPromptOptions {
+export type SubmitPromptOptions = ResponseRequest & {
   advertRef: OutputReference;
-  messages: import("@marketplace/shared/tx").ChatMessage[];
   payment_lovelace: bigint;
-  max_output_tokens?: number;
   /** Explicit consent for the seller's public redacted demo preview. */
   public_preview?: boolean;
-}
+};
 
 /**
  * SubmitTtsOptions — arguments to Marketplace.submitTts() for the
@@ -263,6 +272,8 @@ export interface StartChatResult {
   supplierBaseUrl: string;
   /** How the supplier settles this session ("full" when it Claimed). */
   settleMode: ChatSettleMode;
+  /** Upstream contract declared by the supplier before funds were locked. */
+  upstreamApi: SupplierCapabilityView["upstream_api"];
 }
 
 /**
@@ -276,8 +287,8 @@ export interface EndChatOptions {
    * because the Open escrow UTxO is already spent (Claimed) by End time, so we
    * resolve the supplier via its cached URL + /capability rather than chain. */
   supplierBaseUrl: string;
-  /** The browser's local transcript mirror, used to verify response_hash. */
-  transcript?: import("@marketplace/shared/tx").ChatMessage[];
+  /** Exact ordered input and terminal output Items mirrored by the browser. */
+  transcript: ResponseItem[];
 }
 export type EndChatResult =
   | {

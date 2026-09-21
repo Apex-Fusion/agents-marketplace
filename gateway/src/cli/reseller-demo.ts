@@ -80,7 +80,7 @@ export async function runResellerDemo(
     }
 
     const response = await fetch(
-      `${options.gatewayUrl}/openai/v1/chat/completions`,
+      `${options.gatewayUrl}/openai/v1/responses`,
       {
         method: "POST",
         headers: {
@@ -89,8 +89,8 @@ export async function runResellerDemo(
         },
         body: JSON.stringify({
           model: options.model,
-          messages: [{ role: "user", content: options.prompt }],
-          max_tokens: options.maxTokens,
+          input: options.prompt,
+          max_output_tokens: options.maxTokens,
           stream: false,
           public_preview: true,
           x_vector: { supplier_pkh: supplierPkh },
@@ -104,8 +104,9 @@ export async function runResellerDemo(
         `gateway returned HTTP ${response.status}: ${JSON.stringify(body)}`,
       );
     }
-    const escrowRef = response.headers.get("x-vector-escrow-ref");
-    if (!escrowRef) throw new Error("gateway response omitted X-Vector-Escrow-Ref");
+    const vector = body?.x_vector as Record<string, unknown> | undefined;
+    const escrowRef = typeof vector?.escrow_ref === "string" ? vector.escrow_ref : null;
+    if (!escrowRef) throw new Error("gateway response omitted x_vector.escrow_ref");
     const job = await waitForPublicJob(
       options.dashboardUrl,
       escrowRef,

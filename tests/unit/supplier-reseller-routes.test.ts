@@ -68,9 +68,56 @@ describe("reseller supplier routes", () => {
       reseller: fakeReseller(true, 1),
     });
     const response = await request(app)
-      .post("/v1/chat/completions")
+      .post("/v1/responses")
       .set("X-Escrow-Ref", ESCROW_REF)
-      .send({ messages: [{ role: "user", content: "too large" }] });
+      .send({
+        input: [{
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "too large" }],
+        }],
+      });
+    expect(response.status).toBe(413);
+    expect(response.body.reason).toBe("input_cap_exceeded");
+    expect(submitSpy).not.toHaveBeenCalled();
+  });
+
+  it("rejects oversized tool definitions before Claim even with small message input", async () => {
+    const chain = new MockChainProvider();
+    const submitSpy = vi.spyOn(chain, "submitTx");
+    const app = createApp({
+      chain,
+      state: new SupplierState(),
+      config: { ...buildSampleConfig(), llmBackend: "openai", openaiUpstreamApi: "responses" },
+      supplierKey: buildSupplierWalletKey(),
+      reseller: fakeReseller(true, 500),
+    });
+    const response = await request(app)
+      .post("/v1/responses")
+      .set("X-Escrow-Ref", ESCROW_REF)
+      .send({
+        input: "a",
+        tools: [{ type: "function", name: "lookup", description: "x".repeat(2000), parameters: { type: "object" } }],
+      });
+    expect(response.status).toBe(413);
+    expect(response.body.reason).toBe("input_cap_exceeded");
+    expect(submitSpy).not.toHaveBeenCalled();
+  });
+
+  it("bounds decomposed Unicode as transmitted before claiming paid work", async () => {
+    const chain = new MockChainProvider();
+    const submitSpy = vi.spyOn(chain, "submitTx");
+    const app = createApp({
+      chain,
+      state: new SupplierState(),
+      config: { ...buildSampleConfig(), llmBackend: "openai", openaiUpstreamApi: "responses" },
+      supplierKey: buildSupplierWalletKey(),
+      reseller: fakeReseller(true, 5000),
+    });
+    const response = await request(app)
+      .post("/v1/responses")
+      .set("X-Escrow-Ref", ESCROW_REF)
+      .send({ input: "\u1100\u1161\u11a8".repeat(1000) });
     expect(response.status).toBe(413);
     expect(response.body.reason).toBe("input_cap_exceeded");
     expect(submitSpy).not.toHaveBeenCalled();

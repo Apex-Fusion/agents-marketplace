@@ -1,23 +1,21 @@
 # HuggingFace Router Supplier — Setup Runbook (V1 / W1)
 
-> **Status:** shipped. Configures a Vector supplier node to use the HuggingFace
-> **Inference Providers router** as its **compute backend** for bonded inference
-> work commissioned on Vector. Config only — no code changes.
+> **Purpose:** configure a Vector supplier node to use the HuggingFace
+> Inference Providers router as its compute backend. This is configuration
+> only. It does not state that a deployment has completed.
 
 ---
 
 ## 1. What this is
 
-The HuggingFace **Inference Providers router** (`https://router.huggingface.co`)
-is an OpenAI-compatible endpoint that fronts hundreds of hosted models across
-partner providers (Together, Fireworks, DeepInfra, Groq, …). It is the direct
-analogue of the OpenRouter backend the supplier already supports.
+The HuggingFace **Inference Providers router**
+(`https://router.huggingface.co`) fronts hosted models across partner
+providers. The supplier uses its native Responses API.
 
-Because the supplier's upstream client (`supplier/src/openai.ts`) already speaks
-plain `POST /v1/chat/completions` with a Bearer token, pointing it at HuggingFace
-is **pure configuration**: set `LLM_BACKEND=openai` and point `OPENAI_BASE_URL` at
-the router. It is the same as adding any OpenAI-compatible compute backend, with
-the HuggingFace endpoint and token substituted in.
+Set `LLM_BACKEND=openai`, `OPENAI_UPSTREAM_API=responses`, and
+`OPENAI_BASE_URL=https://router.huggingface.co`. The adapter sends
+`POST /v1/responses` with `store:false` and full Item replay. A provider suffix
+in the model id stays intact. There is no Chat Completions fallback.
 
 ```
 buyer commissions bonded work ──▶ supplier node ──▶ HuggingFace router
@@ -60,16 +58,17 @@ cp supplier/.env.huggingface-chat.example supplier/.env
 chmod 600 supplier/.env
 ```
 
-Fill in `SUPPLIER_PRIV_KEY_HEX`, `OPENAI_API_KEY` (your `hf_…` token),
-`OGMIOS_URL`, and the `ADVERT_*` values. Key settings for this preset:
+Fill in all four supplier wallet values, `OPENAI_API_KEY`, `OGMIOS_URL`, and
+the `ADVERT_*` values. Key settings are:
 
 | Var | Value | Why |
 |-----|-------|-----|
-| `LLM_BACKEND` | `openai` | routes chat through the OpenAI-compatible client |
-| `OPENAI_BASE_URL` | `https://router.huggingface.co` | HF router; the `/v1/chat/completions` suffix is appended by the client — do **not** add it |
-| `OPENAI_API_KEY` | `hf_…` | your HF token (Bearer) |
-| `OPENAI_REASONING` | **unset** | HF 400s on the OpenRouter-only `reasoning` param (see §5) |
-| `ADVERT_MODEL` | provider-qualified id, e.g. `deepseek-ai/DeepSeek-V3:fastest` | see §4 |
+| `LLM_BACKEND` | `openai` | selects the OpenAI-compatible adapter |
+| `OPENAI_UPSTREAM_API` | `responses` | selects native Responses explicitly |
+| `OPENAI_BASE_URL` | `https://router.huggingface.co` | the adapter appends `/v1/responses` |
+| `OPENAI_API_KEY` | `hf_…` | HF Bearer token |
+| `OPENAI_REASONING` | unset, or `off` only by policy | `off` sends native `reasoning.effort:"none"` |
+| `ADVERT_MODEL` | provider-qualified id such as `deepseek-ai/DeepSeek-V3:fastest` | preserves provider selection |
 
 ### 3.2 Choose a model
 
@@ -83,24 +82,28 @@ HF uses **provider-qualified** model names. The value goes on-chain in
 Browse models and their providers at
 <https://huggingface.co/models?inference_provider=all>.
 
-Because the model is on-chain data, you can advertise any router-supported chat
-model without changing the supplier code — just post a new advert.
+The advert can use any router-supported model, but the operator must first
+verify that its selected provider supports the Responses features buyers need.
 
 ### 3.3 Smoke-test the token before going on-chain
 
-Confirm your token + model + base URL work end to end, independent of the chain:
+Confirm the token, model, endpoint, native output Items, and canonical usage:
 
 ```bash
-curl https://router.huggingface.co/v1/chat/completions \
+curl -sS https://router.huggingface.co/v1/responses \
   -H "Authorization: Bearer $HF_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"model":"deepseek-ai/DeepSeek-V3:fastest",
-       "messages":[{"role":"user","content":"say hi in 3 words"}],
-       "stream":false}'
+       "input":"say hi in 3 words",
+       "store":false}' \
+  | jq '{status,output,usage}'
 ```
 
-A `choices[0].message.content` in the response means the compute backend is
-reachable. (Note: **no** `reasoning` field — see §5.)
+Require `status: "completed"`, a non-empty `output` Item array, and usage with
+`input_tokens`, `output_tokens`, and `total_tokens`. Text is an `output_text`
+part inside a message Item. For tool-capable adverts, also probe the flat
+Responses function form:
+`{"type":"function","name":"...","parameters":{...}}`.
 
 ### 3.4 Post the advert
 
@@ -119,10 +122,10 @@ Copy the printed `<txHash>#0` into `ADVERT_REF` in `supplier/.env`. Use
 
 ### 3.5 Boot
 
-Start read-only first (`LIVE_CHAIN` unset) to confirm the node boots and can
-reach both Ogmios and the HF router, then set `LIVE_CHAIN=1` and restart to
-enable real Claim/Submit. Deploy via the supplier compose file as in
-`deploy/README.md`.
+Boot locally without `LIVE_CHAIN=1` first. This checks configuration and
+backend access without chain writes. The current testnet has no functional
+marketplace. Use a controlled mainnet smoke only after the supplier, wallet,
+advert, ingress, and native HF path are ready.
 
 ---
 
@@ -132,13 +135,12 @@ enable real Claim/Submit. Deploy via the supplier compose file as in
 but the HuggingFace backend meters **per token**. The committed amount is fixed
 per job while upstream token usage varies, so:
 
-- Size it for your **worst-case** prompt length, not the average.
-- Cap output tightly with `--max-output-tokens` — it is your main lever on
-  upstream token usage.
-- Prefer **small** models here; large models have wide token-usage variance and
-  are harder to size a fixed per-job amount around.
-- Buyer **input** tokens are not capped on-chain today. Until an input-token
-  ceiling lands, stick to small models or add your own request-size guard.
+- Size for the worst-case full request, not only the visible prompt text.
+- Cap output with the advert and, when required, `OPENAI_MAX_TOKENS`.
+- Prefer small models when variable usage makes a flat job price risky.
+- The base advert has no input-token field. A reseller capability can publish
+  `max_input_tokens`; its bound counts the full transmitted JSON UTF-8,
+  including instructions and tools, without NFC reduction.
 
 This is a pre-existing protocol design point (fixed per-job advert amount vs.
 variable upstream token usage), not specific to HuggingFace. It is the main thing
@@ -146,16 +148,17 @@ to account for when sizing an advert.
 
 ---
 
-## 5. Footgun: `OPENAI_REASONING` must stay unset
+## 5. Reasoning policy
 
-`reasoning:{enabled:false}` is an **OpenRouter-specific** parameter. The HF
-router **rejects it with HTTP 400 on every request**. When copying an existing
-OpenRouter env, it is easy to carry `OPENAI_REASONING=off` over by accident.
+Native HF Responses accepts the standard reasoning control. Leave
+`OPENAI_REASONING` unset to preserve buyer requests. Set it to `off` only when
+the operator policy forbids reasoning. The supplier then sends
+`reasoning:{effort:"none"}`, advertises `reasoning_disabled: true`, and rejects
+an incompatible request before funding or Claim.
 
-The supplier guards against this: `loadConfig` **refuses to boot** if
-`OPENAI_REASONING` is disabled while `OPENAI_BASE_URL` resolves to
-`router.huggingface.co`, with a clear error naming the fix
-(`supplier/src/config.ts`). Just leave `OPENAI_REASONING` unset for HF.
+The old warning applies only to
+`OPENAI_UPSTREAM_API=chat-completions`: HF rejects the OpenRouter-specific
+`reasoning:{enabled:false}` form. This preset does not use that mode.
 
 ---
 

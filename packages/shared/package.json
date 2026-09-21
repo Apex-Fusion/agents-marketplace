@@ -10,6 +10,7 @@
     "./chain": "./src/chain/index.ts",
     "./cbor": "./src/cbor/index.ts",
     "./receipt": "./src/receipt/index.ts",
+    "./responses": "./src/responses.ts",
     "./tx": "./src/tx/index.ts",
     "./tx/server": "./src/tx/server.ts"
   },

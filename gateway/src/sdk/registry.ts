@@ -88,12 +88,12 @@ export class Mutex {
     }
     this.depth++;
 
-    // Keep the chain alive even if fn rejects or times out; swallow here so
-    // the next run() isn't poisoned by a prior rejection.
-    const result = this.tail.then(
-      () => runWithDeadline(fn, timeoutMs, label),
-      () => runWithDeadline(fn, timeoutMs, label),
-    );
+    // A zero deadline is reserved for work that has its own cancellable I/O
+    // budget. It preserves serialization instead of abandoning live work.
+    const invoke = (): Promise<T> => timeoutMs === 0 ? fn() : runWithDeadline(fn, timeoutMs, label);
+    // Keep the chain alive even if fn rejects; swallow here so the next run()
+    // isn't poisoned by a prior rejection.
+    const result = this.tail.then(invoke, invoke);
     const settled = result.finally(() => {
       this.depth--;
     });

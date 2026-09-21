@@ -13,7 +13,7 @@ import {
 } from "@marketplace/shared/tx";
 import { deriveKeypair } from "./gen-keypair.js";
 import { runPostAdvert } from "./postAdvertFlow.js";
-import { callOpenAi } from "../openai.js";
+import { callResponses } from "../openai.js";
 import { OpenRouterCapacityProvider } from "../reseller/openRouterCapacity.js";
 import {
   loadResellerSetupConfig,
@@ -132,11 +132,17 @@ export async function runResellerSetup(
   await capacity.readCapacity(config.openRouterModel);
 
   log("running one-token OpenRouter inference probe");
-  await callOpenAi({
+  await callResponses({
     baseUrl: OPENROUTER_BASE_URL,
     apiKey: openRouterKey,
+    upstreamApi: "responses",
     model: config.openRouterModel,
-    messages: [{ role: "user", content: "Reply OK" }],
+    input: [{
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: "Reply OK" }],
+    }],
+    max_output_tokens: 1,
     maxTokens: 1,
     disableReasoning: true,
     timeoutMs: config.inferenceTimeoutMs,
@@ -214,6 +220,7 @@ function buildRuntimeState(
     CAPABILITY_KIND: "chat",
     LLM_BACKEND: "openai",
     OPENAI_BASE_URL: OPENROUTER_BASE_URL,
+    OPENAI_UPSTREAM_API: "responses",
     OPENAI_MODEL_OVERRIDE: config.openRouterModel,
     OPENAI_MAX_TOKENS: String(config.maxOutputTokens),
     OPENAI_REASONING: "off",

@@ -36,6 +36,8 @@ services:
     env_file:
       - path: /var/lib/agents-marketplace/openrouter-reseller.env
         required: true
+    environment:
+      OPENAI_UPSTREAM_API: responses
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz >/dev/null || exit 1"]
       interval: 20s

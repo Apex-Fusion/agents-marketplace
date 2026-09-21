@@ -54,9 +54,9 @@ describe("Capability-routed mounting", () => {
       .set("X-Escrow-Ref", ESCROW_REF_HEADER).send(validBody());
     expect(ocr.status).not.toBe(404);
 
-    const chat = await request(app).post("/v1/chat/completions")
+    const chat = await request(app).post("/v1/responses")
       .set("X-Escrow-Ref", ESCROW_REF_HEADER)
-      .send({ messages: [{ role: "user", content: "hi" }] });
+      .send({ input: [{ role: "user", content: "hi" }] });
     expect(chat.status).toBe(404);
 
     const tts = await request(app).post("/v1/audio/synthesize")

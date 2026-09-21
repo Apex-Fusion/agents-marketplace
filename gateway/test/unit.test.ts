@@ -1,9 +1,10 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { seal, open } from "../src/crypto/seal.js";
 import { Mutex } from "../src/sdk/registry.js";
 import { selectCandidates, listModels, parseRef } from "../src/routing/selectSupplier.js";
-import { parseChatRequest } from "../src/openai/validate.js";
-import { buildChatCompletion, buildChunk, usageFromReceipt, renderMessages } from "../src/openai/shapes.js";
+import { parseResponseRequest } from "../src/openai/validate.js";
+import { publicResponse, responseSse, usageFromReceipt } from "../src/openai/shapes.js";
+import { createResponse } from "@marketplace/shared/responses";
 import { totalLovelace, hasCollateral, preflight } from "../src/onchain/preflight.js";
 import { GatewayError } from "../src/openai/errors.js";
 
@@ -45,6 +46,29 @@ describe("Mutex", () => {
       throw new Error("boom");
     }).catch(() => undefined);
     expect(await m.run(async () => 42)).toBe(42);
+  });
+
+  it("does not abandon a session operation at the wallet mutex deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const mutex = new Mutex({ timeoutMs: 0 });
+      let release: (() => void) | undefined;
+      const first = mutex.run(() => new Promise<void>((resolve) => {
+        release = resolve;
+      }), "session-turn");
+      let secondRan = false;
+      const second = mutex.run(async () => {
+        secondRan = true;
+      }, "session-turn");
+
+      await vi.advanceTimersByTimeAsync(300_000);
+      expect(secondRan).toBe(false);
+      release?.();
+      await Promise.all([first, second]);
+      expect(secondRan).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -133,102 +157,141 @@ describe("routing/selectSupplier", () => {
   });
 });
 
-describe("openai/validate", () => {
-  it("accepts a valid body and ignores temperature", () => {
-    const p = parseChatRequest({ model: "m", messages: [{ role: "user", content: "hi" }], temperature: 0.7, max_tokens: 50 });
-    expect(p.model).toBe("m");
-    expect(p.maxTokens).toBe(50);
-    expect(p.stream).toBe(false);
-  });
-  it("accepts and validates a Vector supplier pin", () => {
-    const supplierPkh = "a".repeat(56);
-    const parsed = parseChatRequest({
+describe("openai/Responses", () => {
+  it("normalizes string input and supported controls", () => {
+    const parsed = parseResponseRequest({
       model: "m",
-      messages: [{ role: "user", content: "hi" }],
-      x_vector: { supplier_pkh: supplierPkh },
+      input: "hi",
+      temperature: 0.7,
+      max_output_tokens: 50,
+      tools: [{ type: "function", name: "clock", parameters: { type: "object" } }],
+      tool_choice: { type: "function", name: "clock" },
     });
-    expect(parsed.supplierPkh).toBe(supplierPkh);
-    expect(() => parseChatRequest({
+    expect(parsed.input).toEqual([{
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: "hi" }],
+    }]);
+    expect(parsed.max_output_tokens).toBe(50);
+    expect(parsed.temperature).toBe(0.7);
+    expect(parsed.store).toBe(true);
+    expect(parsed.stream).toBe(false);
+    expect(parsed.tools?.[0].name).toBe("clock");
+  });
+
+  it("accepts continuation without new input and validates Vector supplier pins", () => {
+    const supplierPkh = "a".repeat(56);
+    const parsed = parseResponseRequest({
       model: "m",
-      messages: [{ role: "user", content: "hi" }],
-      x_vector: { supplier_pkh: "bad" },
+      previous_response_id: "resp_parent",
+      x_vector: { supplier_pkh: supplierPkh },
+      store: false,
+    });
+    expect(parsed.input).toEqual([]);
+    expect(parsed.previousResponseId).toBe("resp_parent");
+    expect(parsed.supplierPkh).toBe(supplierPkh);
+    expect(parsed.store).toBe(false);
+    expect(() => parseResponseRequest({
+      model: "m", input: "x", x_vector: { supplier_pkh: "bad" },
     })).toThrow(GatewayError);
   });
-  it("rejects tools/functions", () => {
-    expect(() => parseChatRequest({ model: "m", messages: [{ role: "user", content: "x" }], tools: [] })).toThrow(GatewayError);
-  });
-  it("rejects empty messages and bad model", () => {
-    expect(() => parseChatRequest({ model: "m", messages: [] })).toThrow();
-    expect(() => parseChatRequest({ messages: [{ role: "user", content: "x" }] })).toThrow();
-  });
 
-  const TOOL_CALL = { id: "call_1", type: "function", function: { name: "get_time", arguments: "{}" } };
-
-  it("allowTools accepts tools, tool role, null content and assistant tool_calls", () => {
-    const p = parseChatRequest(
-      {
-        model: "m",
-        messages: [
-          { role: "user", content: "hi" },
-          { role: "assistant", content: null, tool_calls: [TOOL_CALL] },
-          { role: "tool", content: "3pm", tool_call_id: "call_1" },
-        ],
-        tools: [{ type: "function", function: { name: "get_time", parameters: {} } }],
-        tool_choice: "auto",
-      },
-      { allowTools: true },
-    );
-    expect(p.tools).toHaveLength(1);
-    expect(p.toolChoice).toBe("auto");
-    expect(p.messages[1]).toEqual({ role: "assistant", content: "", tool_calls: [TOOL_CALL] });
-    expect(p.messages[2]).toEqual({ role: "tool", content: "3pm", tool_call_id: "call_1" });
-  });
-
-  it("allowTools still rejects legacy functions and the default path still rejects tool role", () => {
-    expect(() =>
-      parseChatRequest({ model: "m", messages: [{ role: "user", content: "x" }], functions: [] }, { allowTools: true }),
-    ).toThrow(GatewayError);
-    expect(() =>
-      parseChatRequest({ model: "m", messages: [{ role: "tool", content: "x", tool_call_id: "c" }] }),
-    ).toThrow(GatewayError);
-  });
-});
-
-describe("openai/shapes", () => {
-  const receipt = { prompt_hash: "p", response_hash: "r", model: "m", prompt_tokens: 3, completion_tokens: 5, wallclock_ms: 1, supplier_pkh: "s", escrow_ref: "x#0" };
-  it("usage + completion shape", () => {
-    const usage = usageFromReceipt(receipt);
-    expect(usage).toEqual({ prompt_tokens: 3, completion_tokens: 5, total_tokens: 8 });
-    const cc = buildChatCompletion({ id: "id", model: "m", content: "hello", usage, vector: { receipt, receipt_signature: "sig", escrow_ref: "x#0" } });
-    expect(cc.object).toBe("chat.completion");
-    expect((cc.choices as any)[0].message).toEqual({ role: "assistant", content: "hello" });
-    expect((cc as any).x_vector.escrow_ref).toBe("x#0");
-  });
-  it("chunk shape", () => {
-    const ch = buildChunk({ id: "id", model: "m", delta: { content: "tok" }, finishReason: null });
-    expect(ch.object).toBe("chat.completion.chunk");
-    expect((ch.choices as any)[0].delta.content).toBe("tok");
-  });
-  it("tool_calls chunk + finish_reason tool_calls", () => {
-    const tc = { index: 0, id: "call_1", type: "function" as const, function: { name: "f", arguments: "{}" } };
-    const ch = buildChunk({ id: "id", model: "m", delta: { tool_calls: [tc] }, finishReason: "tool_calls" });
-    expect((ch.choices as any)[0].delta.tool_calls).toEqual([tc]);
-    expect((ch.choices as any)[0].finish_reason).toBe("tool_calls");
-  });
-  it("completion with tool_calls and finish_reason", () => {
-    const cc = buildChatCompletion({
-      id: "id",
+  it("preserves typed reasoning and public storage controls", () => {
+    const reasoning = {
+      id: "rs_1",
+      type: "reasoning" as const,
+      summary: [{ type: "summary_text", text: "summary" }],
+      encrypted_content: "opaque",
+      status: "completed",
+    };
+    const parsed = parseResponseRequest({
       model: "m",
-      content: "",
-      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
-      toolCalls: [{ id: "call_1", type: "function", function: { name: "f", arguments: "{}" } }],
-      finishReason: "tool_calls",
+      input: [reasoning],
+      instructions: "current turn only",
+      include: ["reasoning.encrypted_content"],
+      metadata: { trace: "one" },
     });
-    expect((cc.choices as any)[0].message.tool_calls).toHaveLength(1);
-    expect((cc.choices as any)[0].finish_reason).toBe("tool_calls");
+    expect(parsed.input).toEqual([reasoning]);
+    expect(parsed.instructions).toBe("current turn only");
+    expect(parsed.include).toEqual(["reasoning.encrypted_content"]);
+    expect(parsed.metadata).toEqual({ trace: "one" });
   });
-  it("renderMessages folds roles", () => {
-    expect(renderMessages([{ role: "system", content: "be nice" }, { role: "user", content: "hi" }])).toBe("System: be nice\n\nUser: hi");
+
+  it("rejects old and unsupported controls instead of ignoring them", () => {
+    expect(() => parseResponseRequest({ model: "m", messages: [] })).toThrow(GatewayError);
+    expect(() => parseResponseRequest({ model: "m", input: "x", max_tokens: 5 })).toThrow(GatewayError);
+    expect(() => parseResponseRequest({
+      model: "m", input: "x", tools: [{ type: "web_search_preview" }],
+    })).toThrow(GatewayError);
+    expect(() => parseResponseRequest({ model: "m", input: "x", conversation: "conv_1" }))
+      .toThrow(GatewayError);
+    expect(() => parseResponseRequest({ model: "m", input: [] })).toThrow(GatewayError);
+  });
+
+  const receipt = {
+    prompt_hash: "p", response_hash: "r", model: "m", prompt_tokens: 3,
+    completion_tokens: 5, wallclock_ms: 1, supplier_pkh: "s", escrow_ref: "x#0",
+  };
+  it("builds one typed terminal object for JSON and canonical SSE", () => {
+    const usage = usageFromReceipt(receipt);
+    expect(usage).toEqual({ input_tokens: 3, output_tokens: 5, total_tokens: 8 });
+    const result = createResponse({
+      id: "supplier",
+      model: "m",
+      output: [{
+        id: "msg_1",
+        type: "message",
+        role: "assistant",
+        status: "completed",
+        content: [{ type: "output_text", text: "hello", annotations: [] }],
+      }],
+      usage,
+    });
+    const response = publicResponse({
+      id: "resp_1",
+      model: "m",
+      result,
+      vector: { receipt, receipt_signature: "sig", escrow_ref: "x#0" },
+    });
+    expect(response.object).toBe("response");
+    expect(response.output).toEqual(result.output);
+    expect(response.x_vector).toEqual({
+      receipt, receipt_signature: "sig", escrow_ref: "x#0",
+    });
+    const stream = responseSse(response);
+    expect(stream).not.toContain("[DONE]");
+    const payloads = stream.trim().split("\n\n").map((frame) => {
+      const data = frame.split("\n").find((line) => line.startsWith("data: "));
+      if (!data) throw new Error("SSE frame has no data");
+      return JSON.parse(data.slice(6)) as unknown;
+    });
+    const eventTypes = payloads.map((payload) =>
+      typeof payload === "object" && payload !== null && "type" in payload ? payload.type : undefined);
+    expect(eventTypes).toEqual([
+      "response.created",
+      "response.in_progress",
+      "response.output_item.added",
+      "response.content_part.added",
+      "response.output_text.delta",
+      "response.output_text.done",
+      "response.content_part.done",
+      "response.output_item.done",
+      "response.completed",
+    ]);
+    const sequence = payloads.map((payload) =>
+      typeof payload === "object" && payload !== null && "sequence_number" in payload
+        ? payload.sequence_number
+        : undefined);
+    expect(sequence).toEqual(payloads.map((_, index) => index));
+    const createdPayload = payloads[0];
+    if (typeof createdPayload !== "object" || createdPayload === null ||
+        !("response" in createdPayload) || typeof createdPayload.response !== "object" ||
+        createdPayload.response === null) throw new Error("created SSE frame has no response");
+    expect("x_vector" in createdPayload.response).toBe(false);
+    const terminalPayload = payloads.at(-1);
+    if (typeof terminalPayload !== "object" || terminalPayload === null ||
+        !("response" in terminalPayload)) throw new Error("terminal SSE frame has no response");
+    expect(terminalPayload.response).toEqual(response);
   });
 });
 

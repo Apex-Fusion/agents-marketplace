@@ -35,6 +35,9 @@ services:
         required: false
     environment:
       LLM_BACKEND: openai
+      OPENAI_UPSTREAM_API: responses
+      # Codex supplies complete output Items in SSE, not the terminal aggregate.
+      OPENAI_RESPONSES_STREAM_ONLY: "1"
       OPENAI_BASE_URL: http://marketplace-mainnet-chatmock:8000
       OPENAI_TIMEOUT_MS: "300000"
       PORT: "8080"

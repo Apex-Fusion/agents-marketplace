@@ -3,8 +3,8 @@
  *
  * Public:   GET /healthz, GET /, POST /signup (IP rate-limited).
  * Bearer:   GET /account, POST /account/withdraw,
- *           POST /openai/v1/chat/completions, GET /openai/v1/models,
- *           POST /openai/v1/chat/sessions[/:id/messages|/close].
+ *           POST /openai/v1/responses, GET/DELETE /openai/v1/responses/:id,
+ *           GET /openai/v1/models, and Vector chat session routes.
  */
 
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
@@ -13,7 +13,11 @@ import { makeApiKeyAuth } from "./middleware/apiKeyAuth.js";
 import { ipRateLimit, keyRateLimit, demoIpRateLimit } from "./middleware/rateLimit.js";
 import { sendError } from "./middleware/http.js";
 import { notFound } from "./openai/errors.js";
-import { makeChatCompletionsHandler } from "./openai/chatCompletions.js";
+import {
+  makeResponsesHandler,
+  makeGetResponseHandler,
+  makeDeleteResponseHandler,
+} from "./openai/responses.js";
 import { makeOcrExtractHandler } from "./ocr/extract.js";
 import { makeModelsHandler } from "./openai/models.js";
 import {
@@ -39,7 +43,7 @@ function corsMiddleware(allowOrigins: string[]) {
     if (typeof origin === "string" && allow.has(origin)) {
       res.setHeader("Access-Control-Allow-Origin", origin);
       res.setHeader("Vary", "Origin");
-      res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+      res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
       res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
       res.setHeader("Access-Control-Expose-Headers", "X-Vector-Escrow-Ref");
       res.setHeader("Access-Control-Max-Age", "600");
@@ -85,7 +89,9 @@ export function createApp(deps: GatewayDeps): Express {
   app.get("/account", auth, makeAccountHandler(deps));
   app.post("/account/withdraw", auth, makeWithdrawHandler(deps));
 
-  app.post("/openai/v1/chat/completions", ...gated, makeChatCompletionsHandler(deps));
+  app.post("/openai/v1/responses", ...gated, makeResponsesHandler(deps));
+  app.get("/openai/v1/responses/:id", ...gated, makeGetResponseHandler(deps));
+  app.delete("/openai/v1/responses/:id", ...gated, makeDeleteResponseHandler(deps));
   // Model-scoped OCR: 16mb parser covers MAX_OCR_IMAGE_B64_CHARS
   // (~12M chars ≈ 9 MB binary) plus JSON envelope. Gates (auth + rate
   // limits) run BEFORE the parser so an unauthenticated caller cannot

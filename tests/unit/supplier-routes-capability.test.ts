@@ -18,6 +18,7 @@ import type { Application } from "express";
 import { MockChainProvider } from "../../packages/shared/src/chain/MockChainProvider.js";
 import { encodeAdvertDatum } from "../../packages/shared/src/cbor/AdvertDatum.js";
 import type { AdvertDatum } from "../../packages/shared/src/cbor/types.js";
+import type { SupplierConfig } from "../../supplier/src/config.js";
 import { SupplierState } from "../../supplier/src/state.js";
 import { createApp } from "../../supplier/src/server.js";
 import { buildSampleConfig, SAMPLE_ADVERT_TX_HASH, SAMPLE_ADVERT_INDEX } from "../fixtures/supplier-side/sample-config.js";
@@ -60,11 +61,14 @@ function buildAdvertUtxo(datum: AdvertDatum) {
 
 // ─── Setup helpers ────────────────────────────────────────────────────────────
 
-function makeApp(chain: MockChainProvider): Application {
+function makeApp(
+  chain: MockChainProvider,
+  configOverrides: Partial<SupplierConfig> = {},
+): Application {
   return createApp({
     chain,
     state: new SupplierState(),
-    config: buildSampleConfig(),
+    config: { ...buildSampleConfig(), ...configOverrides },
     supplierKey: buildSupplierWalletKey(),
   });
 }
@@ -124,6 +128,23 @@ describe("GET /capability — happy path", () => {
   it("returns pub_key_hex matching the supplier wallet public key", async () => {
     const res = await request(app).get("/capability");
     expect(res.body.pub_key_hex).toBe(SUPPLIER_PUB_KEY_HEX);
+  });
+
+  it("advertises the marketplace and upstream inference APIs", async () => {
+    const res = await request(app).get("/capability");
+    expect(res.body.inference_api).toBe("responses");
+    expect(res.body.upstream_api).toBe("ollama");
+  });
+
+  it("advertises the operator reasoning policy", async () => {
+    const enabled = await request(app).get("/capability");
+    expect(enabled.body.reasoning_disabled).toBe(false);
+
+    const chain = new MockChainProvider();
+    chain.seed(buildAdvertUtxo(buildActiveAdvertDatum()));
+    const disabledApp = makeApp(chain, { openaiReasoningDisabled: true });
+    const disabled = await request(disabledApp).get("/capability");
+    expect(disabled.body.reasoning_disabled).toBe(true);
   });
 });
 

@@ -1,15 +1,4 @@
-/**
- * gateway/src/db/schema.ts — SQLite schema for the gateway.
- *
- * Three tables:
- *   api_keys — one custodial wallet per key; the wallet priv is AES-GCM sealed
- *              (enc_priv_*). The raw API key is NEVER stored — only sha256(key).
- *   usage    — one row per billable unit (a one-shot completion or a closed chat
- *              session), for /account spend reporting and audit.
- *   sessions — open chat sessions (one escrow per session), for streaming turns
- *              and sweeper recovery of abandoned sessions.
- */
-
+/** SQLite schema for gateway keys, accounting, sessions, and stored Responses. */
 export const CREATE_TABLES_SQL = `
 CREATE TABLE IF NOT EXISTS api_keys (
   id                 TEXT PRIMARY KEY,
@@ -56,7 +45,38 @@ CREATE TABLE IF NOT EXISTS sessions (
   price_lovelace    TEXT NOT NULL,
   state             TEXT NOT NULL,
   opened_at         INTEGER NOT NULL,
-  closed_at         INTEGER
+  closed_at         INTEGER,
+  last_used_at      INTEGER NOT NULL DEFAULT 0,
+  head_response_id  TEXT,
+  managed_demo      INTEGER NOT NULL DEFAULT 0,
+  max_output_tokens INTEGER NOT NULL DEFAULT 0,
+  max_processing_ms INTEGER NOT NULL DEFAULT 300000,
+  transcript_nonce  TEXT,
+  transcript_ct     TEXT,
+  transcript_tag    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_key ON sessions(key_id, opened_at DESC);
+
+CREATE TABLE IF NOT EXISTS responses (
+  id                   TEXT PRIMARY KEY,
+  key_id               TEXT NOT NULL,
+  model                TEXT NOT NULL,
+  previous_response_id TEXT,
+  session_id           TEXT,
+  status               TEXT NOT NULL,
+  stored               INTEGER NOT NULL,
+  created_at           INTEGER NOT NULL,
+  completed_at         INTEGER,
+  expires_at           INTEGER NOT NULL,
+  input_nonce          TEXT NOT NULL,
+  input_ct             TEXT NOT NULL,
+  input_tag            TEXT NOT NULL,
+  response_nonce       TEXT,
+  response_ct          TEXT,
+  response_tag         TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_responses_owner ON responses(key_id, id);
+CREATE INDEX IF NOT EXISTS idx_responses_parent ON responses(previous_response_id);
+CREATE INDEX IF NOT EXISTS idx_responses_session ON responses(session_id, completed_at);
+CREATE INDEX IF NOT EXISTS idx_responses_expiry ON responses(expires_at);
 `;

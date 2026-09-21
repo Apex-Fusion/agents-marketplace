@@ -1,5 +1,5 @@
 import { Pool } from "pg";
-import type { ChatMessage } from "@marketplace/shared/tx";
+import type { ResponseRequest } from "@marketplace/shared/responses";
 import type { CapacitySnapshot } from "./capacityGate.js";
 import { formatUsdNanos } from "./money.js";
 
@@ -58,7 +58,7 @@ export interface ReceivedJob {
   provider: string;
   providerModel: string;
   marketplaceModel: string;
-  messages: ChatMessage[];
+  request: ResponseRequest;
   publicPreview: boolean;
   balanceBeforeUsdNanos: bigint;
   worstCaseCostUsdNanos: bigint;
@@ -174,10 +174,7 @@ export class ResellerEvidenceStore {
 
   async recordReceived(job: ReceivedJob): Promise<void> {
     const promptPreview = job.publicPreview
-      ? redactPublicPreview(
-          job.messages.map((message) => `${message.role}: ${String(message.content)}`).join(" "),
-          this.previewMaxChars,
-        )
+      ? redactPublicPreview(JSON.stringify(job.request.input), this.previewMaxChars)
       : null;
     await this.pool.query(
       `INSERT INTO reseller_jobs (
@@ -190,7 +187,7 @@ export class ResellerEvidenceStore {
         job.provider,
         job.providerModel,
         job.marketplaceModel,
-        JSON.stringify(job.messages),
+        JSON.stringify(job.request),
         job.publicPreview,
         promptPreview,
         job.balanceBeforeUsdNanos.toString(),

@@ -220,14 +220,14 @@ describe("POST /v1/ocr/extract — supplier lookup + body limit", () => {
     expect(res.status).toBe(404);
   });
 
-  it("chat completions keep the 1mb ceiling (413 on a 2MB body)", async () => {
+  it("Responses keep the 1mb ceiling (413 on a 2MB body)", async () => {
     const deps = makeDeps();
     const rawKey = makeKey(deps, 0);
     const big = "A".repeat(2_000_000);
     const res = await request(createApp(deps))
-      .post("/openai/v1/chat/completions")
+      .post("/openai/v1/responses")
       .set("Authorization", `Bearer ${rawKey}`)
-      .send({ model: "qwen", messages: [{ role: "user", content: big }] });
+      .send({ model: "qwen", input: big });
     expect(res.status).toBe(413);
   });
 });

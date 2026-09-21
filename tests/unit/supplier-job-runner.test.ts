@@ -16,7 +16,10 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { createHash } from "crypto";
 import { MockChainProvider } from "../../packages/shared/src/chain/MockChainProvider.js";
+import { canonicalize } from "../../packages/shared/src/cbor/canonical.js";
+import { responseResultCommitment } from "../../packages/shared/src/responses.js";
 import { SupplierState } from "../../supplier/src/state.js";
 import { JobStore } from "../../supplier/src/jobs.js";
 import type { JobStore as JobStoreType } from "../../supplier/src/jobs.js";
@@ -28,7 +31,7 @@ import { buildSupplierWalletKey, SUPPLIER_PKH } from "../fixtures/supplier-side/
 import {
   ESCROW_TX_HASH,
   TEST_MODEL,
-  TEST_MESSAGES,
+  TEST_RESPONSE_INPUT,
   PROMPT_HASH,
   POSTED_AT,
   DELIVER_BY,
@@ -93,6 +96,7 @@ function buildEscrowDatum(): EscrowDatum {
 function buildOllamaOkResult() {
   return {
     content: "I am a helpful assistant.",
+    done_reason: "stop",
     prompt_tokens: 12,
     completion_tokens: 48,
     wallclock_ms: 3200,
@@ -118,7 +122,10 @@ function makeParams(
     claimedRef: CLAIMED_REF,
     advert: buildAdvert(),
     escrowDatum: buildEscrowDatum(),
-    requestBody: { messages: TEST_MESSAGES },
+    requestBody: {
+      input: TEST_RESPONSE_INPUT,
+      max_output_tokens: 512,
+    },
   };
 }
 
@@ -200,8 +207,7 @@ describe("runChatJob — happy path", () => {
     completeSpy.mockRestore();
   });
 
-  it("calls jobs.complete with a payload containing choices, usage, receipt, receipt_signature", async () => {
-    // RED — throws "not implemented"
+  it("calls jobs.complete with the canonical Responses payload and settlement data", async () => {
     const jobId = jobs.create(ESCROW_REF_STR);
     const completeSpy = vi.spyOn(jobs, "complete");
 
@@ -210,15 +216,47 @@ describe("runChatJob — happy path", () => {
     expect(completeSpy).toHaveBeenCalledOnce();
     const [calledJobId, payload] = completeSpy.mock.calls[0];
     expect(calledJobId).toBe(jobId);
-    expect(Array.isArray(payload.choices)).toBe(true);
-    expect(payload.choices[0].message.role).toBe("assistant");
-    expect(typeof payload.choices[0].message.content).toBe("string");
-    expect(payload.choices[0].message.content.length).toBeGreaterThan(0);
-    expect(typeof payload.usage.prompt_tokens).toBe("number");
-    expect(typeof payload.usage.completion_tokens).toBe("number");
-    expect(typeof payload.usage.total_tokens).toBe("number");
+    if (!("object" in payload)) throw new Error("expected Responses payload");
+    expect(payload.object).toBe("response");
+    expect(payload.status).toBe("completed");
+    expect(payload.output[0]).toMatchObject({
+      type: "message",
+      role: "assistant",
+    });
+    expect(payload.usage?.input_tokens).toBe(12);
+    expect(payload.usage?.output_tokens).toBe(48);
     expect(payload.receipt).toBeTruthy();
     expect(typeof payload.receipt_signature).toBe("string");
+  });
+
+  it("signs Ollama length results as incomplete, including an empty partial output", async () => {
+    vi.mocked(ollamaMod.callOllama).mockResolvedValueOnce({
+      content: "",
+      done_reason: "length",
+      prompt_tokens: 12,
+      completion_tokens: 48,
+      wallclock_ms: 3200,
+    });
+    const jobId = jobs.create(ESCROW_REF_STR);
+    const completeSpy = vi.spyOn(jobs, "complete");
+
+    await runChatJob(makeParams(chain, state, jobs, jobId));
+
+    const payload = completeSpy.mock.calls[0][1];
+    if (!("object" in payload)) throw new Error("expected Responses payload");
+    expect(payload.status).toBe("incomplete");
+    expect(payload.incomplete_details).toEqual({ reason: "max_output_tokens" });
+    expect(payload.output).toEqual([{
+      type: "message",
+      id: `msg_${jobId}`,
+      role: "assistant",
+      status: "incomplete",
+      content: [{ type: "output_text", text: "", annotations: [] }],
+    }]);
+    const responseHash = createHash("sha256")
+      .update(canonicalize(responseResultCommitment(payload)), "utf8")
+      .digest("hex");
+    expect(payload.receipt.response_hash).toBe(responseHash);
   });
 
   it("receipt contains all 8 required fields with correct types and values", async () => {

@@ -14,20 +14,21 @@
 #   3. Builds affected images first (all 17 supplier projects share one
 #      Dockerfile/context, so build #2..#17 are layer-cache hits), THEN does a
 #      rolling `up -d` so the downtime window is restart-only, not build+restart.
-#   4. Suppliers are drained before recreate: /status is polled until the
-#      supplier is not "working" (a busy supplier killed mid-job forfeits its
-#      escrow bond). After DRAIN_TIMEOUT_SECS we recreate anyway, so a wedged
-#      supplier cannot block the deploy forever.
+#   4. Suppliers are drained before recreate: /status must report zero active
+#      sessions and no working job. A timeout or unreadable status aborts the
+#      rollout; deployment must not interrupt a bonded job.
 #   5. Every restarted container must report healthy (or plain running when it
 #      has no healthcheck) within HEALTH_TIMEOUT_SECS or the deploy fails.
 #
 # Env knobs:
 #   FORCE=1                redeploy even if already at origin/main
 #   DRY_RUN=1              print what would be rebuilt/restarted, change nothing
-#   DRAIN_TIMEOUT_SECS=N   max wait per busy supplier   (default 600, 0 = skip)
+#   DEPLOY_REF=<sha>       deploy an existing commit instead of fetching main
+#   DRAIN_TIMEOUT_SECS=N   max wait per busy supplier   (default 600, 0 = check once)
 #   HEALTH_TIMEOUT_SECS=N  max wait for healthy         (default 180)
 #
-# Rollback: git reset --hard <old-sha> && FORCE=1 bash deploy/mainnet/deploy.sh
+# Rollback: copy this script outside the checkout, then run that copy with
+# DEPLOY_REF=<old-sha> FORCE=1. This does not fetch or reset back to origin/main.
 # (old sha is printed below and appended to /var/log/marketplace-deploy.log).
 
 set -euo pipefail
@@ -40,18 +41,26 @@ DRAIN_TIMEOUT_SECS="${DRAIN_TIMEOUT_SECS:-600}"
 HEALTH_TIMEOUT_SECS="${HEALTH_TIMEOUT_SECS:-180}"
 FORCE="${FORCE:-0}"
 DRY_RUN="${DRY_RUN:-0}"
+DEPLOY_REF="${DEPLOY_REF:-}"
 
 exec 9>"$LOCK"
 flock -n 9 || { echo "another deploy is already running (lock: $LOCK)"; exit 1; }
 
 cd "$REPO"
+if [ -n "$(git status --porcelain --untracked-files=normal)" ]; then
+  echo "refusing to overwrite local changes in $REPO"
+  exit 1
+fi
 
 OLD=$(git rev-parse HEAD)
-git fetch origin main
-NEW=$(git rev-parse FETCH_HEAD)
+if [ -z "$DEPLOY_REF" ]; then
+  git fetch origin main
+  DEPLOY_REF=FETCH_HEAD
+fi
+NEW=$(git rev-parse --verify --end-of-options "${DEPLOY_REF}^{commit}")
 
 if [ "$OLD" = "$NEW" ] && [ "$FORCE" != "1" ]; then
-  echo "already at origin/main ($NEW) — nothing to deploy (FORCE=1 to override)"
+  echo "already at requested commit ($NEW) — nothing to deploy (FORCE=1 to override)"
   exit 0
 fi
 
@@ -59,7 +68,7 @@ echo "deploying $OLD -> $NEW"
 if [ "$DRY_RUN" = "1" ]; then
   echo "(dry run — checkout not reset, nothing rebuilt or restarted)"
 else
-  git reset --hard FETCH_HEAD
+  git reset --hard "$NEW"
 fi
 
 CHANGED=$(git diff --name-only "$OLD" "$NEW" || true)
@@ -126,22 +135,65 @@ for f in "${AFFECTED[@]}"; do
   docker compose -f "$COMPOSE_DIR/$f" build
 done
 
+DRAINING_CID=""
+clear_supplier_drain() {
+  [ -n "$DRAINING_CID" ] || return 0
+  if ! docker exec "$DRAINING_CID" rm -f /dev/shm/marketplace-draining 2>/dev/null; then
+    # A stopped container loses its tmpfs marker; a removed container needs
+    # no cleanup. Failure on a surviving running container is not success.
+    if [ "$(docker inspect -f '{{.State.Running}}' "$DRAINING_CID" 2>/dev/null)" = "true" ]; then
+      echo "FAILED: could not clear admission drain on $DRAINING_CID"
+      return 1
+    fi
+  fi
+  DRAINING_CID=""
+}
+finish_deploy() {
+  local status=$?
+  trap - EXIT
+  clear_supplier_drain || status=1
+  exit "$status"
+}
+trap finish_deploy EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+
 drain_supplier() { # drain_supplier <compose-file>
-  [ "$DRAIN_TIMEOUT_SECS" = "0" ] && return 0
   local cid deadline status
   cid=$(docker compose -f "$COMPOSE_DIR/$1" ps -q supplier)
   [ -n "$cid" ] || return 0
+  # Stop admission before checking activity. tmpfs also clears the marker
+  # when a container stops; the exit trap handles failures and unchanged up.
+  DRAINING_CID="$cid"
+  docker exec "$cid" touch /dev/shm/marketplace-draining
   deadline=$(( $(date +%s) + DRAIN_TIMEOUT_SECS ))
-  while [ "$(date +%s)" -lt "$deadline" ]; do
-    status=$(docker exec "$cid" wget -qO- http://localhost:8080/status 2>/dev/null \
-      | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4 || true)
-    if [ "$status" != "working" ]; then
+  while :; do
+    status=$(docker exec "$cid" node --input-type=module -e '
+      try {
+        const response = await fetch("http://localhost:8080/status", {
+          signal: AbortSignal.timeout(5000),
+        });
+        if (!response.ok) throw new Error("status unavailable");
+        const state = await response.json();
+        const sessions = state.active_sessions;
+        if (!Number.isInteger(sessions) || sessions < 0) throw new Error("invalid session count");
+        const idle = sessions === 0 && (state.status === "free" || state.status === "offline");
+        console.log(idle ? "idle" : "busy");
+      } catch {
+        console.log("unknown");
+      }
+    ' 2>/dev/null) || status=unknown
+    if [ "$status" = "idle" ]; then
       return 0
     fi
-    echo "   supplier busy (status=working) — waiting for job to finish..."
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      echo "   FAILED: supplier remains $status after ${DRAIN_TIMEOUT_SECS}s; leaving it running"
+      return 1
+    fi
+    echo "   supplier $status — waiting for every active session and job to finish..."
     sleep 15
   done
-  echo "   WARNING: still busy after ${DRAIN_TIMEOUT_SECS}s — recreating anyway"
 }
 
 # Health state per container name BEFORE the rollout. The gate below exists
@@ -194,9 +246,10 @@ for f in "${AFFECTED[@]}"; do
   case "$f" in docker-compose.supplier*) drain_supplier "$f" ;; esac
   docker compose -f "$COMPOSE_DIR/$f" up -d
   wait_healthy "$f"
+  clear_supplier_drain
   echo "   ok"
 done
 
 echo "$(date -Is) $OLD -> $NEW (${AFFECTED[*]})" >> "$LOG"
 echo "== deploy complete: $NEW =="
-echo "rollback: cd $REPO && git reset --hard $OLD && FORCE=1 bash deploy/mainnet/deploy.sh"
+echo "rollback: cp $REPO/deploy/mainnet/deploy.sh /run/marketplace-rollback.sh && DEPLOY_REF=$OLD FORCE=1 bash /run/marketplace-rollback.sh"

@@ -40,6 +40,7 @@ services:
         required: false
     environment:
       LLM_BACKEND: openai
+      OPENAI_UPSTREAM_API: chat-completions
       # No /v1 suffix — supplier/src/openai.ts appends /v1/chat/completions
       # (Hetzner serves at https://inference.hetzner.com/api/v1/...).
       OPENAI_BASE_URL: https://inference.hetzner.com/api

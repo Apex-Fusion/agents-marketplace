@@ -1,10 +1,7 @@
 /**
- * buyer-sdk-discover-suppliers.test.ts — RED phase (M1-E)
+ * buyer-sdk-discover-suppliers.test.ts — Marketplace supplier discovery.
  *
- * Category A: Marketplace.discoverSuppliers()
- *
- * All tests are expected to FAIL until M1-E-green because Marketplace.discoverSuppliers()
- * currently throws "not implemented — M1-E-green".
+ * Covers indexer filters, response mapping, and failure behavior.
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";

@@ -53,6 +53,7 @@ services:
       CHAT_SETTLE_MODE: ticket
       MAX_CHAT_SESSIONS: "1"
       LLM_BACKEND: openai
+      OPENAI_UPSTREAM_API: chat-completions
       # No /v1 suffix — supplier/src/openai.ts appends /v1/chat/completions.
       # vuk's tailscale IP; see header for why not the MagicDNS name.
       OPENAI_BASE_URL: http://100.77.146.49:8002

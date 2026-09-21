@@ -1,53 +1,35 @@
-/**
- * buyer-sdk-submit-prompt-happy.test.ts — RED phase (M1-E)
- *
- * Category B: Marketplace.submitPrompt() happy path
- *
- * All tests FAIL until M1-E-green.
- *
- * Design notes for Catherine:
- * - advertRef is resolved via chain.queryUtxo (MockChainProvider.seed)
- * - PostEscrow tx is submitted via chain.submitTx (MockChainProvider records it)
- * - Supplier is called via POST ${advert.endpoint_url}/v1/chat/completions
- *   with header X-Escrow-Ref: <txHash>#<index>
- * - Receipt is verified via verifyReceipt(signed, advert.supplier_pkh → pub key)
- *   NOTE: verifyReceipt takes a SignedReceipt + publicKeyHex; the SDK needs to
- *   map supplier_pkh → pubKeyHex. In v1 the supplier's /capability endpoint
- *   returns the pubKey; alternatively store it in SupplierView. The test mocks
- *   the supplier HTTP endpoint including a /capability call to get pubKeyHex.
- * - Progress events must be emitted in order: escrow_posted, supplier_called, receipt_verified
- */
-
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "crypto";
-import { MockChainProvider } from "../../packages/shared/src/chain/MockChainProvider.js";
 import { Marketplace } from "../../buyer/src/sdk/Marketplace.js";
-import { buildBuyerWalletKey } from "../fixtures/buyer-side/wallet-keys.js";
-import { buildSupplierWalletKey } from "../fixtures/supplier-side/wallet-keys.js";
+import type { ProgressEvent } from "../../buyer/src/sdk/types.js";
+import { MockChainProvider } from "../../packages/shared/src/chain/MockChainProvider.js";
 import { encodeAdvertDatum } from "../../packages/shared/src/cbor/AdvertDatum.js";
-import { encodeEscrowDatum } from "../../packages/shared/src/cbor/EscrowDatum.js";
 import { canonicalize } from "../../packages/shared/src/cbor/canonical.js";
+import type { AdvertDatum } from "../../packages/shared/src/cbor/types.js";
+import type { OutputReference, Utxo } from "../../packages/shared/src/chain/ChainProvider.js";
 import { buildReceipt } from "../../packages/shared/src/receipt/build.js";
 import { signReceipt } from "../../packages/shared/src/receipt/sign.js";
-import type { AdvertDatum, EscrowDatum } from "../../packages/shared/src/cbor/types.js";
-import type { Utxo, OutputReference } from "../../packages/shared/src/chain/ChainProvider.js";
-import type { ChatMessage } from "../../packages/shared/src/tx/types.js";
-import type { ProgressEvent } from "../../buyer/src/sdk/types.js";
-import { ACCEPT_WINDOW_MS } from "../../packages/shared/src/tx/escrow/accept.js";
+import {
+  createResponse,
+  responseRequestCommitment,
+  responseResultCommitment,
+  type ResponseItem,
+  type ResponseRequest,
+} from "../../packages/shared/src/responses.js";
+import { buildBuyerWalletKey } from "../fixtures/buyer-side/wallet-keys.js";
+import { buildSupplierWalletKey } from "../fixtures/supplier-side/wallet-keys.js";
 
-// ─── Fixtures ─────────────────────────────────────────────────────────────────
-
-const ADVERT_TX = "b".repeat(64);
-const ADVERT_REF: OutputReference = { txHash: ADVERT_TX, index: 0 };
-const ADVERT_SCRIPT_ADDR = "addr_test1wrqq9qqjzf3uh4w9hm0kqzrpvt60r4ryjp5rjf5epd3nptq7yscm6";
-
+const ADVERT_REF: OutputReference = { txHash: "b".repeat(64), index: 0 };
+const PAYMENT = 2_000_000n;
 const buyer = buildBuyerWalletKey();
 const supplier = buildSupplierWalletKey();
+const INPUT: ResponseItem[] = [{
+  type: "message",
+  role: "user",
+  content: [{ type: "input_text", text: "What is 2+2?" }],
+}];
 
-const SAMPLE_MESSAGES: ChatMessage[] = [{ role: "user", content: "What is 2+2?" }];
-const PAYMENT = 2_000_000n;
-
-function makeActiveAdvert(): AdvertDatum {
+function advert(): AdvertDatum {
   return {
     supplier_pkh: supplier.pubKeyHash,
     capability_id: "llm.text.generate.v1",
@@ -65,10 +47,15 @@ function makeActiveAdvert(): AdvertDatum {
   };
 }
 
-function seedAdvertUtxo(chain: MockChainProvider, datum: AdvertDatum, ref = ADVERT_REF) {
+function sha256(value: unknown): string {
+  return createHash("sha256").update(canonicalize(value), "utf8").digest("hex");
+}
+
+function seedAdvert(chain: MockChainProvider): void {
+  const datum = advert();
   const utxo: Utxo = {
-    ref,
-    address: ADVERT_SCRIPT_ADDR,
+    ref: ADVERT_REF,
+    address: "addr_test1wfakeadvert",
     lovelace: 2_000_000n,
     assets: {},
     datumHex: encodeAdvertDatum(datum),
@@ -77,23 +64,46 @@ function seedAdvertUtxo(chain: MockChainProvider, datum: AdvertDatum, ref = ADVE
   chain.seed(utxo);
 }
 
-function sha256(s: string): string {
-  return createHash("sha256").update(s, "utf8").digest("hex");
+function capability() {
+  const datum = advert();
+  return {
+    capability_id: datum.capability_id,
+    model: datum.model,
+    max_output_tokens: datum.max_output_tokens,
+    max_processing_ms: datum.max_processing_ms,
+    price_lovelace: datum.price_lovelace.toString(),
+    advert_ref: `${ADVERT_REF.txHash}#${ADVERT_REF.index}`,
+    supplier_pkh: datum.supplier_pkh,
+    pub_key_hex: supplier.pubKeyHex,
+    inference_api: "responses",
+    upstream_api: "responses",
+  };
 }
 
-/**
- * Build a well-formed supplier HTTP response (OpenAI-compat shape + receipt).
- * Signing uses the supplier fixture private key — verifyReceipt must pass.
- */
-function makeSupplierResponse(escrowRef: string, messages: ChatMessage[]) {
-  const advert = makeActiveAdvert();
-  const promptHash = sha256(canonicalize(messages));
-  const responseContent = "4";
-  const responseHash = sha256(JSON.stringify({ role: "assistant", content: responseContent }));
+function json(body: unknown, status = 200): Promise<Response> {
+  return Promise.resolve(new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  }));
+}
+
+function supplierResult(escrowRef: string, request: ResponseRequest) {
+  const output: ResponseItem[] = [{
+    type: "message",
+    role: "assistant",
+    content: [{ type: "output_text", text: "4", annotations: [] }],
+  }];
+  const result = createResponse({
+    id: "resp_test",
+    model: advert().model,
+    output,
+    status: "completed",
+    usage: { input_tokens: 12, output_tokens: 4, total_tokens: 16 },
+  });
   const receipt = buildReceipt({
-    prompt_hash: promptHash,
-    response_hash: responseHash,
-    model: advert.model,
+    prompt_hash: sha256(responseRequestCommitment(request)),
+    response_hash: sha256(responseResultCommitment(result)),
+    model: advert().model,
     prompt_tokens: 12,
     completion_tokens: 4,
     wallclock_ms: 800,
@@ -101,264 +111,112 @@ function makeSupplierResponse(escrowRef: string, messages: ChatMessage[]) {
     escrow_ref: escrowRef,
   });
   const signed = signReceipt(receipt, supplier.privateKeyHex);
-  return {
-    id: "chatcmpl-test",
-    object: "chat.completion",
-    choices: [
-      {
-        index: 0,
-        message: { role: "assistant", content: responseContent },
-        finish_reason: "stop",
-      },
-    ],
-    usage: { prompt_tokens: 12, completion_tokens: 4, total_tokens: 16 },
-    receipt: signed.receipt,
-    receipt_signature: signed.signature,
-  };
+  return { ...result, receipt: signed.receipt, receipt_signature: signed.signature };
 }
 
-function jsonFetch(body: unknown, status = 200) {
-  return Promise.resolve(
-    new Response(JSON.stringify(body), {
-      status,
-      headers: { "Content-Type": "application/json" },
-    })
-  );
-}
-
-function makeMarketplaceWithFetch(fetchImpl: ReturnType<typeof vi.fn>): Marketplace {
-  const chain = new MockChainProvider();
-  chain.advanceSlot(1_745_500_000);
-  seedAdvertUtxo(chain, makeActiveAdvert());
-  return new Marketplace({
-    chain,
-    indexerUrl: "http://indexer.test",
-    walletKey: buyer,
-    networkParams: { networkId: 0 },
-    _fetch: fetchImpl as unknown as typeof fetch,
-  } as never);
-}
-
-// ─── Tests ────────────────────────────────────────────────────────────────────
-
-describe("Marketplace.submitPrompt() — happy path", () => {
-  let fetchSpy: ReturnType<typeof vi.fn>;
+describe("Marketplace.submitPrompt Responses lifecycle", () => {
   let chain: MockChainProvider;
 
   beforeEach(() => {
-    fetchSpy = vi.fn();
     chain = new MockChainProvider();
     chain.advanceSlot(1_745_500_000);
-    seedAdvertUtxo(chain, makeActiveAdvert());
+    seedAdvert(chain);
   });
 
-  it("resolves advert via chain.queryUtxo(advertRef) before posting escrow", async () => {
-    const querySpy = vi.spyOn(chain, "queryUtxo");
-    // Fetch: supplier /v1/chat/completions — use actual X-Escrow-Ref header so receipt.escrow_ref matches the posted tx.
-    fetchSpy.mockImplementation((_url: unknown, opts: unknown) => {
-      const url = String(_url);
-      if (url.includes("/v1/chat/completions")) {
-        const headers = (opts as { headers?: Record<string, string> })?.headers ?? {};
-        const escrowRef = headers["X-Escrow-Ref"] ?? headers["x-escrow-ref"] ?? `${"f".repeat(64)}#0`;
-        return jsonFetch(makeSupplierResponse(escrowRef, SAMPLE_MESSAGES));
-      }
-      return jsonFetch({});
-    });
-    const mp = new Marketplace({
-      chain,
-      indexerUrl: "http://indexer.test",
-      walletKey: buyer,
-      networkParams: { networkId: 0 },
-      _fetch: fetchSpy as unknown as typeof fetch,
-    } as never);
-    await mp.submitPrompt({ advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT });
-    expect(querySpy).toHaveBeenCalledWith(ADVERT_REF);
-  });
-
-  it("submits the PostEscrow tx via chain.submitTx", async () => {
-    const submitSpy = vi.spyOn(chain, "submitTx");
-    fetchSpy.mockImplementation((_url: unknown, opts: unknown) => {
-      const url = String(_url);
-      if (url.includes("/v1/chat/completions")) {
-        const headers = (opts as { headers?: Record<string, string> })?.headers ?? {};
-        const escrowRef = headers["X-Escrow-Ref"] ?? headers["x-escrow-ref"] ?? `${"f".repeat(64)}#0`;
-        return jsonFetch(makeSupplierResponse(escrowRef, SAMPLE_MESSAGES));
-      }
-      return jsonFetch({});
-    });
-    const mp = new Marketplace({
-      chain,
-      indexerUrl: "http://indexer.test",
-      walletKey: buyer,
-      networkParams: { networkId: 0 },
-      _fetch: fetchSpy as unknown as typeof fetch,
-    } as never);
-    await mp.submitPrompt({ advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT });
-    expect(submitSpy).toHaveBeenCalled();
-  });
-
-  it("calls POST ${advert.endpoint_url}/v1/chat/completions with X-Escrow-Ref header", async () => {
-    fetchSpy.mockImplementation((url: unknown, opts: unknown) => {
-      const u = String(url);
-      if (u.includes("/v1/chat/completions")) {
-        const headers = (opts as { headers?: Record<string, string> })?.headers ?? {};
-        // Must include X-Escrow-Ref header
-        expect(headers["X-Escrow-Ref"] ?? headers["x-escrow-ref"]).toMatch(/^[0-9a-fA-F]{64}#\d+$/);
-        return jsonFetch(makeSupplierResponse(headers["X-Escrow-Ref"] ?? "x".repeat(64) + "#0", SAMPLE_MESSAGES));
-      }
-      return jsonFetch({});
-    });
-    const mp = new Marketplace({
-      chain,
-      indexerUrl: "http://indexer.test",
-      walletKey: buyer,
-      networkParams: { networkId: 0 },
-      _fetch: fetchSpy as unknown as typeof fetch,
-    } as never);
-    await mp.submitPrompt({ advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT });
-    expect(fetchSpy).toHaveBeenCalled();
-  });
-
-  it("calls supplier /v1/chat/completions with OpenAI-shaped body (messages, max_tokens)", async () => {
-    fetchSpy.mockImplementation((url: unknown, opts: unknown) => {
-      const u = String(url);
-      if (u.includes("/v1/chat/completions")) {
-        const body = JSON.parse((opts as { body?: string })?.body ?? "{}");
-        expect(body.messages).toEqual(SAMPLE_MESSAGES);
-        expect(typeof body.max_tokens).toBe("number");
-        const headers = (opts as { headers?: Record<string, string> })?.headers ?? {};
-        return jsonFetch(makeSupplierResponse(headers["X-Escrow-Ref"] ?? "x".repeat(64) + "#0", SAMPLE_MESSAGES));
-      }
-      return jsonFetch({});
-    });
-    const mp = new Marketplace({
-      chain,
-      indexerUrl: "http://indexer.test",
-      walletKey: buyer,
-      networkParams: { networkId: 0 },
-      _fetch: fetchSpy as unknown as typeof fetch,
-    } as never);
-    await mp.submitPrompt({ advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT });
-  });
-
-  it("resolves with {response, receipt, receiptSignature, escrowRef} on success", async () => {
-    fetchSpy.mockImplementation((url: unknown, opts: unknown) => {
-      const u = String(url);
-      if (u.includes("/v1/chat/completions")) {
-        const headers = (opts as { headers?: Record<string, string> })?.headers ?? {};
-        const escrowRef = headers["X-Escrow-Ref"] ?? "x".repeat(64) + "#0";
-        return jsonFetch(makeSupplierResponse(escrowRef, SAMPLE_MESSAGES));
-      }
-      return jsonFetch({});
-    });
-    const mp = new Marketplace({
-      chain,
-      indexerUrl: "http://indexer.test",
-      walletKey: buyer,
-      networkParams: { networkId: 0 },
-      _fetch: fetchSpy as unknown as typeof fetch,
-    } as never);
-    const result = await mp.submitPrompt({ advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT });
-    expect(result).toHaveProperty("response");
-    expect(result).toHaveProperty("receipt");
-    expect(result).toHaveProperty("receiptSignature");
-    expect(result).toHaveProperty("escrowRef");
-    expect(result.response).toBe("4");
-  });
-
-  it("verifies receipt.prompt_hash matches sha256(canonical(messages))", async () => {
-    const expectedPromptHash = sha256(canonicalize(SAMPLE_MESSAGES));
-    fetchSpy.mockImplementation((url: unknown, opts: unknown) => {
-      const u = String(url);
-      if (u.includes("/v1/chat/completions")) {
-        const headers = (opts as { headers?: Record<string, string> })?.headers ?? {};
-        const escrowRef = headers["X-Escrow-Ref"] ?? "x".repeat(64) + "#0";
-        return jsonFetch(makeSupplierResponse(escrowRef, SAMPLE_MESSAGES));
-      }
-      return jsonFetch({});
-    });
-    const mp = new Marketplace({
-      chain,
-      indexerUrl: "http://indexer.test",
-      walletKey: buyer,
-      networkParams: { networkId: 0 },
-      _fetch: fetchSpy as unknown as typeof fetch,
-    } as never);
-    const result = await mp.submitPrompt({ advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT });
-    expect(result.receipt.prompt_hash).toBe(expectedPromptHash);
-  });
-
-  it("emits progress events in order: escrow_posted, supplier_called, receipt_verified", async () => {
+  it("returns the canonical terminal result and exact text convenience", async () => {
     const events: string[] = [];
-    fetchSpy.mockImplementation((url: unknown, opts: unknown) => {
-      const u = String(url);
-      if (u.includes("/v1/chat/completions")) {
-        const headers = (opts as { headers?: Record<string, string> })?.headers ?? {};
-        const escrowRef = headers["X-Escrow-Ref"] ?? "x".repeat(64) + "#0";
-        return jsonFetch(makeSupplierResponse(escrowRef, SAMPLE_MESSAGES));
+    const fetchImpl = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      if (String(url).endsWith("/capability")) return json(capability());
+      if (String(url).endsWith("/v1/responses")) {
+        const request = JSON.parse(String(init?.body)) as ResponseRequest & { model: string };
+        const escrowRef = new Headers(init?.headers).get("X-Escrow-Ref") ?? "";
+        return json(supplierResult(escrowRef, request));
       }
-      return jsonFetch({});
+      return json({});
     });
-    const mp = new Marketplace({
+    const marketplace = new Marketplace({
       chain,
       indexerUrl: "http://indexer.test",
       walletKey: buyer,
       networkParams: { networkId: 0 },
-      _fetch: fetchSpy as unknown as typeof fetch,
-    } as never);
-    mp.on("progress", (e: ProgressEvent) => events.push(e.type));
-    await mp.submitPrompt({ advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT });
+      _fetch: fetchImpl as typeof fetch,
+    });
+    marketplace.on("progress", (event: ProgressEvent) => events.push(event.type));
+
+    const result = await marketplace.submitPrompt({
+      advertRef: ADVERT_REF,
+      input: INPUT,
+      payment_lovelace: PAYMENT,
+    });
+
+    expect(result.response).toBe("4");
+    expect(result.request).toEqual({ input: INPUT });
+    expect(result.result.output).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "message", role: "assistant" }),
+    ]));
+    expect(result.receipt.response_hash).toBe(sha256(responseResultCommitment(result.result)));
     expect(events).toEqual(["escrow_posted", "supplier_called", "receipt_verified"]);
   });
 
-  it("records completed task to TaskHistoryStore after successful submitPrompt", async () => {
-    fetchSpy.mockImplementation((url: unknown, opts: unknown) => {
-      const u = String(url);
-      if (u.includes("/v1/chat/completions")) {
-        const headers = (opts as { headers?: Record<string, string> })?.headers ?? {};
-        const escrowRef = headers["X-Escrow-Ref"] ?? "x".repeat(64) + "#0";
-        return jsonFetch(makeSupplierResponse(escrowRef, SAMPLE_MESSAGES));
-      }
-      return jsonFetch({});
+  it("leaves max_output_tokens absent when the buyer omits it", async () => {
+    let postedRequest: Record<string, unknown> | undefined;
+    const fetchImpl = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      if (String(url).endsWith("/capability")) return json(capability());
+      const request = JSON.parse(String(init?.body)) as ResponseRequest & { model: string };
+      postedRequest = request;
+      return json(supplierResult(
+        new Headers(init?.headers).get("X-Escrow-Ref") ?? "",
+        request,
+      ));
     });
-    const mp = new Marketplace({
+    const marketplace = new Marketplace({
       chain,
       indexerUrl: "http://indexer.test",
       walletKey: buyer,
       networkParams: { networkId: 0 },
-      _fetch: fetchSpy as unknown as typeof fetch,
-    } as never);
-    await mp.submitPrompt({ advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT });
-    const history = mp.getTaskHistory();
-    expect(history).toHaveLength(1);
-    expect(history[0].status).toBe("completed");
+      _fetch: fetchImpl as typeof fetch,
+    });
+
+    await marketplace.submitPrompt({
+      advertRef: ADVERT_REF,
+      input: INPUT,
+      payment_lovelace: PAYMENT,
+    });
+
+    expect(postedRequest).not.toHaveProperty("max_output_tokens");
   });
 
-  it("escrowRef in result matches what was submitted to the chain", async () => {
-    fetchSpy.mockImplementation((url: unknown, opts: unknown) => {
-      const u = String(url);
-      if (u.includes("/v1/chat/completions")) {
-        const headers = (opts as { headers?: Record<string, string> })?.headers ?? {};
-        const escrowRef = headers["X-Escrow-Ref"] ?? "x".repeat(64) + "#0";
-        return jsonFetch(makeSupplierResponse(escrowRef, SAMPLE_MESSAGES));
+  it("caps an explicit buyer output limit before escrow and supplier submission", async () => {
+    let postedRequest: ResponseRequest | undefined;
+    const fetchImpl = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      if (String(url).endsWith("/capability")) {
+        return json({ ...capability(), max_output_tokens: 256 });
       }
-      return jsonFetch({});
+      const request = JSON.parse(String(init?.body)) as ResponseRequest & { model: string };
+      postedRequest = request;
+      return json(supplierResult(
+        new Headers(init?.headers).get("X-Escrow-Ref") ?? "",
+        request,
+      ));
     });
-    const mp = new Marketplace({
+    const marketplace = new Marketplace({
       chain,
       indexerUrl: "http://indexer.test",
       walletKey: buyer,
       networkParams: { networkId: 0 },
-      _fetch: fetchSpy as unknown as typeof fetch,
-    } as never);
-    const result = await mp.submitPrompt({ advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT });
-    // escrowRef must be a valid OutputReference with a real 64-char txHash
-    expect(result.escrowRef.txHash).toMatch(/^[0-9a-fA-F]{64}$/);
-    expect(typeof result.escrowRef.index).toBe("number");
-  });
+      _fetch: fetchImpl as typeof fetch,
+    });
 
-  // The ACCEPT_WINDOW_MS constant must be 600_000 ms (10 min) per ARCHITECTURE §4.3.
-  it("ACCEPT_WINDOW_MS is 600000 (10 minutes)", () => {
-    expect(ACCEPT_WINDOW_MS).toBe(600_000);
+    const result = await marketplace.submitPrompt({
+      advertRef: ADVERT_REF,
+      input: INPUT,
+      max_output_tokens: 4_096,
+      payment_lovelace: PAYMENT,
+    });
+
+    expect(postedRequest?.max_output_tokens).toBe(256);
+    expect(result.receipt.prompt_hash).toBe(
+      sha256(responseRequestCommitment({ input: INPUT, max_output_tokens: 256 })),
+    );
   });
 });

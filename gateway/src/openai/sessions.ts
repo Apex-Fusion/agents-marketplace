@@ -1,23 +1,21 @@
-/**
- * gateway/src/openai/sessions.ts — chat sessions (Vector extension).
- *
- * One escrow per SESSION (fixed price locked at open, settled at close). Real
- * token streaming per turn against an llm.chat.v1 supplier. Endpoints:
- *   POST /openai/v1/chat/sessions            → open  (startChat)
- *   POST /openai/v1/chat/sessions/:id/messages → one streamed turn
- *   POST /openai/v1/chat/sessions/:id/close  → settle (endChat: Submit+Accept)
- *
- * The chat.v1 supplier has no system-role channel and accumulates the transcript
- * server-side, so we send one user `content` per turn and mirror the transcript
- * in-memory (for endChat's response_hash verification). A process restart loses
- * the mirror; an abandoned session is reclaimed by the sweeper.
- */
-
 import { randomUUID } from "crypto";
 import type { Request, Response } from "express";
-import { TxConstructionError, normalizeChatMessage, type ChatMessage } from "@marketplace/shared/tx";
-import { SupplierError } from "@marketplace/buyer/sdk";
-import { transcripts, getSessionLock, dropSessionState } from "./transcripts.js";
+import { TxConstructionError } from "@marketplace/shared/tx";
+import {
+  readResponseEvents,
+  validateResponseToolOutputs,
+  type ResponseObject,
+  type ResponseRequest,
+  type ResponseStreamEvent,
+} from "@marketplace/shared/responses";
+import {
+  getSessionLock,
+  dropSessionState,
+  loadSessionTranscript,
+  persistSessionTranscript,
+  transcripts,
+} from "./transcripts.js";
+import { SupplierError, type StartChatResult } from "@marketplace/buyer/sdk";
 import type { GatewayDeps } from "../deps.js";
 import type { ApiKeyRow, GatewayStore, SessionRow } from "../db/store.js";
 import type { KeyContext } from "../sdk/registry.js";
@@ -26,20 +24,22 @@ import { asyncHandler } from "../middleware/http.js";
 import { selectCandidates, parseRef } from "../routing/selectSupplier.js";
 import { preflight } from "../onchain/preflight.js";
 import { ensureWalletHealthy } from "../walletHealth.js";
-import { badRequest, notFound, paymentRequired, toGatewayError, toErrorBody } from "./errors.js";
+import { seal } from "../crypto/seal.js";
+import { badRequest, notFound, paymentRequired, toGatewayError } from "./errors.js";
 import {
   genId,
   nowSec,
-  buildChatCompletion,
-  buildChunk,
-  sseData,
-  SSE_DONE,
-  type Usage,
+  isResponseObject,
+  publicResponse,
+  publicStreamEvent,
+  responseSse,
+  sseEvent,
+  streamFailure,
 } from "./shapes.js";
+import { parseSessionTurnRequest } from "./validate.js";
 
 export const CAPABILITY = "llm.chat.v1";
 
-/** Thrown when the supplier no longer knows the session (idle-closed/restart). */
 export class SessionGoneError extends Error {
   constructor(sessionId: string) {
     super(`supplier no longer has session ${sessionId}`);
@@ -51,95 +51,174 @@ function refStr(ref: { txHash: string; index: number }): string {
   return `${ref.txHash}#${ref.index}`;
 }
 
-// ─── open ──────────────────────────────────────────────────────────────────
+interface ResponsesCapability {
+  inference_api: "responses";
+  upstream_api: string;
+  reasoning_disabled: boolean;
+}
+
+async function readResponsesCapability(
+  deps: GatewayDeps,
+  baseUrl: string,
+): Promise<ResponsesCapability> {
+  const capabilityResponse = await deps.fetchFn(
+    `${baseUrl.replace(/\/+$/, "")}/capability`,
+    { headers: { accept: "application/json" } },
+  );
+  if (!capabilityResponse.ok) {
+    throw toGatewayError(new SupplierError("supplier_http_error", {
+      status: capabilityResponse.status,
+      message: `supplier /capability returned HTTP ${capabilityResponse.status}`,
+    }));
+  }
+  let capability: unknown;
+  try {
+    capability = await capabilityResponse.json();
+  } catch {
+    throw toGatewayError(new SupplierError("malformed_response", {
+      message: "supplier capability is not valid JSON",
+    }));
+  }
+  if (typeof capability !== "object" || capability === null || Array.isArray(capability) ||
+      !("inference_api" in capability) || capability.inference_api !== "responses" ||
+      !("upstream_api" in capability) || typeof capability.upstream_api !== "string") {
+    throw toGatewayError(new SupplierError("malformed_response", {
+      message: "supplier capability does not advertise Responses inference",
+    }));
+  }
+  const reasoningDisabled = "reasoning_disabled" in capability ? capability.reasoning_disabled : false;
+  if (typeof reasoningDisabled !== "boolean") {
+    throw toGatewayError(new SupplierError("malformed_response", {
+      message: "supplier reasoning policy must be boolean",
+    }));
+  }
+  return {
+    inference_api: capability.inference_api,
+    upstream_api: capability.upstream_api,
+    reasoning_disabled: reasoningDisabled,
+  };
+}
 
 export function makeOpenSessionHandler(deps: GatewayDeps) {
   return asyncHandler(async (req: Request, res: Response) => {
     const keyRow = requireKey(req);
-    const body = (req.body ?? {}) as Record<string, unknown>;
-    const model = body.model;
-    if (typeof model !== "string" || model === "") {
+    const body: unknown = req.body;
+    if (typeof body !== "object" || body === null || Array.isArray(body)) {
+      throw badRequest("invalid_body", "request body must be a JSON object");
+    }
+    for (const field of Object.keys(body)) {
+      if (field !== "model") throw badRequest("unsupported_parameter", `unsupported parameter: ${field}`);
+    }
+    const model = "model" in body ? body.model : undefined;
+    if (typeof model !== "string" || model.length === 0) {
       throw badRequest("invalid_model", "`model` is required");
     }
     const ctx = deps.registry.getContext(keyRow);
     const session = await ctx.mutex.run(() => openSessionCore(deps, keyRow, ctx, model));
-    res.status(200).json({ id: session.id, object: "chat.session", model, created: nowSec() });
+    res.status(200).json({
+      id: session.id,
+      object: "chat.session",
+      model: session.model,
+      created: nowSec(),
+    });
   });
 }
 
-/**
- * Select a supplier, preflight the wallet, post+claim the session escrow and
- * persist the SessionRow. Chain work — the CALLER must hold the key mutex
- * (concurrent PostEscrow from one wallet double-spends the same UTxO).
- * `onPreflightOk` fires once routing + preflight passed, right before the
- * first chain op — the last point at which a failure is still a clean HTTP
- * error rather than something already in flight.
- */
 export async function openSessionCore(
   deps: GatewayDeps,
   keyRow: ApiKeyRow,
   ctx: KeyContext,
   model: string,
-  opts?: { ignoreStatusFor?: ReadonlySet<string>; onPreflightOk?: () => void },
+  opts?: {
+    ignoreStatusFor?: ReadonlySet<string>;
+    onPreflightOk?: () => void;
+    supplierPkh?: string;
+    managedDemo?: boolean;
+    responseRequest?: ResponseRequest;
+  },
 ): Promise<SessionRow> {
   const candidates = await selectCandidates({
     indexerUrl: deps.config.indexerUrl,
     model,
     capabilityId: CAPABILITY,
+    supplierPkh: opts?.supplierPkh,
+    preferredSupplierPkh: deps.config.preferredSupplierPkh,
     fetchFn: deps.fetchFn,
     ignoreStatusFor: opts?.ignoreStatusFor,
   });
   if (candidates.length === 0) {
     throw notFound("model_not_found", `no available chat (llm.chat.v1) supplier for model "${model}"`);
   }
-  const primary = candidates[0];
+  let sessionCandidates = candidates;
+  if (opts?.responseRequest && (
+    opts.responseRequest.reasoning !== undefined ||
+    opts.responseRequest.text !== undefined ||
+    opts.responseRequest.input.some((item) => item.type === "reasoning")
+  )) {
+    const nativeCandidates: typeof candidates = [];
+    let capabilityFailure: unknown;
+    let sawIncompatible = false;
+    for (const candidate of candidates) {
+      try {
+        const capability = await readResponsesCapability(deps, candidate.endpointUrl);
+        const effort = opts.responseRequest.reasoning?.effort;
+        const policyConflict = capability.reasoning_disabled && effort !== undefined && effort !== "none";
+        if (capability.upstream_api === "responses" && !policyConflict) nativeCandidates.push(candidate);
+        else sawIncompatible = true;
+      } catch (error) {
+        capabilityFailure ??= error;
+      }
+    }
+    if (nativeCandidates.length === 0) {
+      if (sawIncompatible) {
+        throw badRequest(
+          "unsupported_parameter",
+          "available suppliers cannot execute these Responses controls",
+        );
+      }
+      throw toGatewayError(capabilityFailure ?? new Error("supplier capability unavailable"));
+    }
+    sessionCandidates = nativeCandidates;
+  }
+  const primary = sessionCandidates[0];
   const pf = await preflight(deps.chain, ctx.walletKey.address, primary);
   if (!pf.ok) {
     throw paymentRequired(
       pf.collateralOk ? "insufficient balance to open a session" : "wallet has no ≥5 AP3X pure-AP3X collateral UTxO",
-      {
-        x_vector: {
-          required_lovelace: pf.requiredLovelace.toString(),
-          available_lovelace: pf.availableLovelace.toString(),
-          collateral_ok: pf.collateralOk,
-          deposit_address: ctx.walletKey.address,
-        },
-      },
+      { x_vector: {
+        required_lovelace: pf.requiredLovelace.toString(),
+        available_lovelace: pf.availableLovelace.toString(),
+        collateral_ok: pf.collateralOk,
+        deposit_address: ctx.walletKey.address,
+      } },
     );
   }
   opts?.onPreflightOk?.();
 
-  // startChat posts the escrow + supplier Claim. Fall back to the next supplier
-  // only on a pre-post error (TxConstructionError, or a busy supplier caught by
-  // startChat's /status pre-check before any funds are locked).
-  let started: Awaited<ReturnType<typeof ctx.sdk.startChat>> | undefined;
-  let used: (typeof candidates)[number] | undefined;
-  let lastErr: unknown;
-  for (const cand of candidates) {
+  let started: StartChatResult | undefined;
+  let used = primary;
+  let lastError: unknown;
+  for (const candidate of sessionCandidates) {
     try {
-      started = await ctx.sdk.startChat({ advertRef: cand.advertRef, payment_lovelace: cand.priceLovelace });
-      used = cand;
+      started = await ctx.sdk.startChat({ advertRef: candidate.advertRef, payment_lovelace: candidate.priceLovelace });
+      used = candidate;
       break;
-    } catch (err) {
-      lastErr = err;
-      if (err instanceof TxConstructionError) continue;
-      if (err instanceof SupplierError && err.reason === "supplier_busy") continue;
-      throw err;
+    } catch (error) {
+      lastError = error;
+      if (error instanceof TxConstructionError &&
+          error.reason !== "supplier_preflight_failed" &&
+          error.reason !== "supplier_adapter_incompatible") continue;
+      if (error instanceof SupplierError && error.reason === "supplier_busy") continue;
+      throw error;
     }
   }
-  if (!started || !used) throw toGatewayError(lastErr ?? new Error("no chat supplier could be engaged"));
-
-  // Deployment sanity: supplier and gateway must agree on the settle mode.
-  // Close behavior is driven per-session by the supplier's /end response, so
-  // a mismatch (rollout window) still settles correctly — just warn.
+  if (!started) throw toGatewayError(lastError ?? new Error("no chat supplier could be engaged"));
   if ((started.settleMode === "ticket") !== (deps.config.chatSettleMode === "ticket")) {
-    // eslint-disable-next-line no-console
-    console.warn(
-      `[gateway] settle-mode mismatch: supplier ${used.supplierPkh.slice(0, 8)} ran "${started.settleMode}" but gateway is configured "${deps.config.chatSettleMode}"`,
-    );
+    console.warn(`[gateway] settle-mode mismatch for supplier ${used.supplierPkh.slice(0, 8)}`);
   }
 
   const sessionId = randomUUID();
+  const emptyTranscript = seal("[]", deps.config.masterKeyHex);
   deps.store.insertSession({
     id: sessionId,
     key_id: keyRow.id,
@@ -151,333 +230,264 @@ export async function openSessionCore(
     price_lovelace: used.priceLovelace.toString(),
     state: "open",
     opened_at: Date.now(),
+    managed_demo: opts?.managedDemo ? 1 : 0,
+    max_output_tokens: used.maxOutputTokens,
+    max_processing_ms: used.maxProcessingMs,
+    transcript_nonce: emptyTranscript.nonce,
+    transcript_ct: emptyTranscript.ct,
+    transcript_tag: emptyTranscript.tag,
   });
   transcripts.set(sessionId, []);
-
   const session = deps.store.getSession(sessionId);
   if (!session) throw new Error(`session ${sessionId} vanished after insert`);
   return session;
 }
 
-// ─── messages (one streamed turn) ────────────────────────────────────────────
+export interface TurnResult {
+  response: ResponseObject;
+  events: ResponseStreamEvent[];
+}
+
+/** Drive one off-chain Responses turn. The caller holds the session lock. */
+export async function streamSupplierTurn(
+  deps: GatewayDeps,
+  session: SessionRow,
+  payload: ResponseRequest,
+  onEvent?: (event: ResponseStreamEvent) => void,
+): Promise<TurnResult> {
+  const mirror = loadSessionTranscript(deps, session);
+  try {
+    validateResponseToolOutputs([...mirror, ...payload.input]);
+  } catch (error) {
+    throw badRequest(
+      "invalid_function_call_output",
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+  if (payload.reasoning !== undefined || payload.text !== undefined || payload.input.some((item) => item.type === "reasoning")) {
+    const capability = await readResponsesCapability(deps, session.supplier_base_url);
+    const effort = payload.reasoning?.effort;
+    if (capability.upstream_api !== "responses" ||
+        (capability.reasoning_disabled && effort !== undefined && effort !== "none")) {
+      throw badRequest(
+        "unsupported_parameter",
+        "this session supplier cannot execute these Responses controls",
+      );
+    }
+  }
+
+  const turnBudgetMs = (session.max_processing_ms > 0 ? session.max_processing_ms : 300_000) + 30_000;
+  const controller = new AbortController();
+  const turnTimer = setTimeout(() => controller.abort(), turnBudgetMs);
+  turnTimer.unref?.();
+  const signal = controller.signal;
+  let dispatched = false;
+  try {
+    // A crash after dispatch can leave an unseen supplier suffix. Do not
+    // retain a reusable head or a falsely complete durable checkpoint.
+    if (!deps.store.setSessionTranscript(session.id, null, null)) {
+      throw new SessionGoneError(session.id);
+    }
+    dispatched = true;
+    const upstream = await deps.fetchFn(`${session.supplier_base_url.replace(/\/+$/, "")}/v1/chat/message`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "text/event-stream", "X-Escrow-Ref": session.escrow_ref },
+      body: JSON.stringify(payload),
+      signal,
+    });
+    if (upstream.status === 404) {
+      await upstream.text().catch(() => "");
+      throw new SessionGoneError(session.id);
+    }
+    if (!upstream.ok || !upstream.body) {
+      const detail = await upstream.text().catch(() => "");
+      throw toGatewayError(new SupplierError("supplier_http_error", { status: upstream.status, message: detail.slice(0, 200) }));
+    }
+
+    const events: ResponseStreamEvent[] = [];
+    let terminal: ResponseObject | undefined;
+    let terminalType: string | undefined;
+    for await (const event of readResponseEvents(upstream.body)) {
+      events.push(event);
+      onEvent?.(event);
+      if (event.type === "response.completed" || event.type === "response.incomplete" || event.type === "response.failed") {
+        terminalType = event.type;
+        if (isResponseObject(event.response)) terminal = event.response;
+      }
+    }
+    if (!terminal) throw toGatewayError(new SupplierError("malformed_response", { message: "supplier stream has no terminal response" }));
+    const expectedTerminal = terminal.status === "completed"
+      ? "response.completed"
+      : terminal.status === "incomplete" ? "response.incomplete" : "response.failed";
+    if (terminalType !== expectedTerminal) {
+      throw toGatewayError(new SupplierError("malformed_response", {
+        message: `supplier terminal ${String(terminalType)} disagrees with response status ${terminal.status}`,
+      }));
+    }
+    if (terminal.status === "failed") {
+      throw toGatewayError(new SupplierError("upstream_error", { message: JSON.stringify(terminal.error ?? {}) }));
+    }
+
+    const nextMirror = [...mirror, ...payload.input, ...terminal.output];
+    persistSessionTranscript(deps, session.id, nextMirror);
+    return { response: terminal, events };
+  } catch (error) {
+    if (error instanceof SessionGoneError) throw error;
+    if (dispatched) {
+      deps.store.setSessionState(session.id, "invalid", Date.now());
+      dropSessionState(session.id);
+    }
+    if (signal.aborted) {
+      throw new SupplierError("timeout", {
+        message: `supplier turn exceeded ${turnBudgetMs}ms`,
+      });
+    }
+    throw error;
+  } finally {
+    clearTimeout(turnTimer);
+  }
+}
 
 export function makeSessionMessageHandler(deps: GatewayDeps) {
   return asyncHandler(async (req: Request, res: Response) => {
     const keyRow = requireKey(req);
-    const session = loadOwnedSession(deps.store, req, keyRow);
-    if (session.state !== "open") {
-      throw badRequest("session_closed", `session ${session.id} is ${session.state}`);
-    }
-    const body = (req.body ?? {}) as Record<string, unknown>;
-    const stream = body.stream !== false; // sessions default to streaming
-    const content = resolveTurnContent(session.id, body);
-    if (content === "") throw badRequest("content_required", "no user content in this turn");
-
-    // Turns are chain-free (one HTTP POST to the supplier + SSE relay), so the
-    // per-key mutex — which exists to serialize wallet UTxO spends — is NOT
-    // held here. What needs serialization is this session's transcript:
-    // concurrent turns would interleave supplier appends and corrupt both the
-    // mirror and the receipt hash. Hence a per-session lock.
-    await getSessionLock(session.id).run(() => streamTurn(deps, session, content, stream, res));
-  });
-}
-
-function resolveTurnContent(sessionId: string, body: Record<string, unknown>): string {
-  if (typeof body.content === "string") {
-    return foldSystem(sessionId, body.content, body);
-  }
-  if (Array.isArray(body.messages)) {
-    const msgs = body.messages as Array<{ role?: unknown; content?: unknown }>;
-    const lastUser = [...msgs].reverse().find((m) => m.role === "user" && typeof m.content === "string");
-    const userContent = typeof lastUser?.content === "string" ? lastUser.content : "";
-    return foldSystem(sessionId, userContent, body);
-  }
-  return "";
-}
-
-/** On the first turn only, prepend any system message (chat.v1 has no system channel). */
-function foldSystem(sessionId: string, content: string, body: Record<string, unknown>): string {
-  const mirror = transcripts.get(sessionId) ?? [];
-  if (mirror.length > 0) return content;
-  if (Array.isArray(body.messages)) {
-    const sys = (body.messages as Array<{ role?: unknown; content?: unknown }>)
-      .filter((m) => m.role === "system" && typeof m.content === "string")
-      .map((m) => m.content as string)
-      .join("\n\n");
-    if (sys) return `System: ${sys}\n\n${content}`;
-  }
-  return content;
-}
-
-/** One turn's payload to the supplier: legacy single user string, or a
- * multi-message delta (e.g. tool results) with optional tools passthrough. */
-export type TurnPayload =
-  | { content: string }
-  | { messages: ChatMessage[]; tools?: unknown[]; tool_choice?: unknown };
-
-export interface TurnResult {
-  assistantMessage: ChatMessage;
-  finishReason: "stop" | "tool_calls";
-  usage: { prompt_tokens: number; completion_tokens: number };
-}
-
-/**
- * Drive one off-chain turn against the session's supplier and mirror the
- * result into the session transcript. Caller must hold the session lock.
- * Throws SessionGoneError when the supplier no longer knows the session
- * (idle-closed or restarted) so callers can transparently reopen.
- */
-export async function streamSupplierTurn(
-  deps: GatewayDeps,
-  session: SessionRow,
-  payload: TurnPayload,
-  onToken?: (token: string) => void,
-): Promise<TurnResult> {
-  const upstream = await deps.fetchFn(`${session.supplier_base_url.replace(/\/+$/, "")}/v1/chat/message`, {
-    method: "POST",
-    headers: { "content-type": "application/json", accept: "text/event-stream", "X-Escrow-Ref": session.escrow_ref },
-    body: JSON.stringify(payload),
-  });
-  if (upstream.status === 404) {
-    await upstream.text().catch(() => "");
-    throw new SessionGoneError(session.id);
-  }
-  if (!upstream.ok || !upstream.body) {
-    const detail = await upstream.text().catch(() => "");
-    throw toGatewayError(new SupplierError("supplier_http_error", { status: upstream.status, message: detail.slice(0, 200) }));
-  }
-
-  let assistant = "";
-  let errored: string | undefined;
-  let doneMessage: ChatMessage | null = null;
-  let doneFinish: string | undefined;
-  let usage = { prompt_tokens: 0, completion_tokens: 0 };
-  await readSupplierSse(upstream.body as ReadableStream<Uint8Array>, (frame) => {
-    if (frame.type === "token" && typeof frame.value === "string") {
-      assistant += frame.value;
-      onToken?.(frame.value);
-    } else if (frame.type === "done") {
-      // Upgraded suppliers echo the final assistant message verbatim; mirror
-      // that exact object so both transcripts stay hash-identical.
-      doneMessage = normalizeChatMessage(frame.message);
-      if (typeof frame.finish_reason === "string") doneFinish = frame.finish_reason;
-      if (frame.usage && typeof frame.usage === "object") {
-        const u = frame.usage as Record<string, unknown>;
-        usage = {
-          prompt_tokens: typeof u.prompt_tokens === "number" ? u.prompt_tokens : 0,
-          completion_tokens: typeof u.completion_tokens === "number" ? u.completion_tokens : 0,
-        };
+    const selected = loadOwnedSession(deps.store, req, keyRow);
+    if (selected.state !== "open") throw badRequest("session_closed", `session ${selected.id} is ${selected.state}`);
+    const parsed = parseSessionTurnRequest(req.body);
+    const { stream, ...request } = parsed;
+    const responseId = genId();
+    const responseCreatedAt = nowSec();
+    await getSessionLock(selected.id).run(async () => {
+      const session = deps.store.getSession(selected.id);
+      if (!session || session.key_id !== keyRow.id) {
+        throw notFound("session_not_found", `no chat session ${selected.id}`);
       }
-    } else if (frame.type === "error") {
-      errored = typeof frame.message === "string" ? frame.message : "supplier stream error";
-    }
-  });
-
-  if (errored !== undefined) {
-    throw toGatewayError(new SupplierError("upstream_error", { message: errored }));
-  }
-
-  const assistantMessage: ChatMessage = doneMessage ?? { role: "assistant", content: assistant };
-  const finishReason: TurnResult["finishReason"] =
-    doneFinish === "tool_calls" || (assistantMessage.tool_calls?.length ?? 0) > 0 ? "tool_calls" : "stop";
-
-  // Mirror the turn for endChat's response_hash verification / affinity matching.
-  const mirror = transcripts.get(session.id) ?? [];
-  if ("content" in payload) mirror.push({ role: "user", content: payload.content });
-  else mirror.push(...payload.messages);
-  mirror.push(assistantMessage);
-  transcripts.set(session.id, mirror);
-
-  return { assistantMessage, finishReason, usage };
-}
-
-async function streamTurn(
-  deps: GatewayDeps,
-  session: SessionRow,
-  content: string,
-  stream: boolean,
-  res: Response,
-): Promise<void> {
-  const id = genId();
-
-  if (stream) {
-    res.status(200);
-    res.setHeader("Content-Type", "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache, no-transform");
-    res.setHeader("Connection", "keep-alive");
-    res.setHeader("X-Accel-Buffering", "no");
-    res.write(sseData(buildChunk({ id, model: session.model, delta: { role: "assistant" }, finishReason: null })));
-  }
-
-  let result: TurnResult;
-  try {
-    result = await streamSupplierTurn(deps, session, { content }, (token) => {
-      if (stream) res.write(sseData(buildChunk({ id, model: session.model, delta: { content: token }, finishReason: null })));
-    });
-  } catch (err) {
-    if (err instanceof SessionGoneError) {
-      err = toGatewayError(new SupplierError("supplier_http_error", { status: 404, message: err.message }));
-    }
-    if (stream) {
-      res.write(sseData(toErrorBody(toGatewayError(err))));
-      res.end();
-      return;
-    }
-    throw toGatewayError(err);
-  }
-
-  if (stream) {
-    res.write(sseData(buildChunk({ id, model: session.model, delta: {}, finishReason: result.finishReason })));
-    res.write(SSE_DONE);
-    res.end();
-  } else {
-    const usage: Usage = {
-      prompt_tokens: result.usage.prompt_tokens,
-      completion_tokens: result.usage.completion_tokens,
-      total_tokens: result.usage.prompt_tokens + result.usage.completion_tokens,
-    };
-    res.status(200).json(buildChatCompletion({ id, model: session.model, content: result.assistantMessage.content, usage }));
-  }
-}
-
-interface SupplierFrame {
-  type?: string;
-  value?: string;
-  message?: unknown;
-  finish_reason?: unknown;
-  usage?: unknown;
-}
-
-/** Read a supplier SSE stream of {type:token|done|error} frames. */
-async function readSupplierSse(
-  body: ReadableStream<Uint8Array>,
-  onFrame: (frame: SupplierFrame) => void,
-): Promise<void> {
-  const reader = body.getReader();
-  const decoder = new TextDecoder();
-  let buf = "";
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    let sep: number;
-    while ((sep = buf.indexOf("\n\n")) !== -1) {
-      const raw = buf.slice(0, sep);
-      buf = buf.slice(sep + 2);
-      for (const line of raw.split("\n")) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith("data:")) continue;
-        const data = trimmed.slice(5).trim();
-        if (data === "" || data === "[DONE]") continue;
-        try {
-          onFrame(JSON.parse(data) as SupplierFrame);
-        } catch {
-          /* ignore non-JSON keepalive/comment frames */
+      if (session.state !== "open") {
+        throw badRequest("session_closed", `session ${session.id} is ${session.state}`);
+      }
+      let opened = false;
+      let sequence = 0;
+      const openStream = (): void => {
+        if (opened) return;
+        opened = true;
+        res.status(200);
+        res.setHeader("Content-Type", "text/event-stream");
+        res.setHeader("Cache-Control", "no-cache, no-transform");
+        res.setHeader("Connection", "keep-alive");
+        res.setHeader("X-Accel-Buffering", "no");
+      };
+      const relay = stream
+        ? (event: ResponseStreamEvent): void => {
+          if (event.type === "error" ||
+              event.type === "response.completed" ||
+              event.type === "response.incomplete" ||
+              event.type === "response.failed") return;
+          openStream();
+          const publicEvent = publicStreamEvent(event, {
+            id: responseId,
+            model: session.model,
+            createdAt: responseCreatedAt,
+          });
+          res.write(sseEvent({ ...publicEvent, sequence_number: sequence++ }));
         }
+        : undefined;
+      try {
+        const result = await streamSupplierTurn(deps, session, request, relay);
+        const response = publicResponse({
+          id: responseId,
+          model: session.model,
+          createdAt: responseCreatedAt,
+          result: result.response,
+        });
+        if (!stream) {
+          res.status(200).json(response);
+          return;
+        }
+        if (!opened) {
+          openStream();
+          res.end(responseSse(response));
+          return;
+        }
+        const terminal = response.status === "incomplete"
+          ? "response.incomplete"
+          : "response.completed";
+        res.write(sseEvent({
+          type: terminal,
+          sequence_number: sequence++,
+          response,
+        }));
+        res.end();
+      } catch (error) {
+        if (!stream || !opened) throw error;
+        const gatewayError = toGatewayError(error);
+        for (const event of streamFailure(responseId, session.model, {
+          code: gatewayError.code,
+          message: gatewayError.message,
+        })) {
+          res.write(sseEvent({ ...event, sequence_number: sequence++ }));
+        }
+        res.end();
       }
-    }
-  }
+    });
+  });
 }
-
-// ─── close (settle) ──────────────────────────────────────────────────────────
 
 export function makeCloseSessionHandler(deps: GatewayDeps) {
   return asyncHandler(async (req: Request, res: Response) => {
     const keyRow = requireKey(req);
-    const session = loadOwnedSession(deps.store, req, keyRow);
-    if (session.state !== "open") {
-      throw badRequest("session_closed", `session ${session.id} is already ${session.state}`);
-    }
+    const selected = loadOwnedSession(deps.store, req, keyRow);
     const ctx = deps.registry.getContext(keyRow);
-    await ctx.mutex.run(() => closeSession(deps, keyRow, ctx, session, res));
+    await getSessionLock(selected.id).run(async () => {
+      const session = deps.store.getSession(selected.id);
+      if (!session || session.key_id !== keyRow.id) {
+        throw notFound("session_not_found", `no chat session ${selected.id}`);
+      }
+      if (session.state !== "open") {
+        throw badRequest("session_closed", `session ${session.id} is already ${session.state}`);
+      }
+      await ctx.mutex.run(() => closeSession(deps, keyRow, ctx, session, res));
+    }, "session-close");
   });
 }
 
-async function closeSession(
-  deps: GatewayDeps,
-  keyRow: ApiKeyRow,
-  ctx: KeyContext,
-  session: SessionRow,
-  res: Response,
-): Promise<void> {
+async function closeSession(deps: GatewayDeps, keyRow: ApiKeyRow, ctx: KeyContext, session: SessionRow, res: Response): Promise<void> {
   const escrowRef = parseRef(session.escrow_ref);
   if (!escrowRef) throw badRequest("bad_session", "session has an invalid escrow ref");
-
+  const transcript = loadSessionTranscript(deps, session);
   const result = await ctx.sdk.endChat({
     escrowRef,
     sessionNonce: session.session_nonce,
     supplierBaseUrl: session.supplier_base_url,
-    transcript: transcripts.get(session.id),
+    transcript,
   });
-
   deps.store.setSessionState(session.id, "closed", Date.now());
   dropSessionState(session.id);
 
-  if (result.settleMode === "ticket") {
-    // Nothing was Submitted/Accepted: no receipt, no charge (the escrow
-    // returns via the sweeper's reclaim), and no wallet churn to tidy up.
-    deps.store.insertUsage({
-      id: randomUUID(),
-      key_id: keyRow.id,
-      created_at: Date.now(),
-      kind: "chat_session",
-      model: session.model,
-      capability_id: CAPABILITY,
-      supplier_pkh: session.supplier_pkh,
-      escrow_ref: session.escrow_ref,
-      cost_lovelace: "0",
-      prompt_tokens: 0,
-      completion_tokens: 0,
-      status: "completed",
-      failure_reason: null,
-    });
-    res.status(200).json({
-      status: "ended",
-      escrow_ref: session.escrow_ref,
-      settle_mode: "ticket",
-      model: session.model,
-    });
-    return;
-  }
-
-  const prompt = result.receipt.prompt_tokens ?? 0;
-  const completion = result.receipt.completion_tokens ?? 0;
+  const ticket = result.settleMode === "ticket";
+  const prompt = ticket ? 0 : result.receipt.prompt_tokens ?? 0;
+  const completion = ticket ? 0 : result.receipt.completion_tokens ?? 0;
   deps.store.insertUsage({
-    id: randomUUID(),
-    key_id: keyRow.id,
-    created_at: Date.now(),
-    kind: "chat_session",
-    model: session.model,
-    capability_id: CAPABILITY,
-    supplier_pkh: session.supplier_pkh,
-    escrow_ref: session.escrow_ref,
-    cost_lovelace: session.price_lovelace,
-    prompt_tokens: prompt,
-    completion_tokens: completion,
-    status: "completed",
-    failure_reason: null,
+    id: randomUUID(), key_id: keyRow.id, created_at: Date.now(), kind: "chat_session",
+    model: session.model, capability_id: CAPABILITY, supplier_pkh: session.supplier_pkh,
+    escrow_ref: session.escrow_ref, cost_lovelace: ticket ? "0" : session.price_lovelace,
+    prompt_tokens: prompt, completion_tokens: completion, status: "completed", failure_reason: null,
   });
-
-  await ensureWalletHealthy(deps.chain, ctx.walletKey).catch((e) =>
-    // eslint-disable-next-line no-console
-    console.error("[gateway] wallet-health after session close:", e instanceof Error ? e.message : e),
-  );
-
-  res.status(200).json({
-    status: "closed",
-    escrow_ref: session.escrow_ref,
-    accepted_ref: refStr(result.acceptedRef),
-    model: session.model,
+  if (!ticket) {
+    await ensureWalletHealthy(deps.chain, ctx.walletKey).catch((error) =>
+      console.error("[gateway] wallet-health after session close:", error instanceof Error ? error.message : error));
+  }
+  res.status(200).json(ticket ? {
+    status: "ended", escrow_ref: session.escrow_ref, settle_mode: "ticket", model: session.model,
+  } : {
+    status: "closed", escrow_ref: session.escrow_ref, accepted_ref: refStr(result.acceptedRef), model: session.model,
     x_vector: { receipt: result.receipt, receipt_signature: result.receiptSignature, escrow_ref: session.escrow_ref },
   });
 }
 
 function loadOwnedSession(store: GatewayStore, req: Request, keyRow: ApiKeyRow): SessionRow {
-  const raw = (req.params as Record<string, string | string[] | undefined>).id;
+  const raw: unknown = req.params.id;
   const id = typeof raw === "string" ? raw : undefined;
   const session = id ? store.getSession(id) : undefined;
-  if (!session || session.key_id !== keyRow.id) {
-    throw notFound("session_not_found", `no chat session ${id ?? "(none)"}`);
-  }
+  if (!session || session.key_id !== keyRow.id) throw notFound("session_not_found", `no chat session ${id ?? "(none)"}`);
   return session;
 }

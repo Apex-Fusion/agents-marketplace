@@ -15,14 +15,19 @@
  *     "End chat" settles (POST /v1/chat/end → supplier Submit + buyer Accept),
  *     which is when the user is actually charged.
  *
- * Both paths stream a uniform SSE wire format over fetch+ReadableStream:
- *   data: {"type":"token","value":"<delta>"}\n\n
- *   data: {"type":"done"}\n\n
- *   data: {"type":"error","message":"…"}\n\n
+ * Both paths consume canonical OpenAI Responses SSE events. Incremental text
+ * is display-only. The terminal Response object supplies the exact Items kept
+ * in the local transcript and later committed by the session receipt.
  */
 
 import { useEffect, useRef, useState } from "react";
 import type { OutputReference } from "@marketplace/shared/chain";
+import {
+  normalizeResponseOutput,
+  readResponseEvents,
+  type ResponseItem,
+  type ResponseObject,
+} from "@marketplace/shared/responses";
 
 export interface ChatFormProps {
   /** When set, runs the paid marketplace lifecycle; when undefined, demo mode. */
@@ -45,61 +50,119 @@ function ap3x(lovelace: bigint | string): string {
   return (Number(lovelace) / 1e6).toFixed(2);
 }
 
-/** Stream a uniform SSE response, invoking onToken per content delta.
- * Resolves when the `done` frame arrives; rejects on `error` frame or
- * transport failure. */
+function itemText(item: ResponseItem): string {
+  if (item.type !== "message") return "";
+  return item.content.map((part) =>
+    part.type === "refusal" ? part.refusal : part.text
+  ).join("");
+}
+
+function displayTurns(transcript: readonly ResponseItem[]): ChatTurn[] {
+  return transcript.flatMap((item) => {
+    if (item.type !== "message" || (item.role !== "user" && item.role !== "assistant")) {
+      return [];
+    }
+    return [{ role: item.role, content: itemText(item) }];
+  });
+}
+
+/** Consume canonical Responses SSE. The terminal object is authoritative. */
 async function streamChat(
   url: string,
   body: unknown,
-  onToken: (delta: string) => void,
-): Promise<void> {
+  onDelta: (delta: string) => void,
+): Promise<ResponseObject> {
   const resp = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
   if (!resp.ok || !resp.body) {
-    let msg = `${resp.status} ${resp.statusText}`;
+    let message = `${resp.status} ${resp.statusText}`;
     try {
-      const j = (await resp.json()) as { error?: string; message?: string };
-      if (j.error || j.message) msg = `${j.error ?? "error"}: ${j.message ?? ""}`;
-    } catch { /* keep status fallback */ }
-    throw new Error(msg);
-  }
-  const reader = resp.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  const handleFrame = (payload: string): boolean => {
-    const trimmed = payload.trim();
-    if (trimmed.length === 0) return false;
-    let frame: { type?: string; value?: string; message?: string };
-    try {
-      frame = JSON.parse(trimmed);
-    } catch {
-      return false;
-    }
-    if (frame.type === "token" && typeof frame.value === "string") {
-      onToken(frame.value);
-    } else if (frame.type === "done") {
-      return true;
-    } else if (frame.type === "error") {
-      throw new Error(frame.message ?? "stream error");
-    }
-    return false;
-  };
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let sepIdx: number;
-    while ((sepIdx = buffer.indexOf("\n\n")) >= 0) {
-      const block = buffer.slice(0, sepIdx);
-      buffer = buffer.slice(sepIdx + 2);
-      for (const line of block.split("\n")) {
-        if (line.startsWith("data:") && handleFrame(line.slice(5))) return;
+      const errorBody: unknown = await resp.json();
+      if (errorBody && typeof errorBody === "object") {
+        if ("message" in errorBody && typeof errorBody.message === "string") {
+          message = errorBody.message;
+        } else if ("error" in errorBody && typeof errorBody.error === "string") {
+          message = errorBody.error;
+        }
       }
+    } catch {
+      /* Keep the HTTP status. */
     }
+    throw new Error(message);
   }
+
+  let terminal: ResponseObject | null = null;
+  for await (const event of readResponseEvents(resp.body)) {
+    if (
+      (event.type === "response.output_text.delta" ||
+        event.type === "response.refusal.delta") &&
+      typeof event.delta === "string"
+    ) {
+      onDelta(event.delta);
+    }
+    if (
+      event.type !== "response.completed" &&
+      event.type !== "response.incomplete" &&
+      event.type !== "response.failed"
+    ) {
+      continue;
+    }
+    const candidate = event.response;
+    if (candidate === null || typeof candidate !== "object" || Array.isArray(candidate)) {
+      throw new Error("terminal stream event is missing its response object");
+    }
+    const response = candidate as Record<string, unknown>;
+    const output = normalizeResponseOutput(response.output);
+    const status = response.status;
+    const expectedStatus = event.type === "response.completed"
+      ? "completed"
+      : event.type === "response.incomplete"
+        ? "incomplete"
+        : "failed";
+    const usage = response.usage;
+    const usageValid = usage === null || (
+      typeof usage === "object" &&
+      !Array.isArray(usage) &&
+      "input_tokens" in usage &&
+      typeof usage.input_tokens === "number" &&
+      "output_tokens" in usage &&
+      typeof usage.output_tokens === "number" &&
+      "total_tokens" in usage &&
+      typeof usage.total_tokens === "number"
+    );
+    const errorValid = response.error === null || (
+      typeof response.error === "object" && !Array.isArray(response.error)
+    );
+    const incompleteDetails = response.incomplete_details;
+    const incompleteValid = status === "incomplete"
+      ? (
+          incompleteDetails !== null &&
+          typeof incompleteDetails === "object" &&
+          !Array.isArray(incompleteDetails) &&
+          "reason" in incompleteDetails &&
+          typeof incompleteDetails.reason === "string"
+        )
+      : incompleteDetails === null;
+    if (
+      response.object !== "response" ||
+      typeof response.id !== "string" ||
+      typeof response.created_at !== "number" ||
+      typeof response.model !== "string" ||
+      status !== expectedStatus ||
+      !usageValid ||
+      !errorValid ||
+      !incompleteValid
+    ) {
+      throw new Error("terminal stream event contains an invalid response object");
+    }
+    const parsedResponse = { ...response, status, output } as ResponseObject;
+    terminal = parsedResponse;
+  }
+  if (!terminal) throw new Error("response stream ended without a terminal event");
+  return terminal;
 }
 
 /** Animated "Thinking …" placeholder shown while waiting for the model's
@@ -125,8 +188,9 @@ export default function ChatForm({ advertRef, payment_lovelace }: ChatFormProps 
   const isPaid = advertRef !== undefined && payment_lovelace !== undefined;
   const advertRefStr = advertRef ? `${advertRef.txHash}#${advertRef.index}` : null;
 
-  const [turns, setTurns] = useState<ChatTurn[]>([]);
-  const [streaming, setStreaming] = useState<string | null>(null); // in-progress assistant text
+  const [transcript, setTranscript] = useState<ResponseItem[]>([]);
+  const turns = displayTurns(transcript);
+  const [streaming, setStreaming] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -197,7 +261,7 @@ export default function ChatForm({ advertRef, payment_lovelace }: ChatFormProps 
       }
       const j = (await resp.json()) as { escrow_ref: string; session_nonce: string };
       setSession({ escrowRef: j.escrow_ref, sessionNonce: j.session_nonce });
-      setTurns([]);
+      setTranscript([]);
       setCharged(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -212,32 +276,50 @@ export default function ChatForm({ advertRef, payment_lovelace }: ChatFormProps 
     setBusy(true);
     setError(null);
     setInput("");
-    const nextTurns: ChatTurn[] = [...turns, { role: "user", content }];
-    setTurns(nextTurns);
+    const userItem: ResponseItem = {
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: content }],
+    };
+    const nextTranscript = [...transcript, userItem];
+    setTranscript(nextTranscript);
     setStreaming("");
-    let acc = "";
+    let streamedText = "";
     try {
-      if (isPaid) {
-        const s = sessionRef.current;
-        if (!s) throw new Error("no active chat session");
-        await streamChat(
-          "/v1/chat/message",
-          { escrow_ref: s.escrowRef, content },
-          (delta) => { acc += delta; setStreaming(acc); },
+      const requestBody = isPaid
+        ? {
+            escrow_ref: sessionRef.current?.escrowRef,
+            input: [userItem],
+          }
+        : { input: nextTranscript };
+      if (isPaid && !sessionRef.current) throw new Error("no active chat session");
+      const terminal = await streamChat(
+        isPaid ? "/v1/chat/message" : "/v1/chat-demo/message",
+        requestBody,
+        (delta) => {
+          streamedText += delta;
+          setStreaming(streamedText);
+        },
+      );
+      // Never synthesize the transcript from deltas. Keep exact terminal Items
+      // so continuation and the settlement receipt share identical bytes.
+      if (terminal.status === "failed") {
+        setTranscript(isPaid ? transcript : [...nextTranscript, ...terminal.output]);
+        setError(
+          `Response failed: ${terminal.error ? JSON.stringify(terminal.error) : "unknown error"}`,
         );
       } else {
-        // Demo: send the full running transcript (no server-side state).
-        const demoMessages = nextTurns.map((t) => ({ role: t.role, content: t.content }));
-        await streamChat(
-          "/v1/chat-demo/message",
-          { messages: demoMessages },
-          (delta) => { acc += delta; setStreaming(acc); },
-        );
+        setTranscript([...nextTranscript, ...terminal.output]);
+        if (terminal.status === "incomplete") {
+          setError(
+            `Response incomplete: ${terminal.incomplete_details?.reason ?? "unknown reason"}`,
+          );
+        }
       }
-      setTurns([...nextTurns, { role: "assistant", content: acc }]);
     } catch (err) {
+      setTranscript(transcript);
       setError(err instanceof Error ? err.message : String(err));
-      // Keep the user's turn but drop the half-streamed assistant bubble.
+      // Failed supplier turns roll back their input. Mirror that rollback.
     } finally {
       setStreaming(null);
       setBusy(false);
@@ -256,7 +338,7 @@ export default function ChatForm({ advertRef, payment_lovelace }: ChatFormProps 
         body: JSON.stringify({
           escrow_ref: s.escrowRef,
           session_nonce: s.sessionNonce,
-          transcript: turns,
+          transcript,
         }),
       });
       if (!resp.ok) {

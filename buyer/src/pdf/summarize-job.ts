@@ -29,6 +29,13 @@
 
 import { randomUUID } from "crypto";
 import { canonicalize } from "@marketplace/shared/cbor";
+import {
+  responseOutputText,
+  responseResultCommitment,
+  type ResponseItem,
+  type ResponseObject,
+  type ResponseRequest,
+} from "@marketplace/shared/responses";
 import type { ChainProvider, OutputReference } from "@marketplace/shared/chain";
 import type { WalletKey } from "@marketplace/shared/tx";
 import type { Marketplace } from "../sdk/Marketplace.js";
@@ -52,12 +59,17 @@ const SUBMITTED_LOOKUP_TIMEOUT_MS = 30_000;
 
 /** The result of running one supplier call's full on-chain lifecycle. */
 export interface CallOutcome {
-  response: string;
+  /** Canonical terminal result. Its status and output determine whether the
+   * paid call produced a usable summary. */
+  result: ResponseObject;
   escrowRef: string;
   supplierPkh: string;
   model: string;
   receipt: Record<string, unknown>;
   receiptSignature: string;
+  /** Canonical request and terminal result used by the archive. */
+  requestEnvelope?: ResponseRequest;
+  responseCanonical?: string;
 }
 
 /** Runs one call (PostEscrow → supplier → verify → Accept). Injectable for
@@ -471,6 +483,8 @@ export class JobStore {
           job.coverageDone++;
         } else {
           row.status = "gap";
+          row.escrowRef = r.escrowRef;
+          row.supplierModel = r.model;
           job.failedCount++;
         }
         job.emit(this.event(job, "map", { label: row.label }));
@@ -531,9 +545,14 @@ export class JobStore {
 
   /** The real per-call lifecycle: submitPrompt → resolve Submitted → Accept. */
   private async defaultRunCall(sup: PoolSupplier, prompt: string): Promise<CallOutcome> {
+    const input: ResponseItem[] = [{
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: prompt }],
+    }];
     const submit = await this.deps.marketplace.submitPrompt({
       advertRef: sup.advertRef,
-      messages: [{ role: "user", content: prompt }],
+      input,
       payment_lovelace: sup.priceLovelace,
       max_output_tokens: sup.maxOutputTokens,
     });
@@ -549,12 +568,14 @@ export class JobStore {
       escrowRef: submittedRef,
     });
     return {
-      response: submit.response,
+      result: submit.result,
       escrowRef: `${submit.escrowRef.txHash}#${submit.escrowRef.index}`,
       supplierPkh: submit.receipt.supplier_pkh,
       model: submit.receipt.model,
       receipt: submit.receipt as unknown as Record<string, unknown>,
       receiptSignature: submit.receiptSignature,
+      requestEnvelope: submit.request,
+      responseCanonical: canonicalize(responseResultCommitment(submit.result)),
     };
   }
 
@@ -570,22 +591,22 @@ export class JobStore {
   ): Promise<{ ok: boolean; summary?: string; escrowRef?: string; model?: string }> {
     const runCall: RunCallFn = this.deps.runCall ?? ((s, p) => this.defaultRunCall(s, p));
     const tried = new Set<string>();
+    let lastSettled: { escrowRef: string; model: string } | undefined;
     for (let attempt = 0; attempt <= this.deps.caps.retryK; attempt++) {
       const sup = pool.next(tried);
       if (!sup) break; // ran out of distinct suppliers
       tried.add(sup.utxoRef);
       try {
         const result = await this.chainMutex.run(() => runCall(sup, prompt));
+        // The receipt is verified and accepted at this point. Account and
+        // archive it even when the model output is not a usable summary.
 
         job.runningCost += sup.priceLovelace;
         job.escrowRefs.push(result.escrowRef);
+        lastSettled = { escrowRef: result.escrowRef, model: sup.model };
 
-        if (this.deps.archive) {
+        if (this.deps.archive && result.requestEnvelope && result.responseCanonical) {
           try {
-            const canonicalAssistant = canonicalize({
-              role: "assistant",
-              content: result.response,
-            });
             this.deps.archive.persistChat({
               escrow_ref: result.escrowRef,
               posted_at: Date.now(),
@@ -593,8 +614,8 @@ export class JobStore {
               supplier_pkh: result.supplierPkh,
               model: result.model,
               payment_lovelace: sup.priceLovelace.toString(),
-              request_messages: [{ role: "user", content: prompt }],
-              response_canonical: canonicalAssistant,
+              request_envelope: result.requestEnvelope,
+              response_canonical: result.responseCanonical,
               receipt: result.receipt,
               receipt_signature: result.receiptSignature,
             });
@@ -605,7 +626,34 @@ export class JobStore {
           }
         }
 
-        return { ok: true, summary: result.response, escrowRef: result.escrowRef, model: sup.model };
+        const refused = result.result.output.some((item) =>
+          item.type === "message"
+          && item.role === "assistant"
+          && item.content.some((part) => part.type === "refusal" && part.refusal.length > 0));
+        const summary = result.result.status === "completed" && !refused
+          ? responseOutputText(result.result.output)
+          : "";
+        if (summary.trim().length > 0) {
+          return { ok: true, summary, escrowRef: result.escrowRef, model: sup.model };
+        }
+
+        let reason: string;
+        if (result.result.status === "incomplete") {
+          const detail = result.result.incomplete_details?.reason;
+          reason = `supplier returned incomplete response${detail ? `: ${detail}` : ""}`;
+        } else if (result.result.status === "failed") {
+          reason = "supplier returned failed response";
+        } else if (refused) {
+          reason = "supplier returned a refusal";
+        } else {
+          reason = "supplier returned no usable summary text";
+        }
+        job.emit(
+          this.event(job, phase, {
+            label,
+            message: `retry ${attempt + 1}/${this.deps.caps.retryK + 1} on new supplier: ${reason}`,
+          }),
+        );
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         job.emit(
@@ -617,7 +665,7 @@ export class JobStore {
         // Orphaned escrow (if PostEscrow landed) is recovered by reclaim:orphans.
       }
     }
-    return { ok: false };
+    return { ok: false, ...lastSettled };
   }
 
   /** Fallback book summary built from surviving map summaries, gaps marked. */

@@ -16,8 +16,9 @@ import { loadPdfCaps } from "../../buyer/src/pdf/caps.js";
 import type { Chunk } from "../../buyer/src/pdf/types.js";
 import type { Marketplace } from "../../buyer/src/sdk/Marketplace.js";
 import type { SupplierView } from "../../buyer/src/sdk/types.js";
-import type { ChainProvider } from "@marketplace/shared/chain";
-import type { WalletKey } from "@marketplace/shared/tx";
+import type { ChainProvider } from "../../packages/shared/src/chain/ChainProvider.js";
+import type { WalletKey } from "../../packages/shared/src/tx/types.js";
+import { createResponse } from "../../packages/shared/src/responses.js";
 
 function supplierView(model: string, ref: string, price: string): SupplierView {
   return {
@@ -53,7 +54,15 @@ function makeStore(opts?: { balance?: bigint; caps?: Record<string, string>; db?
   const runCall: RunCallFn = async (sup) => {
     n += 1;
     return {
-      response: `summary ${n}`,
+      result: createResponse({
+        id: `resp_${n}`,
+        model: sup.model,
+        output: [{
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: `summary ${n}` }],
+        }],
+      }),
       escrowRef: `${"f".repeat(64)}#${n}`,
       supplierPkh: sup.supplierPkh,
       model: sup.model,

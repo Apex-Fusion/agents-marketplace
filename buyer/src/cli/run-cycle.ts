@@ -214,7 +214,7 @@ async function main(argv: string[]): Promise<number> {
   try {
     const submitResult = await marketplace.submitPrompt({
       advertRef,
-      messages: [{ role: "user", content: args.promptText }],
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: args.promptText }] }],
       payment_lovelace: args.paymentLovelace,
     });
     process.stderr.write(`post_escrow_ref=${submitResult.escrowRef.txHash}#${submitResult.escrowRef.index}\n`);
