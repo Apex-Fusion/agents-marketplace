@@ -1,4 +1,4 @@
-# inference-proxy box — suppliers `local`, `openclaw`, and `qwen38-local`
+# inference-proxy box — supplier deployments
 
 Compose projects for the **inference-proxy** host (`62.238.38.167`, hostname
 `local-inference-proxy`) — the first supplier host that is not the main
@@ -13,7 +13,8 @@ vector-marketplace box. These suppliers use backends reached through
   llama.cpp rig. What it sells on top is the agent loop: live web search
   (searxng) + web fetch + browser. Both suppliers contend for vuk's single
   llama.cpp slot; requests queue and the 1h deadline absorbs stalls.
-- `qwen38-local` fronts the vLLM load balancer at `100.77.146.49:8989`.
+- `qwen38-local` and `qwen38-local-oneshot` front the same vLLM load balancer
+  at `100.77.146.49:8989`.
   It serves `swarm-qwen38-27b-gptq4` (Qwen3.8-27B GPTQ Int4), with a
   24,576-token context. The balancer uses four workers: `192.168.1.131`,
   `192.168.1.201`, `192.168.1.202`, and `192.168.1.203`, each on port 8000.
@@ -37,6 +38,7 @@ vector-marketplace box. These suppliers use backends reached through
 | `docker-compose.supplier-local.yml` | `marketplace-mainnet-supplier-local` | Supplier `local`, `llm.chat.v1`, model `<vuk GGUF id>` |
 | `docker-compose.supplier-openclaw.yml` | `marketplace-mainnet-supplier-openclaw` | Supplier `openclaw`, `llm.chat.v1`, model `openclaw-web-agent` |
 | `docker-compose.supplier-qwen38-local.yml` | `marketplace-mainnet-supplier-qwen38-local` | Qwen3.8-27B, `llm.chat.v1`, model `swarm-qwen38-27b-gptq4` |
+| `docker-compose.supplier-qwen38-local-oneshot.yml` | `marketplace-mainnet-supplier-qwen38-local-oneshot` | Qwen3.8-27B, `llm.text.generate.v1`, model `swarm-qwen38-27b-gptq4` |
 
 Host env files (never committed):
 
@@ -56,8 +58,13 @@ Host env files (never committed):
   `ADVERT_REF` (chmod 600). The compose file selects `chat-completions`
   upstream mode, `http://100.77.146.49:8989`, and a one-hour timeout.
   It uses ticket settlement and one active chat session.
+- `supplier/.env.qwen38-local-oneshot` — a distinct wallet, mainnet plumbing,
+  and `ADVERT_REF` (chmod 600). It uses the same upstream and a five-minute
+  processing limit. It runs the full one-shot Claim/Submit settlement flow.
 
-## Qwen3.8 local supplier
+## Qwen3.8 local suppliers
+
+### Chat supplier
 
 Use the [supplier deployment runbook](../../docs/DEPLOY_NEW_SUPPLIER.md)
 with the Qwen compose file above. Set the advert model to
@@ -75,6 +82,35 @@ Live mainnet deployment (2026-09-21):
 - Source revision: `cbc2d85` (Responses API migration).
 - Public TLS, on-chain discovery, two streamed buyer turns, conversation
   recall, and ticket-session close pass. The supplier returns to `free`.
+
+### One-shot supplier
+
+`qwen38-local-oneshot` makes the same model available to normal API keys at
+`POST https://api.marketplace.vector.apexfusion.org/openai/v1/responses`.
+An `llm.chat.v1` advert alone does not satisfy that route: normal keys require
+`llm.text.generate.v1`. Demo Responses calls and the explicit chat-session
+API continue to use the existing chat supplier.
+
+Live mainnet deployment (2026-09-22):
+
+- Endpoint: `https://mp-suppliers-qwen38-local-oneshot.vector.apexfusion.org`.
+- Advert: `3329ba144ba5d1640d77480bcaa66fee7c38272a617f22d2bbcd0af1be9caecf#0`.
+- Wallet: `addr1v8e6kw85kkckkhggw208gaqt89u5uwuaeyf0fhakcw8mxaq6rrjza`.
+- Container: `marketplace-mainnet-supplier-qwen38-local-oneshot`.
+- Capability: `llm.text.generate.v1`; model: `swarm-qwen38-27b-gptq4`.
+- Limits: `24576` output tokens and `300000` ms processing time.
+- Advertised price: `200000` lovelace (0.2 AP3X) per request, plus chain fees.
+- Funding: 200 AP3X from the chat supplier wallet. Its existing collateral
+  output remains unspent.
+- Verification: the original normal-key Responses request returns HTTP 200,
+  `status: "completed"`, and a signed receipt after settlement. Both suppliers
+  return to `free`; the chat container is not restarted.
+
+Each normal Responses call, including a continuation, opens a separate escrow.
+The one-shot gateway path buffers output until completion and settlement.
+The chat supplier retains ticket settlement and live token streaming.
+
+### Shared backend limits
 
 This deployment uses the load balancer without changes to the three remote
 workers. Plain text generation is verified through port 8989. Only the
@@ -138,7 +174,7 @@ Register the wallet in monitoring on the **main** box: add the address to
 
 ## Safe manual updates
 
-Both upstreams remain explicit Chat Completions compatibility providers.
+These suppliers use explicit Chat Completions compatibility providers.
 Their public supplier interface is Responses. It returns authoritative
 `output` Items and canonical `usage.input_tokens`, `usage.output_tokens`, and
 `usage.total_tokens`. It rejects Responses reasoning Items and `text` controls
@@ -147,23 +183,23 @@ default native mode until each upstream exposes `/v1/responses`.
 
 Before a normal restart:
 
-1. Create `/dev/shm/marketplace-draining` in each supplier container. This
+1. Create `/dev/shm/marketplace-draining` in each affected supplier container. This
    blocks new admission.
 2. Poll `/status` from inside that container.
 3. Continue only when `active_sessions` is `0` and `status` is `free` or
    `offline`. This proves that no session and no one-shot job is working.
 4. Treat an unknown value, unreadable response, or timeout as failure. Leave
    the container running.
-5. Pull and build only after both suppliers are idle. Recreate one supplier
+5. Pull and build only after the affected suppliers are idle. Recreate one supplier
    at a time.
 6. A recreated container loses the tmpfs marker. If an error leaves the old
    container running, remove the marker before restoring admission. Failure
    to remove it must keep the rollout failed.
 
-For the first rollout that adds drain-marker enforcement, put both supplier
+For the first rollout that adds drain-marker enforcement, put the affected supplier
 hosts behind ingress maintenance before the first restart. The old image does
 not block admission when the marker exists. Remove maintenance only after
-both new containers are healthy.
+the replacement containers are healthy.
 
 ## Model swap on vuk
 

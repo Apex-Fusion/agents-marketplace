@@ -1,0 +1,59 @@
+# Qwen3.8-27B one-shot supplier on local-inference-proxy (Vector mainnet).
+# Capability: llm.text.generate.v1, for normal /openai/v1/responses requests.
+# Shares vuk's load balancer with qwen38-local; the chat supplier is unchanged.
+# Model id: swarm-qwen38-27b-gptq4; loaded context: 24576 tokens.
+# Wallet and advert: supplier/.env.qwen38-local-oneshot (host-only, mode 600).
+# DNS: mp-suppliers-qwen38-local-oneshot.vector.apexfusion.org -> 62.238.38.167.
+
+name: marketplace-mainnet-supplier-qwen38-local-oneshot
+
+services:
+  supplier:
+    build:
+      context: ../..
+      dockerfile: supplier/Dockerfile
+    container_name: marketplace-mainnet-supplier-qwen38-local-oneshot
+    restart: unless-stopped
+    env_file:
+      - path: ../../supplier/.env.qwen38-local-oneshot
+        required: false
+    environment:
+      # No chat-session settings: use the normal one-shot Claim/Submit flow.
+      LLM_BACKEND: openai
+      OPENAI_UPSTREAM_API: chat-completions
+      OPENAI_BASE_URL: http://100.77.146.49:8989
+      # Matches the advert's five-minute processing limit.
+      OPENAI_TIMEOUT_MS: "300000"
+      PORT: "8080"
+      LIVE_CHAIN: "1"
+      # NETWORK_ID and OGMIOS_URL come from the mainnet env file.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz >/dev/null || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - traefik-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-net"
+      - "traefik.http.routers.mp-suppliers-qwen38-local-oneshot-mainnet.entrypoints=web"
+      - "traefik.http.routers.mp-suppliers-qwen38-local-oneshot-mainnet.rule=Host(`mp-suppliers-qwen38-local-oneshot.vector.apexfusion.org`)"
+      - "traefik.http.routers.mp-suppliers-qwen38-local-oneshot-mainnet.middlewares=mp-suppliers-qwen38-local-oneshot-mainnet-https"
+      - "traefik.http.middlewares.mp-suppliers-qwen38-local-oneshot-mainnet-https.redirectscheme.scheme=https"
+      - "traefik.http.middlewares.mp-suppliers-qwen38-local-oneshot-mainnet-https.redirectscheme.permanent=true"
+      - "traefik.http.routers.mp-suppliers-qwen38-local-oneshot-mainnet-tls.entrypoints=websecure"
+      - "traefik.http.routers.mp-suppliers-qwen38-local-oneshot-mainnet-tls.rule=Host(`mp-suppliers-qwen38-local-oneshot.vector.apexfusion.org`)"
+      - "traefik.http.routers.mp-suppliers-qwen38-local-oneshot-mainnet-tls.tls.certresolver=letsencrypt"
+      - "traefik.http.services.mp-suppliers-qwen38-local-oneshot-mainnet.loadbalancer.server.port=8080"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  traefik-net:
+    external: true
+    name: traefik-net

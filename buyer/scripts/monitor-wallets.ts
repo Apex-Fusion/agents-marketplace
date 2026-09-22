@@ -168,6 +168,13 @@ const OPERATOR_SOURCES: OperatorSource[] = [
     role: "supplier",
   },
   {
+    label: "supplier-qwen38-local-oneshot@inference-proxy",
+    host: "inference-proxy",
+    envPath: "/root/agents-marketplace/supplier/.env.qwen38-local-oneshot",
+    keyVar: "SUPPLIER_PRIV_KEY_HEX",
+    role: "supplier",
+  },
+  {
     label: "buyer@open-webui",
     host: "open-webui",
     envPath: "/root/marketplace-buyer-mainnet/.env",
