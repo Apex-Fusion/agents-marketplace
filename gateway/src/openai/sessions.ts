@@ -1,5 +1,4 @@
 import { randomUUID } from "crypto";
-import type { Request, Response } from "express";
 import { TxConstructionError } from "@marketplace/shared/tx";
 import {
   readResponseEvents,
@@ -9,7 +8,6 @@ import {
   type ResponseStreamEvent,
 } from "@marketplace/shared/responses";
 import {
-  getSessionLock,
   dropSessionState,
   loadSessionTranscript,
   persistSessionTranscript,
@@ -17,26 +15,13 @@ import {
 } from "./transcripts.js";
 import { SupplierError, type StartChatResult } from "@marketplace/buyer/sdk";
 import type { GatewayDeps } from "../deps.js";
-import type { ApiKeyRow, GatewayStore, SessionRow } from "../db/store.js";
+import type { ApiKeyRow, SessionRow } from "../db/store.js";
 import type { KeyContext } from "../sdk/registry.js";
-import { requireKey } from "../middleware/apiKeyAuth.js";
-import { asyncHandler } from "../middleware/http.js";
-import { selectCandidates, parseRef } from "../routing/selectSupplier.js";
+import { selectCandidates } from "../routing/selectSupplier.js";
 import { preflight } from "../onchain/preflight.js";
-import { ensureWalletHealthy } from "../walletHealth.js";
 import { seal } from "../crypto/seal.js";
 import { badRequest, notFound, paymentRequired, toGatewayError } from "./errors.js";
-import {
-  genId,
-  nowSec,
-  isResponseObject,
-  publicResponse,
-  publicStreamEvent,
-  responseSse,
-  sseEvent,
-  streamFailure,
-} from "./shapes.js";
-import { parseSessionTurnRequest } from "./validate.js";
+import { isResponseObject } from "./shapes.js";
 
 export const CAPABILITY = "llm.chat.v1";
 
@@ -99,30 +84,6 @@ async function readResponsesCapability(
   };
 }
 
-export function makeOpenSessionHandler(deps: GatewayDeps) {
-  return asyncHandler(async (req: Request, res: Response) => {
-    const keyRow = requireKey(req);
-    const body: unknown = req.body;
-    if (typeof body !== "object" || body === null || Array.isArray(body)) {
-      throw badRequest("invalid_body", "request body must be a JSON object");
-    }
-    for (const field of Object.keys(body)) {
-      if (field !== "model") throw badRequest("unsupported_parameter", `unsupported parameter: ${field}`);
-    }
-    const model = "model" in body ? body.model : undefined;
-    if (typeof model !== "string" || model.length === 0) {
-      throw badRequest("invalid_model", "`model` is required");
-    }
-    const ctx = deps.registry.getContext(keyRow);
-    const session = await ctx.mutex.run(() => openSessionCore(deps, keyRow, ctx, model));
-    res.status(200).json({
-      id: session.id,
-      object: "chat.session",
-      model: session.model,
-      created: nowSec(),
-    });
-  });
-}
 
 export async function openSessionCore(
   deps: GatewayDeps,
@@ -348,146 +309,3 @@ export async function streamSupplierTurn(
   }
 }
 
-export function makeSessionMessageHandler(deps: GatewayDeps) {
-  return asyncHandler(async (req: Request, res: Response) => {
-    const keyRow = requireKey(req);
-    const selected = loadOwnedSession(deps.store, req, keyRow);
-    if (selected.state !== "open") throw badRequest("session_closed", `session ${selected.id} is ${selected.state}`);
-    const parsed = parseSessionTurnRequest(req.body);
-    const { stream, ...request } = parsed;
-    const responseId = genId();
-    const responseCreatedAt = nowSec();
-    await getSessionLock(selected.id).run(async () => {
-      const session = deps.store.getSession(selected.id);
-      if (!session || session.key_id !== keyRow.id) {
-        throw notFound("session_not_found", `no chat session ${selected.id}`);
-      }
-      if (session.state !== "open") {
-        throw badRequest("session_closed", `session ${session.id} is ${session.state}`);
-      }
-      let opened = false;
-      let sequence = 0;
-      const openStream = (): void => {
-        if (opened) return;
-        opened = true;
-        res.status(200);
-        res.setHeader("Content-Type", "text/event-stream");
-        res.setHeader("Cache-Control", "no-cache, no-transform");
-        res.setHeader("Connection", "keep-alive");
-        res.setHeader("X-Accel-Buffering", "no");
-      };
-      const relay = stream
-        ? (event: ResponseStreamEvent): void => {
-          if (event.type === "error" ||
-              event.type === "response.completed" ||
-              event.type === "response.incomplete" ||
-              event.type === "response.failed") return;
-          openStream();
-          const publicEvent = publicStreamEvent(event, {
-            id: responseId,
-            model: session.model,
-            createdAt: responseCreatedAt,
-          });
-          res.write(sseEvent({ ...publicEvent, sequence_number: sequence++ }));
-        }
-        : undefined;
-      try {
-        const result = await streamSupplierTurn(deps, session, request, relay);
-        const response = publicResponse({
-          id: responseId,
-          model: session.model,
-          createdAt: responseCreatedAt,
-          result: result.response,
-        });
-        if (!stream) {
-          res.status(200).json(response);
-          return;
-        }
-        if (!opened) {
-          openStream();
-          res.end(responseSse(response));
-          return;
-        }
-        const terminal = response.status === "incomplete"
-          ? "response.incomplete"
-          : "response.completed";
-        res.write(sseEvent({
-          type: terminal,
-          sequence_number: sequence++,
-          response,
-        }));
-        res.end();
-      } catch (error) {
-        if (!stream || !opened) throw error;
-        const gatewayError = toGatewayError(error);
-        for (const event of streamFailure(responseId, session.model, {
-          code: gatewayError.code,
-          message: gatewayError.message,
-        })) {
-          res.write(sseEvent({ ...event, sequence_number: sequence++ }));
-        }
-        res.end();
-      }
-    });
-  });
-}
-
-export function makeCloseSessionHandler(deps: GatewayDeps) {
-  return asyncHandler(async (req: Request, res: Response) => {
-    const keyRow = requireKey(req);
-    const selected = loadOwnedSession(deps.store, req, keyRow);
-    const ctx = deps.registry.getContext(keyRow);
-    await getSessionLock(selected.id).run(async () => {
-      const session = deps.store.getSession(selected.id);
-      if (!session || session.key_id !== keyRow.id) {
-        throw notFound("session_not_found", `no chat session ${selected.id}`);
-      }
-      if (session.state !== "open") {
-        throw badRequest("session_closed", `session ${session.id} is already ${session.state}`);
-      }
-      await ctx.mutex.run(() => closeSession(deps, keyRow, ctx, session, res));
-    }, "session-close");
-  });
-}
-
-async function closeSession(deps: GatewayDeps, keyRow: ApiKeyRow, ctx: KeyContext, session: SessionRow, res: Response): Promise<void> {
-  const escrowRef = parseRef(session.escrow_ref);
-  if (!escrowRef) throw badRequest("bad_session", "session has an invalid escrow ref");
-  const transcript = loadSessionTranscript(deps, session);
-  const result = await ctx.sdk.endChat({
-    escrowRef,
-    sessionNonce: session.session_nonce,
-    supplierBaseUrl: session.supplier_base_url,
-    transcript,
-  });
-  deps.store.setSessionState(session.id, "closed", Date.now());
-  dropSessionState(session.id);
-
-  const ticket = result.settleMode === "ticket";
-  const prompt = ticket ? 0 : result.receipt.prompt_tokens ?? 0;
-  const completion = ticket ? 0 : result.receipt.completion_tokens ?? 0;
-  deps.store.insertUsage({
-    id: randomUUID(), key_id: keyRow.id, created_at: Date.now(), kind: "chat_session",
-    model: session.model, capability_id: CAPABILITY, supplier_pkh: session.supplier_pkh,
-    escrow_ref: session.escrow_ref, cost_lovelace: ticket ? "0" : session.price_lovelace,
-    prompt_tokens: prompt, completion_tokens: completion, status: "completed", failure_reason: null,
-  });
-  if (!ticket) {
-    await ensureWalletHealthy(deps.chain, ctx.walletKey).catch((error) =>
-      console.error("[gateway] wallet-health after session close:", error instanceof Error ? error.message : error));
-  }
-  res.status(200).json(ticket ? {
-    status: "ended", escrow_ref: session.escrow_ref, settle_mode: "ticket", model: session.model,
-  } : {
-    status: "closed", escrow_ref: session.escrow_ref, accepted_ref: refStr(result.acceptedRef), model: session.model,
-    x_vector: { receipt: result.receipt, receipt_signature: result.receiptSignature, escrow_ref: session.escrow_ref },
-  });
-}
-
-function loadOwnedSession(store: GatewayStore, req: Request, keyRow: ApiKeyRow): SessionRow {
-  const raw: unknown = req.params.id;
-  const id = typeof raw === "string" ? raw : undefined;
-  const session = id ? store.getSession(id) : undefined;
-  if (!session || session.key_id !== keyRow.id) throw notFound("session_not_found", `no chat session ${id ?? "(none)"}`);
-  return session;
-}

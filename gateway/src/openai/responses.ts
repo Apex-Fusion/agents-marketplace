@@ -77,7 +77,85 @@ function openEventStream(res: Response): NodeJS.Timeout {
     try { res.write(": keepalive\n\n"); } catch { /* client disconnected */ }
   }, 10_000);
   keepalive.unref?.();
+  res.once("close", () => clearInterval(keepalive));
   return keepalive;
+}
+
+export interface ResponseExecutionOptions {
+  responseId: string;
+  createdAt: number;
+  onCommit: () => void;
+  onStreamEvent?: (event: ResponseStreamEvent) => void;
+}
+
+/** Shared execution and settlement; HTTP controllers own their wire format. */
+export async function executeResponse(
+  deps: GatewayDeps,
+  keyRow: ApiKeyRow,
+  parsed: ParsedResponseRequest,
+  options: ResponseExecutionOptions,
+): Promise<ResponseObject> {
+  const { responseId, createdAt, onCommit, onStreamEvent } = options;
+  let history: ResponseItem[] = [];
+  let parent: StoredResponseRow | undefined;
+  if (parsed.previousResponseId) {
+    const chain = loadResponseChain(deps, keyRow.id, parsed.previousResponseId);
+    parent = chain.parent;
+    history = chain.history;
+    if (parent.model !== parsed.model) {
+      throw badRequest("model_mismatch", "`model` must match the previous response model");
+    }
+  }
+  try {
+    validateResponseToolOutputs([...history, ...parsed.input]);
+  } catch (error) {
+    throw badRequest("invalid_function_call_output", error instanceof Error ? error.message : String(error));
+  }
+
+  const request = executionRequest(parsed);
+  if (parsed.store) {
+    insertPendingResponse(deps, {
+      id: responseId, keyId: keyRow.id, model: parsed.model,
+      previousResponseId: parsed.previousResponseId, request,
+    });
+  }
+  try {
+    if (keyRow.demo) {
+      return await runDemoResponse({
+        deps, keyRow, ctx: deps.registry.getContext(keyRow), parsed, request,
+        responseId, createdAt, history, parent, onCommit, onStreamEvent,
+      });
+    }
+    const candidates = await selectCandidates({
+      indexerUrl: deps.config.indexerUrl,
+      model: parsed.model,
+      capabilityId: CAPABILITY,
+      supplierPkh: parsed.supplierPkh,
+      preferredSupplierPkh: deps.config.preferredSupplierPkh,
+      fetchFn: deps.fetchFn,
+    });
+    if (candidates.length === 0) {
+      throw notFound("model_not_found", `no available supplier for model "${parsed.model}"`);
+    }
+    const ctx = deps.registry.getContext(keyRow);
+    return await ctx.mutex.run(
+      () => runOneShot(
+        deps, keyRow, ctx, parsed, request, history,
+        responseId, createdAt, candidates, onCommit, onStreamEvent,
+      ),
+      "response",
+      oneShotBudgetMs(Math.max(...candidates.map((candidate) => candidate.maxProcessingMs))),
+    );
+  } catch (error) {
+    if (!keyRow.demo && !(error instanceof GatewayError && error.code === "model_not_found")) {
+      recordUsage(deps.store, {
+        keyId: keyRow.id, model: parsed.model, supplierPkh: null, escrowRef: null,
+        costLovelace: null, usage: null, status: "failed",
+        failureReason: error instanceof Error ? error.message : String(error),
+      });
+    }
+    throw error;
+  }
 }
 
 export function makeResponsesHandler(deps: GatewayDeps) {
@@ -86,37 +164,14 @@ export function makeResponsesHandler(deps: GatewayDeps) {
     const parsed = parseResponseRequest(req.body);
     const responseId = genId();
     const responseCreatedAt = nowSec();
-    let history: ResponseItem[] = [];
-    let parent: StoredResponseRow | undefined;
-    if (parsed.previousResponseId) {
-      const chain = loadResponseChain(deps, keyRow.id, parsed.previousResponseId);
-      parent = chain.parent;
-      history = chain.history;
-      if (parent.model !== parsed.model) {
-        throw badRequest("model_mismatch", "`model` must match the previous response model");
-      }
-    }
-    try {
-      validateResponseToolOutputs([...history, ...parsed.input]);
-    } catch (error) {
-      throw badRequest("invalid_function_call_output", error instanceof Error ? error.message : String(error));
-    }
-
-    const request = executionRequest(parsed);
-    if (parsed.store) {
-      insertPendingResponse(deps, {
-        id: responseId, keyId: keyRow.id, model: parsed.model,
-        previousResponseId: parsed.previousResponseId, request,
-      });
-    }
-
     let keepalive: NodeJS.Timeout | undefined;
     let streamedEvents = false;
     let streamSequence = 0;
     const onCommit = (): void => {
-      if (parsed.stream && !res.headersSent) keepalive = openEventStream(res);
+      if (parsed.stream && !res.headersSent && !res.destroyed) keepalive = openEventStream(res);
     };
     const onStreamEvent = (event: ResponseStreamEvent): void => {
+      if (res.destroyed) return;
       onCommit();
       const terminal = event.type === "response.completed" ||
         event.type === "response.incomplete" ||
@@ -131,37 +186,14 @@ export function makeResponsesHandler(deps: GatewayDeps) {
       res.write(sseEvent({ ...event, sequence_number: streamSequence++ }));
     };
     try {
-      let response: ResponseObject;
-      if (keyRow.demo) {
-        response = await runDemoResponse({
-          deps, keyRow, ctx: deps.registry.getContext(keyRow), parsed, request,
-          responseId, createdAt: responseCreatedAt, history, parent, onCommit,
-          onStreamEvent: parsed.stream ? onStreamEvent : undefined,
-        });
-      } else {
-        const candidates = await selectCandidates({
-          indexerUrl: deps.config.indexerUrl,
-          model: parsed.model,
-          capabilityId: CAPABILITY,
-          supplierPkh: parsed.supplierPkh,
-          preferredSupplierPkh: deps.config.preferredSupplierPkh,
-          fetchFn: deps.fetchFn,
-        });
-        if (candidates.length === 0) {
-          throw notFound("model_not_found", `no available supplier for model "${parsed.model}"`);
-        }
-        const ctx = deps.registry.getContext(keyRow);
-        response = await ctx.mutex.run(
-          () => runOneShot(
-            deps, keyRow, ctx, parsed, request, history,
-            responseId, responseCreatedAt, candidates, onCommit,
-            parsed.stream ? onStreamEvent : undefined,
-          ),
-          "response",
-          oneShotBudgetMs(Math.max(...candidates.map((candidate) => candidate.maxProcessingMs))),
-        );
-      }
+      const response = await executeResponse(deps, keyRow, parsed, {
+        responseId,
+        createdAt: responseCreatedAt,
+        onCommit,
+        onStreamEvent: parsed.stream ? onStreamEvent : undefined,
+      });
       clearInterval(keepalive);
+      if (res.destroyed) return;
       const vector = response.x_vector;
       if (!parsed.stream && typeof vector === "object" && vector !== null &&
           !Array.isArray(vector) && "escrow_ref" in vector &&
@@ -177,12 +209,9 @@ export function makeResponsesHandler(deps: GatewayDeps) {
       }
     } catch (error) {
       clearInterval(keepalive);
-      if (!keyRow.demo && !(error instanceof GatewayError && error.code === "model_not_found")) {
-        recordUsage(deps.store, {
-          keyId: keyRow.id, model: parsed.model, supplierPkh: null, escrowRef: null,
-          costLovelace: null, usage: null, status: "failed",
-          failureReason: error instanceof Error ? error.message : String(error),
-        });
+      if (res.destroyed) {
+        if (parsed.store) deps.store.deleteResponseTree(responseId, keyRow.id);
+        return;
       }
       if (parsed.stream && res.headersSent) {
         const gatewayError = toGatewayError(error);

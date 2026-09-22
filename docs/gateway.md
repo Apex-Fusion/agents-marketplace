@@ -1,25 +1,22 @@
-# Responses API Gateway for the Vector Marketplace
+# OpenAI-Compatible Gateway for the Vector Marketplace
 
 ## Public contract
 
 The gateway is a multi-tenant custodial buyer. Each API key owns a separate buyer wallet. The gateway encrypts wallet keys with AES-256-GCM and decrypts them only for request handling.
 
-The public inference surface is the OpenAI Responses API:
+The public inference surface supports the OpenAI Responses and Chat Completions APIs for text and function tools:
 
 - `POST /openai/v1/responses`
+- `POST /openai/v1/chat/completions`
 - `GET /openai/v1/responses/:id`
 - `DELETE /openai/v1/responses/:id`
 - `GET /openai/v1/models`
 
-There is no public `/chat/completions` alias. Migrate callers to `client.responses.create(...)` and use `input`, not `messages`.
+Use `client.responses.create(...)` with `input`, or `client.chat.completions.create(...)` with `messages`. Both APIs use the same authentication, routing, execution, and settlement code. No custom session calls are required or exposed.
 
-The gateway also keeps a Vector session extension:
+Optional `x_vector` receipt and supplier-routing fields and `public_preview` remain available for marketplace proof tools. Standard OpenAI clients do not need them.
 
-- `POST /openai/v1/chat/sessions`
-- `POST /openai/v1/chat/sessions/:id/messages`
-- `POST /openai/v1/chat/sessions/:id/close`
-
-These session routes are not OpenAI standard routes. Their message bodies use Responses execution fields and Items.
+The model list includes only Active models the key can use: `llm.text.generate.v1` for normal keys and `llm.chat.v1` for demo keys.
 
 ## SDK example
 
@@ -45,7 +42,7 @@ second = client.responses.create(
 )
 ```
 
-The corresponding request is:
+The Responses request is:
 
 ```http
 POST /openai/v1/responses
@@ -116,7 +113,7 @@ An incomplete result is still a terminal and replayable response:
 
 Check `status` and `incomplete_details`. Do not infer completion from the presence of text.
 
-## Requests and Items
+## Responses requests and Items
 
 `input` can be a string or an array of supported Responses Items. A string becomes one user message with an `input_text` part. Supported Items are:
 
@@ -172,7 +169,57 @@ Native OpenRouter, Hugging Face, and DeepSeek templates send `store:false` upstr
 
 Production Ollama uses its native `/v1/responses` endpoint through `LLM_BACKEND=openai`. The legacy `LLM_BACKEND=ollama` adapter has the restricted behavior described above. Capability fields, not the provider brand, are authoritative.
 
-## Continuation, storage, and forks
+## Chat Completions requests
+
+Use standard Chat Completions messages and nested function definitions:
+
+```python
+completion = client.chat.completions.create(
+    model="the-advertised-model",
+    messages=[{"role": "user", "content": "Give one concise deployment check."}],
+    max_completion_tokens=256,
+)
+print(completion.choices[0].message.content)
+```
+
+Supported request fields:
+
+- `model` and non-empty `messages`.
+- Text messages with roles `system`, `developer`, `user`, `assistant`, and `tool`.
+  Content can be a string or text parts. Assistant messages can carry refusals
+  or `tool_calls` with null or omitted content. Tool results use `role: "tool"`
+  and `tool_call_id`.
+- Function `tools`, `tool_choice`, and `parallel_tool_calls`.
+- `max_completion_tokens` or `max_tokens`, but not both.
+- `temperature`, `top_p`, `stream`, and `stream_options.include_usage`.
+- `reasoning_effort` and `response_format` (`text`, `json_object`, or
+  `json_schema`). These map to the existing Responses controls. Structured
+  formats and reasoning controls still require a compatible supplier.
+- `n: 1` and `store: false` (the defaults). Nullable default controls follow
+  the Chat Completions request contract.
+- Optional `x_vector.supplier_pkh` and `public_preview`.
+
+Unsupported controls fail before execution. These include multiple choices,
+`store: true`, named message participants, media, non-function tools, legacy
+`functions`/`function_call`, stop sequences, penalties, log probabilities, and
+other fields not listed above. Chat Completions has no stored-completion CRUD
+API here; use Responses for stored objects and `previous_response_id`.
+
+The result uses `object: "chat.completion"`, `choices[].message`, and
+`finish_reason`. Function calls appear in `message.tool_calls`. Usage uses
+`prompt_tokens`, `completion_tokens`, and `total_tokens`.
+
+Send the full conversation on every Chat Completions call. Append the returned
+assistant message and any tool-result messages to that history. No session ID
+or custom continuation field is needed. A normal key pays for each call.
+A demo Chat Completions call starts a managed session with that full history;
+the gateway does not infer session identity from matching message prefixes.
+
+Optional receipts still bind the canonical Responses execution and output
+Items, not the rendered Chat `choices` object. Use Responses when a proof
+consumer needs the complete result commitment or native reasoning Items.
+
+## Responses continuation, storage, and forks
 
 `store` defaults to `true`. Stored request Items and terminal response objects are encrypted at rest. They expire after 30 days. A new descendant extends the retained life of its ancestors so the stored chain remains complete.
 
@@ -201,17 +248,19 @@ Continuation has these rules:
 - A continuation from a non-head parent creates a fork. A demo fork opens a new session and replays that branch.
 - Supplying a full history without `previous_response_id` does not trigger prefix matching. For a demo key, it opens a new session.
 
-A normal key starts a new `llm.text.generate.v1` escrow for every Responses call, including continuations. A demo key uses a managed `llm.chat.v1` session. It locks one escrow when the session opens and makes later turns without a per-turn escrow. The session settles or reclaims as one unit. Demo session reuse depends only on `previous_response_id` and the checks above.
+A normal key starts a new `llm.text.generate.v1` escrow for every inference call in either API, including continuations. A demo key uses a managed `llm.chat.v1` session. It locks one escrow when the session opens and makes later Responses turns without a per-turn escrow. The session settles or reclaims as one unit. Demo session reuse depends only on `previous_response_id` and the checks above.
 
 `GET /openai/v1/responses/:id` returns an owned stored terminal response. `DELETE` removes that response and its descendants. Deleted and expired responses cannot be read or used as `previous_response_id`.
 
 A response made with `store:false` is not inserted into public response storage. Its ID cannot be read or used as a later `previous_response_id`. The same request can still cite an existing stored parent. In that case, the gateway loads the parent chain but does not save the new result.
 
-This public storage choice does not remove the operational state that an active escrow session needs. Active demo and explicit chat sessions keep encrypted transcript checkpoints until close, invalidation, or reclaim. This transcript supports session execution and settlement. It is not a public stored Response.
+This public storage choice does not remove the operational state that an active escrow session needs. Managed demo sessions keep encrypted transcript checkpoints until close, invalidation, or reclaim. This transcript supports session execution and settlement. It is not a public stored Response.
 
 Do not treat in-flight work as fully resumable. The gateway checkpoints completed turns. It does not commit partial output deltas as a response. An ambiguous interruption can invalidate a session, while the sweeper handles escrow recovery separately.
 
 ## Streaming
+
+### Responses streaming
 
 Set `stream:true` to receive canonical typed Responses SSE events. Frames use both the event name and matching JSON `type`:
 
@@ -227,17 +276,34 @@ Streams end with exactly one terminal event:
 - `response.incomplete`;
 - `response.failed`.
 
-The gateway does not send a public `data: [DONE]` sentinel. Consumers must wait for a typed terminal event and inspect its `response` object. Refusals use `response.refusal.delta` and `response.refusal.done`. Function arguments use `response.function_call_arguments.delta` and `.done`.
+The Responses API does not send a public `data: [DONE]` sentinel. Consumers must wait for a typed terminal event and inspect its `response` object. Refusals use `response.refusal.delta` and `response.refusal.done`. Function arguments use `response.function_call_arguments.delta` and `.done`.
 
-A normal one-shot stream remains buffered while inference and on-chain settlement finish. It can send keepalive comments, but it does not expose supplier output before settlement. A session stream relays text, refusal, function, reasoning, content-part, and item events live. The gateway emits the terminal public response after the turn checkpoint succeeds.
+A normal one-shot stream in either API remains buffered while inference and on-chain settlement finish. It can send keepalive comments, but it does not expose supplier output before settlement. A managed demo Responses stream relays text, refusal, function, reasoning, content-part, and item events live. The gateway emits the terminal public response after the turn checkpoint succeeds.
 
 Native Codex-compatible providers can put complete output Items only in `response.output_item.done` and leave terminal `response.output` empty. The supplier adapter collects those complete Items by index. It never reconstructs authoritative Items from partial deltas.
+
+### Chat Completions streaming
+
+Set `stream: true` to receive `data:` frames containing
+`object: "chat.completion.chunk"`. Text and refusals appear in `choices[].delta`.
+Tool deltas carry stable call IDs and tool indices so clients can assemble
+fragmented function arguments.
+
+The terminal choice reports `stop`, `tool_calls`, `length`, or `content_filter`.
+With `stream_options: {"include_usage": true}`, regular chunks have
+`usage: null`. When the supplier reports usage, one final chunk carries it with
+an empty `choices` array. Successful and incomplete streams then end with
+`data: [DONE]`.
+
+A failure after headers are sent produces an OpenAI-shaped error frame.
+It does not produce a successful finish chunk or `[DONE]`. Managed demo Chat
+streams convert live text, refusal, and function events into this format.
 
 ## Escrow and settlement
 
 ### Normal keys
 
-Normal Responses calls route to `llm.text.generate.v1`.
+Normal Responses and Chat Completions calls route to `llm.text.generate.v1`.
 
 1. Route by model, capability, availability, and any supplier pin.
 2. Check the request against supplier capability before funding.
@@ -246,28 +312,24 @@ Normal Responses calls route to `llm.text.generate.v1`.
 5. Send the normalized Responses request to supplier `POST /v1/responses`.
 6. Verify the signed receipt, prompt hash, response hash, model, supplier, and escrow reference.
 7. Resolve the Submitted output, accept it on chain, and await confirmation.
-8. Return the public Response and restore wallet health.
+8. Return the requested OpenAI response format and restore wallet health.
 
 The required wallet balance covers price, buyer bond, supplier bond, collateral, and transaction fees. Routing matches capability and model. It does not promise the cheapest supplier.
 
-### Demo and explicit sessions
+### Managed demo sessions
 
-Demo Responses calls and the `/chat/sessions` extension route to `llm.chat.v1`. Session turns stream off chain. The ordered transcript is settled at session close. `full` mode Claims, Submits a transcript receipt, and Accepts. `ticket` mode uses the Open escrow as an entry ticket and later reclaims it; usage records zero marketplace cost apart from chain fees.
+Demo keys route both standard APIs to `llm.chat.v1`. The gateway handles
+session creation, turns, and closure internally. Clients never call a public
+session lifecycle API.
 
-An explicit session uses this sequence:
+Responses can reuse an active managed session with `previous_response_id`.
+Chat Completions sends full message history and opens a new managed session
+for that request. It does not use heuristic prefix matching.
 
-```http
-POST /openai/v1/chat/sessions
-{"model":"the-advertised-model"}
-
-POST /openai/v1/chat/sessions/{session_id}/messages
-{"input":"Start the analysis.","stream":true}
-
-POST /openai/v1/chat/sessions/{session_id}/close
-{}
-```
-
-The open response identifies the session. Message responses use the Responses object or typed SSE shape. The close response returns the settlement result and receipt in full mode. The caller, not `previous_response_id`, selects an explicit session through the path ID.
+Settlement follows `CHAT_SETTLE_MODE`. Full mode uses Claim and Submit, with
+gateway settlement and recovery handling the Submitted escrow. Ticket mode
+uses the Open escrow as an entry ticket and later reclaims it. Ticket usage
+records zero marketplace cost apart from chain fees.
 
 The managed demo session controller can close idle or least-recently-used sessions. A parent response then remains valid stored history, but a later continuation opens a new session and replays the chain.
 
@@ -319,16 +381,21 @@ TLS protects gateway and supplier transport. Suppliers receive plaintext executi
 
 Errors use an OpenAI-shaped body: `{ "error": { "message", "type", "code", "param" } }`. Common cases include invalid API keys, unavailable models, insufficient funds or collateral, unsupported parameters, input limits, supplier overload, timeout, receipt verification failure, and escrow failure.
 
-Migration from the removed Chat Completions surface:
+Migration from the removed custom session API:
 
-1. Change the base URL to end in `/openai/v1`.
-2. Call `client.responses.create` instead of `client.chat.completions.create`.
-3. Replace `messages` with `input` Items or a string.
-4. Use flat Responses function tools and `function_call_output` Items.
-5. Keep every returned `output` Item for manual replay.
-6. Prefer `previous_response_id` to manual replay when storage is enabled.
-7. Stop parsing `choices`, finish reasons, chat chunks, or `[DONE]`.
-8. Handle `completed`, `incomplete`, refusals, and typed stream failures explicitly.
+1. Keep the SDK base URL ending in `/openai/v1`.
+2. Use `client.responses.create` with `input`, or
+   `client.chat.completions.create` with `messages`.
+3. Remove session-open, session-message, and session-close calls.
+4. Use Responses `previous_response_id` for stored continuation, or send
+   complete Chat message history with assistant tool calls and tool results.
+5. Parse the selected API's format: Responses Items and typed terminal
+   events, or Chat `choices`, finish reasons, chunks, and `[DONE]`.
+6. Keep Vector receipt processing only if the application needs it.
+
+The former `/openai/v1/chat/sessions` routes now return OpenAI-shaped 404
+errors. They are not compatibility aliases. Drain existing explicit sessions
+before rolling out this API change.
 
 ## Account operations
 

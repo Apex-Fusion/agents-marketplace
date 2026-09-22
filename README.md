@@ -29,9 +29,9 @@ Monorepo managed with pnpm workspaces.
 
 Developer docs: [Vector AI documentation](https://apex-fusion.github.io/vector-ai-documentation/). For the contract-level picture, start with [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
-## Responses API
+## OpenAI-compatible APIs
 
-The public gateway uses the OpenAI Responses API. It does not expose a Chat Completions alias.
+The public gateway supports both the OpenAI Responses and Chat Completions APIs. Standard clients do not need custom session calls. Optional Vector receipt and routing fields remain available for marketplace tools.
 
 ```python
 from openai import OpenAI
@@ -49,11 +49,17 @@ continuation = client.responses.create(
     previous_response_id=response.id,
     input="Explain why it matters.",
 )
+
+completion = client.chat.completions.create(
+    model="the-advertised-model",
+    messages=[{"role": "user", "content": "Give one concise deployment check."}],
+)
+print(completion.choices[0].message.content)
 ```
 
-Normal keys use one `llm.text.generate.v1` escrow per call. Demo keys use managed `llm.chat.v1` sessions with one escrow per session. Use `previous_response_id` for session reuse and continuation. Keep all returned output Items when you replay history manually.
+Normal keys use one `llm.text.generate.v1` escrow per call in either API. Demo keys use managed `llm.chat.v1` sessions internally. Responses supports `previous_response_id` for stored continuation and session reuse. Chat Completions accepts the full conversation in `messages`; callers do not open or close sessions. The model list includes only capabilities available to the caller's key.
 
-See [`docs/gateway.md`](docs/gateway.md) for Items, typed streaming events, storage, receipts, and migration guidance.
+See [`docs/gateway.md`](docs/gateway.md) for supported fields, JSON and streaming formats, storage, receipts, and migration guidance.
 
 ## Related
 

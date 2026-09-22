@@ -4,7 +4,7 @@
  * Public:   GET /healthz, GET /, POST /signup (IP rate-limited).
  * Bearer:   GET /account, POST /account/withdraw,
  *           POST /openai/v1/responses, GET/DELETE /openai/v1/responses/:id,
- *           GET /openai/v1/models, and Vector chat session routes.
+ *           POST /openai/v1/chat/completions, GET /openai/v1/models.
  */
 
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
@@ -20,11 +20,7 @@ import {
 } from "./openai/responses.js";
 import { makeOcrExtractHandler } from "./ocr/extract.js";
 import { makeModelsHandler } from "./openai/models.js";
-import {
-  makeOpenSessionHandler,
-  makeSessionMessageHandler,
-  makeCloseSessionHandler,
-} from "./openai/sessions.js";
+import { makeChatCompletionsHandler } from "./openai/chatCompletions.js";
 import { makeSignupHandler, makeAccountHandler, makeWithdrawHandler } from "./account/routes.js";
 import { INDEX_HTML } from "./ui/page.js";
 
@@ -90,6 +86,7 @@ export function createApp(deps: GatewayDeps): Express {
   app.post("/account/withdraw", auth, makeWithdrawHandler(deps));
 
   app.post("/openai/v1/responses", ...gated, makeResponsesHandler(deps));
+  app.post("/openai/v1/chat/completions", ...gated, makeChatCompletionsHandler(deps));
   app.get("/openai/v1/responses/:id", ...gated, makeGetResponseHandler(deps));
   app.delete("/openai/v1/responses/:id", ...gated, makeDeleteResponseHandler(deps));
   // Model-scoped OCR: 16mb parser covers MAX_OCR_IMAGE_B64_CHARS
@@ -99,9 +96,6 @@ export function createApp(deps: GatewayDeps): Express {
   // can actually throttle the request (2026-08 review finding C2).
   app.post("/v1/ocr/extract", ...gated, express.json({ limit: "16mb" }), makeOcrExtractHandler(deps));
   app.get("/openai/v1/models", auth, makeModelsHandler(deps));
-  app.post("/openai/v1/chat/sessions", ...gated, makeOpenSessionHandler(deps));
-  app.post("/openai/v1/chat/sessions/:id/messages", ...gated, makeSessionMessageHandler(deps));
-  app.post("/openai/v1/chat/sessions/:id/close", ...gated, makeCloseSessionHandler(deps));
 
   // OpenAI-shaped 404 for anything else.
   app.use((_req: Request, res: Response) => {

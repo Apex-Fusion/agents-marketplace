@@ -181,26 +181,31 @@ Terminal states: `Accepted`, `Reclaimed`, `Released`.
 
 ```text
 POST /openai/v1/responses
+POST /openai/v1/chat/completions
 GET  /openai/v1/responses/{response_id}
 DELETE /openai/v1/responses/{response_id}
 GET  /openai/v1/models
 ```
 
-The client sets its OpenAI SDK base URL to `https://<gateway>/openai/v1` and calls `client.responses.create(...)`. The request uses `input`, not Chat Completions `messages`. Public controls include `model`, `stream`, `store`, `previous_response_id`, `metadata`, `include`, `public_preview`, and `x_vector.supplier_pkh`.
+The client sets its OpenAI SDK base URL to `https://<gateway>/openai/v1`. Responses calls use `client.responses.create(...)` with `input`. Chat Completions calls use `client.chat.completions.create(...)` with `messages`. Both use a shared canonical Responses execution path and the same routing, escrow, and accounting rules.
 
-The public result is an OpenAI Response object. A normal one-shot result adds `x_vector:{receipt,receipt_signature,escrow_ref}`. Consumers must inspect `status`, `incomplete_details`, refusals, and every output Item. Derived output text is not the replay record.
+Responses returns an OpenAI Response object. Chat Completions returns `choices[].message` or standard Chat chunks ending in `[DONE]`. Normal one-shot results can add the optional `x_vector:{receipt,receipt_signature,escrow_ref}` extension. Receipts bind the canonical execution result, not a lossy Chat rendering. Responses preserves the full Item replay record.
 
-The retained Vector extension uses:
+There is no public custom session lifecycle API. The gateway retains internal
+managed sessions for demo keys. Normal keys use `llm.text.generate.v1` for
+both standard APIs; demo keys use `llm.chat.v1`. The model catalog filters by
+that key-specific capability.
 
-```text
-POST /openai/v1/chat/sessions
-POST /openai/v1/chat/sessions/{id}/messages
-POST /openai/v1/chat/sessions/{id}/close
-```
-
-Turn bodies use Responses execution fields and Items. These routes are not OpenAI standard routes.
+Responses supports stored continuation through `previous_response_id`.
+Chat Completions is stateless at the client boundary: each call sends the full
+message history, including tool calls and tool outputs. Chat storage and
+multiple choices are not supported. Unsupported fields and modalities fail
+explicitly; see `docs/gateway.md` for the accepted controls.
 
 ### 5.2 Supplier endpoints
+
+These routes serve the gateway and marketplace SDK's escrow protocol. They are
+not the public OpenAI client contract.
 
 ```text
 GET /capability

@@ -17,6 +17,16 @@ import { transcripts, dropSessionState } from "../src/openai/transcripts.js";
 import type { GatewayConfig } from "../src/config.js";
 import type { GatewayDeps } from "../src/deps.js";
 
+vi.mock("../src/onchain/settle.js", async (importOriginal) => {
+  const actual = await importOriginal();
+  if (typeof actual !== "object" || actual === null) throw new Error("settlement module did not load");
+  return {
+    ...actual,
+    resolveSubmittedRef: vi.fn(async () => ({ txHash: "e".repeat(64), index: 0 })),
+    acceptAndConfirm: vi.fn(async () => "f".repeat(64)),
+  };
+});
+
 const MASTER = "ab".repeat(32);
 const SUPPLIERS = [
   {
@@ -87,39 +97,42 @@ describe("gateway HTTP", () => {
     expect((await request(app).get("/healthz")).body).toEqual({ ok: true });
     const page = await request(app).get("/");
     expect(page.status).toBe(200);
-    expect(page.text).toContain("OpenAI-compatible Gateway");
+    expect(page.headers["content-type"]).toMatch(/text\/html/);
   });
 
-  it("gates Responses and does not retain the old Chat Completions route", async () => {
-    const deps = makeDeps();
-    const app = createApp(deps);
-    const unauthenticated = await request(app)
+  it("gates OpenAI generation routes", async () => {
+    const app = createApp(makeDeps());
+    const responses = await request(app)
       .post("/openai/v1/responses")
       .send({ model: "qwen", input: "hi" });
-    expect(unauthenticated.status).toBe(401);
-    expect(unauthenticated.body.error.code).toBe("invalid_api_key");
+    expect(responses.status).toBe(401);
+    expect(responses.body.error.code).toBe("invalid_api_key");
 
-    const signup = await request(app).post("/signup").send({});
-    const oldRoute = await request(app)
+    const chat = await request(app)
       .post("/openai/v1/chat/completions")
-      .set("authorization", `Bearer ${signup.body.api_key}`)
       .send({ model: "qwen", messages: [{ role: "user", content: "hi" }] });
-    expect(oldRoute.status).toBe(404);
+    expect(chat.status).toBe(401);
+    expect(chat.body.error.code).toBe("invalid_api_key");
   });
 
   it("signup, account, and model listing keep their contracts", async () => {
     const fetchFn = (async (url: unknown) => new Response(
       JSON.stringify(String(url).includes("/suppliers") ? SUPPLIERS : []), { status: 200 },
     )) as unknown as typeof globalThis.fetch;
-    const app = createApp(makeDeps(fetchFn));
+    const deps = makeDeps(fetchFn);
+    const app = createApp(deps);
     const signup = await request(app).post("/signup").send({ label: "test" });
     expect(signup.status).toBe(201);
     const key = signup.body.api_key as string;
     const account = await request(app).get("/account").set("authorization", `Bearer ${key}`);
     expect(account.status).toBe(200);
     expect(account.body.spend.request_count).toBe(0);
-    const models = await request(app).get("/openai/v1/models").set("authorization", `Bearer ${key}`);
-    expect(models.body.data.map((model: { id: string }) => model.id)).toContain("qwen");
+    const normalModels = await request(app).get("/openai/v1/models").set("authorization", `Bearer ${key}`);
+    expect(normalModels.body.data.map((model: { id: string }) => model.id)).toEqual(["qwen"]);
+
+    const demoKey = addDemoKey(deps);
+    const demoModels = await request(app).get("/openai/v1/models").set("authorization", `Bearer ${demoKey}`);
+    expect(demoModels.body.data.map((model: { id: string }) => model.id)).toEqual(["kimi"]);
   });
 
   it("rejects unsupported generation controls before routing or funds", async () => {
@@ -242,7 +255,7 @@ function textResponse(text: string, id = `resp_supplier_${text}`): ResponseObjec
 }
 
 function scriptedDemoFetch(
-  turns: Array<() => Response>,
+  turns: Array<(request: Record<string, unknown>) => Response>,
   suppliers: () => unknown[] = () => SUPPLIERS,
   capability: () => Record<string, unknown> = () => ({
     inference_api: "responses",
@@ -255,10 +268,11 @@ function scriptedDemoFetch(
   const fetchFn = (async (url: unknown, init?: RequestInit) => {
     const target = String(url);
     if (target.includes("/v1/chat/message")) {
-      messageCalls.push(init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {});
+      const requestBody = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      messageCalls.push(requestBody);
       const reply = turns[Math.min(turn, turns.length - 1)];
       turn += 1;
-      return reply();
+      return reply(requestBody);
     }
     if (target.includes("/v1/chat/end")) {
       endCalls.push(new Headers(init?.headers).get("X-Escrow-Ref") ?? "");
@@ -594,50 +608,13 @@ describe("gateway demo Responses", () => {
     expect(script.messageCalls[1].input).toHaveLength(1);
   });
 
-  it("restores the encrypted canonical transcript for close after memory loss", async () => {
-    const script = scriptedDemoFetch([
-      () => supplierStream(textResponse("persisted")),
-    ]);
-    const deps = makeDeps(script.fetchFn, 1000, FUNDED_CHAIN);
-    const { rawKey, keyRow, context } = setupDemo(deps);
-    const endChat = vi.fn(async (opts: { transcript: unknown[] }) => ({
-      settleMode: "full" as const,
-      acceptedRef: { txHash: "dd".repeat(32), index: 0 },
-      receipt: { prompt_tokens: 3, completion_tokens: 2 },
-      receiptSignature: "signature",
-      transcript: opts.transcript,
-    }));
-    const mutableSdk = context.sdk as unknown as { endChat: unknown };
-    mutableSdk.endChat = endChat;
-    const app = createApp(deps);
-    const opened = await request(app).post("/openai/v1/chat/sessions")
-      .set("authorization", `Bearer ${rawKey}`)
-      .send({ model: "kimi" });
-    await request(app).post(`/openai/v1/chat/sessions/${opened.body.id}/messages`)
-      .set("authorization", `Bearer ${rawKey}`)
-      .send({ input: "remember this" });
-    transcripts.delete(opened.body.id);
-
-    const closed = await request(app).post(`/openai/v1/chat/sessions/${opened.body.id}/close`)
-      .set("authorization", `Bearer ${rawKey}`)
-      .send({});
-    expect(closed.status).toBe(200);
-    expect(endChat.mock.calls[0][0].transcript).toHaveLength(2);
-    const session = deps.store.getSession(opened.body.id);
-    expect(session?.transcript_ct).toBeNull();
-    expect(deps.store.listUsage(keyRow.id, 10).some((row) => row.kind === "chat_session")).toBe(true);
-  });
-
-  it("does not settle or reuse a checkpoint interrupted during an unseen turn", async () => {
+  it("invalidates and does not reuse a checkpoint closed during an unseen turn", async () => {
     const script = scriptedDemoFetch([
       () => supplierStream(textResponse("first")),
       () => supplierStream(textResponse("fresh")),
     ]);
     const deps = makeDeps(script.fetchFn, 1000, FUNDED_CHAIN);
-    const { rawKey, keyRow, context, startChat } = setupDemo(deps);
-    const endChat = vi.fn().mockRejectedValue(new Error("unexpected supplier Submit"));
-    const mutableSdk = context.sdk as unknown as { endChat: unknown };
-    mutableSdk.endChat = endChat;
+    const { rawKey, keyRow, startChat } = setupDemo(deps);
     const app = createApp(deps);
     const first = await request(app).post("/openai/v1/responses")
       .set("authorization", `Bearer ${rawKey}`)
@@ -661,12 +638,11 @@ describe("gateway demo Responses", () => {
       .then(response => response);
     await dispatched;
     dropSessionState(session.id); // Simulate losing process-local state during the turn.
-    const closed = await request(app).post(`/openai/v1/chat/sessions/${session.id}/close`)
-      .set("authorization", `Bearer ${rawKey}`).send({});
-    expect(closed.status).toBe(500);
-    expect(endChat).not.toHaveBeenCalled();
+    await sweepIdleDemoSessions(deps, Date.now() + deps.config.demoSessionIdleMs + 1);
+    expect(deps.store.getSession(session.id)?.state).toBe("closed");
     release(supplierStream(textResponse("unseen")));
     expect((await pending).status).toBe(500);
+    expect(deps.store.getSession(session.id)?.state).toBe("invalid");
     deps.fetchFn = script.fetchFn;
     const recovered = await request(app).post("/openai/v1/responses")
       .set("authorization", `Bearer ${rawKey}`)
@@ -781,73 +757,588 @@ describe("gateway demo Responses", () => {
     expect(terminalResponse.id).toMatch(/^resp_/);
   });
 
-  it("keeps Vector session turns Responses-shaped for JSON and streams", async () => {
-    const { fetchFn, messageCalls } = scriptedDemoFetch([
-      () => supplierStream(textResponse("session-json")),
-      () => supplierStream(textResponse("session-stream")),
-    ]);
-    const deps = makeDeps(fetchFn, 1000, FUNDED_CHAIN);
-    const { rawKey } = setupDemo(deps);
-    const app = createApp(deps);
-    const opened = await request(app).post("/openai/v1/chat/sessions")
-      .set("authorization", `Bearer ${rawKey}`)
-      .send({ model: "kimi" });
-    expect(opened.status).toBe(200);
-
-    const json = await request(app)
-      .post(`/openai/v1/chat/sessions/${opened.body.id}/messages`)
-      .set("authorization", `Bearer ${rawKey}`)
-      .send({ input: "hello", stream: false });
-    expect(json.status).toBe(200);
-    expect(json.body.object).toBe("response");
-    expect(json.body.output[0].content[0].text).toBe("session-json");
-
-    const streamed = await request(app)
-      .post(`/openai/v1/chat/sessions/${opened.body.id}/messages`)
-      .set("authorization", `Bearer ${rawKey}`)
-      .send({ input: "again", stream: true });
-    const events = streamEvents(streamed.text);
-    expect(events.at(-1)?.type).toBe("response.completed");
-    expect(events.map((event) => event.sequence_number))
-      .toEqual(events.map((_, index) => index));
-    expect(streamed.text).not.toContain("[DONE]");
-    expect(messageCalls.map((call) => call.input)).toHaveLength(2);
-  });
-
-  it("keeps ticket close and idle janitor accounting at zero cost", async () => {
+  it("keeps ticket-mode idle janitor accounting at zero cost", async () => {
     const { fetchFn, endCalls } = scriptedDemoFetch([
       () => supplierStream(textResponse("ticket")),
       () => supplierStream(textResponse("idle")),
     ]);
     const deps = makeDeps(fetchFn, 1000, FUNDED_CHAIN, "ticket");
-    const { rawKey, keyRow, context } = setupDemo(deps);
-    const endChat = vi.fn(async (opts: { escrowRef: { txHash: string; index: number } }) => ({
-      settleMode: "ticket" as const,
-      escrowRef: opts.escrowRef,
-    }));
-    const mutableSdk = context.sdk as unknown as { endChat: unknown };
-    mutableSdk.endChat = endChat;
+    const { rawKey, keyRow } = setupDemo(deps);
     const app = createApp(deps);
 
     await request(app).post("/openai/v1/responses")
       .set("authorization", `Bearer ${rawKey}`)
       .send({ model: "kimi", input: "one" });
-    const firstSession = deps.store.listOpenSessionsByKey(keyRow.id)[0];
-    const closed = await request(app)
-      .post(`/openai/v1/chat/sessions/${firstSession.id}/close`)
-      .set("authorization", `Bearer ${rawKey}`)
-      .send({});
-    expect(closed.body.settle_mode).toBe("ticket");
-    expect(endChat).toHaveBeenCalledTimes(1);
+    await sweepIdleDemoSessions(deps, Date.now() + deps.config.demoSessionIdleMs + 1);
 
     await request(app).post("/openai/v1/responses")
       .set("authorization", `Bearer ${rawKey}`)
       .send({ model: "kimi", input: "two" });
     await sweepIdleDemoSessions(deps, Date.now() + deps.config.demoSessionIdleMs + 1);
-    expect(endCalls).toHaveLength(1);
+    expect(endCalls).toHaveLength(2);
     const billed = deps.store.listUsage(keyRow.id, 10)
       .filter((usage) => usage.kind === "chat_session");
     expect(billed).toHaveLength(2);
     expect(billed.every((usage) => usage.cost_lovelace === "0")).toBe(true);
+  });
+});
+
+function supplierEventStream(events: Array<Record<string, unknown>>): Response {
+  const body = events
+    .map((event, sequence_number) =>
+      `event: ${String(event.type)}\ndata: ${JSON.stringify({ sequence_number, ...event })}\n\n`)
+    .join("");
+  return new Response(body, {
+    status: 200,
+    headers: { "content-type": "text/event-stream" },
+  });
+}
+
+function chatStreamData(text: string): {
+  chunks: Array<Record<string, unknown>>;
+  doneCount: number;
+} {
+  const data = text.split("\n")
+    .filter((line) => line.startsWith("data: "))
+    .map((line) => line.slice(6));
+  return {
+    chunks: data.filter((value) => value !== "[DONE]")
+      .map((value) => JSON.parse(value) as Record<string, unknown>),
+    doneCount: data.filter((value) => value === "[DONE]").length,
+  };
+}
+
+describe("POST /openai/v1/chat/completions", () => {
+  it("round-trips function calls and tool outputs through standard messages", async () => {
+    const toolCall = {
+      id: "fc_weather",
+      type: "function_call" as const,
+      call_id: "call_weather",
+      name: "get_weather",
+      arguments: "{\"city\":\"Paris\"}",
+      status: "completed",
+    };
+    const script = scriptedDemoFetch([
+      () => supplierStream(createResponse({
+        id: "resp_tool",
+        model: "kimi",
+        output: [toolCall],
+        usage: { input_tokens: 8, output_tokens: 4, total_tokens: 12 },
+      })),
+      (requestBody) => {
+        const input = requestBody.input;
+        const hasCall = Array.isArray(input) && input.some((item) =>
+          typeof item === "object" && item !== null &&
+          "type" in item && item.type === "function_call" &&
+          "call_id" in item && item.call_id === "call_weather");
+        const hasOutput = Array.isArray(input) && input.some((item) =>
+          typeof item === "object" && item !== null &&
+          "type" in item && item.type === "function_call_output" &&
+          "call_id" in item && item.call_id === "call_weather" &&
+          "output" in item && item.output === "18 C");
+        return hasCall && hasOutput
+          ? supplierStream(textResponse("It is 18 C"))
+          : new Response("tool history was not preserved", { status: 422 });
+      },
+    ]);
+    const deps = makeDeps(script.fetchFn, 1000, FUNDED_CHAIN);
+    const { rawKey } = setupDemo(deps);
+    const app = createApp(deps);
+
+    const first = await request(app)
+      .post("/openai/v1/chat/completions")
+      .set("authorization", `Bearer ${rawKey}`)
+      .send({
+        model: "kimi",
+        messages: [{ role: "user", content: "What is the weather?" }],
+        tools: [{
+          type: "function",
+          function: {
+            name: "get_weather",
+            description: "Get current weather",
+            parameters: {
+              type: "object",
+              properties: { city: { type: "string" } },
+              required: ["city"],
+            },
+          },
+        }],
+      });
+    expect(first.status).toBe(200);
+    expect(first.body.id).toMatch(/^chatcmpl-/);
+    expect(first.body.object).toBe("chat.completion");
+    expect(first.body.choices[0].finish_reason).toBe("tool_calls");
+    expect(first.body.choices[0].message.role).toBe("assistant");
+    expect(first.body.choices[0].message.content).toBeNull();
+    expect(first.body.choices[0].message.tool_calls).toEqual([{
+      id: "call_weather",
+      type: "function",
+      function: { name: "get_weather", arguments: "{\"city\":\"Paris\"}" },
+    }]);
+    expect(first.body.usage).toMatchObject({
+      prompt_tokens: 8,
+      completion_tokens: 4,
+      total_tokens: 12,
+    });
+
+    const second = await request(app)
+      .post("/openai/v1/chat/completions")
+      .set("authorization", `Bearer ${rawKey}`)
+      .send({
+        model: "kimi",
+        messages: [
+          { role: "user", content: "What is the weather?" },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [{
+              id: "call_weather",
+              type: "function",
+              function: { name: "get_weather", arguments: "{\"city\":\"Paris\"}" },
+            }],
+          },
+          { role: "tool", tool_call_id: "call_weather", content: "18 C" },
+        ],
+      });
+    expect(second.status).toBe(200);
+    expect(second.body.choices[0]).toMatchObject({
+      finish_reason: "stop",
+      message: { role: "assistant", content: "It is 18 C" },
+    });
+  });
+
+  it("preserves fragmented multi-tool stream indices and emits usage before one DONE", async () => {
+    const firstCall = {
+      id: "fc_first",
+      type: "function_call" as const,
+      call_id: "call_first",
+      name: "first_tool",
+      arguments: "{\"city\":\"Paris\"}",
+      status: "completed",
+    };
+    const secondCall = {
+      id: "fc_second",
+      type: "function_call" as const,
+      call_id: "call_second",
+      name: "second_tool",
+      arguments: "{\"count\":2}",
+      status: "completed",
+    };
+    const terminal = createResponse({
+      id: "resp_fragmented",
+      model: "kimi",
+      output: [firstCall, secondCall],
+      usage: { input_tokens: 9, output_tokens: 7, total_tokens: 16 },
+    });
+    const initial = {
+      ...terminal,
+      status: "in_progress",
+      output: [],
+      usage: null,
+    };
+    const script = scriptedDemoFetch([
+      () => supplierEventStream([
+        { type: "response.created", response: initial },
+        { type: "response.in_progress", response: initial },
+        {
+          type: "response.output_item.added",
+          output_index: 0,
+          item: { ...firstCall, arguments: "", status: "in_progress" },
+        },
+        {
+          type: "response.output_item.added",
+          output_index: 1,
+          item: { ...secondCall, arguments: "", status: "in_progress" },
+        },
+        {
+          type: "response.function_call_arguments.delta",
+          item_id: firstCall.id,
+          output_index: 0,
+          delta: "{\"city\":\"",
+        },
+        {
+          type: "response.function_call_arguments.delta",
+          item_id: secondCall.id,
+          output_index: 1,
+          delta: "{\"count\":",
+        },
+        {
+          type: "response.function_call_arguments.delta",
+          item_id: firstCall.id,
+          output_index: 0,
+          delta: "Paris\"}",
+        },
+        {
+          type: "response.function_call_arguments.delta",
+          item_id: secondCall.id,
+          output_index: 1,
+          delta: "2}",
+        },
+        {
+          type: "response.function_call_arguments.done",
+          item_id: firstCall.id,
+          output_index: 0,
+          name: firstCall.name,
+          arguments: firstCall.arguments,
+        },
+        {
+          type: "response.function_call_arguments.done",
+          item_id: secondCall.id,
+          output_index: 1,
+          name: secondCall.name,
+          arguments: secondCall.arguments,
+        },
+        { type: "response.output_item.done", output_index: 0, item: firstCall },
+        { type: "response.output_item.done", output_index: 1, item: secondCall },
+        { type: "response.completed", response: terminal },
+      ]),
+    ]);
+    const deps = makeDeps(script.fetchFn, 1000, FUNDED_CHAIN);
+    const { rawKey } = setupDemo(deps);
+    const response = await request(createApp(deps))
+      .post("/openai/v1/chat/completions")
+      .set("authorization", `Bearer ${rawKey}`)
+      .send({
+        model: "kimi",
+        messages: [{ role: "user", content: "Use both tools" }],
+        stream: true,
+        stream_options: { include_usage: true },
+        tools: [
+          {
+            type: "function",
+            function: { name: "first_tool", parameters: { type: "object" } },
+          },
+          {
+            type: "function",
+            function: { name: "second_tool", parameters: { type: "object" } },
+          },
+        ],
+      });
+
+    expect(response.status).toBe(200);
+    expect(response.headers["content-type"]).toMatch(/text\/event-stream/);
+    const { chunks, doneCount } = chatStreamData(response.text);
+    expect(doneCount).toBe(1);
+    expect(response.text.trimEnd().endsWith("data: [DONE]")).toBe(true);
+    expect(new Set(chunks.map((chunk) => chunk.id)).size).toBe(1);
+    expect(chunks[0].id).toMatch(/^chatcmpl-/);
+    expect(new Set(chunks.map((chunk) => chunk.created)).size).toBe(1);
+    expect(chunks.every((chunk) =>
+      chunk.object === "chat.completion.chunk" && chunk.model === "kimi")).toBe(true);
+    expect(chunks.slice(0, -1).every((chunk) => chunk.usage === null)).toBe(true);
+
+    const assembled = new Map<number, { id?: string; name?: string; arguments: string }>();
+    for (const chunk of chunks) {
+      const choices = chunk.choices;
+      if (!Array.isArray(choices) || choices.length === 0) continue;
+      const delta = choices[0]?.delta;
+      if (typeof delta !== "object" || delta === null || !("tool_calls" in delta) ||
+          !Array.isArray(delta.tool_calls)) continue;
+      for (const call of delta.tool_calls) {
+        if (typeof call !== "object" || call === null || !("index" in call) ||
+            typeof call.index !== "number") continue;
+        const current = assembled.get(call.index) ?? { arguments: "" };
+        if ("id" in call && typeof call.id === "string") current.id = call.id;
+        if ("function" in call && typeof call.function === "object" && call.function !== null) {
+          if ("name" in call.function && typeof call.function.name === "string") {
+            current.name = call.function.name;
+          }
+          if ("arguments" in call.function && typeof call.function.arguments === "string") {
+            current.arguments += call.function.arguments;
+          }
+        }
+        assembled.set(call.index, current);
+      }
+    }
+    expect([...assembled.entries()]).toEqual([
+      [0, { id: "call_first", name: "first_tool", arguments: "{\"city\":\"Paris\"}" }],
+      [1, { id: "call_second", name: "second_tool", arguments: "{\"count\":2}" }],
+    ]);
+
+    const terminalChunk = chunks.find((chunk) =>
+      Array.isArray(chunk.choices) && chunk.choices[0]?.finish_reason !== null &&
+      chunk.choices[0]?.finish_reason !== undefined);
+    expect(terminalChunk?.choices).toMatchObject([{ index: 0, finish_reason: "tool_calls" }]);
+    const usageChunk = chunks.at(-1);
+    expect(usageChunk?.choices).toEqual([]);
+    expect(usageChunk?.usage).toMatchObject({
+      prompt_tokens: 9,
+      completion_tokens: 7,
+      total_tokens: 16,
+    });
+  });
+
+  it("renders refusal and length terminals without fabricating assistant text", async () => {
+    const refusal = createResponse({
+      id: "resp_refusal",
+      model: "kimi",
+      output: [{
+        id: "msg_refusal",
+        type: "message",
+        role: "assistant",
+        status: "completed",
+        content: [{ type: "refusal", refusal: "I cannot help with that." }],
+      }],
+    });
+    const incomplete = createResponse({
+      id: "resp_incomplete_chat",
+      model: "kimi",
+      status: "incomplete",
+      incomplete_details: { reason: "max_output_tokens" },
+      output: [{
+        id: "msg_partial",
+        type: "message",
+        role: "assistant",
+        status: "incomplete",
+        content: [{ type: "output_text", text: "Partial answer", annotations: [] }],
+      }],
+    });
+    const script = scriptedDemoFetch([
+      () => supplierStream(refusal),
+      () => supplierStream(incomplete),
+    ]);
+    const deps = makeDeps(script.fetchFn, 1000, FUNDED_CHAIN);
+    const { rawKey } = setupDemo(deps);
+    const app = createApp(deps);
+
+    const refused = await request(app)
+      .post("/openai/v1/chat/completions")
+      .set("authorization", `Bearer ${rawKey}`)
+      .send({ model: "kimi", messages: [{ role: "user", content: "Unsafe request" }] });
+    expect(refused.status).toBe(200);
+    expect(refused.body.choices[0]).toMatchObject({
+      finish_reason: "stop",
+      message: {
+        role: "assistant",
+        content: null,
+        refusal: "I cannot help with that.",
+      },
+    });
+
+    const truncated = await request(app)
+      .post("/openai/v1/chat/completions")
+      .set("authorization", `Bearer ${rawKey}`)
+      .send({
+        model: "kimi",
+        messages: [{ role: "user", content: "Give a long answer" }],
+        max_completion_tokens: 1,
+      });
+    expect(truncated.status).toBe(200);
+    expect(truncated.body.choices[0]).toMatchObject({
+      finish_reason: "length",
+      message: { role: "assistant", content: "Partial answer" },
+    });
+  });
+
+  it("uses one-shot routing and records paid Chat usage for a normal key", async () => {
+    const alternate = {
+      ...SUPPLIERS[0],
+      utxo_ref: `${"cc".repeat(32)}#0`,
+      supplier_pkh: "c".repeat(56),
+      price_lovelace: "2000000",
+    };
+    const paidSuppliers = [alternate, ...SUPPLIERS];
+    const fetchFn = (async (url: unknown) => {
+      if (String(url).includes("/suppliers")) {
+        return new Response(JSON.stringify(paidSuppliers), { status: 200 });
+      }
+      return new Response("[]", { status: 200 });
+    }) as unknown as typeof globalThis.fetch;
+    const deps = makeDeps(fetchFn, 1000, FUNDED_CHAIN);
+    const app = createApp(deps);
+    const signup = await request(app).post("/signup").send({ label: "paid-chat" });
+    const rawKey = signup.body.api_key as string;
+    const keyRow = deps.store.getKeyByHash(hashApiKey(rawKey))!;
+    const ctx = deps.registry.getContext(keyRow);
+    const escrowRef = { txHash: "d".repeat(64), index: 0 };
+    const submitPrompt = vi.fn(async () => ({
+      result: createResponse({
+        id: "resp_paid",
+        model: "qwen",
+        output: [{
+          id: "msg_paid",
+          type: "message" as const,
+          role: "assistant" as const,
+          status: "completed",
+          content: [{ type: "output_text" as const, text: "Paid answer", annotations: [] }],
+        }],
+        usage: { input_tokens: 6, output_tokens: 3, total_tokens: 9 },
+      }),
+      receipt: {
+        prompt_hash: "1".repeat(64),
+        response_hash: "2".repeat(64),
+        model: "qwen",
+        prompt_tokens: 6,
+        completion_tokens: 3,
+        wallclock_ms: 10,
+        supplier_pkh: "a".repeat(56),
+        escrow_ref: `${escrowRef.txHash}#${escrowRef.index}`,
+      },
+      receiptSignature: "supplier-signature",
+      escrowRef,
+    }));
+    const mutableSdk = ctx.sdk as unknown as { submitPrompt: typeof submitPrompt };
+    mutableSdk.submitPrompt = submitPrompt;
+
+    const completion = await request(app)
+      .post("/openai/v1/chat/completions")
+      .set("authorization", `Bearer ${rawKey}`)
+      .send({
+        model: "qwen",
+        messages: [{ role: "user", content: "Paid request" }],
+        x_vector: { supplier_pkh: "a".repeat(56) },
+      });
+    expect(completion.status).toBe(200);
+    expect(completion.body.choices[0]).toMatchObject({
+      finish_reason: "stop",
+      message: { role: "assistant", content: "Paid answer" },
+    });
+    expect(completion.body.x_vector).toMatchObject({
+      escrow_ref: `${escrowRef.txHash}#${escrowRef.index}`,
+      receipt: {
+        model: "qwen",
+        supplier_pkh: "a".repeat(56),
+      },
+    });
+
+    const account = await request(app).get("/account")
+      .set("authorization", `Bearer ${rawKey}`);
+    expect(account.body.spend).toEqual({
+      total_cost_lovelace: "1000000",
+      request_count: 1,
+    });
+    expect(account.body.recent_usage[0]).toMatchObject({
+      kind: "completion",
+      model: "qwen",
+      status: "completed",
+      cost_lovelace: "1000000",
+      escrow_ref: `${escrowRef.txHash}#${escrowRef.index}`,
+    });
+  });
+
+  it("emits one in-band error and no success terminal after streaming commits", async () => {
+    const script = scriptedDemoFetch([
+      () => new Response("supplier broke", { status: 500 }),
+    ]);
+    const deps = makeDeps(script.fetchFn, 1000, FUNDED_CHAIN);
+    const { rawKey } = setupDemo(deps);
+    const response = await request(createApp(deps))
+      .post("/openai/v1/chat/completions")
+      .set("authorization", `Bearer ${rawKey}`)
+      .send({
+        model: "kimi",
+        messages: [{ role: "user", content: "hello" }],
+        stream: true,
+      });
+
+    expect(response.status).toBe(200);
+    expect(response.headers["content-type"]).toMatch(/text\/event-stream/);
+    const { chunks, doneCount } = chatStreamData(response.text);
+    const errorFrames = chunks.filter((chunk) => "error" in chunk);
+    expect(errorFrames).toHaveLength(1);
+    expect(errorFrames[0].error).toEqual(expect.objectContaining({
+      type: "server_error",
+      code: expect.any(String),
+      param: null,
+    }));
+    expect(doneCount).toBe(0);
+    expect(chunks.some((chunk) =>
+      Array.isArray(chunk.choices) &&
+      chunk.choices.some((choice) => choice.finish_reason !== null))).toBe(false);
+  });
+
+  it("accepts explicit text format and nullable defaults on a Chat Completions supplier", async () => {
+    const script = scriptedDemoFetch(
+      [() => supplierStream(textResponse("Plain text answer"))],
+      () => SUPPLIERS,
+      () => ({ inference_api: "responses", upstream_api: "chat-completions", reasoning_disabled: false }),
+    );
+    const deps = makeDeps(script.fetchFn, 1000, FUNDED_CHAIN);
+    const { rawKey } = setupDemo(deps);
+    const response = await request(createApp(deps))
+      .post("/openai/v1/chat/completions")
+      .set("authorization", `Bearer ${rawKey}`)
+      .send({
+        model: "kimi",
+        messages: [{ role: "user", content: "Hello" }],
+        response_format: { type: "text" },
+        n: null,
+        store: null,
+        stream: null,
+        stream_options: null,
+      });
+    expect(response.status).toBe(200);
+    expect(response.body.choices[0].message.content).toBe("Plain text answer");
+  });
+
+  it("rejects a changed function identity in the terminal stream", async () => {
+    const announced = {
+      type: "function_call" as const, id: "fc_one", call_id: "call_one",
+      name: "first_tool", arguments: "",
+    };
+    const terminal = createResponse({
+      id: "resp_changed_tool",
+      model: "kimi",
+      output: [{ ...announced, name: "second_tool", arguments: "{}" }],
+    });
+    const script = scriptedDemoFetch([() => supplierEventStream([
+      { type: "response.output_item.added", output_index: 0, item: announced },
+      { type: "response.function_call_arguments.delta", output_index: 0, delta: "{}" },
+      { type: "response.completed", response: terminal },
+    ])]);
+    const deps = makeDeps(script.fetchFn, 1000, FUNDED_CHAIN);
+    const { rawKey } = setupDemo(deps);
+    const response = await request(createApp(deps))
+      .post("/openai/v1/chat/completions")
+      .set("authorization", `Bearer ${rawKey}`)
+      .send({
+        model: "kimi",
+        messages: [{ role: "user", content: "Choose a tool" }],
+        tools: [
+          { type: "function", function: { name: "first_tool" } },
+          { type: "function", function: { name: "second_tool" } },
+        ],
+        stream: true,
+      });
+    const { chunks, doneCount } = chatStreamData(response.text);
+    expect(response.status).toBe(200);
+    expect(chunks.filter((chunk) => "error" in chunk)).toHaveLength(1);
+    expect(doneCount).toBe(0);
+    expect(chunks.some((chunk) =>
+      Array.isArray(chunk.choices) &&
+      chunk.choices.some((choice) => choice.finish_reason !== null))).toBe(false);
+  });
+
+  it("rejects unsupported Chat controls before opening an escrow", async () => {
+    const script = scriptedDemoFetch([
+      () => supplierStream(textResponse("must not execute")),
+    ]);
+    const deps = makeDeps(script.fetchFn, 1000, FUNDED_CHAIN);
+    const { rawKey, startChat } = setupDemo(deps);
+    const app = createApp(deps);
+
+    const multipleChoices = await request(app)
+      .post("/openai/v1/chat/completions")
+      .set("authorization", `Bearer ${rawKey}`)
+      .send({
+        model: "kimi",
+        messages: [{ role: "user", content: "hello" }],
+        n: 2,
+      });
+    expect(multipleChoices.status).toBe(400);
+    expect(typeof multipleChoices.body.error?.code).toBe("string");
+
+    const stored = await request(app)
+      .post("/openai/v1/chat/completions")
+      .set("authorization", `Bearer ${rawKey}`)
+      .send({
+        model: "kimi",
+        messages: [{ role: "user", content: "hello" }],
+        store: true,
+      });
+    expect(stored.status).toBe(400);
+    expect(typeof stored.body.error?.code).toBe("string");
+    expect(startChat).not.toHaveBeenCalled();
+    expect(script.messageCalls).toHaveLength(0);
   });
 });

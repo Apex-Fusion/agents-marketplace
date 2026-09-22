@@ -85,11 +85,11 @@ Live mainnet deployment (2026-09-21):
 
 ### One-shot supplier
 
-`qwen38-local-oneshot` makes the same model available to normal API keys at
-`POST https://api.marketplace.vector.apexfusion.org/openai/v1/responses`.
-An `llm.chat.v1` advert alone does not satisfy that route: normal keys require
-`llm.text.generate.v1`. Demo Responses calls and the explicit chat-session
-API continue to use the existing chat supplier.
+`qwen38-local-oneshot` makes the same model available to normal API keys through
+the gateway's standard `/openai/v1/responses` and `/openai/v1/chat/completions`
+routes. An `llm.chat.v1` advert alone does not satisfy normal-key routing:
+normal keys require `llm.text.generate.v1`. Demo keys use the existing chat
+supplier through the gateway's internal managed-session execution.
 
 Live mainnet deployment (2026-09-22):
 
@@ -106,7 +106,7 @@ Live mainnet deployment (2026-09-22):
   `status: "completed"`, and a signed receipt after settlement. Both suppliers
   return to `free`; the chat container is not restarted.
 
-Each normal Responses call, including a continuation, opens a separate escrow.
+Each normal Responses or Chat Completions call, including a continuation, opens a separate escrow.
 The one-shot gateway path buffers output until completion and settlement.
 The chat supplier retains ticket settlement and live token streaming.
 

@@ -131,22 +131,3 @@ export function executionRequest(parsed: ParsedResponseRequest): ResponseRequest
   return request;
 }
 
-export function parseSessionTurnRequest(body: unknown): ResponseRequest & { stream: boolean } {
-  if (typeof body !== "object" || body === null || Array.isArray(body)) {
-    throw badRequest("invalid_body", "request body must be a JSON object");
-  }
-  const raw = body as Record<string, unknown>;
-  for (const field of Object.keys(raw)) {
-    if (field !== "stream" && EXECUTION_FIELDS[field] !== true) {
-      throw badRequest("unsupported_parameter", `unsupported parameter: ${field}`);
-    }
-  }
-  if (raw.stream !== undefined && typeof raw.stream !== "boolean") {
-    throw badRequest("invalid_stream", "`stream` must be a boolean");
-  }
-  const request = normalizeExecution(raw);
-  if (request.input.length === 0 && request.instructions === undefined) {
-    throw badRequest("invalid_input", "`input` must not be empty without instructions");
-  }
-  return { ...request, stream: raw.stream !== false };
-}
