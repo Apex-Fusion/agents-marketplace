@@ -512,6 +512,39 @@ describe("gateway demo Responses", () => {
   });
 
 
+  it("allows structured output on a managed Chat Completions supplier", async () => {
+    const schema = {
+      type: "object",
+      properties: { token: { type: "string", enum: ["ZQX-7741"] } },
+      required: ["token"],
+      additionalProperties: false,
+    };
+    const script = scriptedDemoFetch(
+      [() => supplierStream(textResponse('{"token":"ZQX-7741"}'))],
+      () => SUPPLIERS,
+      () => ({ inference_api: "responses", upstream_api: "chat-completions", reasoning_disabled: false }),
+    );
+    const deps = makeDeps(script.fetchFn, 1000, FUNDED_CHAIN);
+    const { rawKey } = setupDemo(deps);
+    const app = createApp(deps);
+    const response = await request(app).post("/openai/v1/responses")
+      .set("authorization", `Bearer ${rawKey}`)
+      .send({
+        model: "kimi", input: "Describe the weather.",
+        text: { format: { type: "json_schema", name: "t", strict: true, schema } },
+      });
+    expect(response.status).toBe(200);
+    expect(JSON.parse(response.body.output[0].content[0].text)).toEqual({ token: "ZQX-7741" });
+    const chat = await request(app).post("/openai/v1/chat/completions")
+      .set("authorization", `Bearer ${rawKey}`)
+      .send({
+        model: "kimi", messages: [{ role: "user", content: "Describe the weather." }],
+        response_format: { type: "json_schema", json_schema: { name: "t", strict: true, schema } },
+      });
+    expect(chat.status).toBe(200);
+    expect(JSON.parse(chat.body.choices[0].message.content)).toEqual({ token: "ZQX-7741" });
+  });
+
   it("checks replayed reasoning compatibility before funding a replacement session", async () => {
     let native = true;
     const reasoning = {

@@ -59,6 +59,18 @@ export interface ResponseRequest {
   temperature?: number;
   top_p?: number;
 }
+
+export type ResponseAdapterApi = "responses" | "chat-completions" | "ollama";
+
+export class ResponseCompatibilityError extends Error {
+  constructor(
+    readonly param: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ResponseCompatibilityError";
+  }
+}
 export interface ResponseUsage {
   input_tokens: number;
   output_tokens: number;
@@ -252,11 +264,19 @@ export function normalizeResponseRequest(raw: unknown): ResponseRequest {
     }
     if (text.format !== undefined) {
       const format = object(text.format, "text.format");
-      if (typeof format.type !== "string" || !["text", "json_object", "json_schema"].includes(format.type)) throw new Error("unsupported text format");
+      if (typeof format.type !== "string" || !["text", "json_object", "json_schema"].includes(format.type)) {
+        throw new Error("unsupported text format");
+      }
       if (format.type === "json_schema") {
+        knownKeys(format, ["type", "name", "description", "schema", "strict"], "text.format");
         nonempty(format.name, "schema name");
+        optionalString(format, "description");
         object(format.schema, "JSON schema");
-        if (format.strict !== undefined && typeof format.strict !== "boolean") throw new Error("schema strict must be boolean");
+        if (format.strict !== undefined && typeof format.strict !== "boolean") {
+          throw new Error("schema strict must be boolean");
+        }
+      } else {
+        knownKeys(format, ["type"], "text.format");
       }
     }
     request.text = { ...text };
@@ -271,6 +291,107 @@ export function normalizeResponseRequest(raw: unknown): ResponseRequest {
     }
   }
   return request;
+}
+
+/**
+ * Return the first request field that an upstream adapter cannot preserve.
+ * Native Responses supports the complete normalized request.
+ */
+export function responseCompatibilityError(
+  request: ResponseRequest,
+  upstreamApi: ResponseAdapterApi,
+  reasoningDisabled = false,
+): ResponseCompatibilityError | null {
+  if (
+    reasoningDisabled &&
+    request.reasoning?.effort !== undefined &&
+    request.reasoning.effort !== "none"
+  ) {
+    return new ResponseCompatibilityError(
+      "reasoning.effort",
+      "supplier operator policy disables the requested reasoning effort",
+    );
+  }
+  if (upstreamApi === "responses") return null;
+
+  if (request.reasoning !== undefined) {
+    return new ResponseCompatibilityError(
+      "reasoning",
+      `${upstreamApi} suppliers cannot preserve Responses reasoning options`,
+    );
+  }
+  const reasoningItem = request.input.findIndex((item) => item.type === "reasoning");
+  if (reasoningItem !== -1) {
+    return new ResponseCompatibilityError(
+      `input[${reasoningItem}]`,
+      `${upstreamApi} suppliers cannot replay Responses reasoning items`,
+    );
+  }
+
+  if (upstreamApi === "chat-completions") {
+    if (request.text?.verbosity !== undefined) {
+      return new ResponseCompatibilityError(
+        "text.verbosity",
+        "chat-completions suppliers cannot preserve Responses text verbosity",
+      );
+    }
+    return null;
+  }
+
+  if (request.text !== undefined) {
+    return new ResponseCompatibilityError(
+      "text",
+      "ollama suppliers cannot preserve Responses text options",
+    );
+  }
+  for (const param of ["tools", "tool_choice", "parallel_tool_calls", "temperature", "top_p"] as const) {
+    if (request[param] !== undefined) {
+      return new ResponseCompatibilityError(
+        param,
+        `ollama suppliers cannot preserve Responses ${param}`,
+      );
+    }
+  }
+  const functionItem = request.input.findIndex(
+    (item) => item.type === "function_call" || item.type === "function_call_output",
+  );
+  if (functionItem !== -1) {
+    return new ResponseCompatibilityError(
+      `input[${functionItem}]`,
+      "ollama suppliers cannot replay Responses function call items",
+    );
+  }
+  return null;
+}
+
+/**
+ * Convert the Responses text-format envelope to the Chat Completions
+ * response_format envelope without changing the schema.
+ */
+export function responseTextToChatResponseFormat(
+  text: ResponseRequest["text"],
+): Record<string, unknown> | undefined {
+  if (text === undefined) return undefined;
+  const format = text.format;
+  if (format === undefined) return undefined;
+  if (format === null || typeof format !== "object" || Array.isArray(format)) {
+    throw new ResponseCompatibilityError("text.format", "text.format must be an object");
+  }
+  const value = format as Record<string, unknown>;
+  if (value.type === "text") return undefined;
+  if (value.type === "json_object") return { type: "json_object" };
+  if (value.type !== "json_schema") {
+    throw new ResponseCompatibilityError("text.format.type", "unsupported text format");
+  }
+  return {
+    type: "json_schema",
+    json_schema: {
+      name: value.name,
+      ...(value.description === undefined ? {} : { description: value.description }),
+      schema: value.schema,
+      ...(value.strict === undefined ? {} : { strict: value.strict }),
+    },
+  };
 }
 
 export function responseOutputText(output: readonly ResponseItem[]): string {

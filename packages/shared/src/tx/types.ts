@@ -81,8 +81,8 @@ export interface PostEscrowBuildResult extends BuildResult {
 export class TxConstructionError extends Error {
   public readonly reason: string;
 
-  constructor(reason: string, message?: string) {
-    super(message ?? reason);
+  constructor(reason: string, message?: string, options?: ErrorOptions) {
+    super(message ?? reason, options);
     this.name = "TxConstructionError";
     this.reason = reason;
   }

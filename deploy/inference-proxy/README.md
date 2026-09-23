@@ -177,9 +177,11 @@ Register the wallet in monitoring on the **main** box: add the address to
 These suppliers use explicit Chat Completions compatibility providers.
 Their public supplier interface is Responses. It returns authoritative
 `output` Items and canonical `usage.input_tokens`, `usage.output_tokens`, and
-`usage.total_tokens`. It rejects Responses reasoning Items and `text` controls
-that Chat Completions cannot represent. Do not change these suppliers to the
-default native mode until each upstream exposes `/v1/responses`.
+`usage.total_tokens`. JSON `text.format` controls are translated to upstream
+Chat Completions `response_format` without changing the schema or `strict`.
+Responses reasoning Items/options and text verbosity remain unsupported in
+this compatibility mode. Do not change the upstream mode until the backend
+exposes native `/v1/responses`.
 
 Before a normal restart:
 

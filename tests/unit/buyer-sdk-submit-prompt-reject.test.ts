@@ -19,6 +19,7 @@ import {
   createResponse,
   responseRequestCommitment,
   responseResultCommitment,
+  ResponseCompatibilityError,
   type ResponseItem,
   type ResponseRequest,
 } from "../../packages/shared/src/responses.js";
@@ -204,7 +205,11 @@ describe("Marketplace.submitPrompt Responses rejection paths", () => {
       reasoning: { effort: "high" },
       payment_lovelace: PAYMENT,
     })).rejects.toSatisfy(
-      (error: unknown) => error instanceof TxConstructionError && error.reason === "supplier_adapter_incompatible",
+      (error: unknown) =>
+        error instanceof TxConstructionError &&
+        error.reason === "supplier_adapter_incompatible" &&
+        error.cause instanceof ResponseCompatibilityError &&
+        error.cause.param === "reasoning.effort",
     );
     expect(submitSpy).not.toHaveBeenCalled();
   });
@@ -231,6 +236,29 @@ describe("Marketplace.submitPrompt Responses rejection paths", () => {
       (error: unknown) =>
         error instanceof TxConstructionError &&
         error.reason === "supplier_adapter_incompatible",
+    );
+    expect(submitSpy).not.toHaveBeenCalled();
+  });
+
+  it("rejects Chat text verbosity with a precise cause before locking funds", async () => {
+    const datum = advert();
+    seedAdvert(chain, datum);
+    const submitSpy = vi.spyOn(chain, "submitTx");
+    const fetchImpl = vi.fn(async () => json(capability(datum, {
+      upstream_api: "chat-completions",
+    }))) as unknown as typeof fetch;
+
+    await expect(marketplace(chain, fetchImpl).submitPrompt({
+      advertRef: ADVERT_REF,
+      input: INPUT,
+      text: { verbosity: "high" },
+      payment_lovelace: PAYMENT,
+    })).rejects.toSatisfy(
+      (error: unknown) =>
+        error instanceof TxConstructionError &&
+        error.reason === "supplier_adapter_incompatible" &&
+        error.cause instanceof ResponseCompatibilityError &&
+        error.cause.param === "text.verbosity",
     );
     expect(submitSpy).not.toHaveBeenCalled();
   });

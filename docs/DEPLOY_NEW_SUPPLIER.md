@@ -159,6 +159,13 @@ the full Item history. Hetzner, local llama.cpp, and OpenClaw templates stay on
 `chat-completions` until those endpoints support Responses. There is no
 automatic HTTP fallback between modes.
 
+The Chat Completions adapter preserves `json_object` and `json_schema` output
+formats. It translates Responses `text.format` into upstream `response_format`
+and preserves the full schema, name, description, and `strict` value. There is
+no separate model-specific registration flag. Verify schema enforcement at
+the upstream; the marketplace does not synthesize JSON from plain text.
+Responses reasoning controls and text verbosity still require native support.
+
 `OPENAI_REASONING=off` sets native `reasoning.effort` to `none`. In
 compatibility mode it sends the OpenRouter extension
 `reasoning.enabled=false`, so do not set it for Hetzner or HuggingFace Chat

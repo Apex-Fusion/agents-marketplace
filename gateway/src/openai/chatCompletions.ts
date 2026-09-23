@@ -783,6 +783,18 @@ class ChatStreamWriter {
   }
 }
 
+/** Report canonical compatibility failures using the caller's Chat field names. */
+function chatGatewayError(error: unknown): GatewayError {
+  const mapped = toGatewayError(error);
+  let param = mapped.param;
+  if (param === "reasoning" || param?.startsWith("reasoning.")) param = "reasoning_effort";
+  else if (param === "text" || param?.startsWith("text.")) param = "response_format";
+  else if (param === "input" || param?.startsWith("input[")) param = "messages";
+  return param === mapped.param ? mapped : new GatewayError(
+    mapped.httpStatus, mapped.type, mapped.code, mapped.message, mapped.extra, param,
+  );
+}
+
 export function makeChatCompletionsHandler(deps: GatewayDeps) {
   return asyncHandler(async (req: Request, res: Response) => {
     const keyRow = requireKey(req);
@@ -810,12 +822,13 @@ export function makeChatCompletionsHandler(deps: GatewayDeps) {
       res.status(200).json(chatCompletion(response, id, created, parsed.model));
     } catch (error) {
       if (res.destroyed) return;
+      const mapped = chatGatewayError(error);
       if (stream?.isOpen || res.headersSent) {
-        stream?.fail(error);
+        stream?.fail(mapped);
         stream?.close();
         return;
       }
-      throw error;
+      throw mapped;
     } finally {
       stream?.dispose();
     }

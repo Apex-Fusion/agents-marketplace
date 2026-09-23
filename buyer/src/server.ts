@@ -28,6 +28,8 @@ import { canonicalize } from "@marketplace/shared/cbor";
 import {
   normalizeResponseInput,
   normalizeResponseRequest,
+  responseCompatibilityError,
+  ResponseCompatibilityError,
   responseResultCommitment,
   type ResponseItem,
   type ResponseRequest,
@@ -143,8 +145,13 @@ function jsonError(
   status: number,
   reason: string,
   message: string,
+  param?: string,
 ): Response {
-  return res.status(status).json({ error: reason, message });
+  return res.status(status).json({
+    error: reason,
+    message,
+    ...(param === undefined ? {} : { param }),
+  });
 }
 
 /** Coerce req.body to a plain object, treating null/undefined as empty. */
@@ -174,35 +181,6 @@ function responseRequestFromBody(body: Record<string, unknown>): ResponseRequest
   return normalizeResponseRequest(raw);
 }
 
-function adapterCompatibilityError(
-  request: ResponseRequest,
-  upstreamApi: "responses" | "chat-completions" | "ollama",
-): string | null {
-  if (upstreamApi === "responses") return null;
-  if (
-    request.reasoning !== undefined ||
-    request.text !== undefined ||
-    request.input.some((item) => item.type === "reasoning")
-  ) {
-    return `${upstreamApi} suppliers cannot preserve Responses reasoning items or text options`;
-  }
-  if (
-    upstreamApi === "ollama" &&
-    (
-      request.tools !== undefined ||
-      request.tool_choice !== undefined ||
-      request.parallel_tool_calls !== undefined ||
-      request.temperature !== undefined ||
-      request.top_p !== undefined ||
-      request.input.some(
-        (item) => item.type === "function_call" || item.type === "function_call_output",
-      )
-    )
-  ) {
-    return "ollama suppliers cannot preserve Responses tools, function calls, or sampling options";
-  }
-  return null;
-}
 
 function unsupportedResponseFields(
   body: Record<string, unknown>,
@@ -700,7 +678,10 @@ export function createApp(deps: AppDeps): Express {
         `[buyer] /v1/submit-prompt failed reason=${reason} message=${message}`,
         err instanceof Error && err.stack ? `\n${err.stack}` : "",
       );
-      return res.status(502).json({ error: reason, message });
+      const param = err instanceof Error && err.cause instanceof ResponseCompatibilityError
+        ? err.cause.param
+        : undefined;
+      return jsonError(res, 502, reason, message, param);
     }
   });
 
@@ -984,13 +965,14 @@ export function createApp(deps: AppDeps): Express {
     if (!state) {
       return jsonError(res, 404, "chat_session_not_found", `no active chat session for ${rawRef}`);
     }
-    const compatibilityError = adapterCompatibilityError(request, state.upstreamApi);
+    const compatibilityError = responseCompatibilityError(request, state.upstreamApi);
     if (compatibilityError) {
       return jsonError(
         res,
         400,
         "supplier_adapter_incompatible",
-        compatibilityError,
+        compatibilityError.message,
+        compatibilityError.param,
       );
     }
 

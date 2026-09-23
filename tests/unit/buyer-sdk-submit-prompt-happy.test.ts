@@ -186,6 +186,51 @@ describe("Marketplace.submitPrompt Responses lifecycle", () => {
     expect(postedRequest).not.toHaveProperty("max_output_tokens");
   });
 
+  it("funds and submits structured text formats to a Chat supplier", async () => {
+    let postedRequest: ResponseRequest | undefined;
+    const fetchImpl = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      if (String(url).endsWith("/capability")) {
+        return json({ ...capability(), upstream_api: "chat-completions" });
+      }
+      const request = JSON.parse(String(init?.body)) as ResponseRequest & { model: string };
+      postedRequest = request;
+      return json(supplierResult(
+        new Headers(init?.headers).get("X-Escrow-Ref") ?? "",
+        request,
+      ));
+    });
+    const marketplace = new Marketplace({
+      chain,
+      indexerUrl: "http://indexer.test",
+      walletKey: buyer,
+      networkParams: { networkId: 0 },
+      _fetch: fetchImpl as typeof fetch,
+    });
+    const text = {
+      format: {
+        type: "json_schema",
+        name: "token",
+        strict: true,
+        schema: {
+          type: "object",
+          properties: { token: { type: "string", enum: ["ZQX-7741"] } },
+          required: ["token"],
+          additionalProperties: false,
+        },
+      },
+    };
+
+    const result = await marketplace.submitPrompt({
+      advertRef: ADVERT_REF,
+      input: INPUT,
+      text,
+      payment_lovelace: PAYMENT,
+    });
+
+    expect(postedRequest?.text).toEqual(text);
+    expect(result.request.text).toEqual(text);
+  });
+
   it("caps an explicit buyer output limit before escrow and supplier submission", async () => {
     let postedRequest: ResponseRequest | undefined;
     const fetchImpl = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {

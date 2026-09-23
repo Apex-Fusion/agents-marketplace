@@ -155,13 +155,28 @@ Support at the public parser does not imply support by every supplier. Supplier 
 - `upstream_api`, such as `responses`, `chat-completions`, or `ollama`;
 - `reasoning_disabled`.
 
-The gateway rejects an explicitly incompatible request before it funds or claims an escrow. Native Responses suppliers can preserve reasoning and text controls. Compatibility adapters cannot represent every Responses feature. Legacy Ollama mode rejects function history, tools, reasoning, and other unsupported controls. No adapter silently retries through another HTTP API.
+The gateway rejects an explicitly incompatible request before it funds or claims an escrow. Native Responses suppliers can preserve reasoning and text controls. Chat Completions adapters preserve JSON output formats, but still reject Responses reasoning options, reasoning Items, and text verbosity. Legacy Ollama restrictions remain unchanged. No adapter silently retries through another HTTP API.
 
 `max_output_tokens` is capped to the selected advert and supplier limit before the committed request is sent.
 
 ### Supplier upstream modes
 
 `OPENAI_UPSTREAM_API=responses` is the default. `chat-completions` is an explicit compatibility selection for providers that are not upgraded. The adapter never changes API mode after an HTTP error.
+
+Chat Completions compatibility supports structured output without a
+model-specific registration flag:
+
+- `text.format: {"type":"json_object"}` becomes
+  `response_format: {"type":"json_object"}`.
+- `text.format: {"type":"json_schema","name":"t","strict":true,"schema":{...}}`
+  becomes `response_format: {"type":"json_schema","json_schema":{"name":"t","strict":true,"schema":{...}}}`.
+- The schema, name, optional description, and explicit `strict` value are
+  preserved. The gateway does not replace schema enforcement with prompting
+  or repair the generated JSON.
+
+The public Chat Completions API normalizes `response_format` into the same
+canonical request before the supplier restores the Chat envelope. Schema
+enforcement remains the upstream model server's responsibility.
 
 `OPENAI_RESPONSES_URL` can set an exact native endpoint, such as `https://api.deepseek.com/responses`. `OPENAI_RESPONSES_STREAM_ONLY=1` asks the adapter to collect native SSE even when the marketplace call is buffered. The collector still returns one verified terminal Response to the one-shot settlement flow.
 
@@ -193,8 +208,9 @@ Supported request fields:
 - `max_completion_tokens` or `max_tokens`, but not both.
 - `temperature`, `top_p`, `stream`, and `stream_options.include_usage`.
 - `reasoning_effort` and `response_format` (`text`, `json_object`, or
-  `json_schema`). These map to the existing Responses controls. Structured
-  formats and reasoning controls still require a compatible supplier.
+  `json_schema`). JSON formats are preserved for native Responses and Chat
+  Completions upstreams. Reasoning controls require a compatible native
+  Responses supplier.
 - `n: 1` and `store: false` (the defaults). Nullable default controls follow
   the Chat Completions request contract.
 - Optional `x_vector.supplier_pkh` and `public_preview`.
@@ -316,6 +332,14 @@ Normal Responses and Chat Completions calls route to `llm.text.generate.v1`.
 
 The required wallet balance covers price, buyer bond, supplier bond, collateral, and transaction fees. Routing matches capability and model. It does not promise the cheapest supplier.
 
+The indexer's availability status is a cache. If no cached free or unknown
+supplier matches, the gateway checks the matching working/offline suppliers'
+live `/status` endpoints. This permits the next request after a completed job
+without waiting for the indexer poll. Probes have a two-second timeout and
+four-request concurrency. Live busy, offline, malformed, or unreachable
+results do not become eligible. Hard supplier pins and preferred ordering
+still apply.
+
 ### Managed demo sessions
 
 Demo keys route both standard APIs to `llm.chat.v1`. The gateway handles
@@ -380,6 +404,12 @@ TLS protects gateway and supplier transport. Suppliers receive plaintext executi
 ## Errors and migration notes
 
 Errors use an OpenAI-shaped body: `{ "error": { "message", "type", "code", "param" } }`. Common cases include invalid API keys, unavailable models, insufficient funds or collateral, unsupported parameters, input limits, supplier overload, timeout, receipt verification failure, and escrow failure.
+
+Compatibility failures identify the rejected field in `error.param`, such as
+`reasoning`, `reasoning_effort`, or `text.verbosity`. An unknown model or
+required capability returns `model_not_found`. An existing Active model whose
+matching suppliers are busy returns HTTP 503 `overloaded`; unavailable
+suppliers return HTTP 503 `suppliers_unavailable`.
 
 Migration from the removed custom session API:
 

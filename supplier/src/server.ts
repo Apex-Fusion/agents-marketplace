@@ -51,6 +51,7 @@ import {
 } from "@marketplace/shared/tx";
 import {
   normalizeResponseRequest,
+  responseCompatibilityError,
   responseInputToChatMessages,
   responseInputTokenUpperBound,
   responseRequestCommitment,
@@ -114,10 +115,17 @@ function parseEscrowRef(ref: string): OutputReference | null {
   return { txHash: ref.slice(0, idx), index: Number(ref.slice(idx + 1)) };
 }
 
-function jsonError(res: Response, status: number, reason: string, message: string): Response {
+function jsonError(
+  res: Response,
+  status: number,
+  reason: string,
+  message: string,
+  param?: string,
+): Response {
+  const error = { reason, message, ...(param === undefined ? {} : { param }) };
   return res
     .status(status)
-    .json({ reason, message, error: { reason, message } });
+    .json({ reason, message, ...(param === undefined ? {} : { param }), error });
 }
 
 // ─── /capability ───────────────────────────────────────────────────────────
@@ -307,18 +315,23 @@ function makeChatHandler(deps: ResolvedDeps) {
           error instanceof Error ? error.message : String(error),
         );
       }
-      if (
-        deps.config.llmBackend === "openai" &&
-        deps.config.openaiUpstreamApi === "responses" &&
-        deps.config.openaiReasoningDisabled &&
-        responseRequest.reasoning?.effort !== undefined &&
-        responseRequest.reasoning.effort !== "none"
-      ) {
+      const compatibilityApi = deps.config.llmBackend === "ollama"
+        ? "ollama"
+        : deps.config.openaiUpstreamApi;
+      const compatibilityError = responseCompatibilityError(
+        responseRequest,
+        compatibilityApi,
+        deps.config.llmBackend === "openai" && deps.config.openaiReasoningDisabled,
+      );
+      if (compatibilityError) {
         return jsonError(
           res,
           400,
-          "reasoning_disabled",
-          "reasoning is disabled by supplier policy",
+          compatibilityError.param === "reasoning.effort"
+            ? "reasoning_disabled"
+            : "upstream_api_incompatible",
+          compatibilityError.message,
+          compatibilityError.param,
         );
       }
       if (deps.reseller) {
@@ -353,23 +366,7 @@ function makeChatHandler(deps: ResolvedDeps) {
         };
       }
 
-      const compatibilityApi = deps.config.llmBackend === "ollama"
-        ? "ollama"
-        : deps.config.openaiUpstreamApi;
       if (compatibilityApi !== "responses") {
-        if (
-          compatibilityApi === "ollama" &&
-          responseRequest.input.some(
-            (item) => item.type === "function_call" || item.type === "function_call_output",
-          )
-        ) {
-          return jsonError(
-            res,
-            400,
-            "upstream_api_incompatible",
-            "ollama upstream does not support function call history",
-          );
-        }
         try {
           responseInputToChatMessages(responseRequest.input, responseRequest.instructions);
         } catch (error) {
@@ -378,31 +375,7 @@ function makeChatHandler(deps: ResolvedDeps) {
             400,
             "upstream_api_incompatible",
             error instanceof Error ? error.message : String(error),
-          );
-        }
-        if (responseRequest.reasoning !== undefined || responseRequest.text !== undefined) {
-          return jsonError(
-            res,
-            400,
-            "upstream_api_incompatible",
-            `${compatibilityApi} upstream does not support Responses reasoning or text options`,
-          );
-        }
-        if (
-          compatibilityApi === "ollama" &&
-          (
-            responseRequest.tools !== undefined ||
-            responseRequest.tool_choice !== undefined ||
-            responseRequest.parallel_tool_calls !== undefined ||
-            responseRequest.temperature !== undefined ||
-            responseRequest.top_p !== undefined
-          )
-        ) {
-          return jsonError(
-            res,
-            400,
-            "upstream_api_incompatible",
-            "ollama upstream does not support these Responses execution options",
+            "input",
           );
         }
       }
@@ -1489,17 +1462,20 @@ function makeChatSessionHandlers(deps: ResolvedDeps) {
         );
       }
 
-      if (
-        deps.config.openaiUpstreamApi === "responses" &&
-        deps.config.openaiReasoningDisabled &&
-        turnRequest.reasoning?.effort !== undefined &&
-        turnRequest.reasoning.effort !== "none"
-      ) {
+      const compatibilityError = responseCompatibilityError(
+        { ...turnRequest, input: prospectiveTranscript },
+        deps.config.openaiUpstreamApi,
+        deps.config.openaiReasoningDisabled,
+      );
+      if (compatibilityError) {
         return jsonError(
           res,
           400,
-          "reasoning_disabled",
-          "reasoning is disabled by supplier policy",
+          compatibilityError.param === "reasoning.effort"
+            ? "reasoning_disabled"
+            : "upstream_api_incompatible",
+          compatibilityError.message,
+          compatibilityError.param,
         );
       }
 
@@ -1515,14 +1491,7 @@ function makeChatSessionHandlers(deps: ResolvedDeps) {
             400,
             "upstream_api_incompatible",
             error instanceof Error ? error.message : String(error),
-          );
-        }
-        if (turnRequest.reasoning !== undefined || turnRequest.text !== undefined) {
-          return jsonError(
-            res,
-            400,
-            "upstream_api_incompatible",
-            "chat-completions upstream does not support Responses reasoning or text options",
+            "input",
           );
         }
       }

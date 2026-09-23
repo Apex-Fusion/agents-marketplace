@@ -4,6 +4,8 @@ import {
   readResponseEvents,
   responseEvents,
   responseInputToChatMessages,
+  responseCompatibilityError,
+  responseTextToChatResponseFormat,
   responseOutputText,
   type ResponseFunctionTool,
   type ResponseItem,
@@ -242,16 +244,15 @@ function chatToolChoice(choice: ResponseToolChoice): unknown {
 }
 
 function chatPayload(params: CallResponsesParams, stream: boolean): Record<string, unknown> {
-  if (params.reasoning !== undefined) {
+  const compatibilityError = responseCompatibilityError(
+    params,
+    "chat-completions",
+    params.disableReasoning,
+  );
+  if (compatibilityError) {
     throw new OpenAiError(
       "openai_malformed",
-      "The chat-completions upstream cannot replay Responses reasoning options",
-    );
-  }
-  if (params.text !== undefined) {
-    throw new OpenAiError(
-      "openai_malformed",
-      "The chat-completions upstream cannot represent Responses text options",
+      `${compatibilityError.param}: ${compatibilityError.message}`,
     );
   }
 
@@ -274,6 +275,8 @@ function chatPayload(params: CallResponsesParams, stream: boolean): Record<strin
   if (params.parallel_tool_calls !== undefined) payload.parallel_tool_calls = params.parallel_tool_calls;
   if (params.temperature !== undefined) payload.temperature = params.temperature;
   if (params.top_p !== undefined) payload.top_p = params.top_p;
+  const responseFormat = responseTextToChatResponseFormat(params.text);
+  if (responseFormat !== undefined) payload.response_format = responseFormat;
   if (params.disableReasoning) payload.reasoning = { enabled: false };
   if (params.user) payload.user = params.user;
   return payload;

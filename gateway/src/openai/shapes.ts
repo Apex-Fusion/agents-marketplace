@@ -111,16 +111,16 @@ export function sseEvent(event: ResponseStreamEvent): string {
   return `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
 }
 
-export function streamFailure(id: string, model: string, error: { code: string; message: string }): ResponseStreamEvent[] {
+export function streamFailure(id: string, model: string, error: { code: string; message: string; param?: string | null }): ResponseStreamEvent[] {
   const failed = createResponse({
     id,
     model,
     status: "failed",
     output: [],
-    error: { code: error.code, message: error.message },
+    error: { ...error },
   });
   return [
-    { type: "error", code: error.code, message: error.message },
+    { type: "error", ...error },
     { type: "response.failed", response: failed },
   ];
 }

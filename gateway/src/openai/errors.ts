@@ -9,6 +9,7 @@
 
 import { ReceiptVerificationError, IndexerError, SupplierError } from "@marketplace/buyer/sdk";
 import { TxConstructionError } from "@marketplace/shared/tx";
+import { ResponseCompatibilityError } from "@marketplace/shared/responses";
 
 export type OpenAiErrorType =
   | "invalid_request_error"
@@ -24,29 +25,31 @@ export class GatewayError extends Error {
     message: string,
     /** Optional vendor extension fields merged alongside `error` in the body. */
     public readonly extra?: Record<string, unknown>,
+    /** Request field that cannot be represented or supported. */
+    public readonly param: string | null = null,
   ) {
     super(message);
     this.name = "GatewayError";
   }
 }
 
-export const badRequest = (code: string, message: string): GatewayError =>
-  new GatewayError(400, "invalid_request_error", code, message);
+export const badRequest = (code: string, message: string, param: string | null = null): GatewayError =>
+  new GatewayError(400, "invalid_request_error", code, message, undefined, param);
 export const unauthorized = (message = "invalid API key"): GatewayError =>
   new GatewayError(401, "authentication_error", "invalid_api_key", message);
 export const paymentRequired = (message: string, extra?: Record<string, unknown>): GatewayError =>
   new GatewayError(402, "invalid_request_error", "insufficient_funds", message, extra);
 export const forbidden = (code: string, message: string): GatewayError =>
   new GatewayError(403, "invalid_request_error", code, message);
-export const notFound = (code: string, message: string): GatewayError =>
-  new GatewayError(404, "invalid_request_error", code, message);
+export const notFound = (code: string, message: string, param: string | null = null): GatewayError =>
+  new GatewayError(404, "invalid_request_error", code, message, undefined, param);
 export const rateLimited = (message: string): GatewayError =>
   new GatewayError(429, "rate_limit_error", "rate_limit_exceeded", message);
 
 /** Render the body OpenAI clients expect: {error:{message,type,code,param}}. */
 export function toErrorBody(err: GatewayError): Record<string, unknown> {
   return {
-    error: { message: err.message, type: err.type, code: err.code, param: null },
+    error: { message: err.message, type: err.type, code: err.code, param: err.param },
     ...(err.extra ?? {}),
   };
 }
@@ -54,6 +57,9 @@ export function toErrorBody(err: GatewayError): Record<string, unknown> {
 /** Map any thrown value to a GatewayError. */
 export function toGatewayError(err: unknown): GatewayError {
   if (err instanceof GatewayError) return err;
+  if (err instanceof ResponseCompatibilityError) {
+    return badRequest("unsupported_parameter", err.message, err.param);
+  }
 
   if (err instanceof SupplierError) {
     if (err.reason === "timeout") {
@@ -85,6 +91,8 @@ export function toGatewayError(err: unknown): GatewayError {
         "invalid_request_error",
         "unsupported_parameter",
         err.message,
+        undefined,
+        err.cause instanceof ResponseCompatibilityError ? err.cause.param : null,
       );
     }
     if (err.reason === "supplier_preflight_failed") {

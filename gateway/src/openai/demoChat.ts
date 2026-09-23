@@ -107,7 +107,9 @@ async function openSessionWithEviction(
       }));
     } catch (error) {
       const unavailable = error instanceof GatewayError &&
-        (error.code === "model_not_found" || error.code === "overloaded");
+        (error.code === "model_not_found" ||
+          error.code === "overloaded" ||
+          error.code === "suppliers_unavailable");
       if (!unavailable || attempt >= MAX_EVICTIONS) throw error;
       const victim = pickLru(deps, keyRow.id, parsed.model, evicted);
       if (!victim) throw error;

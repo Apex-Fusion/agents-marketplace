@@ -235,6 +235,20 @@ describe("callResponses explicit Chat Completions mode", () => {
       tool_choice: { type: "function", name: "lookup" },
       max_output_tokens: 300,
       maxTokens: 200,
+      text: {
+        format: {
+          type: "json_schema",
+          name: "answer",
+          description: "Strict answer envelope",
+          strict: false,
+          schema: {
+            type: "object",
+            properties: { answer: { type: "string", enum: ["ZQX-7741"] } },
+            required: ["answer"],
+            additionalProperties: false,
+          },
+        },
+      },
     });
 
     expect(fetchMock.mock.calls[0][0]).toBe(`${BASE_URL}/v1/chat/completions`);
@@ -248,6 +262,20 @@ describe("callResponses explicit Chat Completions mode", () => {
       ],
       tools: [{ type: "function", function: { name: "lookup", description: "Lookup", parameters: { type: "object" }, strict: true } }],
       tool_choice: { type: "function", function: { name: "lookup" } },
+      response_format: {
+        type: "json_schema",
+        json_schema: {
+          name: "answer",
+          description: "Strict answer envelope",
+          strict: false,
+          schema: {
+            type: "object",
+            properties: { answer: { type: "string", enum: ["ZQX-7741"] } },
+            required: ["answer"],
+            additionalProperties: false,
+          },
+        },
+      },
     });
     expect(result.response.output).toEqual([
       {
@@ -314,5 +342,19 @@ describe("callResponses explicit Chat Completions mode", () => {
         { type: "reasoning", id: "rs_1", encrypted_content: "opaque" },
       ],
     })).rejects.toMatchObject({ reason: "openai_malformed" });
+  });
+
+  it("rejects unsupported text verbosity before calling Chat upstream", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(callResponses({
+      ...BASE,
+      upstreamApi: "chat-completions",
+      text: { verbosity: "high" },
+    })).rejects.toMatchObject({
+      reason: "openai_malformed",
+      message: expect.stringContaining("text.verbosity"),
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

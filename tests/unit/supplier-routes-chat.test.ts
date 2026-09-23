@@ -277,6 +277,7 @@ describe("POST /v1/chat/completions — body validation", () => {
       .send({ ...validChatBody(), reasoning: { effort: "high" } });
     expect(res.status).toBe(400);
     expect(res.body.reason).toBe("upstream_api_incompatible");
+    expect(res.body.param).toBe("reasoning");
     expect(submitSpy).not.toHaveBeenCalled();
   });
 
@@ -310,6 +311,7 @@ describe("POST /v1/chat/completions — body validation", () => {
       });
     expect(res.status).toBe(400);
     expect(res.body.reason).toBe("upstream_api_incompatible");
+    expect(res.body.param).toBe("input[1]");
     expect(submitSpy).not.toHaveBeenCalled();
     expect(state.snapshot().status).toBe("free");
   });
@@ -328,6 +330,7 @@ describe("POST /v1/chat/completions — body validation", () => {
       .send({ ...validChatBody(), reasoning: { effort: "high" } });
     expect(res.status).toBe(400);
     expect(res.body.reason).toBe("reasoning_disabled");
+    expect(res.body.param).toBe("reasoning.effort");
     expect(submitSpy).not.toHaveBeenCalled();
     expect(nativeState.snapshot().status).toBe("free");
   });

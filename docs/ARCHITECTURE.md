@@ -234,7 +234,7 @@ The one-shot supplier route performs this flow:
 7. Sign the receipt and Submit its hash on chain.
 8. Return the terminal Response, receipt, signature, and Submitted reference.
 
-Native Responses, chat-completions compatibility, and legacy Ollama modes are explicit. There is no HTTP fallback. Compatibility adapters reject reasoning, replay, tool, or text features that they cannot represent.
+Native Responses, chat-completions compatibility, and legacy Ollama modes are explicit. There is no HTTP fallback. Chat Completions compatibility translates `text.format` JSON modes to `response_format`, preserving the schema and strictness. A shared compatibility policy rejects only controls and Items that the selected adapter cannot represent, before funding or Claim. Compatibility errors retain the rejected parameter through the buyer SDK and public gateway.
 
 The chat-session supplier routes are `/v1/chat/start`, `/v1/chat/message`, and `/v1/chat/end`. Message output is typed Responses SSE. The session records ordered input and output Items for its close receipt. Native providers can place complete Items only in `response.output_item.done`; the adapter collects those Items by output index and never rebuilds them from partial deltas.
 

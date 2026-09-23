@@ -8,6 +8,9 @@ import {
   readResponseEvents,
   responseEvents,
   responseInputToChatMessages,
+  responseCompatibilityError,
+  responseTextToChatResponseFormat,
+  ResponseCompatibilityError,
   responseResultCommitment,
   validateResponseToolOutputs,
 } from "../../packages/shared/src/responses.js";
@@ -72,6 +75,67 @@ describe("Responses item commitments", () => {
   it("rejects an undefined forced function before executing a request", () => {
     expect(() => normalizeResponseRequest({ input: "hi", tools: [{ type: "function", name: "lookup" }],
       tool_choice: { type: "function", name: "different" } })).toThrow(/undefined function/);
+  });
+
+  it("converts structured text formats for Chat without changing their JSON schema", () => {
+    const schema = {
+      type: "object",
+      properties: { token: { type: "string", enum: ["ZQX-7741"] } },
+      required: ["token"],
+      additionalProperties: false,
+    };
+    const request = normalizeResponseRequest({
+      input: "Return the token",
+      text: {
+        format: {
+          type: "json_schema",
+          name: "token_result",
+          description: "One required token",
+          strict: false,
+          schema,
+        },
+      },
+    });
+
+    expect(responseCompatibilityError(request, "chat-completions")).toBeNull();
+    expect(responseTextToChatResponseFormat(request.text)).toEqual({
+      type: "json_schema",
+      json_schema: {
+        name: "token_result",
+        description: "One required token",
+        strict: false,
+        schema,
+      },
+    });
+    expect(
+      responseTextToChatResponseFormat(
+        normalizeResponseRequest({
+          input: "JSON",
+          text: { format: { type: "json_object" } },
+        }).text,
+      ),
+    ).toEqual({ type: "json_object" });
+  });
+  it("reports precise incompatible Responses controls for Chat adapters", () => {
+    const verbosity = responseCompatibilityError(
+      normalizeResponseRequest({ input: "hi", text: { verbosity: "high" } }),
+      "chat-completions",
+    );
+    expect(verbosity).toBeInstanceOf(ResponseCompatibilityError);
+    expect(verbosity).toMatchObject({ param: "text.verbosity" });
+
+    const reasoning = responseCompatibilityError(
+      normalizeResponseRequest({ input: "hi", reasoning: { effort: "high" } }),
+      "chat-completions",
+    );
+    expect(reasoning).toMatchObject({ param: "reasoning" });
+
+    const policy = responseCompatibilityError(
+      normalizeResponseRequest({ input: "hi", reasoning: { effort: "high" } }),
+      "responses",
+      true,
+    );
+    expect(policy).toMatchObject({ param: "reasoning.effort" });
   });
 });
 

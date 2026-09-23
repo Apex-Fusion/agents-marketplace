@@ -135,7 +135,7 @@ export async function executeResponse(
       fetchFn: deps.fetchFn,
     });
     if (candidates.length === 0) {
-      throw notFound("model_not_found", `no available supplier for model "${parsed.model}"`);
+      throw notFound("model_not_found", `no active supplier for model "${parsed.model}" with capability "${CAPABILITY}"`, "model");
     }
     const ctx = deps.registry.getContext(keyRow);
     return await ctx.mutex.run(
@@ -218,6 +218,7 @@ export function makeResponsesHandler(deps: GatewayDeps) {
         const events = streamFailure(responseId, parsed.model, {
           code: gatewayError.code,
           message: gatewayError.message,
+          param: gatewayError.param,
         }).map((event) => publicStreamEvent(event, {
           id: responseId,
           model: parsed.model,

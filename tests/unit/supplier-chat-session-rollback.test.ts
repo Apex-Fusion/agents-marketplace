@@ -240,8 +240,75 @@ describe("POST /v1/chat/message — reasoning policy", () => {
 
     expect(response.status).toBe(400);
     expect(response.body.reason).toBe("reasoning_disabled");
+    expect(response.body.param).toBe("reasoning.effort");
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(record.transcript).toEqual([]);
+  });
+});
+
+describe("POST /v1/chat/message — Chat structured output", () => {
+  it("accepts a JSON schema turn and sends the exact Chat response_format", async () => {
+    const { app, record } = makeAppWithSession({
+      openaiUpstreamApi: "chat-completions",
+    });
+    const wire = [
+      `data: ${JSON.stringify({
+        id: "chatcmpl_1",
+        model: "kimi",
+        created: 1,
+        choices: [{
+          delta: { role: "assistant", content: "{\"token\":\"ZQX-7741\"}" },
+          finish_reason: "stop",
+        }],
+      })}\n\n`,
+      `data: ${JSON.stringify({
+        id: "chatcmpl_1",
+        model: "kimi",
+        choices: [],
+        usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
+      })}\n\n`,
+      "data: [DONE]\n\n",
+    ].join("");
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(wire, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const schema = {
+      type: "object",
+      properties: { token: { type: "string", enum: ["ZQX-7741"] } },
+      required: ["token"],
+      additionalProperties: false,
+    };
+
+    const response = await request(app)
+      .post("/v1/chat/message")
+      .set("X-Escrow-Ref", ESCROW_REF)
+      .send({
+        input: [{ role: "user", content: "What is the weather?" }],
+        text: {
+          format: {
+            type: "json_schema",
+            name: "token",
+            description: "Return the required token",
+            strict: true,
+            schema,
+          },
+        },
+      });
+
+    expect(response.status).toBe(200);
+    const upstream = JSON.parse(fetchSpy.mock.calls[0][1].body as string);
+    expect(upstream.response_format).toEqual({
+      type: "json_schema",
+      json_schema: {
+        name: "token",
+        description: "Return the required token",
+        strict: true,
+        schema,
+      },
+    });
+    expect(record.transcript).toHaveLength(2);
   });
 });
 

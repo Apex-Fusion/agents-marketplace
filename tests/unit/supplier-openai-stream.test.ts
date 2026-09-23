@@ -226,6 +226,7 @@ describe("callResponsesStream explicit Chat Completions mode", () => {
       upstreamApi: "chat-completions",
       tools: [{ type: "function", name: "lookup", parameters: { type: "object" } }],
       tool_choice: "auto",
+      text: { format: { type: "json_object" } },
     }, (event) => events.push(event));
 
     expect(events.filter((event) => event.type === "response.output_text.delta").map((event) => event.delta)).toEqual(["Hel", "lo"]);
@@ -246,6 +247,7 @@ describe("callResponsesStream explicit Chat Completions mode", () => {
       stream_options: { include_usage: true },
       tools: [{ type: "function", function: { name: "lookup", parameters: { type: "object" } } }],
       tool_choice: "auto",
+      response_format: { type: "json_object" },
     });
   });
 

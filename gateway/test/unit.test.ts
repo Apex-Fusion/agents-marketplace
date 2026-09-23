@@ -16,6 +16,25 @@ function jsonResponse(body: unknown): typeof globalThis.fetch {
   return (async () => new Response(JSON.stringify(body), { status: 200 })) as unknown as typeof globalThis.fetch;
 }
 
+function routingFetch(
+  suppliers: unknown[],
+  statusByUrl: Record<string, () => Response | Promise<Response>>,
+): typeof globalThis.fetch {
+  return async (input) => {
+    const url = typeof input === "string"
+      ? input
+      : input instanceof URL
+        ? input.href
+        : input.url;
+    if (url.startsWith("http://ix/suppliers?")) {
+      return new Response(JSON.stringify(suppliers), { status: 200 });
+    }
+    const respond = statusByUrl[url];
+    if (!respond) throw new Error(`unexpected request: ${url}`);
+    return respond();
+  };
+}
+
 describe("crypto/seal", () => {
   it("round-trips and binds the master key", () => {
     const priv = "cd".repeat(32);
@@ -139,21 +158,129 @@ describe("routing/selectSupplier", () => {
     expect(parseRef("nope")).toBeNull();
   });
 
-  it("ignoreStatusFor readmits a busy supplier by pkh (stale indexer status)", async () => {
-    const busy = [
+  it("readmits a completed supplier while the indexer still reports working", async () => {
+    const stale = [{ ...rows[0], status: "working" }];
+    const got = await selectCandidates({
+      indexerUrl: "http://ix",
+      model: "m",
+      capabilityId: "llm.text.generate.v1",
+      fetchFn: routingFetch(stale, {
+        "http://a/status": () =>
+          new Response(JSON.stringify({ status: "free" }), { status: 200 }),
+      }),
+    });
+
+    expect(got.map((candidate) => candidate.supplierPkh)).toEqual(["s1"]);
+    expect(got[0].status).toBe("free");
+  });
+
+  it("does not select live working or offline suppliers", async () => {
+    const unavailable = [
       { ...rows[0], status: "working" },
       { ...rows[1], status: "offline" },
     ];
-    const base = { indexerUrl: "http://ix", model: "m", capabilityId: "llm.text.generate.v1" };
-    const excluded = await selectCandidates({ ...base, fetchFn: jsonResponse(busy) });
-    expect(excluded).toEqual([]);
-
-    const readmitted = await selectCandidates({
-      ...base,
-      fetchFn: jsonResponse(busy),
-      ignoreStatusFor: new Set(["s1"]),
+    const selection = selectCandidates({
+      indexerUrl: "http://ix",
+      model: "m",
+      capabilityId: "llm.text.generate.v1",
+      fetchFn: routingFetch(unavailable, {
+        "http://a/status": () =>
+          new Response(JSON.stringify({ status: "working" }), { status: 200 }),
+        "http://b/status": () =>
+          new Response(JSON.stringify({ status: "offline" }), { status: 200 }),
+      }),
     });
-    expect(readmitted.map((c) => c.supplierPkh)).toEqual(["s1"]);
+
+    await expect(selection).rejects.toMatchObject({
+      httpStatus: 503,
+      code: "overloaded",
+    });
+  });
+
+  it("reports unreachable and malformed supplier statuses as unavailable", async () => {
+    const stale = [
+      { ...rows[0], status: "working" },
+      { ...rows[1], status: "offline" },
+    ];
+    const selection = selectCandidates({
+      indexerUrl: "http://ix",
+      model: "m",
+      capabilityId: "llm.text.generate.v1",
+      fetchFn: routingFetch(stale, {
+        "http://a/status": async () => {
+          throw new Error("unreachable");
+        },
+        "http://b/status": () =>
+          new Response(JSON.stringify({ state: "free" }), { status: 200 }),
+      }),
+    });
+
+    await expect(selection).rejects.toMatchObject({
+      httpStatus: 503,
+      code: "suppliers_unavailable",
+    });
+  });
+
+  it("preserves hard pins and preferred ordering after live recovery", async () => {
+    const stale = [
+      { ...rows[0], status: "working" },
+      { ...rows[1], status: "offline" },
+    ];
+    const fetchFn = routingFetch(stale, {
+      "http://a/status": () =>
+        new Response(JSON.stringify({ status: "free" }), { status: 200 }),
+      "http://b/status": () =>
+        new Response(JSON.stringify({ status: "free" }), { status: 200 }),
+    });
+    const pinned = await selectCandidates({
+      indexerUrl: "http://ix",
+      model: "m",
+      capabilityId: "llm.text.generate.v1",
+      supplierPkh: "s1",
+      fetchFn,
+    });
+    const preferred = await selectCandidates({
+      indexerUrl: "http://ix",
+      model: "m",
+      capabilityId: "llm.text.generate.v1",
+      preferredSupplierPkh: "s2",
+      fetchFn,
+    });
+
+    expect(pinned.map((candidate) => candidate.supplierPkh)).toEqual(["s1"]);
+    expect(preferred.map((candidate) => candidate.supplierPkh)).toEqual(["s2", "s1"]);
+  });
+
+  it("live-checks a demo-evicted supplier without readmitting it while busy", async () => {
+    const stale = [
+      { ...rows[0], status: "working" },
+      { ...rows[1], status: "free" },
+    ];
+    const ignoreStatusFor = new Set<string>();
+    ignoreStatusFor.add("s1");
+    const base = {
+      indexerUrl: "http://ix",
+      model: "m",
+      capabilityId: "llm.text.generate.v1",
+      ignoreStatusFor,
+    };
+    const freed = await selectCandidates({
+      ...base,
+      fetchFn: routingFetch(stale, {
+        "http://a/status": () =>
+          new Response(JSON.stringify({ status: "free" }), { status: 200 }),
+      }),
+    });
+    const stillBusy = await selectCandidates({
+      ...base,
+      fetchFn: routingFetch(stale, {
+        "http://a/status": () =>
+          new Response(JSON.stringify({ status: "working" }), { status: 200 }),
+      }),
+    });
+
+    expect(freed.map((candidate) => candidate.supplierPkh)).toEqual(["s2", "s1"]);
+    expect(stillBusy.map((candidate) => candidate.supplierPkh)).toEqual(["s2"]);
   });
 });
 

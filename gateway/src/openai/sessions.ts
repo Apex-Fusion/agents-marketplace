@@ -3,6 +3,9 @@ import { TxConstructionError } from "@marketplace/shared/tx";
 import {
   readResponseEvents,
   validateResponseToolOutputs,
+  responseCompatibilityError,
+  type ResponseAdapterApi,
+  type ResponseCompatibilityError,
   type ResponseObject,
   type ResponseRequest,
   type ResponseStreamEvent,
@@ -38,7 +41,7 @@ function refStr(ref: { txHash: string; index: number }): string {
 
 interface ResponsesCapability {
   inference_api: "responses";
-  upstream_api: string;
+  upstream_api: ResponseAdapterApi;
   reasoning_disabled: boolean;
 }
 
@@ -66,7 +69,9 @@ async function readResponsesCapability(
   }
   if (typeof capability !== "object" || capability === null || Array.isArray(capability) ||
       !("inference_api" in capability) || capability.inference_api !== "responses" ||
-      !("upstream_api" in capability) || typeof capability.upstream_api !== "string") {
+      !("upstream_api" in capability) ||
+      (capability.upstream_api !== "responses" && capability.upstream_api !== "chat-completions" &&
+        capability.upstream_api !== "ollama")) {
     throw toGatewayError(new SupplierError("malformed_response", {
       message: "supplier capability does not advertise Responses inference",
     }));
@@ -108,7 +113,7 @@ export async function openSessionCore(
     ignoreStatusFor: opts?.ignoreStatusFor,
   });
   if (candidates.length === 0) {
-    throw notFound("model_not_found", `no available chat (llm.chat.v1) supplier for model "${model}"`);
+    throw notFound("model_not_found", `no active supplier for model "${model}" with capability "${CAPABILITY}"`, "model");
   }
   let sessionCandidates = candidates;
   if (opts?.responseRequest && (
@@ -116,30 +121,30 @@ export async function openSessionCore(
     opts.responseRequest.text !== undefined ||
     opts.responseRequest.input.some((item) => item.type === "reasoning")
   )) {
-    const nativeCandidates: typeof candidates = [];
+    const compatibleCandidates: typeof candidates = [];
     let capabilityFailure: unknown;
-    let sawIncompatible = false;
+    let incompatibility: ResponseCompatibilityError | undefined;
     for (const candidate of candidates) {
       try {
         const capability = await readResponsesCapability(deps, candidate.endpointUrl);
-        const effort = opts.responseRequest.reasoning?.effort;
-        const policyConflict = capability.reasoning_disabled && effort !== undefined && effort !== "none";
-        if (capability.upstream_api === "responses" && !policyConflict) nativeCandidates.push(candidate);
-        else sawIncompatible = true;
+        const problem = responseCompatibilityError(
+          opts.responseRequest,
+          capability.upstream_api,
+          capability.reasoning_disabled,
+        );
+        if (problem) incompatibility ??= problem;
+        else compatibleCandidates.push(candidate);
       } catch (error) {
         capabilityFailure ??= error;
       }
     }
-    if (nativeCandidates.length === 0) {
-      if (sawIncompatible) {
-        throw badRequest(
-          "unsupported_parameter",
-          "available suppliers cannot execute these Responses controls",
-        );
+    if (compatibleCandidates.length === 0) {
+      if (incompatibility) {
+        throw badRequest("unsupported_parameter", incompatibility.message, incompatibility.param);
       }
       throw toGatewayError(capabilityFailure ?? new Error("supplier capability unavailable"));
     }
-    sessionCandidates = nativeCandidates;
+    sessionCandidates = compatibleCandidates;
   }
   const primary = sessionCandidates[0];
   const pf = await preflight(deps.chain, ctx.walletKey.address, primary);
@@ -217,23 +222,24 @@ export async function streamSupplierTurn(
   onEvent?: (event: ResponseStreamEvent) => void,
 ): Promise<TurnResult> {
   const mirror = loadSessionTranscript(deps, session);
+  const input = [...mirror, ...payload.input];
   try {
-    validateResponseToolOutputs([...mirror, ...payload.input]);
+    validateResponseToolOutputs(input);
   } catch (error) {
     throw badRequest(
       "invalid_function_call_output",
       error instanceof Error ? error.message : String(error),
     );
   }
-  if (payload.reasoning !== undefined || payload.text !== undefined || payload.input.some((item) => item.type === "reasoning")) {
+  if (payload.reasoning !== undefined || payload.text !== undefined || input.some((item) => item.type === "reasoning")) {
     const capability = await readResponsesCapability(deps, session.supplier_base_url);
-    const effort = payload.reasoning?.effort;
-    if (capability.upstream_api !== "responses" ||
-        (capability.reasoning_disabled && effort !== undefined && effort !== "none")) {
-      throw badRequest(
-        "unsupported_parameter",
-        "this session supplier cannot execute these Responses controls",
-      );
+    const problem = responseCompatibilityError(
+      { ...payload, input },
+      capability.upstream_api,
+      capability.reasoning_disabled,
+    );
+    if (problem) {
+      throw badRequest("unsupported_parameter", problem.message, problem.param);
     }
   }
 
@@ -289,7 +295,7 @@ export async function streamSupplierTurn(
       throw toGatewayError(new SupplierError("upstream_error", { message: JSON.stringify(terminal.error ?? {}) }));
     }
 
-    const nextMirror = [...mirror, ...payload.input, ...terminal.output];
+    const nextMirror = [...input, ...terminal.output];
     persistSessionTranscript(deps, session.id, nextMirror);
     return { response: terminal, events };
   } catch (error) {

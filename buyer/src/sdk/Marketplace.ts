@@ -84,6 +84,7 @@ import {
   responseInputTokenUpperBound,
   responseOutputText,
   responseRequestCommitment,
+  responseCompatibilityError,
   responseResultCommitment,
   type ResponseItem,
   type ResponseObject,
@@ -264,39 +265,6 @@ function responseDisplayText(output: readonly ResponseItem[]): string {
   ).join("");
 }
 
-function adapterCompatibilityError(
-  request: ResponseRequest,
-  upstreamApi: SupplierCapabilityView["upstream_api"],
-  reasoningDisabled: boolean,
-): string | null {
-  if (reasoningDisabled && request.reasoning?.effort !== undefined && request.reasoning.effort !== "none") {
-    return "supplier operator policy disables the requested reasoning effort";
-  }
-  if (upstreamApi === "responses") return null;
-  if (
-    request.reasoning !== undefined ||
-    request.text !== undefined ||
-    request.input.some((item) => item.type === "reasoning")
-  ) {
-    return `${upstreamApi} suppliers cannot preserve Responses reasoning items or text options`;
-  }
-  if (
-    upstreamApi === "ollama" &&
-    (
-      request.tools !== undefined ||
-      request.tool_choice !== undefined ||
-      request.parallel_tool_calls !== undefined ||
-      request.temperature !== undefined ||
-      request.top_p !== undefined ||
-      request.input.some(
-        (item) => item.type === "function_call" || item.type === "function_call_output",
-      )
-    )
-  ) {
-    return "ollama suppliers cannot preserve Responses tools, function calls, or sampling options";
-  }
-  return null;
-}
 
 export class Marketplace extends EventEmitterBase {
   private readonly chain: ChainProvider;
@@ -443,7 +411,7 @@ export class Marketplace extends EventEmitterBase {
           advertRef,
         );
 
-        const compatibilityError = adapterCompatibilityError(
+        const compatibilityError = responseCompatibilityError(
           request,
           capability.upstream_api,
           capability.reasoning_disabled === true,
@@ -451,7 +419,8 @@ export class Marketplace extends EventEmitterBase {
         if (compatibilityError) {
           throw new TxConstructionError(
             "supplier_adapter_incompatible",
-            compatibilityError,
+            compatibilityError.message,
+            { cause: compatibilityError },
           );
         }
 
