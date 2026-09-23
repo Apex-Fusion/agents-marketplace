@@ -448,6 +448,8 @@ Balances come from current wallet UTxOs. They exclude funds held in escrow.
 A failed wallet query shows **Balance unavailable**, not zero. Use **Refresh
 balances** to load current values. Successful key creation also refreshes the
 list.
+The inventory reads wallets in sequence to avoid concurrent-load failures
+from the production Ogmios service.
 
 The browser calls `GET /v1/api-keys` on the buyer service. This route requires
 the operator session. The buyer then calls `GET /internal/api-keys` on the

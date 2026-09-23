@@ -111,16 +111,14 @@ export function makeListKeysHandler(deps: GatewayDeps) {
         balance_error: null as string | null,
       }));
 
-    // Bound concurrent chain reads without excluding any keys from the list.
-    for (let offset = 0; offset < keys.length; offset += 8) {
-      await Promise.all(keys.slice(offset, offset + 8).map(async (key) => {
-        try {
-          const utxos = await deps.chain.queryUtxosByAddress(key.deposit_address);
-          key.balance_lovelace = totalLovelace(utxos).toString();
-        } catch {
-          key.balance_error = "Balance unavailable";
-        }
-      }));
+    // Avoid query bursts: production Ogmios returns HTTP 500 under concurrent load.
+    for (const key of keys) {
+      try {
+        const utxos = await deps.chain.queryUtxosByAddress(key.deposit_address);
+        key.balance_lovelace = totalLovelace(utxos).toString();
+      } catch {
+        key.balance_error = "Balance unavailable";
+      }
     }
     res.status(200).json({ keys });
   });

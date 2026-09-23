@@ -164,6 +164,37 @@ describe("gateway HTTP", () => {
     }
   });
 
+  it("keeps every balance when the chain service permits one query at a time", async () => {
+    let reading = false;
+    const chain = {
+      queryUtxosByAddress: async () => {
+        if (reading) throw new Error("chain service is busy");
+        reading = true;
+        try {
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          return [{ lovelace: 123_000_000n }];
+        } finally {
+          reading = false;
+        }
+      },
+    } as unknown as GatewayDeps["chain"];
+    const deps = makeDeps(undefined, 1000, chain);
+    deps.config.adminToken = "operator-token-".repeat(4);
+    const app = createApp(deps);
+    try {
+      await request(app).post("/signup").send({ label: "first" }).expect(201);
+      await request(app).post("/signup").send({ label: "second" }).expect(201);
+      const response = await request(app).get("/internal/api-keys")
+        .set("authorization", `Bearer ${deps.config.adminToken}`);
+      expect(response.status).toBe(200);
+      expect(response.body.keys.map((key: { balance_lovelace: string | null }) => key.balance_lovelace))
+        .toEqual(["123000000", "123000000"]);
+    } finally {
+      deps.store["db"].close();
+      rmSync(deps.config.dbDir, { recursive: true, force: true });
+    }
+  });
+
   it("lists disabled wallets without secrets and distinguishes a balance failure from zero", async () => {
     let failedAddress = "";
     const chain = {
