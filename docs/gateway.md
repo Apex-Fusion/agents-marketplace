@@ -436,6 +436,44 @@ before rolling out this API change.
 
 Raw API keys are returned once. Withdrawal is the custodial exit path.
 
+### Operator key inventory
+
+The buyer application's **API Keys** tab lists every gateway key, including
+demo and disabled keys. Each row shows the saved key prefix, label, status,
+deposit address, creation time, and wallet balance in AP3X. Full keys remain
+visible only at creation. The list contains no key hashes or encrypted wallet
+secrets.
+
+Balances come from current wallet UTxOs. They exclude funds held in escrow.
+A failed wallet query shows **Balance unavailable**, not zero. Use **Refresh
+balances** to load current values. Successful key creation also refreshes the
+list.
+
+The browser calls `GET /v1/api-keys` on the buyer service. This route requires
+the operator session. The buyer then calls `GET /internal/api-keys` on the
+gateway with a server-only bearer token. Customer and demo API keys cannot
+access this inventory. Both responses use `Cache-Control: no-store`.
+
+To enable the list:
+
+1. Generate a separate random token with `openssl rand -hex 32`.
+2. Set `GATEWAY_ADMIN_TOKEN` to that value in both `gateway/.env` and
+   `buyer/.env`. Do not reuse `GATEWAY_MASTER_KEY` or a customer API key.
+3. Set the buyer's `GATEWAY_INTERNAL_URL` to the gateway base URL. The mainnet
+   buyer compose file sets `http://marketplace-mainnet-gateway:8080`. For local
+   services, use the gateway's local URL, such as `http://localhost:3010`.
+4. Rebuild and redeploy the gateway and buyer services.
+
+The token must contain at least 32 characters. It is not included in the SPA
+boot data or browser requests. Missing configuration disables the list but
+does not disable public key creation. Existing keys need no migration.
+
+The inventory response has a `keys` array ordered newest first. Each item
+contains `id`, `key_prefix`, `label`, `deposit_address`, `created_at` (Unix
+milliseconds), `disabled`, `demo`, `balance_lovelace`, and `balance_error`.
+The balance is an integer string. If its query fails, the balance is `null`
+and `balance_error` contains a public error message.
+
 ## Historical implementation notes
 
 These notes describe resolved or retained behavior. They are not alternate API contracts.

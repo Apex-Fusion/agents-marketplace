@@ -4,9 +4,10 @@
  *   POST /signup            → mint a custodial wallet + API key (key shown once)
  *   GET  /account           → balance, collateral readiness, spend, recent usage
  *   POST /account/withdraw  → move unspent AP3X out to an external address (exit)
+ *   GET /internal/api-keys → operator-only key prefixes and wallet balances
  */
 
-import { randomBytes, randomUUID } from "crypto";
+import { randomBytes, randomUUID, timingSafeEqual } from "crypto";
 import type { Request, Response } from "express";
 import { buildWithdrawTx } from "@marketplace/shared/tx/server";
 import type { GatewayDeps } from "../deps.js";
@@ -15,7 +16,7 @@ import { seal } from "../crypto/seal.js";
 import { hashApiKey, requireKey } from "../middleware/apiKeyAuth.js";
 import { asyncHandler } from "../middleware/http.js";
 import { totalLovelace, hasCollateral } from "../onchain/preflight.js";
-import { badRequest, forbidden } from "../openai/errors.js";
+import { badRequest, forbidden, GatewayError, unauthorized } from "../openai/errors.js";
 
 const ACTIVE_ESCROW_STATES = new Set(["Open", "Claimed", "Submitted"]);
 
@@ -77,6 +78,51 @@ export function makeSignupHandler(deps: GatewayDeps) {
       deposit_address: walletKey.address,
       note: "Save api_key now — it is shown only once. Fund deposit_address with AP3X to use the gateway.",
     });
+  });
+}
+
+// ─── operator key list ───────────────────────────────────────────────────────
+
+export function makeListKeysHandler(deps: GatewayDeps) {
+  return asyncHandler(async (req: Request, res: Response) => {
+    res.setHeader("Cache-Control", "no-store");
+    const adminToken = deps.config.adminToken;
+    if (!adminToken) {
+      throw new GatewayError(503, "server_error", "operator_access_unconfigured", "API key listing is not configured");
+    }
+    const match = /^Bearer\s+(.+)$/i.exec((req.header("authorization") ?? "").trim());
+    const supplied = Buffer.from(match?.[1].trim() ?? "");
+    const expected = Buffer.from(adminToken);
+    if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) {
+      throw unauthorized("operator access required");
+    }
+
+    const keys = deps.store.listAllKeys()
+      .sort((a, b) => b.created_at - a.created_at || a.id.localeCompare(b.id))
+      .map((row) => ({
+        id: row.id,
+        key_prefix: row.key_prefix,
+        label: row.label,
+        deposit_address: row.deposit_address,
+        created_at: row.created_at,
+        disabled: row.disabled !== 0,
+        demo: row.demo !== 0,
+        balance_lovelace: null as string | null,
+        balance_error: null as string | null,
+      }));
+
+    // Bound concurrent chain reads without excluding any keys from the list.
+    for (let offset = 0; offset < keys.length; offset += 8) {
+      await Promise.all(keys.slice(offset, offset + 8).map(async (key) => {
+        try {
+          const utxos = await deps.chain.queryUtxosByAddress(key.deposit_address);
+          key.balance_lovelace = totalLovelace(utxos).toString();
+        } catch {
+          key.balance_error = "Balance unavailable";
+        }
+      }));
+    }
+    res.status(200).json({ keys });
   });
 }
 

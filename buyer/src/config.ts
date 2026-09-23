@@ -42,6 +42,9 @@
  *                         API key" page knows where to POST /signup. When
  *                         unset, the SPA falls back to deriving "api." +
  *                         current host.
+ *   GATEWAY_INTERNAL_URL — Gateway base URL for the operator key list.
+ *   GATEWAY_ADMIN_TOKEN  — Server-only token shared with the gateway.
+ *                          At least 32 chars; both settings enable the list.
  *   SURPLUS_DASHBOARD_URL — Internal URL of the private Surplus dashboard
  *                         snapshot endpoint. When unset, /v1/resale-dashboard
  *                         responds 503 while the rest of the buyer stays live.
@@ -71,6 +74,8 @@ export interface BuyerConfig {
   cookieSecure: boolean;
   pdfEnabled: boolean;
   gatewayPublicUrl: string;
+  gatewayInternalUrl: string;
+  gatewayAdminToken: string;
   resaleDashboardUrl: string;
 }
 
@@ -172,6 +177,22 @@ export function loadConfig(env: Record<string, string | undefined>): BuyerConfig
   // the SPA via the boot block (no trailing slash). Empty string means the SPA
   // derives the URL from its own host ("api." + location.host).
   const gatewayPublicUrl = (env.GATEWAY_PUBLIC_URL ?? "").trim().replace(/\/+$/, "");
+  const gatewayInternalUrl = (env.GATEWAY_INTERNAL_URL ?? "").trim().replace(/\/+$/, "");
+  if (gatewayInternalUrl !== "") {
+    let parsed: URL;
+    try {
+      parsed = new URL(gatewayInternalUrl);
+    } catch {
+      throw new Error("loadConfig: GATEWAY_INTERNAL_URL must be a valid URL");
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      throw new Error("loadConfig: GATEWAY_INTERNAL_URL must use http or https");
+    }
+  }
+  const gatewayAdminToken = (env.GATEWAY_ADMIN_TOKEN ?? "").trim();
+  if (gatewayAdminToken !== "" && gatewayAdminToken.length < 32) {
+    throw new Error("loadConfig: GATEWAY_ADMIN_TOKEN must be at least 32 chars");
+  }
   const resaleDashboardUrl = (env.SURPLUS_DASHBOARD_URL ?? "")
     .trim()
     .replace(/\/+$/, "");
@@ -203,6 +224,8 @@ export function loadConfig(env: Record<string, string | undefined>): BuyerConfig
     cookieSecure,
     pdfEnabled,
     gatewayPublicUrl,
+    gatewayInternalUrl,
+    gatewayAdminToken,
     resaleDashboardUrl,
   };
 }

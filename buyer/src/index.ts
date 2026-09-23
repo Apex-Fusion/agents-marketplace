@@ -141,6 +141,8 @@ export async function runMain(env: Record<string, string | undefined>): Promise<
     sessionSecret: config.sessionSecret,
     cookieSecure: config.cookieSecure,
     gatewayPublicUrl: config.gatewayPublicUrl,
+    gatewayInternalUrl: config.gatewayInternalUrl,
+    gatewayAdminToken: config.gatewayAdminToken,
     resaleDashboardUrl: config.resaleDashboardUrl,
     jobStore,
     pdfCaps,

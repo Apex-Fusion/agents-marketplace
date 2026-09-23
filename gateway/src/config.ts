@@ -16,6 +16,8 @@
  *   NETWORK_ID          — "0" testnet (default) | "1" mainnet.
  *   GATEWAY_PORT        — default 3010.
  *   GATEWAY_DB_DIR      — default "./data/gateway".
+ *   GATEWAY_ADMIN_TOKEN — server-only token for the operator key list.
+ *                         At least 32 chars; unset disables the list.
  *   SIGNUP_RATE_MAX / SIGNUP_RATE_WINDOW_MS  — per-IP signup limiter.
  *   KEY_RATE_MAX / KEY_RATE_WINDOW_MS        — per-key request limiter.
  *   SWEEPER_INTERVAL_MS / WALLET_HEALTH_INTERVAL_MS — background tick cadences.
@@ -38,6 +40,7 @@ export interface GatewayConfig {
   liveChain: boolean;
   port: number;
   dbDir: string;
+  adminToken?: string;
   signupRate: { max: number; windowMs: number };
   keyRate: { max: number; windowMs: number };
   demoIpRate: { max: number; windowMs: number };
@@ -97,6 +100,10 @@ export function loadConfig(env: Record<string, string | undefined>): GatewayConf
       "loadConfig: GATEWAY_MASTER_KEY must be 64 hex chars (32 bytes); generate with: openssl rand -hex 32",
     );
   }
+  const adminToken = (env.GATEWAY_ADMIN_TOKEN ?? "").trim();
+  if (adminToken !== "" && adminToken.length < 32) {
+    throw new Error("loadConfig: GATEWAY_ADMIN_TOKEN must be at least 32 chars");
+  }
 
   const indexerUrl = requireField(env, "INDEXER_URL").replace(/\/+$/, "");
 
@@ -132,6 +139,7 @@ export function loadConfig(env: Record<string, string | undefined>): GatewayConf
 
   return {
     masterKeyHex,
+    adminToken: adminToken || undefined,
     indexerUrl,
     ogmiosUrl,
     networkId,

@@ -270,7 +270,7 @@ describe("<ApiKeys /> Responses example", () => {
     Reflect.set(window, "__BUYER_BOOT__", {
       gatewayUrl: "https://api.marketplace.example",
     });
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => new Response(JSON.stringify(String(input) === "/v1/api-keys" ? { keys: [] } : {
       api_key: "vmp_live_secret",
       key_prefix: "vmp_live",
       deposit_address: "addr1deposit",

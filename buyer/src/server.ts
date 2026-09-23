@@ -122,6 +122,9 @@ export interface AppDeps {
    * `${gatewayUrl}/signup`. Public, non-secret value. When empty/omitted the
    * SPA derives "api." + its own host. */
   gatewayPublicUrl?: string;
+  /** Server-only gateway connection for the operator key list. */
+  gatewayInternalUrl?: string;
+  gatewayAdminToken?: string;
   /** Private supplier-network endpoint used to populate the resale dashboard.
    * The browser only sees the redacted same-origin /v1/resale-dashboard proxy. */
   resaleDashboardUrl?: string;
@@ -366,6 +369,40 @@ export function createApp(deps: AppDeps): Express {
         fetchImpl: deps.fetchImpl ?? globalThis.fetch,
       }
     : null;
+
+  app.get("/v1/api-keys", async (_req: Request, res: Response) => {
+    res.setHeader("Cache-Control", "no-store");
+    // Unlike public signup, listing all wallets must always require a login.
+    if (!authReady) {
+      return jsonError(res, 503, "auth_unconfigured", "operator login is not configured");
+    }
+    const gatewayUrl = (deps.gatewayInternalUrl ?? "").replace(/\/+$/, "");
+    if (!gatewayUrl || !deps.gatewayAdminToken) {
+      return jsonError(res, 503, "service_unavailable", "API key listing is not configured");
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 30_000);
+    try {
+      const upstream = await (deps.fetchImpl ?? globalThis.fetch)(`${gatewayUrl}/internal/api-keys`, {
+        headers: {
+          accept: "application/json",
+          authorization: `Bearer ${deps.gatewayAdminToken}`,
+        },
+        cache: "no-store",
+        redirect: "error",
+        signal: controller.signal,
+      });
+      if (!upstream.ok) {
+        return jsonError(res, 502, "gateway_upstream_error", `API key listing returned ${upstream.status}`);
+      }
+      const payload = await upstream.json();
+      return res.status(200).json(payload);
+    } catch {
+      return jsonError(res, 502, "gateway_unreachable", "API key listing is unavailable");
+    } finally {
+      clearTimeout(timer);
+    }
+  });
 
   app.get("/v1/resale-dashboard", async (_req: Request, res: Response) => {
     const dashboardUrl = (deps.resaleDashboardUrl ?? "").replace(/\/+$/, "");

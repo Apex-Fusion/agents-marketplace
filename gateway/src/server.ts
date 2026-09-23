@@ -5,6 +5,7 @@
  * Bearer:   GET /account, POST /account/withdraw,
  *           POST /openai/v1/responses, GET/DELETE /openai/v1/responses/:id,
  *           POST /openai/v1/chat/completions, GET /openai/v1/models.
+ * Operator: GET /internal/api-keys (server-only admin token).
  */
 
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
@@ -21,7 +22,7 @@ import {
 import { makeOcrExtractHandler } from "./ocr/extract.js";
 import { makeModelsHandler } from "./openai/models.js";
 import { makeChatCompletionsHandler } from "./openai/chatCompletions.js";
-import { makeSignupHandler, makeAccountHandler, makeWithdrawHandler } from "./account/routes.js";
+import { makeSignupHandler, makeAccountHandler, makeWithdrawHandler, makeListKeysHandler } from "./account/routes.js";
 import { INDEX_HTML } from "./ui/page.js";
 
 /**
@@ -74,6 +75,8 @@ export function createApp(deps: GatewayDeps): Express {
 
   // Public signup, rate-limited per IP.
   app.post("/signup", ipRateLimit(deps.config.signupRate), makeSignupHandler(deps));
+
+  app.get("/internal/api-keys", makeListKeysHandler(deps));
 
   // Bearer-gated routes: auth → per-key rate limit (skips demo keys) →
   // per-IP demo limit (demo keys only) → handler.

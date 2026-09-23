@@ -3,6 +3,8 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { randomBytes, randomUUID } from "crypto";
 import request from "supertest";
+import Database from "better-sqlite3";
+import { rmSync } from "fs";
 import { createResponse, responseEvents, type ResponseObject } from "@marketplace/shared/responses";
 import { createApp } from "../src/server.js";
 import { GatewayStore } from "../src/db/store.js";
@@ -133,6 +135,92 @@ describe("gateway HTTP", () => {
     const demoKey = addDemoKey(deps);
     const demoModels = await request(app).get("/openai/v1/models").set("authorization", `Bearer ${demoKey}`);
     expect(demoModels.body.data.map((model: { id: string }) => model.id)).toEqual(["kimi"]);
+  });
+
+  it("restricts the key inventory to the operator token, not customer or demo keys", async () => {
+    const deps = makeDeps();
+    const app = createApp(deps);
+    try {
+      expect((await request(app).get("/internal/api-keys")).status).toBe(503);
+      deps.config.adminToken = "operator-token-".repeat(4);
+      const signup = await request(app).post("/signup").send({ label: "customer" });
+      const demoKey = addDemoKey(deps);
+
+      expect((await request(app).get("/internal/api-keys")).status).toBe(401);
+      for (const token of [signup.body.api_key, demoKey, "wrong-token-".repeat(4)]) {
+        const response = await request(app).get("/internal/api-keys")
+          .set("authorization", `Bearer ${token}`);
+        expect(response.status).toBe(401);
+        expect(response.body).not.toHaveProperty("keys");
+      }
+      const allowed = await request(app).get("/internal/api-keys")
+        .set("authorization", `Bearer ${deps.config.adminToken}`);
+      expect(allowed.status).toBe(200);
+      expect(allowed.body.keys.map((key: { label: string }) => key.label).sort())
+        .toEqual(["customer", "shared-demo"]);
+    } finally {
+      deps.store["db"].close();
+      rmSync(deps.config.dbDir, { recursive: true, force: true });
+    }
+  });
+
+  it("lists disabled wallets without secrets and distinguishes a balance failure from zero", async () => {
+    let failedAddress = "";
+    const chain = {
+      queryUtxosByAddress: async (address: string) => {
+        if (address === failedAddress) throw new Error("private chain connection details");
+        return [7_000_000n, 2_123_456n].map((lovelace) => ({ lovelace }));
+      },
+    } as unknown as GatewayDeps["chain"];
+    const deps = makeDeps(undefined, 1000, chain);
+    deps.config.adminToken = "operator-token-".repeat(4);
+    const app = createApp(deps);
+    try {
+      const disabled = await request(app).post("/signup").send({ label: "disabled wallet" });
+      const failed = await request(app).post("/signup").send({ label: "unavailable wallet" });
+      failedAddress = failed.body.deposit_address;
+      const demoKey = addDemoKey(deps);
+      const db = new Database(join(deps.config.dbDir, "gateway.db"));
+      try {
+        db.prepare("UPDATE api_keys SET disabled = 1 WHERE key_hash = ?")
+          .run(hashApiKey(disabled.body.api_key));
+        db.prepare("UPDATE api_keys SET created_at = 1 WHERE label = 'disabled wallet'").run();
+      } finally {
+        db.close();
+      }
+
+      const response = await request(app).get("/internal/api-keys")
+        .set("authorization", `Bearer ${deps.config.adminToken}`);
+      expect(response.status).toBe(200);
+      expect(response.headers["cache-control"]).toBe("no-store");
+      expect(response.body.keys).toHaveLength(3);
+      expect(response.body.keys.at(-1)).toMatchObject({
+        key_prefix: disabled.body.key_prefix,
+        label: "disabled wallet",
+        disabled: true,
+        balance_lovelace: "9123456",
+        balance_error: null,
+      });
+      expect(response.body.keys.find((key: { demo: boolean }) => key.demo)).toMatchObject({
+        key_prefix: demoKey.slice(0, 12),
+        balance_lovelace: "9123456",
+      });
+      expect(response.body.keys.find((key: { label: string }) => key.label === "unavailable wallet"))
+        .toMatchObject({ balance_lovelace: null, balance_error: expect.any(String) });
+      for (const rawKey of [disabled.body.api_key, failed.body.api_key, demoKey]) {
+        expect(response.text).not.toContain(rawKey);
+      }
+      for (const key of response.body.keys) {
+        expect(Object.keys(key).sort()).toEqual([
+          "balance_error", "balance_lovelace", "created_at", "demo", "deposit_address",
+          "disabled", "id", "key_prefix", "label",
+        ]);
+      }
+      expect(response.text).not.toContain("private chain connection details");
+    } finally {
+      deps.store["db"].close();
+      rmSync(deps.config.dbDir, { recursive: true, force: true });
+    }
   });
 
   it("rejects unsupported generation controls before routing or funds", async () => {

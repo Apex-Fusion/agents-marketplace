@@ -1,24 +1,30 @@
 /**
- * buyer/src/ui/pages/ApiKeys.tsx — self-serve "Generate API key" page.
+ * buyer/src/ui/pages/ApiKeys.tsx — operator key list and self-serve creation.
  *
- * Mints a custodial gateway API key by POSTing directly to the gateway's
- * public /signup endpoint (cross-origin; the gateway CORS-allows this origin).
- * The raw key is shown ONCE — it is never stored server-side in retrievable
- * form, so it cannot be listed or recovered later. The page also surfaces the
- * funding deposit address and a ready-to-paste usage snippet.
- *
- * Access is gated by the SPA's existing operator login (this page only renders
- * inside <RequireAuth>). The gateway /signup itself stays public + IP
- * rate-limited; per-user accounts are a later feature.
+ * Lists stored key prefixes and live wallet balances through the authenticated
+ * buyer API. Full keys are never stored in retrievable form. Public gateway
+ * signup returns a new key once, together with its funding deposit address.
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { resolveGatewayUrl } from "../gateway.js";
 
 interface SignupResult {
   api_key: string;
   key_prefix: string;
   deposit_address: string;
+}
+
+interface ApiKeySummary {
+  id: string;
+  key_prefix: string;
+  label: string | null;
+  deposit_address: string;
+  created_at: number;
+  disabled: boolean;
+  demo: boolean;
+  balance_lovelace: string | null;
+  balance_error: string | null;
 }
 
 /** Pull a human-readable message out of whatever error shape the gateway
@@ -30,8 +36,8 @@ function errorMessage(body: unknown, status: number, statusText: string): string
     if (err && typeof err === "object" && typeof (err as Record<string, unknown>).message === "string") {
       return (err as Record<string, string>).message;
     }
-    if (typeof err === "string") return err;
     if (typeof b.message === "string") return b.message;
+    if (typeof err === "string") return err;
   }
   return `${status} ${statusText}`.trim() || "request failed";
 }
@@ -64,6 +70,36 @@ export default function ApiKeys() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<SignupResult | null>(null);
+  const [keys, setKeys] = useState<ApiKeySummary[] | null>(null);
+  const [listLoading, setListLoading] = useState(true);
+  const [listError, setListError] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setListLoading(true);
+    setListError(null);
+    setKeys(null);
+    fetch("/v1/api-keys", { cache: "no-store", signal: controller.signal })
+      .then(async (res) => {
+        const body = await res.json().catch(() => null);
+        if (!res.ok) throw new Error(errorMessage(body, res.status, res.statusText));
+        if (!body || !Array.isArray(body.keys)) throw new Error("Unexpected API key list response");
+        return body.keys as ApiKeySummary[];
+      })
+      .then((rows) => {
+        if (!controller.signal.aborted) setKeys(rows);
+      })
+      .catch((e: unknown) => {
+        if (!controller.signal.aborted) {
+          setListError(e instanceof Error ? e.message : "Could not load API keys");
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setListLoading(false);
+      });
+    return () => controller.abort();
+  }, [reloadKey]);
 
   const gatewayUrl = resolveGatewayUrl();
   const baseUrl = `${gatewayUrl}/openai/v1`;
@@ -91,6 +127,7 @@ export default function ApiKeys() {
         key_prefix: r.key_prefix ?? r.api_key.slice(0, 12),
         deposit_address: r.deposit_address,
       });
+      setReloadKey((k) => k + 1);
     } catch (e) {
       setError(e instanceof Error ? e.message : "could not reach the gateway");
     } finally {
@@ -109,7 +146,7 @@ export default function ApiKeys() {
         ].join("\n");
 
   return (
-    <div className="max-w-3xl space-y-6">
+    <div className="max-w-6xl space-y-6">
       <div className="space-y-1">
         <h1 className="text-2xl font-semibold">API Keys</h1>
         <p className="text-sm text-gray-600">
@@ -118,6 +155,78 @@ export default function ApiKeys() {
           <code className="font-mono text-xs">{baseUrl}</code>.
         </p>
       </div>
+
+      <section className="rounded-lg border border-gray-200 bg-white p-4 space-y-3" aria-labelledby="api-key-list-heading">
+        <div className="flex items-center justify-between gap-3">
+          <h2 id="api-key-list-heading" className="text-lg font-semibold">Existing API keys</h2>
+          <button
+            type="button"
+            onClick={() => setReloadKey((k) => k + 1)}
+            disabled={listLoading}
+            className="rounded border border-gray-300 px-3 py-1 text-sm text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+          >
+            {listLoading ? "Loading…" : "Refresh balances"}
+          </button>
+        </div>
+        <p className="text-sm text-gray-600">
+          All gateway keys, including demo and disabled keys. Only key prefixes are shown.
+          Wallet balances exclude funds held in escrow.
+        </p>
+        {listLoading ? (
+          <p className="text-sm text-gray-500" role="status">Loading API keys and balances…</p>
+        ) : listError !== null ? (
+          <p className="text-sm text-red-600" role="alert">{listError}</p>
+        ) : keys?.length === 0 ? (
+          <p className="text-sm text-gray-500">No API keys yet. Generate a key below.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-sm">
+              <caption className="sr-only">API key prefixes and wallet balances</caption>
+              <thead className="border-b text-gray-500">
+                <tr>
+                  <th scope="col" className="py-2 pr-4 font-medium">API key</th>
+                  <th scope="col" className="py-2 pr-4 font-medium">Wallet balance</th>
+                  <th scope="col" className="py-2 pr-4 font-medium">Deposit address</th>
+                  <th scope="col" className="py-2 font-medium">Created</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {keys?.map((key) => (
+                  <tr key={key.id}>
+                    <td className="py-3 pr-4 align-top">
+                      <code className="whitespace-nowrap font-mono">{key.key_prefix}…</code>
+                      <div className="mt-1 text-gray-600">{key.label || "No label"}</div>
+                      <div className="mt-1 flex gap-2 text-xs text-gray-500">
+                        <span>{key.disabled ? "Disabled" : "Active"}</span>
+                        {key.demo && <span>Demo</span>}
+                      </div>
+                    </td>
+                    <td className="py-3 pr-4 align-top whitespace-nowrap">
+                      {key.balance_lovelace === null ? (
+                        <span className="text-red-600">{key.balance_error ?? "Balance unavailable"}</span>
+                      ) : (
+                        <span className="font-medium">
+                          {(Number(key.balance_lovelace) / 1e6).toLocaleString(undefined, {
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 6,
+                          })} AP3X
+                        </span>
+                      )}
+                    </td>
+                    <td className="min-w-48 max-w-sm py-3 pr-4 align-top">
+                      <code className="block break-all font-mono text-xs">{key.deposit_address}</code>
+                      <div className="mt-1"><CopyButton value={key.deposit_address} label="Copy address" /></div>
+                    </td>
+                    <td className="py-3 align-top text-gray-600">
+                      {new Date(key.created_at).toLocaleString()}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
 
       <div className="rounded-lg border border-gray-200 bg-white p-4 space-y-3">
         <label className="block text-sm font-medium text-gray-700">

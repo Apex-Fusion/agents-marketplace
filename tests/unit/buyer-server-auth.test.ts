@@ -278,6 +278,27 @@ describe("createApp: /v1/auth/whoami + protected /v1/* gate", () => {
     expect(res.status).toBe(401);
   });
 
+  it("requires an operator session for the API key inventory", async () => {
+    const app = createApp({
+      password: PASSWORD,
+      sessionSecret: SECRET,
+      cookieSecure: false,
+      gatewayInternalUrl: "http://gateway.internal",
+      gatewayAdminToken: "operator-token-".repeat(4),
+      fetchImpl: async () => new Response("private upstream error details", { status: 500 }),
+    });
+    const anonymous = await request(app).get("/v1/api-keys");
+    expect(anonymous.status).toBe(401);
+    const agent = request.agent(app);
+    await agent.post("/v1/auth/login").send({ password: PASSWORD }).expect(204);
+    const upstreamError = await agent.get("/v1/api-keys");
+    expect(upstreamError.status).toBe(502);
+    expect(upstreamError.text).not.toContain("private upstream error details");
+    expect(upstreamError.text).not.toContain("operator-token-");
+    await agent.post("/v1/auth/logout").expect(204);
+    expect((await agent.get("/v1/api-keys")).status).toBe(401);
+  });
+
   it("a protected /v1/* route is reachable with a valid cookie", async () => {
     // The route still 503s on missing chain deps, but it gets past the gate.
     const app = makeAuthApp();
@@ -315,6 +336,18 @@ describe("createApp: /v1/auth/logout", () => {
 });
 
 describe("createApp without auth deps (test/library shape)", () => {
+  it("keeps the API key inventory closed without operator auth configuration", async () => {
+    const app = createApp({
+      gatewayInternalUrl: "http://gateway.internal",
+      gatewayAdminToken: "operator-token-".repeat(4),
+      fetchImpl: async () => new Response(JSON.stringify({ keys: [{ key_prefix: "private" }] })),
+    });
+    const response = await request(app).get("/v1/api-keys");
+    expect(response.status).toBe(503);
+    expect(response.body.error).toBe("auth_unconfigured");
+    expect(response.text).not.toContain("private");
+  });
+
   it("does not gate /v1/* and does not mount /v1/auth/* routes", async () => {
     const app = createApp({});
     // No /v1/auth/login route → 404.

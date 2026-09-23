@@ -5,6 +5,7 @@
 #
 # Secrets live in gateway/.env (NOT committed):
 #   GATEWAY_MASTER_KEY=<openssl rand -hex 32>   # losing this locks ALL user funds
+#   GATEWAY_ADMIN_TOKEN=<separate random token, matching buyer/.env>
 # Back up BOTH gateway/.env (the master key) AND the gateway-mainnet-data volume
 # (the gateway.db holds every user's encrypted wallet key + usage).
 
