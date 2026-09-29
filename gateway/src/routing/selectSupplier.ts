@@ -75,11 +75,13 @@ function toCandidate(raw: SupplierView, status = raw.status): SupplierCandidate 
 async function readLiveStatus(
   raw: SupplierView,
   fetchFn: typeof globalThis.fetch,
+  signal?: AbortSignal,
 ): Promise<LiveSupplierStatus> {
   try {
+    const timeout = AbortSignal.timeout(STATUS_PROBE_TIMEOUT_MS);
     const res = await fetchFn(`${raw.endpoint_url.replace(/\/+$/, "")}/status`, {
       method: "GET",
-      signal: AbortSignal.timeout(STATUS_PROBE_TIMEOUT_MS),
+      signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
     });
     if (!res.ok) return "unavailable";
     const body = (await res.json()) as unknown;
@@ -95,6 +97,7 @@ async function readLiveStatus(
 async function probeStatuses(
   rows: SupplierView[],
   fetchFn: typeof globalThis.fetch,
+  signal?: AbortSignal,
 ): Promise<Array<{ raw: SupplierView; status: LiveSupplierStatus }>> {
   const results = new Array<{ raw: SupplierView; status: LiveSupplierStatus }>(rows.length);
   let next = 0;
@@ -102,7 +105,7 @@ async function probeStatuses(
     while (next < rows.length) {
       const index = next++;
       const raw = rows[index];
-      results[index] = { raw, status: await readLiveStatus(raw, fetchFn) };
+      results[index] = { raw, status: await readLiveStatus(raw, fetchFn, signal) };
     }
   };
   await Promise.all(
@@ -145,6 +148,7 @@ export interface SelectSupplierOpts {
   /** Preferred seller ordered first when it is eligible. */
   preferredSupplierPkh?: string;
   fetchFn?: typeof globalThis.fetch;
+  signal?: AbortSignal;
   /** Supplier identities just freed by managed-demo eviction. These are live
    * rechecked even if another cached candidate looks ready, because that other
    * candidate may be the busy supplier that caused the eviction. */
@@ -160,7 +164,7 @@ export interface SelectSupplierOpts {
 export async function selectCandidates(opts: SelectSupplierOpts): Promise<SupplierCandidate[]> {
   const fetchFn = opts.fetchFn ?? globalThis.fetch;
   const url = `${opts.indexerUrl}/suppliers?capability_id=${encodeURIComponent(opts.capabilityId)}`;
-  const res = await fetchFn(url);
+  const res = await fetchFn(url, { signal: opts.signal });
   if (!res.ok) {
     throw new Error(`indexer /suppliers returned ${res.status}`);
   }
@@ -200,7 +204,7 @@ export async function selectCandidates(opts: SelectSupplierOpts): Promise<Suppli
   const rowsToProbe = candidates.length > 0
     ? explicitlyFreed
     : matching.filter((raw) => raw.status === "working" || raw.status === "offline");
-  const liveStatuses = await probeStatuses(rowsToProbe, fetchFn);
+  const liveStatuses = await probeStatuses(rowsToProbe, fetchFn, opts.signal);
   for (const result of liveStatuses) {
     if (result.status !== "free") continue;
     const candidate = toCandidate(result.raw, "free");

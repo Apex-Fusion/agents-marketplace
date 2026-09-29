@@ -22,6 +22,9 @@
  *   KEY_RATE_MAX / KEY_RATE_WINDOW_MS        — per-key request limiter.
  *   SWEEPER_INTERVAL_MS / WALLET_HEALTH_INTERVAL_MS — background tick cadences.
  *   SDK_REGISTRY_MAX    — max cached per-key Marketplace instances (LRU).
+ *   ONE_SHOT_CONCURRENCY — active paid LLM jobs per key (default 4).
+ *   ONE_SHOT_MAX_OUTSTANDING — active + queued + recovering jobs per key (default 64).
+ *   ONE_SHOT_QUEUE_TIMEOUT_MS — wait for admission before spending (default 60000).
  *   GATEWAY_CORS_ORIGINS — comma-separated allowlist of browser Origins that may
  *                         call the gateway cross-origin (e.g. the marketplace
  *                         frontend's "Generate API key" page). Default empty =
@@ -56,6 +59,9 @@ export interface GatewayConfig {
   chatSettleMode: "full" | "ticket";
   walletHealthIntervalMs: number;
   sdkRegistryMax: number;
+  oneShotConcurrency: number;
+  oneShotMaxOutstanding: number;
+  oneShotQueueTimeoutMs: number;
   corsOrigins: string[];
   /** Capability id the /v1/ocr/extract route escrows against. Model-scoped
    * per the marketplace convention (one model, one id). Env: OCR_CAPABILITY_ID. */
@@ -163,6 +169,9 @@ export function loadConfig(env: Record<string, string | undefined>): GatewayConf
     chatSettleMode: chatSettleMode(env),
     walletHealthIntervalMs: posInt(env, "WALLET_HEALTH_INTERVAL_MS", 10 * 60 * 1000),
     sdkRegistryMax: posInt(env, "SDK_REGISTRY_MAX", 500),
+    oneShotConcurrency: posInt(env, "ONE_SHOT_CONCURRENCY", 4),
+    oneShotMaxOutstanding: posInt(env, "ONE_SHOT_MAX_OUTSTANDING", 64),
+    oneShotQueueTimeoutMs: posInt(env, "ONE_SHOT_QUEUE_TIMEOUT_MS", 60_000),
     ocrCapabilityId: env.OCR_CAPABILITY_ID ?? "ocr.page.extract.chandra-ocr-2.v1",
     preferredSupplierPkh: preferredSupplierPkhRaw === ""
       ? undefined

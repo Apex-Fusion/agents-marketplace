@@ -6,6 +6,8 @@ export { Marketplace } from "./Marketplace.js";
 export type { MarketplaceOpts, NetworkParams } from "./Marketplace.js";
 export type {
   SubmitPromptResult,
+  PreparedPrompt,
+  PostedPrompt,
   SubmitTtsOptions,
   SubmitTtsResult,
   SubmitOcrOptions,

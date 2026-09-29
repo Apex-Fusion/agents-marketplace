@@ -21,6 +21,8 @@ export function buildDeps(env: Record<string, string | undefined>): GatewayDeps 
   const chain = buildChainProvider(config);
   const registry = new SdkRegistry({
     chain,
+    store,
+    fetchFn: globalThis.fetch,
     indexerUrl: config.indexerUrl,
     networkId: config.networkId,
     masterKeyHex: config.masterKeyHex,

@@ -20,6 +20,8 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { Decoder } from "cbor-x";
+import { inspectSignedTransaction } from "../../packages/shared/src/tx/server.js";
 import { LiveOgmiosProvider } from "../../packages/shared/src/chain/LiveOgmiosProvider.js";
 import { buildPostEscrowTx } from "../../packages/shared/src/tx/escrow/postEscrow.js";
 import { TxConstructionError } from "../../packages/shared/src/tx/types.js";
@@ -156,22 +158,23 @@ function setupMocksForHappyPath(): void {
 // ─── A. Output CBOR shape ──────────────────────────────────────────────────────
 
 describe("buildPostEscrowTx() [live] — CBOR shape", () => {
-  it("returns a txCborHex that is a non-empty lowercase hex string", async () => {
+  it("extracts the live transaction identity and validity for recovery", async () => {
     setupMocksForHappyPath();
-    const chain = buildLiveChain();
-    const buyer = buildBuyerWalletKey();
-
     const result = await buildPostEscrowTx({
-      chain,
-      buyerKey: buyer,
+      chain: buildLiveChain(),
+      buyerKey: buildBuyerWalletKey(),
       advertRef: { txHash: ADVERT_TX_HASH, index: ADVERT_INDEX },
       messages: SAMPLE_MESSAGES,
       payment_lovelace: PAYMENT,
     });
-
-    expect(typeof result.txCborHex).toBe("string");
-    expect(result.txCborHex.length).toBeGreaterThan(0);
-    expect(/^[0-9a-f]+$/i.test(result.txCborHex)).toBe(true);
+    const decoded: unknown = new Decoder({ mapsAsObjects: false }).decode(Buffer.from(result.txCborHex, "hex"));
+    if (!Array.isArray(decoded) || !(decoded[0] instanceof Map)) {
+      throw new Error("live transaction has no CBOR body map");
+    }
+    const body: Map<number, unknown> = decoded[0];
+    const inspected = inspectSignedTransaction(result.txCborHex);
+    expect(inspected.txHash).toBe(result.expectedTxHash);
+    expect(inspected.validUntilSlot).toBe(Number(body.get(3)));
   });
 
   it("txCborHex starts with 83 or 84 (Conway-era tx body CBOR array)", async () => {
@@ -212,6 +215,37 @@ describe("buildPostEscrowTx() [live] — CBOR shape", () => {
     // JSON-in-hex would decode the first 4 bytes as a uint32 JSON length —
     // real CBOR always has 0x83 or 0x84 as the first byte.
     expect(firstByte).not.toBe("00"); // length prefix starts with 00 for small JSON
+  });
+
+  it("runs the persist hook with signed CBOR before the live broadcast", async () => {
+    setupMocksForHappyPath();
+    const chain = buildLiveChain();
+    let hookTxHash = "";
+
+    const result = await buildPostEscrowTx({
+      chain,
+      buyerKey: buildBuyerWalletKey(),
+      advertRef: { txHash: ADVERT_TX_HASH, index: ADVERT_INDEX },
+      messages: SAMPLE_MESSAGES,
+      payment_lovelace: PAYMENT,
+      beforeSubmit: async (built) => {
+        hookTxHash = built.expectedTxHash;
+        const methodsBeforeHook = mockFetch.mock.calls.map((call: unknown[]) => {
+          const init = call[1] as RequestInit | undefined;
+          const body = JSON.parse(String(init?.body ?? "{}")) as { method?: string };
+          return body.method;
+        });
+        expect(methodsBeforeHook).not.toContain("submitTransaction");
+      },
+    });
+
+    expect(hookTxHash).toBe(result.expectedTxHash);
+    const submitted = mockFetch.mock.calls.some((call: unknown[]) => {
+      const init = call[1] as RequestInit | undefined;
+      const body = JSON.parse(String(init?.body ?? "{}")) as { method?: string };
+      return body.method === "submitTransaction";
+    });
+    expect(submitted).toBe(true);
   });
 });
 

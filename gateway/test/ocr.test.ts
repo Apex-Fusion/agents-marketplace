@@ -80,12 +80,14 @@ function makeDeps(fetchFn?: typeof globalThis.fetch, overrides?: { chain?: Gatew
     chatSettleMode: "full",
     walletHealthIntervalMs: 600_000,
     sdkRegistryMax: 100,
+    oneShotConcurrency: 4, oneShotMaxOutstanding: 64, oneShotQueueTimeoutMs: 60_000,
     ocrCapabilityId: "ocr.page.extract.chandra-ocr-2.v1",
     corsOrigins: [],
   };
   const chain = overrides?.chain ?? ({ queryUtxosByAddress: async () => [] } as unknown as GatewayDeps["chain"]);
   const registry = new SdkRegistry({
     chain,
+    store,
     indexerUrl: config.indexerUrl,
     networkId: config.networkId,
     masterKeyHex: config.masterKeyHex,

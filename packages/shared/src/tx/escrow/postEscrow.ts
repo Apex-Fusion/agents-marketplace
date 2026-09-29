@@ -50,6 +50,8 @@ export interface PostEscrowParams {
    * it verbatim and does not require or hash messages. */
   prompt_hash?: string;
   payment_lovelace: bigint;
+  /** Runs after signing and before any broadcast. Rejection prevents submit. */
+  beforeSubmit?: (built: PostEscrowBuildResult) => Promise<void>;
 }
 
 function sha256Utf8Hex(s: string): string {
@@ -193,6 +195,7 @@ export async function buildPostEscrowTx(
       totalLocked,
       deliverBy,
       postedAt,
+      beforeSubmit: params.beforeSubmit,
     });
   }
 
@@ -219,12 +222,14 @@ export async function buildPostEscrowTx(
 
   const txCborHex = encodeTxBody(body);
   const expectedTxHash = sha256Hex(txCborHex);
-
-  await chain.submitTx(txCborHex);
-
-  return {
+  const built: PostEscrowBuildResult = {
     txCborHex,
     expectedTxHash,
     escrowOutputRef: { txHash: expectedTxHash, index: 0 },
   };
+
+  await params.beforeSubmit?.(built);
+  await chain.submitTx(txCborHex);
+
+  return built;
 }

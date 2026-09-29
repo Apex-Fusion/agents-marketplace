@@ -157,17 +157,32 @@ a 65-byte URL and fails CBOR encoding.
 
 #### Concurrent callers
 
-The gateway still serializes requests per API key to protect wallet UTxOs.
-Use separate funded keys for concurrent workers. Set `x_vector.supplier_pkh`
-to a different supplier for each worker when you need a fixed assignment.
+The concurrent gateway supports four paid one-shot jobs with one funded API key.
+It reserves distinct suppliers before payment.
+Only wallet transactions remain serialized through confirmation.
+Inference runs outside the wallet lock.
+This behavior requires the concurrent gateway and its exact-lineage indexer endpoint.
+The source change does not update the running deployment by itself.
+
+The defaults allow 64 outstanding jobs per key and a 60-second admission wait.
+Queued jobs spend no funds.
+Overflow returns HTTP 429.
+Use `x_vector.supplier_pkh` only when a fixed supplier assignment is required.
+Requests pinned to the same supplier wait for that supplier.
 The original one-shot supplier PKH is
 `f3ab38f4b5b16b5d08729e74740b39794e3b9dc912f4dfb6c38fb374`.
 
-Verification: four pinned public `/openai/v1/responses` requests, with four
+Earlier production verification: four pinned public `/openai/v1/responses` requests, with four
 independent keys, return HTTP 200 and receipts from four distinct suppliers.
 All four suppliers report `working` at the same time. Total elapsed time is
 about 44 seconds. Each probe intentionally stops at its 512-token output cap,
 so its Responses status is `incomplete`, not an inference error.
+
+Local verification of the concurrent gateway uses one key and four supplier apps.
+It confirms four active inference jobs, a waiting fifth job, bounded overflow,
+distinct settled escrows, and single-count billing.
+This check uses a simulated ledger.
+It is not a same-key production benchmark.
 
 #### Private load-balancer access
 

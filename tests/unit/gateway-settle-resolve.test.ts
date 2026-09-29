@@ -11,7 +11,12 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
-import { resolveSubmittedRef, oneShotBudgetMs } from "../../gateway/src/onchain/settle.js";
+import {
+  fetchEscrowLineage,
+  resolveSubmittedRef,
+  oneShotBudgetMs,
+  type EscrowLineage,
+} from "../../gateway/src/onchain/settle.js";
 import { Mutex } from "../../gateway/src/sdk/registry.js";
 import { submitBudgetMs } from "../../buyer/src/sdk/budget.js";
 import { encodeEscrowDatum } from "../../packages/shared/src/cbor/EscrowDatum.js";
@@ -25,19 +30,82 @@ import { BUYER_PKH } from "../fixtures/buyer-side/wallet-keys.js";
 const ORIGINAL_REF = `${"f".repeat(64)}#0`;
 const RECEIPT_HASH = submittedEscrowDatum().result_receipt_hash as string;
 
-function chainWith(utxo: Utxo | null): ChainProvider {
-  return { queryUtxo: vi.fn(async () => utxo) } as unknown as ChainProvider;
+function chainWith(...utxos: Utxo[]): ChainProvider {
+  return {
+    queryUtxo: vi.fn(async (ref) => (
+      utxos.find((utxo) => (
+        utxo.ref.txHash === ref.txHash && utxo.ref.index === ref.index
+      )) ?? null
+    )),
+  } as unknown as ChainProvider;
 }
 
-/** An indexer that only ever knows the Submitted row (never called on the hint path). */
-function indexerWith(rows: unknown[]) {
-  return vi.fn(async () => new Response(JSON.stringify(rows), { status: 200 }));
+function submittedUtxo(
+  txHash: string,
+  buyerPkh = BUYER_PKH,
+  receiptHash = RECEIPT_HASH,
+): Utxo {
+  const base = buildSubmittedEscrowUtxo();
+  return {
+    ...base,
+    ref: { txHash, index: 0 },
+    datumHex: encodeEscrowDatum({
+      ...submittedEscrowDatum(),
+      buyer_pkh: buyerPkh,
+      result_receipt_hash: receiptHash,
+    }),
+  };
 }
 
-describe("resolveSubmittedRef() — supplier hint", () => {
-  it("returns a hint whose on-chain datum is our Submitted escrow bound to our receipt, without the indexer", async () => {
+function lineageTo(
+  submitted: Utxo,
+  receiptHash = RECEIPT_HASH,
+): EscrowLineage {
+  const submittedRef = `${submitted.ref.txHash}#${submitted.ref.index}`;
+  return {
+    original_ref: ORIGINAL_REF,
+    rows: [
+      {
+        utxo_ref: ORIGINAL_REF,
+        state: "Open",
+        posted_at: 1,
+        spent_tx: submitted.ref.txHash,
+      },
+      {
+        utxo_ref: submittedRef,
+        state: "Submitted",
+        posted_at: 1,
+        result_receipt_hash: receiptHash,
+        spent_tx: null,
+      },
+    ],
+    terminal: null,
+  };
+}
+
+function indexerWith(lineage: EscrowLineage | null, status = 200) {
+  return vi.fn(async () => new Response(
+    lineage === null ? JSON.stringify({ error: "escrow not found" }) : JSON.stringify(lineage),
+    { status },
+  ));
+}
+
+describe("fetchEscrowLineage()", () => {
+
+  it("returns null for a missing origin", async () => {
+    const fetchFn = indexerWith(null, 404);
+    await expect(fetchEscrowLineage(
+      "http://indexer.test",
+      ORIGINAL_REF,
+      fetchFn as unknown as typeof fetch,
+    )).resolves.toBeNull();
+  });
+});
+
+describe("resolveSubmittedRef() — exact lineage", () => {
+  it("preserves a supplier hint verified against the expected receipt", async () => {
     const utxo = buildSubmittedEscrowUtxo();
-    const fetchFn = indexerWith([]);
+    const fetchFn = indexerWith(null, 404);
 
     const ref = await resolveSubmittedRef({
       chain: chainWith(utxo),
@@ -45,70 +113,96 @@ describe("resolveSubmittedRef() — supplier hint", () => {
       buyerPkh: BUYER_PKH,
       originalRefStr: ORIGINAL_REF,
       hint: { ref: utxo.ref, resultReceiptHash: RECEIPT_HASH },
+      receiptHash: RECEIPT_HASH,
       fetchFn: fetchFn as unknown as typeof fetch,
-      timeoutMs: 10,
+      timeoutMs: 0,
     });
 
     expect(ref).toEqual(utxo.ref);
     expect(fetchFn).not.toHaveBeenCalled();
   });
 
-  it("falls back to the indexer when the hinted datum commits to a different receipt", async () => {
-    const utxo = buildSubmittedEscrowUtxo();
-    const indexed = `${"a".repeat(64)}#0`;
-    const fetchFn = indexerWith([{ utxo_ref: indexed, state: "Submitted", posted_at: 1 }]);
+  it("falls back from an invalid hint to the exact indexed lineage", async () => {
+    const hinted = submittedUtxo("b".repeat(64), BUYER_PKH, "0".repeat(64));
+    const indexed = submittedUtxo("a".repeat(64));
+    const fetchFn = indexerWith(lineageTo(indexed));
 
     const ref = await resolveSubmittedRef({
-      chain: chainWith(utxo),
+      chain: chainWith(hinted, indexed),
       indexerUrl: "http://indexer.test",
       buyerPkh: BUYER_PKH,
       originalRefStr: ORIGINAL_REF,
-      hint: { ref: utxo.ref, resultReceiptHash: "0".repeat(64) },
+      hint: { ref: hinted.ref, resultReceiptHash: RECEIPT_HASH },
+      receiptHash: RECEIPT_HASH,
       fetchFn: fetchFn as unknown as typeof fetch,
-      timeoutMs: 10,
-      intervalMs: 1,
+      timeoutMs: 0,
     });
 
-    expect(ref).toEqual({ txHash: "a".repeat(64), index: 0 });
-    expect(fetchFn).toHaveBeenCalled();
+    expect(ref).toEqual(indexed.ref);
   });
 
-  it("falls back to the indexer when the hinted UTxO belongs to another buyer", async () => {
-    const foreign: Utxo = {
-      ...buildSubmittedEscrowUtxo(),
-      datumHex: encodeEscrowDatum({ ...submittedEscrowDatum(), buyer_pkh: "1".repeat(56) }),
-    };
-    const fetchFn = indexerWith([{ utxo_ref: ORIGINAL_REF, state: "Submitted", posted_at: 1 }]);
+  it("selects only the indexed lineage when simultaneous escrows share posted_at", async () => {
+    const ours = submittedUtxo("c".repeat(64));
+    const other = submittedUtxo("d".repeat(64));
+    const fetchFn = indexerWith(lineageTo(ours));
 
     const ref = await resolveSubmittedRef({
+      chain: chainWith(ours, other),
+      indexerUrl: "http://indexer.test",
+      buyerPkh: BUYER_PKH,
+      originalRefStr: ORIGINAL_REF,
+      receiptHash: RECEIPT_HASH,
+      fetchFn: fetchFn as unknown as typeof fetch,
+      timeoutMs: 0,
+    });
+
+    expect(ref).toEqual(ours.ref);
+  });
+
+  it("rejects a lineage output whose live datum has the wrong owner", async () => {
+    const foreign = submittedUtxo("e".repeat(64), "1".repeat(56));
+    const fetchFn = indexerWith(lineageTo(foreign));
+
+    await expect(resolveSubmittedRef({
       chain: chainWith(foreign),
       indexerUrl: "http://indexer.test",
       buyerPkh: BUYER_PKH,
       originalRefStr: ORIGINAL_REF,
-      hint: { ref: foreign.ref, resultReceiptHash: RECEIPT_HASH },
+      receiptHash: RECEIPT_HASH,
       fetchFn: fetchFn as unknown as typeof fetch,
-      timeoutMs: 10,
-      intervalMs: 1,
-    });
-
-    expect(ref).toEqual({ txHash: "f".repeat(64), index: 0 });
+      timeoutMs: 0,
+    })).rejects.toMatchObject({ code: "escrow_settle_failed" });
   });
 
-  it("falls back to the indexer when the hinted UTxO is already spent", async () => {
-    const fetchFn = indexerWith([{ utxo_ref: ORIGINAL_REF, state: "Submitted", posted_at: 1 }]);
+  it("rejects a lineage output whose live datum has the wrong receipt", async () => {
+    const wrongReceipt = "0".repeat(64);
+    const submitted = submittedUtxo("e".repeat(64), BUYER_PKH, wrongReceipt);
+    const fetchFn = indexerWith(lineageTo(submitted, wrongReceipt));
 
-    const ref = await resolveSubmittedRef({
-      chain: chainWith(null),
+    await expect(resolveSubmittedRef({
+      chain: chainWith(submitted),
       indexerUrl: "http://indexer.test",
       buyerPkh: BUYER_PKH,
       originalRefStr: ORIGINAL_REF,
-      hint: { ref: { txHash: "c".repeat(64), index: 0 }, resultReceiptHash: RECEIPT_HASH },
+      receiptHash: RECEIPT_HASH,
       fetchFn: fetchFn as unknown as typeof fetch,
-      timeoutMs: 10,
-      intervalMs: 1,
-    });
+      timeoutMs: 0,
+    })).rejects.toMatchObject({ code: "escrow_settle_failed" });
+  });
 
-    expect(ref).toEqual({ txHash: "f".repeat(64), index: 0 });
+  it("rejects a lineage output that has already been spent", async () => {
+    const submitted = submittedUtxo("e".repeat(64));
+    const fetchFn = indexerWith(lineageTo(submitted));
+
+    await expect(resolveSubmittedRef({
+      chain: chainWith(),
+      indexerUrl: "http://indexer.test",
+      buyerPkh: BUYER_PKH,
+      originalRefStr: ORIGINAL_REF,
+      receiptHash: RECEIPT_HASH,
+      fetchFn: fetchFn as unknown as typeof fetch,
+      timeoutMs: 0,
+    })).rejects.toMatchObject({ code: "escrow_settle_failed" });
   });
 });
 

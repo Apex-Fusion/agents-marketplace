@@ -24,7 +24,12 @@ import {
   SAMPLE_REQUEST_SPEC_HASH,
   SAMPLE_PROMPT_HASH,
 } from "../fixtures/indexer-side/sample-blocks.js";
-import type { AdvertRow, EscrowRow } from "../../indexer/src/db/cache.js";
+import {
+  AmbiguousEscrowLineageError,
+  type AdvertRow,
+  type EscrowLineage,
+  type EscrowRow,
+} from "../../indexer/src/db/cache.js";
 
 // ─── Mock helpers ─────────────────────────────────────────────────────────────
 
@@ -80,6 +85,8 @@ function makeMockDeps(overrides: Partial<{
   adverts: AdvertRow[];
   escrows: EscrowRow[];
   currentSlot: number;
+  lineage?: EscrowLineage | null;
+  lineageError?: Error;
   tipSlot: number;
 }>): IndexerDeps {
   const adverts = overrides.adverts ?? [sampleAdvert()];
@@ -97,6 +104,10 @@ function makeMockDeps(overrides: Partial<{
     }),
     getAdvertisementByRef: vi.fn((ref: string) => adverts.find(a => a.utxo_ref === ref) ?? null),
     getEscrowByRef: vi.fn((ref: string) => escrows.find(e => e.utxo_ref === ref) ?? null),
+    getEscrowLineage: vi.fn(() => {
+      if (overrides.lineageError) throw overrides.lineageError;
+      return overrides.lineage ?? null;
+    }),
     listEscrowsByBuyer: vi.fn((pkh: string) => escrows.filter(e => e.buyer_pkh === pkh)),
     listEscrowsBySupplier: vi.fn((pkh: string) => escrows.filter(e => e.supplier_pkh === pkh)),
     getSupplierStatus: vi.fn(() => ({
@@ -371,6 +382,61 @@ describe("GET /escrows/:ref", () => {
     const res = await request(app).get(`/escrows/${encodedRef}`);
     expect(res.status).toBe(200);
     expect(res.body.state).toBe("Claimed");
+  });
+});
+
+describe("GET /escrows/:ref/lineage", () => {
+  it("returns the exact rows with spend links and an observed terminal event", async () => {
+    const originalRef = `${"c".repeat(64)}#0`;
+    const submittedRef = `${"d".repeat(64)}#1`;
+    const terminalTx = "e".repeat(64);
+    const lineage: EscrowLineage = {
+      original_ref: originalRef,
+      rows: [
+        { ...sampleEscrow({ utxo_ref: originalRef }), spent_tx: "d".repeat(64) },
+        {
+          ...sampleEscrow({
+            utxo_ref: submittedRef,
+            state: "Submitted",
+            submitted_at: SAMPLE_POSTED_AT + 1_000,
+            result_receipt_hash: "f".repeat(64),
+          }),
+          spent_tx: terminalTx,
+        },
+      ],
+      terminal: { type: "AcceptEscrow", tx_hash: terminalTx },
+    };
+    const app = createApp(makeMockDeps({ lineage }));
+
+    const res = await request(app).get(
+      `/escrows/${encodeURIComponent(originalRef)}/lineage`,
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body.original_ref).toBe(originalRef);
+    expect(res.body.rows.map((row: { utxo_ref: string }) => row.utxo_ref)).toEqual([
+      originalRef,
+      submittedRef,
+    ]);
+    expect(res.body.rows[0].spent_tx).toBe("d".repeat(64));
+    expect(res.body.terminal).toEqual({
+      type: "AcceptEscrow",
+      tx_hash: terminalTx,
+    });
+  });
+
+  it("returns 404 when the origin is not in the active indexed history", async () => {
+    const app = createApp(makeMockDeps({ lineage: null }));
+    const res = await request(app).get("/escrows/missing%230/lineage");
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 409 rather than choosing an ambiguous continuation", async () => {
+    const app = createApp(makeMockDeps({
+      lineageError: new AmbiguousEscrowLineageError("ambiguous#0"),
+    }));
+    const res = await request(app).get("/escrows/ambiguous%230/lineage");
+    expect(res.status).toBe(409);
   });
 });
 

@@ -80,6 +80,8 @@ export interface LivePostEscrowParams {
   totalLocked: bigint;
   deliverBy: number;
   postedAt: number;
+  /** Runs after signing and before any broadcast. Rejection prevents submit. */
+  beforeSubmit?: (built: PostEscrowBuildResult) => Promise<void>;
 }
 
 export interface LiveClaimParams {
@@ -474,18 +476,17 @@ export async function buildLiveTxForEscrow(
 
   const txCborHex = signed.toCBOR();
   const expectedTxHash = signed.toHash();
-
-  await chain.submitTx(txCborHex);
-  // Note: awaiting on-chain confirmation is the SDK's responsibility
-  // (Marketplace.submitPrompt awaits before calling the supplier). Keeping
-  // the live builder submit-only matches the Claim/Submit/Accept pattern
-  // and lets unit tests exercise the builder without stubbing awaitTx.
-
-  return {
+  const built: PostEscrowBuildResult = {
     txCborHex,
     expectedTxHash,
     escrowOutputRef: { txHash: expectedTxHash, index: 0 },
   };
+
+  await params.beforeSubmit?.(built);
+  await chain.submitTx(txCborHex);
+  // Note: awaiting on-chain confirmation is the SDK's responsibility.
+
+  return built;
 }
 
 // ─── Claim / Submit / Accept share input-collection scaffolding ─────────

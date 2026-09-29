@@ -194,7 +194,7 @@ describe.sequential("structured output through gateway, SDK, supplier, and Chat 
     store = new GatewayStore(directory);
     // The simulated ledger implements the chain operations exercised here.
     const gatewayChain = chain as unknown as GatewayDeps["chain"];
-    const registry = new SdkRegistry({ chain: gatewayChain, indexerUrl, networkId: 0, masterKeyHex: config.masterKeyHex, max: 10 });
+    const registry = new SdkRegistry({ chain: gatewayChain, store, indexerUrl, networkId: 0, masterKeyHex: config.masterKeyHex, max: 10 });
     app = createApp({ config, store, chain: gatewayChain, registry, fetchFn: fetch });
     const signup = await request(app).post("/signup").send({ label: "structured-output regression" });
     expect(signup.status).toBe(201);

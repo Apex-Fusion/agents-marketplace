@@ -399,4 +399,47 @@ describe("Marketplace.submitPrompt Responses rejection paths", () => {
     );
     expect(submitSpy).not.toHaveBeenCalled();
   });
+
+  it("fails a paid request when PostEscrow confirmation fails", async () => {
+    const datum = advert();
+    seedAdvert(chain, datum);
+    const fetchImpl = vi.fn(async (url: RequestInfo | URL) => {
+      if (String(url).endsWith("/capability")) {
+        return json(capability(datum));
+      }
+      throw new Error("inference must wait for confirmation");
+    }) as unknown as typeof fetch;
+    const submitSpy = vi.spyOn(chain, "submitTx");
+    vi.spyOn(chain, "awaitTx").mockRejectedValue(
+      new Error("confirmation unavailable"),
+    );
+
+    await expect(marketplace(chain, fetchImpl).submitPrompt({
+      advertRef: ADVERT_REF,
+      input: INPUT,
+      payment_lovelace: PAYMENT,
+    })).rejects.toThrow("confirmation unavailable");
+
+    expect(submitSpy).toHaveBeenCalledTimes(1);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not broadcast when the persist-before-submit hook fails", async () => {
+    const datum = advert();
+    seedAdvert(chain, datum);
+    const fetchImpl = vi.fn(async () => json(capability(datum))) as unknown as typeof fetch;
+    const sdk = marketplace(chain, fetchImpl);
+    const submitSpy = vi.spyOn(chain, "submitTx");
+    const prepared = await sdk.preparePrompt({
+      advertRef: ADVERT_REF,
+      input: INPUT,
+      payment_lovelace: PAYMENT,
+    });
+
+    await expect(sdk.postPrompt(prepared, async () => {
+      throw new Error("journal unavailable");
+    })).rejects.toThrow("journal unavailable");
+
+    expect(submitSpy).not.toHaveBeenCalled();
+  });
 });

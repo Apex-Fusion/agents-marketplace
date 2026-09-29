@@ -264,4 +264,120 @@ describe("Marketplace.submitPrompt Responses lifecycle", () => {
       sha256(responseRequestCommitment({ input: INPUT, max_output_tokens: 256 })),
     );
   });
+
+  it("prepares without spending and posts exactly once before delayed confirmation", async () => {
+    const calls: string[] = [];
+    const fetchImpl = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      if (String(url).endsWith("/capability")) return json(capability());
+      if (String(url).endsWith("/v1/responses")) {
+        calls.push("inference");
+        const request = JSON.parse(String(init?.body)) as ResponseRequest & { model: string };
+        const escrowRef = new Headers(init?.headers).get("X-Escrow-Ref") ?? "";
+        return json(supplierResult(escrowRef, request));
+      }
+      return json({});
+    });
+    const marketplace = new Marketplace({
+      chain,
+      indexerUrl: "http://indexer.test",
+      walletKey: buyer,
+      networkParams: { networkId: 0 },
+      _fetch: fetchImpl as typeof fetch,
+    });
+    const originalSubmit = chain.submitTx.bind(chain);
+    const submitSpy = vi.spyOn(chain, "submitTx").mockImplementation(async (tx: string) => {
+      calls.push("submit");
+      return originalSubmit(tx);
+    });
+    let confirm!: () => void;
+    vi.spyOn(chain, "awaitTx").mockImplementation(
+      () => new Promise<void>((resolve) => {
+        confirm = resolve;
+      }),
+    );
+
+    const prepared = await marketplace.preparePrompt({
+      advertRef: ADVERT_REF,
+      input: INPUT,
+      payment_lovelace: PAYMENT,
+    });
+    expect(prepared).toMatchObject({
+      advertRef: ADVERT_REF,
+      request: { input: INPUT },
+      publicPreview: false,
+    });
+    expect(prepared).not.toHaveProperty("escrowRef");
+    expect(submitSpy).not.toHaveBeenCalled();
+
+    const posting = marketplace.postPrompt(prepared, async (built) => {
+      expect(built.escrowOutputRef.txHash).toBe(built.expectedTxHash);
+      calls.push("beforeSubmit");
+    });
+    await vi.waitFor(() => expect(submitSpy).toHaveBeenCalledTimes(1));
+    expect(calls).toEqual(["beforeSubmit", "submit"]);
+
+    confirm();
+    const posted = await posting;
+    expect(posted).toMatchObject({
+      escrowRef: { txHash: expect.any(String), index: 0 },
+      postedAt: 1_745_500_000_000,
+      deliverBy: 1_745_500_090_000,
+    });
+    expect(submitSpy).toHaveBeenCalledTimes(1);
+
+    const result = await marketplace.executePrompt(posted);
+    expect(result.response).toBe("4");
+    expect(calls).toEqual(["beforeSubmit", "submit", "inference"]);
+    expect(submitSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("awaits job acceptance persistence before the first supplier poll", async () => {
+    let request: ResponseRequest | undefined;
+    let escrowRef = "";
+    let pollCalls = 0;
+    const fetchImpl = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      const target = String(url);
+      if (target.endsWith("/capability")) return json(capability());
+      if (target.endsWith("/v1/responses") && init?.method === "POST") {
+        request = JSON.parse(String(init.body)) as ResponseRequest;
+        escrowRef = new Headers(init.headers).get("X-Escrow-Ref") ?? "";
+        return json({ job_id: "job_123" }, 202);
+      }
+      if (target.endsWith("/v1/responses/job_123")) {
+        pollCalls += 1;
+        if (!request) throw new Error("request was not captured");
+        return json(supplierResult(escrowRef, request));
+      }
+      return json({});
+    });
+    const marketplace = new Marketplace({
+      chain,
+      indexerUrl: "http://indexer.test",
+      walletKey: buyer,
+      networkParams: { networkId: 0 },
+      _fetch: fetchImpl as typeof fetch,
+    });
+    const prepared = await marketplace.preparePrompt({
+      advertRef: ADVERT_REF,
+      input: INPUT,
+      payment_lovelace: PAYMENT,
+    });
+    const posted = await marketplace.postPrompt(prepared);
+    let releaseAccepted!: () => void;
+    let acceptedJob = "";
+
+    const executing = marketplace.executePrompt(posted, async (jobId) => {
+      acceptedJob = jobId;
+      await new Promise<void>((resolve) => {
+        releaseAccepted = resolve;
+      });
+    });
+    await vi.waitFor(() => expect(acceptedJob).toBe("job_123"));
+    expect(pollCalls).toBe(0);
+
+    releaseAccepted();
+    const result = await executing;
+    expect(result.response).toBe("4");
+    expect(pollCalls).toBe(1);
+  });
 });

@@ -45,12 +45,14 @@ function makeSweepDeps(opts: { chatSettleMode: "full" | "ticket"; escrows: Escro
     chatSettleMode: opts.chatSettleMode,
     walletHealthIntervalMs: 600_000,
     sdkRegistryMax: 100,
+    oneShotConcurrency: 4, oneShotMaxOutstanding: 64, oneShotQueueTimeoutMs: 60_000,
     ocrCapabilityId: "ocr.page.extract.chandra-ocr-2.v1",
     corsOrigins: [],
   };
   const chain = { queryUtxo: async () => null } as unknown as GatewayDeps["chain"];
   const registry = new SdkRegistry({
     chain,
+    store,
     indexerUrl: config.indexerUrl,
     networkId: config.networkId,
     masterKeyHex: config.masterKeyHex,

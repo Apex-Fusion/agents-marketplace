@@ -1,4 +1,3 @@
-import { randomUUID } from "crypto";
 import type { Request, Response } from "express";
 import { TxConstructionError } from "@marketplace/shared/tx";
 import { receiptResultHash } from "@marketplace/shared/receipt";
@@ -12,15 +11,16 @@ import {
   type ResponseStreamEvent,
   type ResponseUsage,
 } from "@marketplace/shared/responses";
-import type { SubmitPromptResult } from "@marketplace/buyer/sdk";
+import type { PostedPrompt, SubmitPromptResult } from "@marketplace/buyer/sdk";
+import { inspectSignedTransaction } from "@marketplace/shared/tx/server";
 import type { GatewayDeps } from "../deps.js";
 import type { ApiKeyRow, GatewayStore, StoredResponseRow } from "../db/store.js";
 import type { KeyContext } from "../sdk/registry.js";
 import { requireKey } from "../middleware/apiKeyAuth.js";
-import { asyncHandler } from "../middleware/http.js";
+import { asyncHandler, requestAbortSignal } from "../middleware/http.js";
 import { selectCandidates, type SupplierCandidate } from "../routing/selectSupplier.js";
 import { preflight } from "../onchain/preflight.js";
-import { resolveSubmittedRef, acceptAndConfirm, oneShotBudgetMs } from "../onchain/settle.js";
+import { resolveSubmittedRef, acceptAndConfirm } from "../onchain/settle.js";
 import { ensureWalletHealthy } from "../walletHealth.js";
 import { parseResponseRequest, executionRequest, type ParsedResponseRequest } from "./validate.js";
 import { runDemoResponse } from "./demoChat.js";
@@ -42,10 +42,12 @@ import {
   readStoredResponse,
 } from "./responseStore.js";
 import { GatewayError, badRequest, notFound, paymentRequired, toGatewayError } from "./errors.js";
+import { reserveOneShotSupplier, runOneShotJob, updateOneShotJob } from "../oneShotJobs.js";
 
 const CAPABILITY = "llm.text.generate.v1";
 
 function recordUsage(store: GatewayStore, args: {
+  id: string;
   keyId: string;
   model: string;
   supplierPkh: string | null;
@@ -55,8 +57,8 @@ function recordUsage(store: GatewayStore, args: {
   status: "completed" | "failed";
   failureReason?: string;
 }): void {
-  store.insertUsage({
-    id: randomUUID(), key_id: args.keyId, created_at: Date.now(), kind: "completion",
+  store.upsertUsage({
+    id: args.id, key_id: args.keyId, created_at: Date.now(), kind: "completion",
     model: args.model, capability_id: CAPABILITY, supplier_pkh: args.supplierPkh,
     escrow_ref: args.escrowRef,
     cost_lovelace: args.costLovelace === null ? null : args.costLovelace.toString(),
@@ -86,6 +88,7 @@ export interface ResponseExecutionOptions {
   createdAt: number;
   onCommit: () => void;
   onStreamEvent?: (event: ResponseStreamEvent) => void;
+  signal?: AbortSignal;
 }
 
 /** Shared execution and settlement; HTTP controllers own their wire format. */
@@ -126,32 +129,22 @@ export async function executeResponse(
         responseId, createdAt, history, parent, onCommit, onStreamEvent,
       });
     }
-    const candidates = await selectCandidates({
-      indexerUrl: deps.config.indexerUrl,
-      model: parsed.model,
-      capabilityId: CAPABILITY,
-      supplierPkh: parsed.supplierPkh,
-      preferredSupplierPkh: deps.config.preferredSupplierPkh,
-      fetchFn: deps.fetchFn,
-    });
-    if (candidates.length === 0) {
-      throw notFound("model_not_found", `no active supplier for model "${parsed.model}" with capability "${CAPABILITY}"`, "model");
-    }
     const ctx = deps.registry.getContext(keyRow);
-    return await ctx.mutex.run(
+    return await runOneShotJob(
+      deps, keyRow, { id: responseId, model: parsed.model, signal: options.signal },
       () => runOneShot(
         deps, keyRow, ctx, parsed, request, history,
-        responseId, createdAt, candidates, onCommit, onStreamEvent,
+        responseId, createdAt, onCommit, onStreamEvent, options.signal,
       ),
-      "response",
-      oneShotBudgetMs(Math.max(...candidates.map((candidate) => candidate.maxProcessingMs))),
     );
   } catch (error) {
-    if (!keyRow.demo && !(error instanceof GatewayError && error.code === "model_not_found")) {
+    const job = deps.store.getOneShotJob(responseId);
+    if (!keyRow.demo && !job?.settle_tx_hash && !(error instanceof GatewayError && error.code === "model_not_found")) {
       recordUsage(deps.store, {
-        keyId: keyRow.id, model: parsed.model, supplierPkh: null, escrowRef: null,
+        id: responseId, keyId: keyRow.id, model: parsed.model,
+        supplierPkh: job?.supplier_pkh ?? null, escrowRef: job?.escrow_ref ?? null,
         costLovelace: null, usage: null, status: "failed",
-        failureReason: error instanceof Error ? error.message : String(error),
+        failureReason: toGatewayError(error).code,
       });
     }
     throw error;
@@ -164,6 +157,7 @@ export function makeResponsesHandler(deps: GatewayDeps) {
     const parsed = parseResponseRequest(req.body);
     const responseId = genId();
     const responseCreatedAt = nowSec();
+    const signal = requestAbortSignal(res);
     let keepalive: NodeJS.Timeout | undefined;
     let streamedEvents = false;
     let streamSequence = 0;
@@ -191,6 +185,7 @@ export function makeResponsesHandler(deps: GatewayDeps) {
         createdAt: responseCreatedAt,
         onCommit,
         onStreamEvent: parsed.stream ? onStreamEvent : undefined,
+        signal,
       });
       clearInterval(keepalive);
       if (res.destroyed) return;
@@ -256,103 +251,135 @@ async function runOneShot(
   history: ResponseItem[],
   responseId: string,
   responseCreatedAt: number,
-  candidates: SupplierCandidate[],
   onCommit: () => void,
   onStreamEvent?: (event: ResponseStreamEvent) => void,
+  signal?: AbortSignal,
 ): Promise<ResponseObject> {
-  const primary = candidates[0];
-  const pf = await preflight(deps.chain, ctx.walletKey.address, primary);
-  if (!pf.ok) {
-    throw paymentRequired(
-      pf.collateralOk ? "insufficient balance for this request" :
-        "wallet has no pure-AP3X UTxO ≥ 5 AP3X for collateral; deposit a little more AP3X",
-      { x_vector: {
-        required_lovelace: pf.requiredLovelace.toString(),
-        available_lovelace: pf.availableLovelace.toString(),
-        collateral_ok: pf.collateralOk,
-        deposit_address: ctx.walletKey.address,
-      } },
-    );
-  }
-  onCommit();
-
-  if (onStreamEvent) {
-    const initial = publicResponse({
-      id: responseId,
-      model: parsed.model,
-      createdAt: responseCreatedAt,
-      result: createResponse({
-        id: responseId,
-        model: parsed.model,
-        created_at: responseCreatedAt,
-        status: "in_progress",
-      }),
-      previousResponseId: parsed.previousResponseId,
-      metadata: parsed.metadata,
-    });
-    onStreamEvent({ type: "response.created", response: initial });
-    onStreamEvent({ type: "response.in_progress", response: initial });
-  }
-  let result: SubmitPromptResult | undefined;
+  const excluded = new Set<string>();
+  const input = [...history, ...request.input];
+  let posted: PostedPrompt | undefined;
   let used: SupplierCandidate | undefined;
   let lastError: unknown;
-  for (const candidate of candidates) {
-    try {
-      const explicitLimit = request.max_output_tokens === undefined
-        ? undefined
-        : Math.min(request.max_output_tokens, candidate.maxOutputTokens);
-      result = await ctx.sdk.submitPrompt({
-        advertRef: candidate.advertRef,
-        ...request,
-        input: [...history, ...request.input],
-        ...(explicitLimit === undefined ? {} : { max_output_tokens: explicitLimit }),
-        payment_lovelace: candidate.priceLovelace,
-        public_preview: parsed.publicPreview,
+  let committed = false;
+  while (!posted) {
+    const candidate = await reserveOneShotSupplier(deps, responseId, async (admissionSignal) => {
+      const candidates = await selectCandidates({
+        indexerUrl: deps.config.indexerUrl, model: parsed.model, capabilityId: CAPABILITY,
+        supplierPkh: parsed.supplierPkh, preferredSupplierPkh: deps.config.preferredSupplierPkh,
+        fetchFn: deps.fetchFn, signal: admissionSignal,
       });
+      const eligible = candidates.filter((item) => !excluded.has(item.supplierPkh));
+      if (eligible.length === 0 && lastError) throw lastError;
+      return eligible;
+    }, signal);
+    try {
+      const prepared = await ctx.sdk.preparePrompt({
+        advertRef: candidate.advertRef, ...request, input,
+        ...(request.max_output_tokens === undefined ? {} : {
+          max_output_tokens: Math.min(request.max_output_tokens, candidate.maxOutputTokens),
+        }),
+        payment_lovelace: candidate.priceLovelace, public_preview: parsed.publicPreview,
+      });
+      if (prepared.advert.supplier_pkh !== candidate.supplierPkh) {
+        throw new GatewayError(503, "server_error", "supplier_identity_changed", "advert no longer matches the reserved supplier");
+      }
+      posted = await ctx.mutex.run(async () => {
+        if (signal?.aborted) {
+          throw new GatewayError(408, "invalid_request_error", "request_cancelled", "request closed before escrow funding");
+        }
+        const pf = await preflight(ctx.chain, ctx.walletKey.address, candidate);
+        if (!pf.ok) {
+          throw paymentRequired(
+            pf.collateralOk ? "insufficient balance for this request" :
+              "wallet has no pure-AP3X UTxO ≥ 5 AP3X for collateral; deposit a little more AP3X",
+            { x_vector: {
+              required_lovelace: pf.requiredLovelace.toString(),
+              available_lovelace: pf.availableLovelace.toString(),
+              collateral_ok: pf.collateralOk, deposit_address: ctx.walletKey.address,
+            } },
+          );
+        }
+        if (!committed) {
+          committed = true;
+          onCommit();
+          if (onStreamEvent) {
+            const initial = publicResponse({
+              id: responseId, model: parsed.model, createdAt: responseCreatedAt,
+              result: createResponse({
+                id: responseId, model: parsed.model, created_at: responseCreatedAt, status: "in_progress",
+              }),
+              previousResponseId: parsed.previousResponseId, metadata: parsed.metadata,
+            });
+            onStreamEvent({ type: "response.created", response: initial });
+            onStreamEvent({ type: "response.in_progress", response: initial });
+          }
+        }
+        return ctx.sdk.postPrompt(prepared, async (built) => {
+          if (signal?.aborted) {
+            throw new GatewayError(408, "invalid_request_error", "request_cancelled", "request closed before escrow funding");
+          }
+          // Persist the exact output before broadcast, including ambiguous
+          // submissions. A retry must never create another escrow for this job.
+          updateOneShotJob(deps, responseId, {
+            state: "funding", escrow_ref: `${built.escrowOutputRef.txHash}#${built.escrowOutputRef.index}`,
+            post_valid_until_slot: inspectSignedTransaction(built.txCborHex).validUntilSlot,
+          });
+        });
+      }, "post-response", 0);
       used = candidate;
-      break;
     } catch (error) {
       lastError = error;
-      if (error instanceof TxConstructionError &&
-          error.reason !== "supplier_preflight_failed" &&
-          error.reason !== "supplier_adapter_incompatible") continue;
-      throw error;
+      const job = deps.store.getOneShotJob(responseId);
+      if (job?.escrow_ref || !(error instanceof TxConstructionError) ||
+          error.reason === "supplier_preflight_failed" || error.reason === "supplier_adapter_incompatible") throw error;
+      excluded.add(candidate.supplierPkh);
+      updateOneShotJob(deps, responseId, {
+        state: "queued", supplier_pkh: null, endpoint_url: null, advert_ref: null,
+        price_lovelace: null, max_processing_ms: null,
+      });
     }
   }
-  if (!result || !used) throw toGatewayError(lastError ?? new Error("no supplier could be engaged"));
+  if (!used) throw new Error("posted request has no reserved supplier");
+  updateOneShotJob(deps, responseId, { state: "running", deliver_by: posted.deliverBy });
 
+  // No wallet lock while the supplier generates and the SDK verifies output.
+  const result: SubmitPromptResult = await ctx.sdk.executePrompt(posted, async (jobId) => {
+    updateOneShotJob(deps, responseId, { supplier_job_id: jobId });
+  });
   const originalRef = `${result.escrowRef.txHash}#${result.escrowRef.index}`;
+  const receiptHash = receiptResultHash({ receipt: result.receipt, signature: result.receiptSignature });
+  updateOneShotJob(deps, responseId, {
+    state: "submitted", receipt_hash: receiptHash,
+    submitted_ref: result.submittedRef ? `${result.submittedRef.txHash}#${result.submittedRef.index}` : null,
+  });
   const submittedRef = await resolveSubmittedRef({
-    chain: deps.chain,
-    indexerUrl: deps.config.indexerUrl,
-    buyerPkh: ctx.walletKey.pubKeyHash,
-    originalRefStr: originalRef,
-    hint: result.submittedRef && {
-      ref: result.submittedRef,
-      resultReceiptHash: receiptResultHash({ receipt: result.receipt, signature: result.receiptSignature }),
-    },
+    chain: ctx.chain, indexerUrl: deps.config.indexerUrl, buyerPkh: ctx.walletKey.pubKeyHash,
+    originalRefStr: originalRef, receiptHash,
+    hint: result.submittedRef && { ref: result.submittedRef, resultReceiptHash: receiptHash },
     fetchFn: deps.fetchFn,
   });
-  await acceptAndConfirm(deps.chain, ctx.walletKey, submittedRef);
+  await ctx.mutex.run(async () => {
+    updateOneShotJob(deps, responseId, {
+      state: "settling", submitted_ref: `${submittedRef.txHash}#${submittedRef.index}`,
+    });
+    const txHash = await acceptAndConfirm(ctx.chain, ctx.walletKey, submittedRef);
+    updateOneShotJob(deps, responseId, { settle_tx_hash: txHash });
+  }, "accept-response", 0);
 
   const usage = result.result.usage ?? usageFromReceipt(result.receipt);
-  const terminal = { ...result.result, usage };
   const response = publicResponse({
-    id: responseId,
-    model: parsed.model,
-    createdAt: responseCreatedAt,
-    result: terminal,
-    previousResponseId: parsed.previousResponseId,
-    metadata: parsed.metadata,
+    id: responseId, model: parsed.model, createdAt: responseCreatedAt,
+    result: { ...result.result, usage },
+    previousResponseId: parsed.previousResponseId, metadata: parsed.metadata,
     vector: { receipt: result.receipt, receipt_signature: result.receiptSignature, escrow_ref: originalRef },
   });
   if (parsed.store) completeStoredResponse(deps, { id: responseId, keyId: keyRow.id, response });
   recordUsage(deps.store, {
-    keyId: keyRow.id, model: parsed.model, supplierPkh: used.supplierPkh,
+    id: responseId, keyId: keyRow.id, model: parsed.model, supplierPkh: used.supplierPkh,
     escrowRef: originalRef, costLovelace: used.priceLovelace, usage, status: "completed",
   });
-  await ensureWalletHealthy(deps.chain, ctx.walletKey).catch((error) =>
-    console.error("[gateway] wallet-health after response:", error instanceof Error ? error.message : error));
+  await ctx.mutex.run(() => ensureWalletHealthy(ctx.chain, ctx.walletKey), "response-wallet-health", 0)
+    .catch((error) => console.error("[gateway] wallet-health after response:", error instanceof Error ? error.message : error));
   if (onStreamEvent) {
     for (const event of responseEvents(response).slice(2)) onStreamEvent(event);
   }

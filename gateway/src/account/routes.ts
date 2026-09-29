@@ -217,12 +217,12 @@ export function makeWithdrawHandler(deps: GatewayDeps) {
     const ctx = deps.registry.getContext(keyRow);
     await ctx.mutex.run(async () => {
       const built = await buildWithdrawTx({
-        chain: deps.chain,
+        chain: ctx.chain,
         walletKey: ctx.walletKey,
         toAddress,
         amountLovelace,
       });
-      await deps.chain.awaitTx(built.expectedTxHash, 120_000);
+      await ctx.chain.awaitTx(built.expectedTxHash, 120_000);
       res.status(200).json({
         status: "submitted",
         tx_hash: built.expectedTxHash,

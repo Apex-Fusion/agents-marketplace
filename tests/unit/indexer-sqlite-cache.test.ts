@@ -13,7 +13,10 @@ import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
-import { SqliteCache } from "../../indexer/src/db/cache.js";
+import {
+  AmbiguousEscrowLineageError,
+  SqliteCache,
+} from "../../indexer/src/db/cache.js";
 import type { AdvertRow, EscrowRow, SupplierStatusRow } from "../../indexer/src/db/cache.js";
 import {
   buildAdvertDatumHex,
@@ -86,6 +89,22 @@ function sampleEscrowRow(overrides: Partial<EscrowRow> = {}): Omit<EscrowRow, "i
     rolled_back: 0,
     ...overrides,
   };
+}
+
+function insertEscrowState(
+  cache: SqliteCache,
+  row: Omit<EscrowRow, "id">,
+  createdSlot: number,
+  createdTx: string,
+): void {
+  cache.upsertEscrow({ ...row, created_slot: createdSlot });
+  cache.insertUtxo(
+    row.utxo_ref,
+    "addr_test1wESCROW",
+    row.datum_hex,
+    createdSlot,
+    createdTx,
+  );
 }
 
 // ─── Schema ──────────────────────────────────────────────────────────────────
@@ -280,6 +299,139 @@ describe("SqliteCache — escrows", () => {
     cache.upsertEscrow(sampleEscrowRow({ result_receipt_hash: hash, state: "Submitted" }));
     const found = cache.getEscrowByRef("c".repeat(64) + "#0");
     expect(found!.result_receipt_hash).toBe(hash);
+    cache.close();
+  });
+});
+
+describe("SqliteCache — escrow lineage", () => {
+  afterEach(cleanupTemp);
+
+  it("uses spent transactions and immutable identity when same-time escrows transition together", () => {
+    const cache = new SqliteCache(tempDb());
+    const openA = `${"1".repeat(64)}#0`;
+    const openB = `${"2".repeat(64)}#0`;
+    const transitionTx = "3".repeat(64);
+    const claimedA = `${transitionTx}#0`;
+    const claimedB = `${transitionTx}#1`;
+    const rowA = sampleEscrowRow({
+      utxo_ref: openA,
+      prompt_hash: "a".repeat(64),
+    });
+    const rowB = sampleEscrowRow({
+      utxo_ref: openB,
+      prompt_hash: "b".repeat(64),
+    });
+    insertEscrowState(cache, rowA, 100, "1".repeat(64));
+    insertEscrowState(cache, rowB, 100, "2".repeat(64));
+    cache.spendUtxo(openA, 200, transitionTx);
+    cache.spendUtxo(openB, 200, transitionTx);
+    insertEscrowState(
+      cache,
+      { ...rowA, utxo_ref: claimedA, state: "Claimed" },
+      200,
+      transitionTx,
+    );
+    insertEscrowState(
+      cache,
+      { ...rowB, utxo_ref: claimedB, state: "Claimed" },
+      200,
+      transitionTx,
+    );
+
+    const lineage = cache.getEscrowLineage(openA);
+
+    expect(lineage?.rows.map((row) => row.utxo_ref)).toEqual([openA, claimedA]);
+    expect(lineage?.rows[0].spent_tx).toBe(transitionTx);
+    cache.close();
+  });
+
+  it("fails closed when one spend has multiple matching continuations", () => {
+    const cache = new SqliteCache(tempDb());
+    const openRef = `${"4".repeat(64)}#0`;
+    const transitionTx = "5".repeat(64);
+    const open = sampleEscrowRow({ utxo_ref: openRef });
+    insertEscrowState(cache, open, 100, "4".repeat(64));
+    cache.spendUtxo(openRef, 200, transitionTx);
+    insertEscrowState(
+      cache,
+      { ...open, utxo_ref: `${transitionTx}#0`, state: "Claimed" },
+      200,
+      transitionTx,
+    );
+    insertEscrowState(
+      cache,
+      { ...open, utxo_ref: `${transitionTx}#1`, state: "Claimed" },
+      200,
+      transitionTx,
+    );
+
+    expect(() => cache.getEscrowLineage(openRef)).toThrow(AmbiguousEscrowLineageError);
+    cache.close();
+  });
+
+  it("reports an observed terminal spend and rewinds to the last live row on rollback", () => {
+    const cache = new SqliteCache(tempDb());
+    const openRef = `${"6".repeat(64)}#0`;
+    const claimTx = "7".repeat(64);
+    const claimedRef = `${claimTx}#0`;
+    const submitTx = "8".repeat(64);
+    const submittedRef = `${submitTx}#0`;
+    const acceptTx = "9".repeat(64);
+    const open = sampleEscrowRow({ utxo_ref: openRef });
+    const claimed = { ...open, utxo_ref: claimedRef, state: "Claimed" };
+    const submitted = {
+      ...open,
+      utxo_ref: submittedRef,
+      state: "Submitted",
+      submitted_at: SAMPLE_POSTED_AT + 1_000,
+      result_receipt_hash: "e".repeat(64),
+    };
+    insertEscrowState(cache, open, 100, "6".repeat(64));
+    cache.spendUtxo(openRef, 200, claimTx);
+    insertEscrowState(cache, claimed, 200, claimTx);
+    cache.spendUtxo(claimedRef, 300, submitTx);
+    insertEscrowState(cache, submitted, 300, submitTx);
+    cache.spendUtxo(submittedRef, 400, acceptTx);
+    cache.appendEvent({
+      type: "AcceptEscrow",
+      slot: 400,
+      tx_hash: acceptTx,
+      utxo_ref: submittedRef,
+      datum_hex: submitted.datum_hex,
+      metadata_json: "{}",
+      rolled_back: 0,
+    });
+
+    expect(cache.getEscrowLineage(openRef)?.terminal).toEqual({
+      type: "AcceptEscrow",
+      tx_hash: acceptTx,
+    });
+
+    cache.rollbackToSlot(250);
+    const rewound = cache.getEscrowLineage(openRef);
+    expect(rewound?.rows.map((row) => row.utxo_ref)).toEqual([openRef, claimedRef]);
+    expect(rewound?.rows[1].spent_tx).toBeNull();
+    expect(rewound?.terminal).toBeNull();
+    cache.close();
+  });
+
+  it("does not infer a terminal state from a spent output without an event", () => {
+    const cache = new SqliteCache(tempDb());
+    const submittedRef = `${"a".repeat(64)}#2`;
+    const spendTx = "b".repeat(64);
+    const submitted = sampleEscrowRow({
+      utxo_ref: submittedRef,
+      state: "Submitted",
+      submitted_at: SAMPLE_POSTED_AT + 1_000,
+      result_receipt_hash: "e".repeat(64),
+    });
+    insertEscrowState(cache, submitted, 100, "a".repeat(64));
+    cache.spendUtxo(submittedRef, 200, spendTx);
+
+    const lineage = cache.getEscrowLineage(submittedRef);
+
+    expect(lineage?.rows[0].spent_tx).toBe(spendTx);
+    expect(lineage?.terminal).toBeNull();
     cache.close();
   });
 });

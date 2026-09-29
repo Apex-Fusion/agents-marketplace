@@ -59,12 +59,13 @@ function makeDeps(
     keyRate: { max: 1000, windowMs: 60_000 }, demoIpRate: { max: demoIpMax, windowMs: 60_000 },
     sweeperIntervalMs: 60_000, demoSessionIdleMs: 180_000, chatSettleMode,
     walletHealthIntervalMs: 600_000, sdkRegistryMax: 100,
+    oneShotConcurrency: 4, oneShotMaxOutstanding: 64, oneShotQueueTimeoutMs: 60_000,
     ocrCapabilityId: "ocr.page.extract.chandra-ocr-2.v1", corsOrigins: [],
   };
   const chain = chainOverride ??
     ({ queryUtxosByAddress: async () => [] } as unknown as GatewayDeps["chain"]);
   const registry = new SdkRegistry({
-    chain, indexerUrl: config.indexerUrl, networkId: config.networkId,
+    chain, store, indexerUrl: config.indexerUrl, networkId: config.networkId,
     masterKeyHex: config.masterKeyHex, max: config.sdkRegistryMax,
   });
   const defaultFetch = (async () => new Response("[]", { status: 200 })) as unknown as typeof globalThis.fetch;
@@ -1282,91 +1283,6 @@ describe("POST /openai/v1/chat/completions", () => {
     });
   });
 
-  it("uses one-shot routing and records paid Chat usage for a normal key", async () => {
-    const alternate = {
-      ...SUPPLIERS[0],
-      utxo_ref: `${"cc".repeat(32)}#0`,
-      supplier_pkh: "c".repeat(56),
-      price_lovelace: "2000000",
-    };
-    const paidSuppliers = [alternate, ...SUPPLIERS];
-    const fetchFn = (async (url: unknown) => {
-      if (String(url).includes("/suppliers")) {
-        return new Response(JSON.stringify(paidSuppliers), { status: 200 });
-      }
-      return new Response("[]", { status: 200 });
-    }) as unknown as typeof globalThis.fetch;
-    const deps = makeDeps(fetchFn, 1000, FUNDED_CHAIN);
-    const app = createApp(deps);
-    const signup = await request(app).post("/signup").send({ label: "paid-chat" });
-    const rawKey = signup.body.api_key as string;
-    const keyRow = deps.store.getKeyByHash(hashApiKey(rawKey))!;
-    const ctx = deps.registry.getContext(keyRow);
-    const escrowRef = { txHash: "d".repeat(64), index: 0 };
-    const submitPrompt = vi.fn(async () => ({
-      result: createResponse({
-        id: "resp_paid",
-        model: "qwen",
-        output: [{
-          id: "msg_paid",
-          type: "message" as const,
-          role: "assistant" as const,
-          status: "completed",
-          content: [{ type: "output_text" as const, text: "Paid answer", annotations: [] }],
-        }],
-        usage: { input_tokens: 6, output_tokens: 3, total_tokens: 9 },
-      }),
-      receipt: {
-        prompt_hash: "1".repeat(64),
-        response_hash: "2".repeat(64),
-        model: "qwen",
-        prompt_tokens: 6,
-        completion_tokens: 3,
-        wallclock_ms: 10,
-        supplier_pkh: "a".repeat(56),
-        escrow_ref: `${escrowRef.txHash}#${escrowRef.index}`,
-      },
-      receiptSignature: "supplier-signature",
-      escrowRef,
-    }));
-    const mutableSdk = ctx.sdk as unknown as { submitPrompt: typeof submitPrompt };
-    mutableSdk.submitPrompt = submitPrompt;
-
-    const completion = await request(app)
-      .post("/openai/v1/chat/completions")
-      .set("authorization", `Bearer ${rawKey}`)
-      .send({
-        model: "qwen",
-        messages: [{ role: "user", content: "Paid request" }],
-        x_vector: { supplier_pkh: "a".repeat(56) },
-      });
-    expect(completion.status).toBe(200);
-    expect(completion.body.choices[0]).toMatchObject({
-      finish_reason: "stop",
-      message: { role: "assistant", content: "Paid answer" },
-    });
-    expect(completion.body.x_vector).toMatchObject({
-      escrow_ref: `${escrowRef.txHash}#${escrowRef.index}`,
-      receipt: {
-        model: "qwen",
-        supplier_pkh: "a".repeat(56),
-      },
-    });
-
-    const account = await request(app).get("/account")
-      .set("authorization", `Bearer ${rawKey}`);
-    expect(account.body.spend).toEqual({
-      total_cost_lovelace: "1000000",
-      request_count: 1,
-    });
-    expect(account.body.recent_usage[0]).toMatchObject({
-      kind: "completion",
-      model: "qwen",
-      status: "completed",
-      cost_lovelace: "1000000",
-      escrow_ref: `${escrowRef.txHash}#${escrowRef.index}`,
-    });
-  });
 
   it("emits one in-band error and no success terminal after streaming commits", async () => {
     const script = scriptedDemoFetch([

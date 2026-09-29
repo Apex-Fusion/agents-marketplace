@@ -10,7 +10,7 @@ import {
 } from "@marketplace/shared/responses";
 import type { GatewayDeps } from "../deps.js";
 import { requireKey } from "../middleware/apiKeyAuth.js";
-import { asyncHandler } from "../middleware/http.js";
+import { asyncHandler, requestAbortSignal } from "../middleware/http.js";
 import { GatewayError, badRequest, toErrorBody, toGatewayError } from "./errors.js";
 import { executeResponse } from "./responses.js";
 import { genId, nowSec } from "./shapes.js";
@@ -802,6 +802,7 @@ export function makeChatCompletionsHandler(deps: GatewayDeps) {
     const responseId = genId();
     const created = nowSec();
     const id = chatId(responseId);
+    const signal = requestAbortSignal(res);
     const stream = parsed.stream
       ? new ChatStreamWriter(res, id, created, parsed.model, includeUsage)
       : undefined;
@@ -812,6 +813,7 @@ export function makeChatCompletionsHandler(deps: GatewayDeps) {
         createdAt: created,
         onCommit: () => stream?.open(),
         onStreamEvent: stream ? (event: ResponseStreamEvent) => stream.handle(event) : undefined,
+        signal,
       });
       if (stream) {
         stream.finish(response);

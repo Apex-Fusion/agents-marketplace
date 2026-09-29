@@ -235,7 +235,8 @@ async function runOcrOneShot(
   attribution: { venue: string; runUserHash: string },
   res: Response,
 ): Promise<void> {
-  const { config, store, chain, fetchFn } = deps;
+  const { config, store, fetchFn } = deps;
+  const chain = ctx.chain;
   const capabilityId = config.ocrCapabilityId;
 
   // Hoisted above the try so the catch block can report whatever is known

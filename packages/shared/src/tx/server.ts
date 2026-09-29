@@ -16,6 +16,8 @@ export type {
   PublishRefScriptsBuildResult,
 } from "./internal/publishReferenceScripts.js";
 export { buildLiveTxForPublishReferenceScripts } from "./internal/publishReferenceScripts.js";
+export type { SignedTransactionInfo } from "./internal/signedTransaction.js";
+export { inspectSignedTransaction } from "./internal/signedTransaction.js";
 
 // ── Wallet consolidate (one-shot operational tx; live-only) ─────────────
 export type {

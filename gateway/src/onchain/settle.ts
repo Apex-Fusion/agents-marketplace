@@ -8,16 +8,13 @@
  *   1. The supplier's done payload carries `submitted_ref` (the Submit tx
  *      output). We verify it from chain state alone: the UTxO must be a
  *      Submitted escrow of this wallet whose result_receipt_hash equals the
- *      hash of the signed receipt we hold — Submit binds that hash on chain,
- *      so a supplier cannot point us at a different escrow.
- *   2. Fallback (older suppliers, or a hint that fails verification): poll the
- *      indexer (mirrors buyer /v1/accept: match the lineage by posted_at).
- *      Because the per-key mutex serializes a wallet's escrows, at settle time
- *      the wallet has at most one in-flight escrow, so a lone Submitted row is
- *      unambiguously ours. The indexer lags the chain by up to minutes under
- *      load (2026-09-05: a 60 s poll gave up on a paid, submitted job), so the
- *      fallback budget is generous; the accept window is 600 s from
- *      submitted_at and the Accept itself needs ACCEPT_CONFIRM_TIMEOUT_MS.
+ *      hash of the signed receipt we hold.
+ *   2. Fallback follows the indexer's exact spend-linked lineage from the
+ *      original ref. The candidate is still verified from live chain state.
+ *
+ * Timestamp and lone-Submitted guesses are intentionally forbidden. Multiple
+ * concurrent escrows can share a buyer and posted_at, so either guess can pay
+ * for another request.
  *
  * acceptResult/reclaim on the SDK are fire-and-forget; here we buildAcceptTx /
  * buildReclaimTx and AWAIT confirmation so a returned success means settled.
@@ -65,6 +62,31 @@ export interface EscrowRow {
   posted_at: number;
   /** Validator reclaim floor (indexer serves it; absent on very old rows). */
   deliver_by?: number;
+  buyer_pkh?: string;
+  supplier_pkh?: string;
+  advert_ref?: string;
+  capability_id?: string;
+  request_spec_hash?: string;
+  prompt_hash?: string;
+  payment_lovelace?: string;
+  buyer_bond_lovelace?: string;
+  supplier_bond_lovelace?: string;
+  submitted_at?: number | null;
+  result_receipt_hash?: string | null;
+  created_slot?: number;
+  spent_tx?: string | null;
+}
+
+export interface EscrowLineageRow extends EscrowRow {
+  spent_tx: string | null;
+}
+
+export type EscrowTerminalType = "AcceptEscrow" | "ReclaimEscrow" | "ReleaseEscrow";
+
+export interface EscrowLineage {
+  original_ref: string;
+  rows: EscrowLineageRow[];
+  terminal: { type: EscrowTerminalType; tx_hash: string } | null;
 }
 
 export async function fetchEscrows(
@@ -77,6 +99,73 @@ export async function fetchEscrows(
   const body = (await res.json()) as unknown;
   if (!Array.isArray(body)) throw new Error("indexer /escrows did not return an array");
   return body as EscrowRow[];
+}
+
+function isEscrowLineageRow(value: unknown): value is EscrowLineageRow {
+  if (typeof value !== "object" || value === null) return false;
+  return (
+    "utxo_ref" in value &&
+    typeof value.utxo_ref === "string" &&
+    "state" in value &&
+    typeof value.state === "string" &&
+    "posted_at" in value &&
+    typeof value.posted_at === "number" &&
+    "spent_tx" in value &&
+    (typeof value.spent_tx === "string" || value.spent_tx === null)
+  );
+}
+
+function isEscrowTerminal(
+  value: unknown,
+): value is { type: EscrowTerminalType; tx_hash: string } {
+  if (typeof value !== "object" || value === null) return false;
+  if (
+    !("type" in value) ||
+    !("tx_hash" in value) ||
+    typeof value.tx_hash !== "string"
+  ) {
+    return false;
+  }
+  return (
+    value.type === "AcceptEscrow" ||
+    value.type === "ReclaimEscrow" ||
+    value.type === "ReleaseEscrow"
+  );
+}
+
+export async function fetchEscrowLineage(
+  indexerUrl: string,
+  originalRef: string,
+  fetchFn: typeof globalThis.fetch,
+): Promise<EscrowLineage | null> {
+  const res = await fetchFn(
+    `${indexerUrl}/escrows/${encodeURIComponent(originalRef)}/lineage`,
+    { signal: AbortSignal.timeout(10_000) },
+  );
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`indexer escrow lineage returned ${res.status}`);
+  const body = (await res.json()) as unknown;
+  if (
+    typeof body !== "object" ||
+    body === null ||
+    !("original_ref" in body) ||
+    typeof body.original_ref !== "string" ||
+    body.original_ref !== originalRef ||
+    !("rows" in body) ||
+    !("terminal" in body)
+  ) {
+    throw new Error("indexer escrow lineage returned an invalid response");
+  }
+  const rows = body.rows;
+  const terminal = body.terminal;
+  if (
+    !Array.isArray(rows) ||
+    !rows.every(isEscrowLineageRow) ||
+    (terminal !== null && !isEscrowTerminal(terminal))
+  ) {
+    throw new Error("indexer escrow lineage returned an invalid response");
+  }
+  return { original_ref: body.original_ref, rows, terminal };
 }
 
 function sleep(ms: number): Promise<void> {
@@ -92,16 +181,47 @@ export interface SubmittedHint {
 }
 
 /** True when the hinted UTxO is a live Submitted escrow of this wallet bound
- * to our receipt. Any lookup or decode failure counts as unverified. */
-async function hintVerified(chain: ChainProvider, buyerPkh: string, hint: SubmittedHint): Promise<boolean> {
+ * to the expected receipt. Any lookup or decode failure counts as unverified. */
+async function hintVerified(
+  chain: ChainProvider,
+  buyerPkh: string,
+  hint: SubmittedHint,
+  expectedReceiptHash?: string,
+): Promise<boolean> {
   try {
+    const receiptHash = expectedReceiptHash ?? hint.resultReceiptHash;
+    if (hint.resultReceiptHash !== receiptHash) return false;
     const utxo = await chain.queryUtxo(hint.ref);
     if (!utxo?.datumHex) return false;
     const datum = decodeEscrowDatum(utxo.datumHex);
     return (
       datum.state === "Submitted" &&
       datum.buyer_pkh === buyerPkh &&
-      datum.result_receipt_hash === hint.resultReceiptHash
+      datum.result_receipt_hash === receiptHash
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function lineageSubmittedVerified(
+  chain: ChainProvider,
+  buyerPkh: string,
+  row: EscrowLineageRow,
+  expectedReceiptHash?: string,
+): Promise<boolean> {
+  try {
+    if (row.state !== "Submitted" || row.spent_tx !== null) return false;
+    const receiptHash = expectedReceiptHash ?? row.result_receipt_hash;
+    if (!receiptHash) return false;
+    const ref = refOrThrow(row.utxo_ref);
+    const utxo = await chain.queryUtxo(ref);
+    if (!utxo?.datumHex) return false;
+    const datum = decodeEscrowDatum(utxo.datumHex);
+    return (
+      datum.state === "Submitted" &&
+      datum.buyer_pkh === buyerPkh &&
+      datum.result_receipt_hash === receiptHash
     );
   } catch {
     return false;
@@ -109,19 +229,29 @@ async function hintVerified(chain: ChainProvider, buyerPkh: string, hint: Submit
 }
 
 /** Resolve the current Submitted UTxO of our in-flight escrow: the verified
- * supplier hint when there is one, else poll the indexer. */
+ * supplier hint when there is one, else its exact spend-linked lineage. */
 export async function resolveSubmittedRef(opts: {
   chain: ChainProvider;
   indexerUrl: string;
   buyerPkh: string;
   originalRefStr: string;
   hint?: SubmittedHint;
+  receiptHash?: string;
   fetchFn?: typeof globalThis.fetch;
   timeoutMs?: number;
   intervalMs?: number;
 }): Promise<OutputReference> {
   if (opts.hint) {
-    if (await hintVerified(opts.chain, opts.buyerPkh, opts.hint)) return opts.hint.ref;
+    if (
+      await hintVerified(
+        opts.chain,
+        opts.buyerPkh,
+        opts.hint,
+        opts.receiptHash,
+      )
+    ) {
+      return opts.hint.ref;
+    }
     // eslint-disable-next-line no-console
     console.warn(
       `[gateway] supplier submitted_ref ${opts.hint.ref.txHash}#${opts.hint.ref.index} for ${opts.originalRefStr} did not verify on chain; falling back to the indexer`,
@@ -136,24 +266,23 @@ export async function resolveSubmittedRef(opts: {
   let lastErr: unknown;
   for (;;) {
     try {
-      const rows = await fetchEscrows(opts.indexerUrl, opts.buyerPkh, fetchFn);
-
-      // 1. Direct: the original ref already shows Submitted.
-      const direct = rows.find((r) => r.utxo_ref === opts.originalRefStr && r.state === "Submitted");
-      if (direct) return refOrThrow(direct.utxo_ref);
-
-      // 2. Lineage: find the original row to read posted_at, then the Submitted
-      //    row sharing it (the validator preserves posted_at across states).
-      const lineage = rows.find((r) => r.utxo_ref === opts.originalRefStr);
-      if (lineage) {
-        const submitted = rows.find((r) => r.posted_at === lineage.posted_at && r.state === "Submitted");
-        if (submitted) return refOrThrow(submitted.utxo_ref);
+      const lineage = await fetchEscrowLineage(
+        opts.indexerUrl,
+        opts.originalRefStr,
+        fetchFn,
+      );
+      const current = lineage?.rows.at(-1);
+      if (
+        current &&
+        await lineageSubmittedVerified(
+          opts.chain,
+          opts.buyerPkh,
+          current,
+          opts.receiptHash,
+        )
+      ) {
+        return refOrThrow(current.utxo_ref);
       }
-
-      // 3. Fallback: the mutex guarantees ≤1 in-flight escrow for this wallet,
-      //    so a single Submitted row is ours.
-      const submittedRows = rows.filter((r) => r.state === "Submitted");
-      if (submittedRows.length === 1) return refOrThrow(submittedRows[0].utxo_ref);
     } catch (err) {
       lastErr = err;
     }

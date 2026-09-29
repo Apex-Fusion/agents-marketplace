@@ -2,12 +2,18 @@
  * indexer/src/routes/escrows.ts
  *
  * GET /escrows/:ref  — ref is "<txHash>#<index>"; 404 if not found.
+ * GET /escrows/:ref/lineage — exact spend-linked escrow history.
  * GET /escrows?buyer=PKH  — list escrows by buyer_pkh.
  * GET /escrows?supplier=PKH — list escrows by supplier_pkh.
  */
 
 import { Router, type Request, type Response } from "express";
-import type { SqliteCache, EscrowRow } from "../db/cache.js";
+import {
+  AmbiguousEscrowLineageError,
+  type EscrowLineageRow,
+  type EscrowRow,
+  type SqliteCache,
+} from "../db/cache.js";
 
 export interface EscrowsDeps {
   cache: SqliteCache;
@@ -32,6 +38,10 @@ interface EscrowView {
   created_slot: number;
 }
 
+interface LineageEscrowView extends EscrowView {
+  spent_tx: string | null;
+}
+
 function shapeEscrow(row: EscrowRow): EscrowView {
   return {
     utxo_ref: row.utxo_ref,
@@ -53,6 +63,10 @@ function shapeEscrow(row: EscrowRow): EscrowView {
   };
 }
 
+function shapeLineageEscrow(row: EscrowLineageRow): LineageEscrowView {
+  return { ...shapeEscrow(row), spent_tx: row.spent_tx };
+}
+
 export function escrowsRouter(deps: EscrowsDeps): Router {
   const router = Router();
 
@@ -70,6 +84,28 @@ export function escrowsRouter(deps: EscrowsDeps): Router {
       ? deps.cache.listEscrowsByBuyer(buyer)
       : deps.cache.listEscrowsBySupplier(supplier!);
     res.status(200).json(rows.map(shapeEscrow));
+  });
+
+  router.get("/escrows/:ref/lineage", (req: Request, res: Response) => {
+    const ref = String(req.params.ref);
+    try {
+      const lineage = deps.cache.getEscrowLineage(ref);
+      if (!lineage) {
+        res.status(404).json({ error: "escrow not found" });
+        return;
+      }
+      res.status(200).json({
+        original_ref: lineage.original_ref,
+        rows: lineage.rows.map(shapeLineageEscrow),
+        terminal: lineage.terminal,
+      });
+    } catch (err) {
+      if (err instanceof AmbiguousEscrowLineageError) {
+        res.status(409).json({ error: "ambiguous escrow lineage" });
+        return;
+      }
+      throw err;
+    }
   });
 
   router.get("/escrows/:ref", (req: Request, res: Response) => {

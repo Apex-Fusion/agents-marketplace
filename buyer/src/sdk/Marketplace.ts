@@ -3,7 +3,8 @@
  *
  * Implements:
  *   discoverSuppliers(opts?)            → indexer GET /suppliers
- *   submitPrompt({advertRef, ...})      → full lifecycle (escrow → supplier → verify → record)
+ *   prepare/post/executePrompt(...)     → explicit paid one-shot lifecycle stages
+ *   submitPrompt({advertRef, ...})      → high-level composition of those stages
  *   acceptResult({escrowRef})           → buildAcceptTx
  *   reclaim({escrowRef})                → buildReclaimTx
  *   getTaskHistory(opts?)               → reads from injected TaskHistoryStore
@@ -62,7 +63,7 @@ const EventEmitterBase: typeof FallbackEventEmitter =
   ((nodeEvents as unknown as { EventEmitter?: typeof FallbackEventEmitter }).EventEmitter)
     ?? FallbackEventEmitter;
 import type { ChainProvider, OutputReference } from "@marketplace/shared/chain";
-import type { WalletKey } from "@marketplace/shared/tx";
+import type { PostEscrowBuildResult, WalletKey } from "@marketplace/shared/tx";
 import {
   buildPostEscrowTx,
   buildPostTtsEscrowTx,
@@ -96,6 +97,8 @@ import type {
   DiscoverSuppliersOptions,
   SubmitPromptOptions,
   SubmitPromptResult,
+  PreparedPrompt,
+  PostedPrompt,
   SupplierCapabilityView,
   SubmitTtsOptions,
   SubmitTtsResult,
@@ -327,9 +330,27 @@ export class Marketplace extends EventEmitterBase {
     }
     return result.body as SupplierView[];
   }
-  // ─── submitPrompt — happy path + every adversarial branch ──────────────
+  // ─── paid one-shot prompt stages ─────────────────────────────────────
 
-  async submitPrompt(opts: SubmitPromptOptions): Promise<SubmitPromptResult> {
+  private recordPromptFailure(
+    request: ResponseRequest,
+    advert: AdvertDatum | null,
+    reason: string,
+    escrowRef?: OutputReference,
+    postedAt = Date.now(),
+  ): void {
+    this.historyStore.save({
+      escrow_ref: escrowRef ? refToString(escrowRef) : `${"0".repeat(64)}#0`,
+      supplier_pkh: advert?.supplier_pkh ?? "",
+      capability_id: advert?.capability_id ?? "",
+      prompt_preview: previewInput(request.input),
+      posted_at: postedAt,
+      status: "failed",
+      failure_reason: reason,
+    });
+  }
+
+  async preparePrompt(opts: SubmitPromptOptions): Promise<PreparedPrompt> {
     const { advertRef, payment_lovelace, public_preview, ...requestOptions } = opts;
     let request: ResponseRequest;
     try {
@@ -345,186 +366,245 @@ export class Marketplace extends EventEmitterBase {
       );
     }
 
-    let supplierHttp: HttpClient | null = null;
-    let advertDatum: AdvertDatum | null = null;
-    let escrowOutputRef: OutputReference | null = null;
-    let escrowRefStr = "";
-    let postedAtMs = Date.now();
-    let deliverByMs = 0;
-
-    const recordFailure = (reason: string): void => {
-      this.historyStore.save({
-        escrow_ref: escrowRefStr || `${"0".repeat(64)}#0`,
-        supplier_pkh: advertDatum?.supplier_pkh ?? "",
-        capability_id: advertDatum?.capability_id ?? "",
-        prompt_preview: previewInput(request.input),
-        posted_at: postedAtMs,
-        status: "failed",
-        failure_reason: reason,
-      });
-    };
-
-    let escrowResult;
+    let advert: AdvertDatum | null = null;
     try {
       const utxo = await this.chain.queryUtxo(advertRef);
-      if (utxo?.datumHex) {
-        try {
-          advertDatum = decodeAdvertDatum(utxo.datumHex);
-        } catch {
-          /* The escrow builder reports the canonical structured error. */
+      if (utxo === null) {
+        throw new TxConstructionError(
+          "advert ref not on chain",
+          `no UTxO at ${advertRef.txHash}#${advertRef.index}`,
+        );
+      }
+      if (!utxo.datumHex) {
+        throw new TxConstructionError(
+          "advert datum missing",
+          `UTxO ${advertRef.txHash}#${advertRef.index} has no inline datum`,
+        );
+      }
+      advert = decodeAdvertDatum(utxo.datumHex);
+
+      if (advert.status !== "Active") {
+        throw new TxConstructionError("advert is retired");
+      }
+      if (payment_lovelace !== advert.price_lovelace) {
+        throw new TxConstructionError("payment must equal advertised price");
+      }
+      if (this.walletKey.pubKeyHash === advert.supplier_pkh) {
+        throw new TxConstructionError("buyer cannot be supplier");
+      }
+
+      const supplierHttp = new HttpClient({
+        baseUrl: advert.endpoint_url,
+        fetch: this.fetchImpl,
+      });
+      let capabilityResult;
+      try {
+        capabilityResult = await supplierHttp.getJson("/capability");
+      } catch (error) {
+        throw new TxConstructionError(
+          "supplier_preflight_failed",
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+      if (!capabilityResult.ok || capabilityResult.parseError) {
+        throw new TxConstructionError(
+          "supplier_preflight_failed",
+          `supplier /capability returned HTTP ${capabilityResult.status}`,
+        );
+      }
+      const capability = validateSupplierCapability(
+        capabilityResult.body,
+        advert,
+        advertRef,
+      );
+
+      const compatibilityError = responseCompatibilityError(
+        request,
+        capability.upstream_api,
+        capability.reasoning_disabled === true,
+      );
+      if (compatibilityError) {
+        throw new TxConstructionError(
+          "supplier_adapter_incompatible",
+          compatibilityError.message,
+          { cause: compatibilityError },
+        );
+      }
+
+      if (advert.detail_uri.endsWith(BOUNDED_INPUT_DETAIL_MARKER)) {
+        if (capability.max_input_tokens === undefined) {
+          throw new TxConstructionError(
+            "supplier_preflight_failed",
+            "bounded-input supplier omitted max_input_tokens",
+          );
+        }
+        const requestUnits = responseInputTokenUpperBound(request);
+        if (requestUnits > capability.max_input_tokens) {
+          throw new TxConstructionError(
+            "input_cap_exceeded",
+            `request bound ${requestUnits} exceeds supplier cap ${capability.max_input_tokens}`,
+          );
         }
       }
 
-      if (advertDatum) {
-        if (advertDatum.status !== "Active") {
-          throw new TxConstructionError("advert is retired");
-        }
-        if (payment_lovelace !== advertDatum.price_lovelace) {
-          throw new TxConstructionError("payment must equal advertised price");
-        }
-        if (this.walletKey.pubKeyHash === advertDatum.supplier_pkh) {
-          throw new TxConstructionError("buyer cannot be supplier");
-        }
-        supplierHttp = new HttpClient({
-          baseUrl: advertDatum.endpoint_url,
-          fetch: this.fetchImpl,
-        });
-
-        let capabilityResult;
-        try {
-          capabilityResult = await supplierHttp.getJson("/capability");
-        } catch (error) {
-          throw new TxConstructionError(
-            "supplier_preflight_failed",
-            error instanceof Error ? error.message : String(error),
-          );
-        }
-        if (!capabilityResult.ok || capabilityResult.parseError) {
-          throw new TxConstructionError(
-            "supplier_preflight_failed",
-            `supplier /capability returned HTTP ${capabilityResult.status}`,
-          );
-        }
-        const capability = validateSupplierCapability(
-          capabilityResult.body,
-          advertDatum,
-          advertRef,
-        );
-
-        const compatibilityError = responseCompatibilityError(
-          request,
-          capability.upstream_api,
-          capability.reasoning_disabled === true,
-        );
-        if (compatibilityError) {
-          throw new TxConstructionError(
-            "supplier_adapter_incompatible",
-            compatibilityError.message,
-            { cause: compatibilityError },
-          );
-        }
-
-        if (advertDatum.detail_uri.endsWith(BOUNDED_INPUT_DETAIL_MARKER)) {
-          if (capability.max_input_tokens === undefined) {
-            throw new TxConstructionError(
-              "supplier_preflight_failed",
-              "bounded-input supplier omitted max_input_tokens",
-            );
-          }
-          const requestUnits = responseInputTokenUpperBound(request);
-          if (requestUnits > capability.max_input_tokens) {
-            throw new TxConstructionError(
-              "input_cap_exceeded",
-              `request bound ${requestUnits} exceeds supplier cap ${capability.max_input_tokens}`,
-            );
-          }
-        }
-
-        if (request.max_output_tokens !== undefined) {
-          request = {
-            ...request,
-            max_output_tokens: Math.min(
-              request.max_output_tokens,
-              advertDatum.max_output_tokens,
-              capability.max_output_tokens,
-            ),
-          };
-        }
+      if (request.max_output_tokens !== undefined) {
+        request = {
+          ...request,
+          max_output_tokens: Math.min(
+            request.max_output_tokens,
+            advert.max_output_tokens,
+            capability.max_output_tokens,
+          ),
+        };
       }
 
-      const promptHash = sha256Hex(canonicalize(responseRequestCommitment(request)));
-      escrowResult = await buildPostEscrowTx({
+      return {
+        request,
+        advertRef,
+        advert,
+        publicPreview: public_preview === true,
+      };
+    } catch (error) {
+      const reason = error instanceof TxConstructionError
+        ? error.reason
+        : error instanceof Error
+          ? error.message
+          : String(error);
+      this.recordPromptFailure(request, advert, reason);
+      if (!(error instanceof TxConstructionError)) {
+        this.emitProgress({ type: "chain_submit_failed", detail: reason });
+      }
+      throw error;
+    }
+  }
+
+  async postPrompt(
+    prepared: PreparedPrompt,
+    beforeSubmit?: (built: PostEscrowBuildResult) => Promise<void>,
+  ): Promise<PostedPrompt> {
+    const postedAtFallback = Date.now();
+    let built: PostEscrowBuildResult;
+    try {
+      const promptHash = sha256Hex(
+        canonicalize(responseRequestCommitment(prepared.request)),
+      );
+      built = await buildPostEscrowTx({
         chain: this.chain,
         buyerKey: this.walletKey,
-        advertRef,
+        advertRef: prepared.advertRef,
         prompt_hash: promptHash,
-        payment_lovelace,
+        payment_lovelace: prepared.advert.price_lovelace,
+        beforeSubmit,
       });
-    } catch (err) {
-      if (err instanceof TxConstructionError) {
-        recordFailure(err.reason);
-        throw err;
+    } catch (error) {
+      const reason = error instanceof TxConstructionError
+        ? error.reason
+        : error instanceof Error
+          ? error.message
+          : String(error);
+      if (!(error instanceof TxConstructionError)) {
+        this.emitProgress({ type: "chain_submit_failed", detail: reason });
       }
-      this.emitProgress({ type: "chain_submit_failed", detail: (err as Error).message });
-      recordFailure((err as Error).message);
-      throw err;
+      this.recordPromptFailure(prepared.request, prepared.advert, reason);
+      throw error;
     }
 
-    escrowOutputRef = escrowResult.escrowOutputRef;
-    escrowRefStr = refToString(escrowOutputRef);
-    this.emitProgress({ type: "escrow_posted", escrow_ref: escrowRefStr });
+    const escrowRef = built.escrowOutputRef;
+    this.emitProgress({
+      type: "escrow_posted",
+      escrow_ref: refToString(escrowRef),
+    });
 
     try {
-      await this.chain.awaitTx(escrowResult.expectedTxHash, ESCROW_CONFIRM_TIMEOUT_MS);
-    } catch {
-      /* Mock providers can omit confirmation support. */
+      await this.chain.awaitTx(built.expectedTxHash, ESCROW_CONFIRM_TIMEOUT_MS);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      this.emitProgress({ type: "chain_submit_failed", detail: reason });
+      this.recordPromptFailure(
+        prepared.request,
+        prepared.advert,
+        reason,
+        escrowRef,
+      );
+      throw error;
     }
 
+    let postedAt = postedAtFallback;
+    let deliverBy = deliverByFor(
+      postedAt,
+      prepared.advert.max_processing_ms,
+    );
     try {
-      const escrowUtxo = await this.chain.queryUtxo(escrowOutputRef);
+      const escrowUtxo = await this.chain.queryUtxo(escrowRef);
       if (escrowUtxo?.datumHex) {
         const escrowDatum = decodeEscrowDatum(escrowUtxo.datumHex);
-        postedAtMs = escrowDatum.posted_at;
-        deliverByMs = escrowDatum.deliver_by;
+        postedAt = escrowDatum.posted_at;
+        deliverBy = escrowDatum.deliver_by;
       }
     } catch {
-      /* posted_at remains best-effort history metadata */
+      /* Confirmed escrow timing remains best-effort history metadata. */
     }
 
-    if (!advertDatum || !supplierHttp) {
-      const reason = "supplier unavailable after escrow post";
-      recordFailure(reason);
-      throw new ReceiptVerificationError(reason);
-    }
-    if (deliverByMs === 0) {
-      deliverByMs = deliverByFor(postedAtMs, advertDatum.max_processing_ms);
-    }
+    return {
+      ...prepared,
+      escrowRef,
+      postedAt,
+      deliverBy,
+    };
+  }
+
+  async executePrompt(
+    posted: PostedPrompt,
+    onJobAccepted?: (jobId: string) => Promise<void>,
+  ): Promise<SubmitPromptResult> {
+    const escrowRefStr = refToString(posted.escrowRef);
+    const recordFailure = (reason: string): void => {
+      this.recordPromptFailure(
+        posted.request,
+        posted.advert,
+        reason,
+        posted.escrowRef,
+        posted.postedAt,
+      );
+    };
+    const supplierHttp = new HttpClient({
+      baseUrl: posted.advert.endpoint_url,
+      fetch: this.fetchImpl,
+    });
 
     let responseResult;
     try {
       responseResult = await supplierHttp.postJson(
         "/v1/responses",
-        { model: advertDatum.model, ...request },
+        { model: posted.advert.model, ...posted.request },
         {
           headers: {
             "X-Escrow-Ref": escrowRefStr,
-            ...(public_preview ? { "X-Vector-Public-Preview": "1" } : {}),
+            ...(posted.publicPreview ? { "X-Vector-Public-Preview": "1" } : {}),
           },
-          timeoutMs: supplierBudgetMs(deliverByMs),
+          timeoutMs: supplierBudgetMs(posted.deliverBy),
         },
       );
-    } catch (err) {
-      if (err instanceof HttpError) {
-        const reason = err.kind === "timeout" ? "timeout" : "network_error";
+    } catch (error) {
+      if (error instanceof HttpError) {
+        const reason = error.kind === "timeout" ? "timeout" : "network_error";
         recordFailure(reason);
-        throw new SupplierError(reason, { message: err.message });
+        throw new SupplierError(reason, { message: error.message });
       }
-      recordFailure((err as Error).message);
-      throw err;
+      const reason = error instanceof Error ? error.message : String(error);
+      recordFailure(reason);
+      throw error;
     }
 
-    if (responseResult.status === 202 && responseResult.body && typeof responseResult.body === "object") {
-      const jobId = (responseResult.body as { job_id?: string }).job_id;
+    if (
+      responseResult.status === 202 &&
+      responseResult.body &&
+      typeof responseResult.body === "object"
+    ) {
+      const responseBody202 = responseResult.body;
+      const jobId = "job_id" in responseBody202
+        ? responseBody202.job_id
+        : undefined;
       if (typeof jobId !== "string" || jobId.length === 0) {
         recordFailure("malformed_response");
         throw new SupplierError("malformed_response", {
@@ -532,7 +612,14 @@ export class Marketplace extends EventEmitterBase {
           message: "supplier 202 response missing job_id",
         });
       }
-      const pollBudgetMs = supplierBudgetMs(deliverByMs);
+      try {
+        await onJobAccepted?.(jobId);
+      } catch (error) {
+        recordFailure(error instanceof Error ? error.message : String(error));
+        throw error;
+      }
+
+      const pollBudgetMs = supplierBudgetMs(posted.deliverBy);
       const pollDeadline = Date.now() + pollBudgetMs;
       let polled = responseResult;
       let firstPoll = true;
@@ -543,13 +630,13 @@ export class Marketplace extends EventEmitterBase {
         firstPoll = false;
         try {
           polled = await supplierHttp.getJson(`/v1/responses/${jobId}`);
-        } catch (err) {
-          if (err instanceof HttpError) {
-            const reason = err.kind === "timeout" ? "timeout" : "network_error";
+        } catch (error) {
+          if (error instanceof HttpError) {
+            const reason = error.kind === "timeout" ? "timeout" : "network_error";
             recordFailure(reason);
-            throw new SupplierError(reason, { message: err.message });
+            throw new SupplierError(reason, { message: error.message });
           }
-          throw err;
+          throw error;
         }
         if (polled.status === 200) break;
         if (polled.status === 202) continue;
@@ -584,7 +671,11 @@ export class Marketplace extends EventEmitterBase {
         message: failure.message ?? `supplier returned ${responseResult.status}`,
       });
     }
-    if (responseResult.parseError || !responseResult.body || typeof responseResult.body !== "object") {
+    if (
+      responseResult.parseError ||
+      !responseResult.body ||
+      typeof responseResult.body !== "object"
+    ) {
       recordFailure("malformed_response");
       throw new SupplierError("malformed_response", {
         status: responseResult.status,
@@ -601,7 +692,11 @@ export class Marketplace extends EventEmitterBase {
     delete rawResult.receipt_signature;
     delete rawResult.escrow_ref;
     delete rawResult.submitted_ref;
-    if (!receipt || typeof receipt !== "object" || typeof receiptSignature !== "string") {
+    if (
+      !receipt ||
+      typeof receipt !== "object" ||
+      typeof receiptSignature !== "string"
+    ) {
       recordFailure("malformed_response");
       throw new SupplierError("malformed_response", {
         status: responseResult.status,
@@ -665,7 +760,7 @@ export class Marketplace extends EventEmitterBase {
 
     this.emitProgress({ type: "supplier_called", escrow_ref: escrowRefStr });
 
-    if (verifiedReceipt.supplier_pkh !== advertDatum.supplier_pkh) {
+    if (verifiedReceipt.supplier_pkh !== posted.advert.supplier_pkh) {
       recordFailure("wrong_supplier");
       throw new ReceiptVerificationError("wrong_supplier");
     }
@@ -673,12 +768,17 @@ export class Marketplace extends EventEmitterBase {
       recordFailure("wrong_escrow_ref");
       throw new ReceiptVerificationError("wrong_escrow_ref");
     }
-    const expectedPromptHash = sha256Hex(canonicalize(responseRequestCommitment(request)));
+    const expectedPromptHash = sha256Hex(
+      canonicalize(responseRequestCommitment(posted.request)),
+    );
     if (verifiedReceipt.prompt_hash !== expectedPromptHash) {
       recordFailure("prompt_hash_mismatch");
       throw new ReceiptVerificationError("prompt_hash_mismatch");
     }
-    if (verifiedReceipt.model !== advertDatum.model || result.model !== advertDatum.model) {
+    if (
+      verifiedReceipt.model !== posted.advert.model ||
+      result.model !== posted.advert.model
+    ) {
       recordFailure("request_spec_hash_mismatch");
       throw new ReceiptVerificationError("request_spec_hash_mismatch");
     }
@@ -693,7 +793,10 @@ export class Marketplace extends EventEmitterBase {
       recordFailure("invalid_signature");
       throw new ReceiptVerificationError("invalid_signature");
     }
-    if (!HEX64_RE.test(verifiedReceipt.prompt_hash) || !HEX64_RE.test(verifiedReceipt.response_hash)) {
+    if (
+      !HEX64_RE.test(verifiedReceipt.prompt_hash) ||
+      !HEX64_RE.test(verifiedReceipt.response_hash)
+    ) {
       recordFailure("malformed_receipt");
       throw new ReceiptVerificationError("malformed_receipt");
     }
@@ -701,10 +804,10 @@ export class Marketplace extends EventEmitterBase {
     this.emitProgress({ type: "receipt_verified", escrow_ref: escrowRefStr });
     this.historyStore.save({
       escrow_ref: escrowRefStr,
-      supplier_pkh: advertDatum.supplier_pkh,
-      capability_id: advertDatum.capability_id,
-      prompt_preview: previewInput(request.input),
-      posted_at: postedAtMs,
+      supplier_pkh: posted.advert.supplier_pkh,
+      capability_id: posted.advert.capability_id,
+      prompt_preview: previewInput(posted.request.input),
+      posted_at: posted.postedAt,
       status: "completed",
       response: responseDisplayText(result.output),
       receipt: verifiedReceipt,
@@ -713,13 +816,21 @@ export class Marketplace extends EventEmitterBase {
 
     return {
       response: responseContent,
-      request,
+      request: posted.request,
       result,
       receipt: verifiedReceipt,
       receiptSignature,
-      escrowRef: escrowOutputRef,
-      submittedRef: parseRef(typeof submittedRef === "string" ? submittedRef : "") ?? undefined,
+      escrowRef: posted.escrowRef,
+      submittedRef: parseRef(
+        typeof submittedRef === "string" ? submittedRef : "",
+      ) ?? undefined,
     };
+  }
+
+  async submitPrompt(opts: SubmitPromptOptions): Promise<SubmitPromptResult> {
+    const prepared = await this.preparePrompt(opts);
+    const posted = await this.postPrompt(prepared);
+    return this.executePrompt(posted);
   }
 
   // ─── submitTts — full marketplace lifecycle for audio.synthesize.piper.v1 ─

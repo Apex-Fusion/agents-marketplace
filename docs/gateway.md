@@ -321,10 +321,10 @@ streams convert live text, refusal, and function events into this format.
 
 Normal Responses and Chat Completions calls route to `llm.text.generate.v1`.
 
-1. Route by model, capability, availability, and any supplier pin.
+1. Reserve an available supplier for the requested model, capability, and any supplier pin.
 2. Check the request against supplier capability before funding.
 3. Check balance and a pure AP3X collateral UTxO of at least 5 AP3X.
-4. Post one escrow at the advert price.
+4. Post one escrow at the advert price and await confirmation.
 5. Send the normalized Responses request to supplier `POST /v1/responses`.
 6. Verify the signed receipt, prompt hash, response hash, model, supplier, and escrow reference.
 7. Resolve the Submitted output, accept it on chain, and await confirmation.
@@ -339,6 +339,59 @@ without waiting for the indexer poll. Probes have a two-second timeout and
 four-request concurrency. Live busy, offline, malformed, or unreachable
 results do not become eligible. Hard supplier pins and preferred ordering
 still apply.
+
+### Concurrent paid requests
+
+One normal API key can run four paid one-shot jobs at the same time.
+Both standard OpenAI routes use this limit.
+The gateway reserves a supplier in SQLite before it funds the request.
+Two gateway jobs cannot reserve the same supplier at the same time.
+Cached availability alone does not grant a reservation.
+
+The wallet lock covers each transaction through confirmation.
+Inference and receipt verification run outside that lock.
+Withdrawals, settlement, recovery, and wallet maintenance use the same lock.
+A caller timeout does not release a transaction that is still running.
+
+| Setting | Default | Meaning |
+|---|---:|---|
+| `ONE_SHOT_CONCURRENCY` | `4` | Maximum active paid one-shot jobs per key |
+| `ONE_SHOT_MAX_OUTSTANDING` | `64` | Maximum queued, active, and recovering jobs per key |
+| `ONE_SHOT_QUEUE_TIMEOUT_MS` | `60000` | Maximum wait for admission before funding |
+
+Queued jobs hold no supplier and spend no funds.
+A full queue returns HTTP 429 with `concurrency_queue_full`.
+An admission timeout returns HTTP 503 with `supplier_capacity_timeout`.
+Both responses include `Retry-After: 1`.
+A client disconnect cancels an unfunded job.
+A funded job continues to settlement or financial recovery.
+Supplier pins still apply; requests pinned to one supplier wait for that supplier.
+
+### Financial recovery
+
+The gateway records each original escrow reference before broadcast.
+Its financial journal contains no prompt text or generated output.
+It remains active when the client sets `store: false`.
+The wallet journal stores the exact signed transaction until its outcome is known.
+An uncertain broadcast blocks replacement spending.
+Recovery can resubmit that same signed transaction, but never posts another escrow for the job.
+
+The indexer serves `GET /escrows/:ref/lineage` with exact transaction links.
+Settlement does not identify jobs by timestamps or by a lone Submitted output.
+Deploy this indexer endpoint before or with the concurrent gateway.
+
+After a restart, recovery takes ownership only after the previous owner's
+heartbeat is stale for 60 seconds.
+It settles Submitted escrows and reclaims expired Open or Claimed escrows.
+It records known terminal payments or refunds once per job.
+For an absent post, recovery requires either a definite submission rejection
+or transaction expiry plus proof that the indexer has caught up.
+An unknown outcome keeps the reservation.
+
+Recovery restores financial state, not a lost inference response.
+It does not replay the prompt.
+An interrupted stored response remains failed unless it was already complete.
+Managed demo sessions retain their existing session lifecycle and settlement rules.
 
 ### Managed demo sessions
 

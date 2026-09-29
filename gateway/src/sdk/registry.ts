@@ -1,11 +1,9 @@
 /**
  * gateway/src/sdk/registry.ts — per-API-key Marketplace SDK cache + serializer.
  *
- * Each API key is its own custodial wallet, so each gets its own Marketplace
- * instance bound to that wallet's WalletKey. The shared ChainProvider and
- * indexer URL are reused across all keys. A per-key Mutex serializes all
- * on-chain work for one wallet (a single wallet cannot post two escrows from
- * the same UTxO concurrently). The cache is LRU-bounded to cap memory.
+ * Marketplace instances are LRU-cached. Wallet mutexes and guarded providers
+ * live in a separate identity-stable map, so SDK eviction cannot create a
+ * second writer for a wallet whose old context still has work in flight.
  */
 
 import { Marketplace, MemoryTaskHistoryStore } from "@marketplace/buyer/sdk";
@@ -13,22 +11,22 @@ import type { LiveOgmiosProvider } from "@marketplace/shared/chain";
 import type { WalletKey } from "@marketplace/shared/tx";
 import { open as unseal } from "../crypto/seal.js";
 import { deriveWalletKey } from "../wallet.js";
-import type { ApiKeyRow } from "../db/store.js";
+import type { ApiKeyRow, GatewayStore } from "../db/store.js";
+import { WalletTransactionGuard } from "./walletTransactions.js";
 
-/** Default per-run deadline for wallet ops that are one or two chain round
- * trips (withdraw, consolidate, a sweeper Accept/Reclaim). Anything past this
- * is the 2026-08-12 freeze mode (a fetch that never settles), not a slow
- * success. One-shot jobs pass their own SLA-derived deadline to run(). */
+/** Caller deadline for wallet operations. An overdue operation retains the
+ * mutex until it actually settles. Paid one-shot phases disable this caller
+ * deadline and use the SDK and chain-confirmation budgets instead. */
 export const DEFAULT_MUTEX_TIMEOUT_MS = 180_000;
 
 /** Default queue bound per mutex. A healthy key drains its queue in seconds;
  * a queue this deep means the head is stuck and callers should fail fast. */
 export const DEFAULT_MUTEX_MAX_QUEUE = 64;
 
-/** A run() exceeded its deadline and was abandoned so queued work can proceed. */
+/** The caller deadline elapsed. The underlying operation still owns the mutex. */
 export class MutexTimeoutError extends Error {
   constructor(label: string, timeoutMs: number) {
-    super(`mutex run '${label}' exceeded ${timeoutMs}ms and was abandoned; queued work proceeds`);
+    super(`mutex run '${label}' exceeded ${timeoutMs}ms; the wallet operation is still running`);
     this.name = "MutexTimeoutError";
   }
 }
@@ -41,44 +39,40 @@ export class MutexQueueFullError extends Error {
   }
 }
 
-function runWithDeadline<T>(fn: () => Promise<T>, timeoutMs: number, label: string): Promise<T> {
+function notifyAtDeadline<T>(operation: Promise<T>, timeoutMs: number, label: string): Promise<T> {
   return new Promise<T>((resolvePromise, rejectPromise) => {
     const timer = setTimeout(() => rejectPromise(new MutexTimeoutError(label, timeoutMs)), timeoutMs);
-    // Node-only nicety: don't hold the process open for a pending deadline.
     timer.unref?.();
-    fn().then(
-      (v) => {
+    operation.then(
+      (value) => {
         clearTimeout(timer);
-        resolvePromise(v);
+        resolvePromise(value);
       },
-      (e) => {
+      (error) => {
         clearTimeout(timer);
-        rejectPromise(e);
+        rejectPromise(error);
       },
     );
   });
 }
 
+interface MutexOptions {
+  timeoutMs?: number;
+  maxQueue?: number;
+  beforeRun?: () => Promise<void>;
+  runInContext?: <T>(operation: () => Promise<T>) => Promise<T>;
+}
+
 /**
- * Tiny promise-chain mutex: run(fn) executes fns strictly one at a time —
- * now with a per-run deadline and a queue bound (2026-08-12 freeze fix).
- *
- * On deadline the stuck fn is NOT cancelled (promises aren't); it is
- * abandoned: its run() rejects with MutexTimeoutError and the chain advances.
- * A zombie that settles later can at worst lose a UTxO-contention race with
- * the run that replaced it — strictly better than the alternative, where one
- * stuck chain call convoys every subsequent request on the key forever.
- *
- * The deadline must therefore exceed the run's legitimate worst case: a run
- * abandoned mid-settle still pays (the zombie Accepts) while its caller has
- * already been told the job failed (2026-09-07). Callers whose worst case
- * derives from an advert SLA pass it as `timeoutMs`.
+ * Promise-chain mutex. A deadline only stops the caller from waiting. The
+ * chain tail and queue depth follow the real operation until it settles, so a
+ * timed-out wallet operation can never overlap its successor.
  */
 export class Mutex {
   private tail: Promise<unknown> = Promise.resolve();
   private depth = 0;
 
-  constructor(private readonly opts: { timeoutMs?: number; maxQueue?: number } = {}) {}
+  constructor(private readonly opts: MutexOptions = {}) {}
 
   run<T>(fn: () => Promise<T>, label = "op", timeoutMs = this.opts.timeoutMs ?? DEFAULT_MUTEX_TIMEOUT_MS): Promise<T> {
     const maxQueue = this.opts.maxQueue ?? DEFAULT_MUTEX_MAX_QUEUE;
@@ -88,20 +82,33 @@ export class Mutex {
     }
     this.depth++;
 
-    // A zero deadline is reserved for work that has its own cancellable I/O
-    // budget. It preserves serialization instead of abandoning live work.
-    const invoke = (): Promise<T> => timeoutMs === 0 ? fn() : runWithDeadline(fn, timeoutMs, label);
-    // Keep the chain alive even if fn rejects; swallow here so the next run()
-    // isn't poisoned by a prior rejection.
-    const result = this.tail.then(invoke, invoke);
-    const settled = result.finally(() => {
+    let resolveCaller: ((value: T | PromiseLike<T>) => void) | undefined;
+    let rejectCaller: ((reason?: unknown) => void) | undefined;
+    const caller = timeoutMs === 0 ? undefined : new Promise<T>((resolve, reject) => {
+      resolveCaller = resolve;
+      rejectCaller = reject;
+    });
+    const invoke = (): Promise<T> => {
+      const execution = (async () => {
+        await this.opts.beforeRun?.();
+        return this.opts.runInContext === undefined
+          ? fn()
+          : this.opts.runInContext(fn);
+      })();
+      if (resolveCaller !== undefined && rejectCaller !== undefined) {
+        notifyAtDeadline(execution, timeoutMs, label).then(resolveCaller, rejectCaller);
+      }
+      return execution;
+    };
+    const operation = this.tail.then(invoke, invoke);
+    const settled = operation.finally(() => {
       this.depth--;
     });
     this.tail = settled.then(
       () => undefined,
       () => undefined,
     );
-    return settled;
+    return caller ?? settled;
   }
 }
 
@@ -109,18 +116,29 @@ export interface KeyContext {
   sdk: Marketplace;
   mutex: Mutex;
   walletKey: WalletKey;
+  chain: LiveOgmiosProvider;
+  reconcilePendingWalletTransaction(): Promise<void>;
 }
 
 export interface SdkRegistryDeps {
   chain: LiveOgmiosProvider;
+  store: GatewayStore;
   indexerUrl: string;
   networkId: 0 | 1;
   masterKeyHex: string;
   max: number;
+  fetchFn?: typeof globalThis.fetch;
+}
+
+interface StableWalletState {
+  keyId: string;
+  mutex: Mutex;
+  guard: WalletTransactionGuard;
 }
 
 export class SdkRegistry {
   private readonly cache = new Map<string, KeyContext>();
+  private readonly walletStates = new Map<string, StableWalletState>();
 
   constructor(private readonly deps: SdkRegistryDeps) {}
 
@@ -140,17 +158,51 @@ export class SdkRegistry {
       this.deps.masterKeyHex,
     );
     const walletKey = deriveWalletKey(privHex, this.deps.networkId);
+    const walletState = this.getWalletState(keyRow.id, walletKey.pubKeyHash);
     const sdk = new Marketplace({
-      chain: this.deps.chain,
+      chain: walletState.guard.chain,
       indexerUrl: this.deps.indexerUrl,
       walletKey,
       networkParams: { networkId: this.deps.networkId },
       historyStore: new MemoryTaskHistoryStore(),
+      _fetch: this.deps.fetchFn,
     });
-    const ctx: KeyContext = { sdk, mutex: new Mutex(), walletKey };
+    const ctx: KeyContext = {
+      sdk,
+      mutex: walletState.mutex,
+      walletKey,
+      chain: walletState.guard.chain,
+      reconcilePendingWalletTransaction: () => walletState.guard.reconcilePendingWalletTransaction(),
+    };
     this.cache.set(keyRow.id, ctx);
     this.evictIfNeeded();
     return ctx;
+  }
+
+  private getWalletState(keyId: string, walletPkh: string): StableWalletState {
+    const existing = this.walletStates.get(walletPkh);
+    if (existing !== undefined) {
+      if (existing.keyId !== keyId) {
+        throw new Error(`custodial wallet ${walletPkh} is assigned to more than one API key`);
+      }
+      return existing;
+    }
+
+    const guard = new WalletTransactionGuard({
+      keyId,
+      chain: this.deps.chain,
+      store: this.deps.store,
+    });
+    const state: StableWalletState = {
+      keyId,
+      guard,
+      mutex: new Mutex({
+        beforeRun: () => guard.reconcilePendingWalletTransaction(),
+        runInContext: (operation) => guard.runInScope(operation),
+      }),
+    };
+    this.walletStates.set(walletPkh, state);
+    return state;
   }
 
   private evictIfNeeded(): void {

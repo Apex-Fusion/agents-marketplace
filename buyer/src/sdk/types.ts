@@ -5,6 +5,7 @@
 import type { Receipt } from "@marketplace/shared/receipt";
 import type { SignedReceipt } from "@marketplace/shared/receipt";
 import type { OutputReference } from "@marketplace/shared/chain";
+import type { AdvertDatum } from "@marketplace/shared/cbor";
 import type {
   ResponseItem,
   ResponseObject,
@@ -175,7 +176,8 @@ export interface DiscoverSuppliersOptions {
 }
 
 /**
- * SubmitPromptOptions — arguments to Marketplace.submitPrompt().
+ * SubmitPromptOptions — arguments to Marketplace.preparePrompt() and
+ * Marketplace.submitPrompt().
  */
 export type SubmitPromptOptions = ResponseRequest & {
   advertRef: OutputReference;
@@ -183,6 +185,26 @@ export type SubmitPromptOptions = ResponseRequest & {
   /** Explicit consent for the seller's public redacted demo preview. */
   public_preview?: boolean;
 };
+
+/**
+ * A validated one-shot request and supplier advert.
+ *
+ * Preparing performs all request, advert, and capability checks. It does not
+ * build or broadcast an escrow transaction.
+ */
+export interface PreparedPrompt {
+  request: ResponseRequest;
+  advertRef: OutputReference;
+  advert: AdvertDatum;
+  publicPreview: boolean;
+}
+
+/** A prepared request whose escrow transaction is confirmed on chain. */
+export interface PostedPrompt extends PreparedPrompt {
+  escrowRef: OutputReference;
+  postedAt: number;
+  deliverBy: number;
+}
 
 /**
  * SubmitTtsOptions — arguments to Marketplace.submitTts() for the

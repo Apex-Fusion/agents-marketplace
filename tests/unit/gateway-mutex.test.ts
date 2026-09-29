@@ -1,13 +1,9 @@
 /**
  * gateway-mutex.test.ts — Mutex deadline + queue bound (2026-08-12 freeze fix).
  *
- * Incident: one chain call that never settled, run under a per-key Mutex with
- * no deadline, convoyed every subsequent request on that key silently while
- * /models and /account stayed healthy. The fix gives run() a deadline that
- * abandons the stuck operation (advancing the chain) and a queue bound that
- * rejects new work instead of queueing without limit.
- *
- * Serialization semantics of the original class must be preserved.
+ * Caller deadlines report stalled work. They do not release wallet ownership:
+ * only the actual operation settling permits the next wallet spend.
+ * Queue bounds still reject new work instead of waiting without limit.
  */
 
 import { describe, it, expect, vi, afterEach } from "vitest";
@@ -68,18 +64,6 @@ describe("Mutex — per-run deadline", () => {
     await assertion;
   });
 
-  it("queued work proceeds after a stuck run is abandoned (no convoy)", async () => {
-    vi.useFakeTimers();
-    const mutex = new Mutex({ timeoutMs: 1_000 });
-
-    const stuck = mutex.run(() => new Promise<never>(() => {}), "stuck");
-    const stuckAssertion = expect(stuck).rejects.toBeInstanceOf(MutexTimeoutError);
-    const queued = mutex.run(async () => "unblocked");
-
-    await vi.advanceTimersByTimeAsync(1_001);
-    await stuckAssertion;
-    await expect(queued).resolves.toBe("unblocked");
-  });
 
   it("a run that finishes in time is unaffected by the deadline", async () => {
     vi.useFakeTimers();

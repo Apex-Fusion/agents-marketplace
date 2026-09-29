@@ -46,6 +46,7 @@ import { parseRef } from "./routing/selectSupplier.js";
 import { dropSessionState } from "./openai/transcripts.js";
 import { sweepIdleDemoSessions } from "./openai/demoChat.js";
 import { CAPABILITY as CHAT_CAPABILITY } from "./openai/sessions.js";
+import { recoverOneShotJobs } from "./oneShotJobs.js";
 
 // Don't touch escrows newer than this — an in-flight request is settling them.
 const MIN_AGE_MS = 90_000;
@@ -114,6 +115,7 @@ export async function runSweepOnce(
   deps: GatewayDeps,
   settle: SweepSettleFns = { accept: acceptAndConfirm, reclaim: reclaimAndConfirm },
 ): Promise<void> {
+  const protection = await recoverOneShotJobs(deps);
   // Idle demo sessions first: closing them makes the supplier Submit, so this
   // sweep (or the next) can Accept the escrow right after.
   await sweepIdleDemoSessions(deps).catch((err) =>
@@ -123,6 +125,7 @@ export async function runSweepOnce(
   const now = Date.now();
   deps.store.deleteExpiredResponses(now);
   for (const keyRow of deps.store.listKeys()) {
+    if (protection.protectedKeys.has(keyRow.id)) continue;
     let rows: EscrowRow[];
     try {
       rows = await fetchEscrows(deps.config.indexerUrl, keyRow.wallet_pkh, deps.fetchFn);
@@ -144,6 +147,7 @@ export async function runSweepOnce(
       const ref = parseRef(row.utxo_ref);
       if (!ref) continue;
       if (settledRefs.has(row.utxo_ref)) continue;
+      if (protection.protectedRefs.has(row.utxo_ref)) continue;
       const ageMs = now - (row.posted_at ?? 0);
       if (ageMs < MIN_AGE_MS) continue;
       const chatSession = sessionByPostedAt.get(row.posted_at);
@@ -151,7 +155,7 @@ export async function runSweepOnce(
       try {
         if (row.state === "Submitted") {
           try {
-            await ctx.mutex.run(() => settle.accept(deps.chain, ctx.walletKey, ref));
+            await ctx.mutex.run(() => settle.accept(ctx.chain, ctx.walletKey, ref), "sweep-accept", 0);
             log(`accepted stranded Submitted escrow ${row.utxo_ref}`);
             markSettled(row.utxo_ref);
             if (chatSession) {
@@ -180,7 +184,7 @@ export async function runSweepOnce(
           const pastDeliverBy =
             typeof row.deliver_by === "number" ? now > row.deliver_by + DELIVER_BY_BUFFER_MS : true;
           if (ageMs > reclaimAfterMs && pastDeliverBy) {
-            await ctx.mutex.run(() => settle.reclaim(deps.chain, ctx.walletKey, ref));
+            await ctx.mutex.run(() => settle.reclaim(ctx.chain, ctx.walletKey, ref), "sweep-reclaim", 0);
             log(`reclaimed stranded ${row.state} escrow ${row.utxo_ref}`);
             markSettled(row.utxo_ref);
             if (chatSession) {
@@ -221,5 +225,6 @@ export function startSweeper(deps: GatewayDeps): () => void {
     }
   };
   const handle = setInterval(() => void tick(), deps.config.sweeperIntervalMs);
+  void tick();
   return () => clearInterval(handle);
 }

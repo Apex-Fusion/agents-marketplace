@@ -94,6 +94,78 @@ export interface StoredResponseRow {
   response_tag: string | null;
 }
 
+export type OneShotJobState =
+  | "queued"
+  | "reserved"
+  | "funding"
+  | "running"
+  | "submitted"
+  | "settling"
+  | "recovering"
+  | "completed"
+  | "failed"
+  | "reclaimed";
+
+export interface OneShotJobRow {
+  id: string;
+  key_id: string;
+  owner_id: string;
+  model: string;
+  state: OneShotJobState;
+  created_at: number;
+  updated_at: number;
+  heartbeat_at: number;
+  supplier_pkh: string | null;
+  endpoint_url: string | null;
+  advert_ref: string | null;
+  price_lovelace: string | null;
+  max_processing_ms: number | null;
+  escrow_ref: string | null;
+  submitted_ref: string | null;
+  receipt_hash: string | null;
+  supplier_job_id: string | null;
+  settle_tx_hash: string | null;
+  deliver_by: number | null;
+  post_valid_until_slot: number | null;
+  recovery_slot: number | null;
+  error: string | null;
+}
+
+export interface PendingWalletTransaction {
+  key_id: string;
+  tx_hash: string;
+  tx_cbor: string;
+  created_at: number;
+  valid_until_slot: number | null;
+}
+
+export interface WalletTransactionOutcome {
+  key_id: string;
+  tx_hash: string;
+  state: "confirmed" | "rejected" | "expired";
+  resolved_at: number;
+}
+
+const ONE_SHOT_MUTABLE_FIELDS: Partial<Record<keyof OneShotJobRow, true>> = {
+  state: true,
+  updated_at: true,
+  heartbeat_at: true,
+  supplier_pkh: true,
+  endpoint_url: true,
+  advert_ref: true,
+  price_lovelace: true,
+  max_processing_ms: true,
+  escrow_ref: true,
+  submitted_ref: true,
+  receipt_hash: true,
+  supplier_job_id: true,
+  settle_tx_hash: true,
+  deliver_by: true,
+  post_valid_until_slot: true,
+  recovery_slot: true,
+  error: true,
+};
+
 export class GatewayStore {
   private readonly db: BetterDatabase;
   private readonly sInsertKey: Statement;
@@ -103,6 +175,7 @@ export class GatewayStore {
   private readonly sListAllKeys: Statement;
   private readonly sUpdateKeyEncryption: Statement;
   private readonly sInsertUsage: Statement;
+  private readonly sUpsertUsage: Statement;
   private readonly sSumCost: Statement;
   private readonly sCountByKey: Statement;
   private readonly sListUsage: Statement;
@@ -123,6 +196,23 @@ export class GatewayStore {
   private readonly sExtendResponseAncestors: Statement;
   private readonly sClearSessionHeadsForTree: Statement;
   private readonly sClearExpiredSessionHeads: Statement;
+  private readonly sInsertOneShotJob: Statement;
+  private readonly sCountOneShotOutstanding: Statement;
+  private readonly sGetOneShotJob: Statement;
+  private readonly sListOneShotJobs: Statement;
+  private readonly sListOneShotJobsByKey: Statement;
+  private readonly sListUnfinishedOneShotJobs: Statement;
+  private readonly sCountActiveOneShotJobs: Statement;
+  private readonly sReserveOneShotSupplier: Statement;
+  private readonly sUpdateOneShotJob: Statement;
+  private readonly sHeartbeatOneShotJobs: Statement;
+  private readonly sClaimOneShotJob: Statement;
+  private readonly sCompleteOneShotJob: Statement;
+  private readonly sGetPendingWalletTransaction: Statement;
+  private readonly sInsertPendingWalletTransaction: Statement;
+  private readonly sClearPendingWalletTransaction: Statement;
+  private readonly sGetWalletTransactionOutcome: Statement;
+  private readonly sInsertWalletTransactionOutcome: Statement;
 
 
   constructor(dbDir: string) {
@@ -130,6 +220,7 @@ export class GatewayStore {
     mkdirSync(dir, { recursive: true });
     this.db = new Database(join(dir, "gateway.db"));
     this.db.pragma("journal_mode = WAL");
+    this.db.pragma("busy_timeout = 5000");
     this.db.exec(CREATE_TABLES_SQL);
 
     const keyCols = this.db.pragma("table_info(api_keys)") as Array<{ name: string }>;
@@ -184,6 +275,25 @@ export class GatewayStore {
       @id, @key_id, @created_at, @kind, @model, @capability_id, @supplier_pkh, @escrow_ref,
       @cost_lovelace, @prompt_tokens, @completion_tokens, @status, @failure_reason
     )`);
+    this.sUpsertUsage = this.db.prepare(`INSERT INTO usage (
+      id, key_id, created_at, kind, model, capability_id, supplier_pkh, escrow_ref,
+      cost_lovelace, prompt_tokens, completion_tokens, status, failure_reason
+    ) VALUES (
+      @id, @key_id, @created_at, @kind, @model, @capability_id, @supplier_pkh, @escrow_ref,
+      @cost_lovelace, @prompt_tokens, @completion_tokens, @status, @failure_reason
+    ) ON CONFLICT(id) DO UPDATE SET
+      key_id = excluded.key_id,
+      created_at = excluded.created_at,
+      kind = excluded.kind,
+      model = excluded.model,
+      capability_id = excluded.capability_id,
+      supplier_pkh = excluded.supplier_pkh,
+      escrow_ref = excluded.escrow_ref,
+      cost_lovelace = excluded.cost_lovelace,
+      prompt_tokens = excluded.prompt_tokens,
+      completion_tokens = excluded.completion_tokens,
+      status = excluded.status,
+      failure_reason = excluded.failure_reason`);
     this.sSumCost = this.db.prepare(`SELECT COALESCE(SUM(CAST(cost_lovelace AS INTEGER)), 0) AS total
       FROM usage WHERE key_id = @key_id AND status = 'completed'`);
     this.sCountByKey = this.db.prepare("SELECT COUNT(*) AS n FROM usage WHERE key_id = @key_id");
@@ -256,6 +366,284 @@ export class GatewayStore {
       UNION ALL SELECT responses.id FROM responses JOIN expired ON responses.previous_response_id = expired.id
     ) UPDATE sessions SET head_response_id = NULL WHERE head_response_id IN (SELECT id FROM expired)`);
 
+    this.sInsertOneShotJob = this.db.prepare(`INSERT INTO one_shot_jobs (
+      id, key_id, owner_id, model, state, created_at, updated_at, heartbeat_at
+    ) VALUES (
+      @id, @key_id, @owner_id, @model, 'queued', @created_at, @created_at, @created_at
+    )`);
+    this.sCountOneShotOutstanding = this.db.prepare(`SELECT COUNT(*) AS n
+      FROM one_shot_jobs
+      WHERE key_id = @key_id AND state NOT IN ('completed', 'failed', 'reclaimed')`);
+    this.sGetOneShotJob = this.db.prepare("SELECT * FROM one_shot_jobs WHERE id = @id");
+    this.sListOneShotJobs = this.db.prepare(
+      "SELECT * FROM one_shot_jobs ORDER BY created_at, id",
+    );
+    this.sListOneShotJobsByKey = this.db.prepare(
+      "SELECT * FROM one_shot_jobs WHERE key_id = @key_id ORDER BY created_at, id",
+    );
+    this.sListUnfinishedOneShotJobs = this.db.prepare(`SELECT * FROM one_shot_jobs
+      WHERE state NOT IN ('completed', 'failed', 'reclaimed') ORDER BY created_at, id`);
+    this.sCountActiveOneShotJobs = this.db.prepare(`SELECT COUNT(*) AS n
+      FROM one_shot_jobs
+      WHERE key_id = @key_id
+        AND state IN ('reserved', 'funding', 'running', 'submitted', 'settling', 'recovering')`);
+    this.sReserveOneShotSupplier = this.db.prepare(`UPDATE one_shot_jobs SET
+      state = 'reserved',
+      updated_at = @now,
+      heartbeat_at = @now,
+      supplier_pkh = @supplier_pkh,
+      endpoint_url = @endpoint_url,
+      advert_ref = @advert_ref,
+      price_lovelace = @price_lovelace,
+      max_processing_ms = @max_processing_ms
+      WHERE id = @id AND owner_id = @owner_id AND state = 'queued'
+        AND NOT EXISTS (
+          SELECT 1 FROM one_shot_jobs AS active
+          WHERE active.supplier_pkh = @supplier_pkh
+            AND active.state IN ('reserved', 'funding', 'running', 'submitted', 'settling', 'recovering')
+        )`);
+    this.sUpdateOneShotJob = this.db.prepare(`UPDATE one_shot_jobs SET
+      state = @state,
+      updated_at = @updated_at,
+      heartbeat_at = @heartbeat_at,
+      supplier_pkh = @supplier_pkh,
+      endpoint_url = @endpoint_url,
+      advert_ref = @advert_ref,
+      price_lovelace = @price_lovelace,
+      max_processing_ms = @max_processing_ms,
+      escrow_ref = @escrow_ref,
+      submitted_ref = @submitted_ref,
+      receipt_hash = @receipt_hash,
+      supplier_job_id = @supplier_job_id,
+      settle_tx_hash = @settle_tx_hash,
+      deliver_by = @deliver_by,
+      post_valid_until_slot = @post_valid_until_slot,
+      recovery_slot = @recovery_slot,
+      error = @error
+      WHERE id = @id AND owner_id = @owner_id
+        AND state NOT IN ('completed', 'failed', 'reclaimed')`);
+    this.sHeartbeatOneShotJobs = this.db.prepare(`UPDATE one_shot_jobs
+      SET heartbeat_at = @now
+      WHERE owner_id = @owner_id AND state NOT IN ('completed', 'failed', 'reclaimed')`);
+    this.sClaimOneShotJob = this.db.prepare(`UPDATE one_shot_jobs SET
+      owner_id = @new_owner_id, updated_at = @now, heartbeat_at = @now
+      WHERE id = @id AND heartbeat_at <= @stale_before
+        AND state NOT IN ('completed', 'failed', 'reclaimed')`);
+    this.sCompleteOneShotJob = this.db.prepare(`UPDATE one_shot_jobs SET
+      state = @state, updated_at = @now, heartbeat_at = @now, error = @error
+      WHERE id = @id AND owner_id = @owner_id
+        AND state NOT IN ('completed', 'failed', 'reclaimed')`);
+
+    this.sGetPendingWalletTransaction = this.db.prepare(
+      "SELECT * FROM pending_wallet_transactions WHERE key_id = @key_id",
+    );
+    this.sInsertPendingWalletTransaction = this.db.prepare(`INSERT OR IGNORE INTO pending_wallet_transactions (
+      key_id, tx_hash, tx_cbor, created_at, valid_until_slot
+    ) VALUES (
+      @key_id, @tx_hash, @tx_cbor, @created_at, @valid_until_slot
+    )`);
+    this.sClearPendingWalletTransaction = this.db.prepare(`DELETE FROM pending_wallet_transactions
+      WHERE key_id = @key_id AND tx_hash = @tx_hash`);
+    this.sGetWalletTransactionOutcome = this.db.prepare(`SELECT *
+      FROM wallet_transaction_outcomes WHERE key_id = @key_id AND tx_hash = @tx_hash`);
+    this.sInsertWalletTransactionOutcome = this.db.prepare(`INSERT OR IGNORE INTO wallet_transaction_outcomes (
+      key_id, tx_hash, state, resolved_at
+    ) VALUES (
+      @key_id, @tx_hash, @state, @resolved_at
+    )`);
+
+  }
+
+  insertOneShotJob(
+    row: Pick<OneShotJobRow, "id" | "key_id" | "owner_id" | "model" | "created_at">,
+    maxOutstanding = 64,
+  ): boolean {
+    if (!Number.isSafeInteger(maxOutstanding) || maxOutstanding < 0) {
+      throw new RangeError("maxOutstanding must be a non-negative safe integer");
+    }
+    const insert = this.db.transaction(() => {
+      const count = this.sCountOneShotOutstanding.get({ key_id: row.key_id }) as { n: number };
+      if (count.n >= maxOutstanding) return false;
+      this.sInsertOneShotJob.run(row);
+      return true;
+    });
+    return insert.immediate();
+  }
+
+  reserveOneShotSupplier(
+    jobId: string,
+    ownerId: string,
+    candidates: Array<{
+      supplierPkh: string;
+      endpointUrl: string;
+      utxoRef: string;
+      priceLovelace: bigint;
+      maxProcessingMs: number;
+    }>,
+    maxActive = 4,
+  ): OneShotJobRow | undefined {
+    if (candidates.length === 0) return undefined;
+    if (!Number.isSafeInteger(maxActive) || maxActive < 0) {
+      throw new RangeError("maxActive must be a non-negative safe integer");
+    }
+    const reserve = this.db.transaction(() => {
+      const job = this.sGetOneShotJob.get({ id: jobId }) as OneShotJobRow | undefined;
+      if (job?.owner_id !== ownerId || job.state !== "queued") return undefined;
+
+      const active = this.sCountActiveOneShotJobs.get({ key_id: job.key_id }) as { n: number };
+      if (active.n >= maxActive) return undefined;
+
+      const now = Date.now();
+      for (const candidate of candidates) {
+        const result = this.sReserveOneShotSupplier.run({
+          id: jobId,
+          owner_id: ownerId,
+          now,
+          supplier_pkh: candidate.supplierPkh,
+          endpoint_url: candidate.endpointUrl,
+          advert_ref: candidate.utxoRef,
+          price_lovelace: candidate.priceLovelace.toString(),
+          max_processing_ms: candidate.maxProcessingMs,
+        });
+        if (result.changes > 0) {
+          return this.sGetOneShotJob.get({ id: jobId }) as OneShotJobRow;
+        }
+      }
+      return undefined;
+    });
+    return reserve.immediate();
+  }
+
+  getOneShotJob(id: string): OneShotJobRow | undefined {
+    return this.sGetOneShotJob.get({ id }) as OneShotJobRow | undefined;
+  }
+
+  listOneShotJobs(keyId?: string): OneShotJobRow[] {
+    if (keyId === undefined) return this.sListOneShotJobs.all() as OneShotJobRow[];
+    return this.sListOneShotJobsByKey.all({ key_id: keyId }) as OneShotJobRow[];
+  }
+
+  listUnfinishedOneShotJobs(): OneShotJobRow[] {
+    return this.sListUnfinishedOneShotJobs.all() as OneShotJobRow[];
+  }
+
+  updateOneShotJob(id: string, ownerId: string, patch: Partial<OneShotJobRow>): boolean {
+    for (const field of Object.keys(patch) as Array<keyof OneShotJobRow>) {
+      if (ONE_SHOT_MUTABLE_FIELDS[field] !== true) {
+        throw new TypeError(`one-shot job field is immutable: ${field}`);
+      }
+    }
+    const update = this.db.transaction(() => {
+      const existing = this.sGetOneShotJob.get({ id }) as OneShotJobRow | undefined;
+      if (existing?.owner_id !== ownerId) return false;
+      const merged = {
+        ...existing,
+        ...patch,
+        id,
+        owner_id: ownerId,
+        updated_at: patch.updated_at ?? Date.now(),
+      };
+      return this.sUpdateOneShotJob.run(merged).changes > 0;
+    });
+    return update.immediate();
+  }
+
+  heartbeatOneShotJobs(ownerId: string, now: number): number {
+    return this.sHeartbeatOneShotJobs.run({ owner_id: ownerId, now }).changes;
+  }
+
+  claimOneShotJob(id: string, newOwner: string, staleBefore: number): boolean {
+    const now = Date.now();
+    return this.sClaimOneShotJob.run({
+      id,
+      new_owner_id: newOwner,
+      stale_before: staleBefore,
+      now,
+    }).changes > 0;
+  }
+
+  completeOneShotJob(
+    id: string,
+    ownerId: string,
+    state: "completed" | "failed" | "reclaimed",
+    error?: string,
+  ): boolean {
+    return this.sCompleteOneShotJob.run({
+      id,
+      owner_id: ownerId,
+      state,
+      error: error ?? null,
+      now: Date.now(),
+    }).changes > 0;
+  }
+
+  getPendingWalletTransaction(keyId: string): PendingWalletTransaction | undefined {
+    return this.sGetPendingWalletTransaction.get({
+      key_id: keyId,
+    }) as PendingWalletTransaction | undefined;
+  }
+
+  putPendingWalletTransaction(row: PendingWalletTransaction): boolean {
+    const put = this.db.transaction(() => {
+      const inserted = this.sInsertPendingWalletTransaction.run(row);
+      if (inserted.changes > 0) return true;
+      const existing = this.sGetPendingWalletTransaction.get({
+        key_id: row.key_id,
+      }) as PendingWalletTransaction | undefined;
+      return existing?.tx_hash === row.tx_hash && existing.tx_cbor === row.tx_cbor;
+    });
+    return put.immediate();
+  }
+
+  clearPendingWalletTransaction(keyId: string, txHash: string): boolean {
+    return this.sClearPendingWalletTransaction.run({
+      key_id: keyId,
+      tx_hash: txHash,
+    }).changes > 0;
+  }
+
+  getWalletTransactionOutcome(
+    keyId: string,
+    txHash: string,
+  ): WalletTransactionOutcome | undefined {
+    return this.sGetWalletTransactionOutcome.get({
+      key_id: keyId,
+      tx_hash: txHash,
+    }) as WalletTransactionOutcome | undefined;
+  }
+
+  resolvePendingWalletTransaction(
+    keyId: string,
+    txHash: string,
+    state: WalletTransactionOutcome["state"],
+  ): boolean {
+    const resolvePending = this.db.transaction(() => {
+      const params = { key_id: keyId, tx_hash: txHash };
+      const outcome = this.sGetWalletTransactionOutcome.get(
+        params,
+      ) as WalletTransactionOutcome | undefined;
+      if (outcome !== undefined) {
+        if (outcome.state !== state) return false;
+        this.sClearPendingWalletTransaction.run(params);
+        return true;
+      }
+
+      const pending = this.sGetPendingWalletTransaction.get({
+        key_id: keyId,
+      }) as PendingWalletTransaction | undefined;
+      if (pending?.tx_hash !== txHash) return false;
+
+      this.sInsertWalletTransactionOutcome.run({
+        ...params,
+        state,
+        resolved_at: Date.now(),
+      });
+      if (this.sClearPendingWalletTransaction.run(params).changes !== 1) {
+        throw new Error("pending wallet transaction changed during resolution");
+      }
+      return true;
+    });
+    return resolvePending.immediate();
   }
 
   insertKey(row: Omit<ApiKeyRow, "disabled" | "demo"> & { demo?: number }): void {
@@ -304,6 +692,9 @@ export class GatewayStore {
   }
   insertUsage(row: UsageRow): void {
     this.sInsertUsage.run(row);
+  }
+  upsertUsage(row: UsageRow): void {
+    this.sUpsertUsage.run(row);
   }
   sumCostLovelace(keyId: string): bigint {
     const row = this.sSumCost.get({ key_id: keyId }) as { total: number } | undefined;

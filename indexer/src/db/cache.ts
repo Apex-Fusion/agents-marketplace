@@ -92,6 +92,25 @@ export interface UtxoRow {
   spent_tx: string | null;
 }
 
+export type EscrowTerminalType = "AcceptEscrow" | "ReclaimEscrow" | "ReleaseEscrow";
+
+export interface EscrowLineageRow extends EscrowRow {
+  spent_tx: string | null;
+}
+
+export interface EscrowLineage {
+  original_ref: string;
+  rows: EscrowLineageRow[];
+  terminal: { type: EscrowTerminalType; tx_hash: string } | null;
+}
+
+export class AmbiguousEscrowLineageError extends Error {
+  constructor(ref: string) {
+    super(`ambiguous escrow lineage at ${ref}`);
+    this.name = "AmbiguousEscrowLineageError";
+  }
+}
+
 export class SqliteCache {
   private db: Database.Database;
   private dbPath: string;
@@ -232,6 +251,131 @@ export class SqliteCache {
     return this.db.prepare(
       `SELECT * FROM escrows WHERE supplier_pkh = ? ORDER BY created_slot DESC`
     ).all(supplierPkh) as EscrowRow[];
+  }
+
+  /**
+   * Follow one escrow through the transactions which spend it. A transition is
+   * eligible only when the spending transaction creates exactly one escrow
+   * output with the same immutable datum fields and the next protocol state.
+   * Terminal state is reported only when the matching, non-rolled-back event
+   * was observed for the spend.
+   */
+  getEscrowLineage(originalRef: string): EscrowLineage | null {
+    const getRow = this.db.prepare(`
+      SELECT e.*, u.spent_tx
+      FROM escrows e
+      JOIN utxos u ON u.ref = e.utxo_ref
+      WHERE e.utxo_ref = ? AND e.rolled_back = 0
+    `);
+    const getContinuations = this.db.prepare(`
+      SELECT e.*, u.spent_tx
+      FROM escrows e
+      JOIN utxos u ON u.ref = e.utxo_ref
+      WHERE u.created_tx = ?
+        AND e.rolled_back = 0
+        AND e.buyer_pkh = ?
+        AND e.supplier_pkh = ?
+        AND e.advert_ref_tx = ?
+        AND e.advert_ref_index = ?
+        AND e.capability_id = ?
+        AND e.request_spec_hash = ?
+        AND e.prompt_hash = ?
+        AND e.payment_lovelace = ?
+        AND e.buyer_bond_lovelace = ?
+        AND e.supplier_bond_lovelace = ?
+        AND e.deliver_by = ?
+        AND e.posted_at = ?
+        AND e.state = ?
+      ORDER BY e.utxo_ref ASC
+    `);
+    const getTerminalEvents = this.db.prepare(`
+      SELECT type, tx_hash
+      FROM events
+      WHERE rolled_back = 0
+        AND tx_hash = ?
+        AND utxo_ref = ?
+        AND type IN ('AcceptEscrow', 'ReclaimEscrow', 'ReleaseEscrow')
+      ORDER BY id ASC
+    `);
+
+    const readLineage = this.db.transaction((ref: string): EscrowLineage | null => {
+      const origin = getRow.get(ref) as EscrowLineageRow | undefined;
+      if (!origin) return null;
+
+      const rows: EscrowLineageRow[] = [];
+      const seen = new Set<string>();
+      let current = origin;
+
+      for (;;) {
+        if (seen.has(current.utxo_ref)) {
+          throw new AmbiguousEscrowLineageError(current.utxo_ref);
+        }
+        seen.add(current.utxo_ref);
+        rows.push(current);
+
+        if (current.spent_tx === null) {
+          return { original_ref: originalRef, rows, terminal: null };
+        }
+
+        const nextState =
+          current.state === "Open"
+            ? "Claimed"
+            : current.state === "Claimed"
+              ? "Submitted"
+              : null;
+        const continuations = nextState === null
+          ? []
+          : getContinuations.all(
+              current.spent_tx,
+              current.buyer_pkh,
+              current.supplier_pkh,
+              current.advert_ref_tx,
+              current.advert_ref_index,
+              current.capability_id,
+              current.request_spec_hash,
+              current.prompt_hash,
+              current.payment_lovelace,
+              current.buyer_bond_lovelace,
+              current.supplier_bond_lovelace,
+              current.deliver_by,
+              current.posted_at,
+              nextState,
+            ) as EscrowLineageRow[];
+        const terminalEvents = getTerminalEvents.all(
+          current.spent_tx,
+          current.utxo_ref,
+        ) as Array<{ type: EscrowTerminalType; tx_hash: string }>;
+
+        if (continuations.length > 1 || terminalEvents.length > 1) {
+          throw new AmbiguousEscrowLineageError(current.utxo_ref);
+        }
+        if (continuations.length === 1) {
+          if (terminalEvents.length !== 0) {
+            throw new AmbiguousEscrowLineageError(current.utxo_ref);
+          }
+          current = continuations[0];
+          continue;
+        }
+        if (terminalEvents.length === 1) {
+          const terminal = terminalEvents[0];
+          const validTerminal =
+            (terminal.type === "ReclaimEscrow" &&
+              (current.state === "Open" || current.state === "Claimed")) ||
+            ((terminal.type === "AcceptEscrow" || terminal.type === "ReleaseEscrow") &&
+              current.state === "Submitted");
+          if (!validTerminal) {
+            throw new AmbiguousEscrowLineageError(current.utxo_ref);
+          }
+          return { original_ref: originalRef, rows, terminal };
+        }
+
+        // The spend is known, but no indexed continuing output or terminal
+        // event proves what it did. Keep the last proven row and fail closed.
+        return { original_ref: originalRef, rows, terminal: null };
+      }
+    });
+
+    return readLineage(originalRef);
   }
 
   // ─── Supplier status ───────────────────────────────────────────────────

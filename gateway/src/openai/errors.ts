@@ -10,6 +10,8 @@
 import { ReceiptVerificationError, IndexerError, SupplierError } from "@marketplace/buyer/sdk";
 import { TxConstructionError } from "@marketplace/shared/tx";
 import { ResponseCompatibilityError } from "@marketplace/shared/responses";
+import { MutexQueueFullError, MutexTimeoutError } from "../sdk/registry.js";
+import { WalletTransactionGuardError } from "../sdk/walletTransactions.js";
 
 export type OpenAiErrorType =
   | "invalid_request_error"
@@ -57,6 +59,15 @@ export function toErrorBody(err: GatewayError): Record<string, unknown> {
 /** Map any thrown value to a GatewayError. */
 export function toGatewayError(err: unknown): GatewayError {
   if (err instanceof GatewayError) return err;
+  if (err instanceof WalletTransactionGuardError) {
+    return new GatewayError(503, "server_error", "wallet_transaction_pending", "wallet payment state is not yet resolved");
+  }
+  if (err instanceof MutexQueueFullError) {
+    return new GatewayError(429, "rate_limit_error", "wallet_queue_full", "wallet transaction queue is full");
+  }
+  if (err instanceof MutexTimeoutError) {
+    return new GatewayError(503, "server_error", "wallet_operation_timeout", "wallet operation is still running; no second spend has started");
+  }
   if (err instanceof ResponseCompatibilityError) {
     return badRequest("unsupported_parameter", err.message, err.param);
   }
