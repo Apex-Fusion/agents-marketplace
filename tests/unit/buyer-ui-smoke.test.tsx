@@ -8,6 +8,7 @@
  * Core UI contract:
  * - <App /> must render a <nav> with links to /, /tasks, /wallet
  * - <Dashboard /> must call marketplace.discoverSuppliers() on mount
+ * - <Dashboard /> must not display suppliers whose status is "offline"
  * - <PromptForm /> must call marketplace.submitPrompt() with correct args on submit
  * - <TaskHistory /> must call getTaskHistory() and render TaskRow for each entry
  * - <Wallet /> must render the configured walletKey.address
@@ -118,20 +119,27 @@ describe("<Dashboard /> smoke", () => {
     await waitFor(() => expect(spy).toHaveBeenCalledOnce());
   });
 
-  it("renders a SupplierCard for each supplier returned by discoverSuppliers()", async () => {
+  it("renders a SupplierCard for each discovered supplier except offline ones", async () => {
     const mp = makeMockMarketplace();
     vi.spyOn(mp, "discoverSuppliers").mockResolvedValue([
       makeSampleSupplierView({ supplier_pkh: "a".repeat(56) }),
       makeSampleSupplierView({ supplier_pkh: "b".repeat(56) }),
+      makeSampleSupplierView({
+        utxo_ref: "c".repeat(64) + "#0",
+        supplier_pkh: "c".repeat(56),
+        model: "offline-model",
+        status: "offline",
+      }),
     ]);
     render(wrap(<Dashboard />, mp));
     // Wait for async discover to complete and cards to render. Dashboard
-    // appends two synthetic demo cards (Piper-TTS + Kimi K2.6 chat) to whatever
-    // the indexer returned, so the count is N+2 until on-chain suppliers ship.
+    // hides offline suppliers and appends two synthetic demo cards (Piper-TTS
+    // + Kimi K2.6 chat), so the count is (N - offline) + 2.
     await waitFor(() => {
       const cards = document.querySelectorAll("[data-testid='supplier-card']");
       expect(cards.length).toBe(4);
     });
+    expect(screen.queryByText("offline-model")).toBeNull();
     // Sanity: one of the cards is the demo Piper supplier.
     const piperBadges = Array.from(
       document.querySelectorAll("[data-testid='supplier-card']"),

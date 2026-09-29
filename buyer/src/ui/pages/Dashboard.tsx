@@ -2,10 +2,10 @@
  * buyer/src/ui/pages/Dashboard.tsx — supplier list + capability-routed task form.
  *
  * Calls marketplace.discoverSuppliers() on mount; renders a SupplierCard
- * per result. Once a supplier is selected, the task form (e.g. the chat
- * window) renders ABOVE the grid — directly under the page title — and the
- * component is picked from `CAPABILITY_FORMS` based on the supplier's
- * `capability_id`.
+ * per result. Offline suppliers stay in state but are not displayed. Once a
+ * supplier is selected, the task form (e.g. the chat window) renders ABOVE
+ * the grid — directly under the page title — and the component is picked
+ * from `CAPABILITY_FORMS` based on the supplier's `capability_id`.
  *
  * Capabilities (current registry):
  *
@@ -146,18 +146,21 @@ export default function Dashboard() {
       )}
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-        {suppliers.map((s) => (
-          <SupplierCard
-            key={s.utxo_ref}
-            supplier={s}
-            onUse={(sup) => {
-              setSelected(sup);
-              // The form renders above the grid; bring it into view when a
-              // card further down the page was clicked.
-              window.scrollTo({ top: 0, behavior: "smooth" });
-            }}
-          />
-        ))}
+        {suppliers.map((s) =>
+          // Display-only filter: discovery and selection are unchanged.
+          s.status === "offline" ? null : (
+            <SupplierCard
+              key={s.utxo_ref}
+              supplier={s}
+              onUse={(sup) => {
+                setSelected(sup);
+                // The form renders above the grid; bring it into view when a
+                // card further down the page was clicked.
+                window.scrollTo({ top: 0, behavior: "smooth" });
+              }}
+            />
+          ),
+        )}
       </div>
     </div>
   );
