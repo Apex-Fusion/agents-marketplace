@@ -13,8 +13,9 @@ vector-marketplace box. These suppliers use backends reached through
   llama.cpp rig. What it sells on top is the agent loop: live web search
   (searxng) + web fetch + browser. Both suppliers contend for vuk's single
   llama.cpp slot; requests queue and the 1h deadline absorbs stalls.
-- `qwen38-local` and `qwen38-local-oneshot` front the same vLLM load balancer
-  at `100.77.146.49:8989`.
+- `qwen38-local`, `qwen38-local-oneshot`, and the three one-shot replicas
+  `qwen38-local-oneshot-{2,3,4}` front the same vLLM load balancer at
+  `100.77.146.49:8989`.
   It serves `swarm-qwen38-27b-gptq4` (Qwen3.8-27B GPTQ Int4), with a
   24,576-token context. The balancer uses four workers: `192.168.1.131`,
   `192.168.1.201`, `192.168.1.202`, and `192.168.1.203`, each on port 8000.
@@ -39,6 +40,9 @@ vector-marketplace box. These suppliers use backends reached through
 | `docker-compose.supplier-openclaw.yml` | `marketplace-mainnet-supplier-openclaw` | Supplier `openclaw`, `llm.chat.v1`, model `openclaw-web-agent` |
 | `docker-compose.supplier-qwen38-local.yml` | `marketplace-mainnet-supplier-qwen38-local` | Qwen3.8-27B, `llm.chat.v1`, model `swarm-qwen38-27b-gptq4` |
 | `docker-compose.supplier-qwen38-local-oneshot.yml` | `marketplace-mainnet-supplier-qwen38-local-oneshot` | Qwen3.8-27B, `llm.text.generate.v1`, model `swarm-qwen38-27b-gptq4` |
+| `docker-compose.supplier-qwen38-local-oneshot-2.yml` | `marketplace-mainnet-supplier-qwen38-local-oneshot-2` | Independent Qwen one-shot wallet and request slot |
+| `docker-compose.supplier-qwen38-local-oneshot-3.yml` | `marketplace-mainnet-supplier-qwen38-local-oneshot-3` | Independent Qwen one-shot wallet and request slot |
+| `docker-compose.supplier-qwen38-local-oneshot-4.yml` | `marketplace-mainnet-supplier-qwen38-local-oneshot-4` | Independent Qwen one-shot wallet and request slot |
 
 Host env files (never committed):
 
@@ -61,6 +65,8 @@ Host env files (never committed):
 - `supplier/.env.qwen38-local-oneshot` — a distinct wallet, mainnet plumbing,
   and `ADVERT_REF` (chmod 600). It uses the same upstream and a five-minute
   processing limit. It runs the full one-shot Claim/Submit settlement flow.
+- `supplier/.env.qwen38-local-oneshot-{2,3,4}` — three more distinct wallets
+  and adverts (chmod 600), with the same one-shot limits and upstream.
 
 ## Qwen3.8 local suppliers
 
@@ -109,6 +115,73 @@ Live mainnet deployment (2026-09-22):
 Each normal Responses or Chat Completions call, including a continuation, opens a separate escrow.
 The one-shot gateway path buffers output until completion and settlement.
 The chat supplier retains ticket settlement and live token streaming.
+
+### Additional one-shot suppliers
+
+Deployed on 2026-09-29. Each replica has its own container, wallet, advert,
+and single-flight request slot. Together with the original one-shot supplier,
+the pool has four independent slots for `swarm-qwen38-27b-gptq4`.
+The existing chat supplier is separate.
+
+All three use `llm.text.generate.v1`, a `24576` output-token cap, a `300000` ms
+processing limit, and the existing `200000` lovelace price. Each wallet receives
+50 AP3X from the Qwen chat wallet; its original 5 AP3X collateral stays unspent.
+Funding transaction:
+`49a2327c9b2db0e49bc213becbae40c46c6e4724b0cbb76babf3cfb73e4f7f02`.
+
+Each hostname below has a DNS-only A record pointing to `62.238.38.167`.
+The shorter hostnames keep endpoint URLs within the current advert encoder's
+64-byte string limit. The longer `qwen38-local-oneshot-2` hostname produces
+a 65-byte URL and fails CBOR encoding.
+
+#### `qwen38-local-oneshot-2`
+
+- Endpoint: `https://mp-suppliers-qwen38-oneshot-2.vector.apexfusion.org`.
+- Supplier PKH: `58b4e2f6771734a27d004524f215c30abdd4b73196d0bbf9e40160eb`.
+- Advert: `b990644bcf18a99c8b035b62cde931eb4f1f1649171c2274c0a1514e4585b509#0`.
+- Wallet: `addr1v9vtfchkwutnfgnaqpzjfus4cv9tm49hxxtdpwleusqkp6cqd4hgy`.
+
+#### `qwen38-local-oneshot-3`
+
+- Endpoint: `https://mp-suppliers-qwen38-oneshot-3.vector.apexfusion.org`.
+- Supplier PKH: `4d61737df07f2b3f51fd78a2f91b98040a649c2670c32ff0ca8e0b99`.
+- Advert: `1d1d0aab294f0c2f6bfc267949cb550b7a974c4d98b05c8f04c8bef59f40364f#0`.
+- Wallet: `addr1v9xkzuma7pljk063l4u297gmnqzq5eyuyecvxtlse28qhxgjvdszz`.
+
+#### `qwen38-local-oneshot-4`
+
+- Endpoint: `https://mp-suppliers-qwen38-oneshot-4.vector.apexfusion.org`.
+- Supplier PKH: `dc6d1e0c6f3e6713e421668df75ac0ab07409a0feba0c7c01d92f9a6`.
+- Advert: `d9160b2ee2cbd7d2825b467f48ee6b863160c2514ec3852f3ef165afa15f40e6#0`.
+- Wallet: `addr1v8wx68svdulxwylyy9ngma66cz4swsy6pl46p37qrkf0nfst9r0st`.
+
+#### Concurrent callers
+
+The gateway still serializes requests per API key to protect wallet UTxOs.
+Use separate funded keys for concurrent workers. Set `x_vector.supplier_pkh`
+to a different supplier for each worker when you need a fixed assignment.
+The original one-shot supplier PKH is
+`f3ab38f4b5b16b5d08729e74740b39794e3b9dc912f4dfb6c38fb374`.
+
+Verification: four pinned public `/openai/v1/responses` requests, with four
+independent keys, return HTTP 200 and receipts from four distinct suppliers.
+All four suppliers report `working` at the same time. Total elapsed time is
+about 44 seconds. Each probe intentionally stops at its 512-token output cap,
+so its Responses status is `incomplete`, not an inference error.
+
+#### Private load-balancer access
+
+The current `vuk` load-balancer container publishes only `127.0.0.1:8080`.
+Tailscale Serve forwards the existing private supplier endpoint to it:
+
+```bash
+sudo tailscale serve --bg --tcp=8989 tcp://127.0.0.1:8080
+```
+
+This configuration persists in tailscaled and exposes the port only within
+the tailnet. It does not change the load-balancer container or inference workers.
+Check it with `tailscale serve status`. Do not replace it with a public Funnel.
+The supplier compose files continue to use `http://100.77.146.49:8989`.
 
 ### Shared backend limits
 

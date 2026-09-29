@@ -1,0 +1,55 @@
+# Independent Qwen3.8-27B one-shot supplier 4 on local-inference-proxy.
+# Same load balancer and model as qwen38-local-oneshot; separate wallet/advert.
+# Endpoint: https://mp-suppliers-qwen38-oneshot-4.vector.apexfusion.org
+# Host-only wallet: supplier/.env.qwen38-local-oneshot-4 (mode 600).
+
+name: marketplace-mainnet-supplier-qwen38-local-oneshot-4
+
+services:
+  supplier:
+    build:
+      context: ../..
+      dockerfile: supplier/Dockerfile
+    container_name: marketplace-mainnet-supplier-qwen38-local-oneshot-4
+    restart: unless-stopped
+    env_file:
+      - path: ../../supplier/.env.qwen38-local-oneshot-4
+        required: false
+    environment:
+      LLM_BACKEND: openai
+      OPENAI_UPSTREAM_API: chat-completions
+      OPENAI_BASE_URL: http://100.77.146.49:8989
+      OPENAI_TIMEOUT_MS: "300000"
+      PORT: "8080"
+      LIVE_CHAIN: "1"
+      # NETWORK_ID and OGMIOS_URL come from the mainnet env file.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz >/dev/null || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - traefik-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-net"
+      - "traefik.http.routers.mp-suppliers-qwen38-local-oneshot-4-mainnet.entrypoints=web"
+      - "traefik.http.routers.mp-suppliers-qwen38-local-oneshot-4-mainnet.rule=Host(`mp-suppliers-qwen38-oneshot-4.vector.apexfusion.org`)"
+      - "traefik.http.routers.mp-suppliers-qwen38-local-oneshot-4-mainnet.middlewares=mp-suppliers-qwen38-local-oneshot-4-mainnet-https"
+      - "traefik.http.middlewares.mp-suppliers-qwen38-local-oneshot-4-mainnet-https.redirectscheme.scheme=https"
+      - "traefik.http.middlewares.mp-suppliers-qwen38-local-oneshot-4-mainnet-https.redirectscheme.permanent=true"
+      - "traefik.http.routers.mp-suppliers-qwen38-local-oneshot-4-mainnet-tls.entrypoints=websecure"
+      - "traefik.http.routers.mp-suppliers-qwen38-local-oneshot-4-mainnet-tls.rule=Host(`mp-suppliers-qwen38-oneshot-4.vector.apexfusion.org`)"
+      - "traefik.http.routers.mp-suppliers-qwen38-local-oneshot-4-mainnet-tls.tls.certresolver=letsencrypt"
+      - "traefik.http.services.mp-suppliers-qwen38-local-oneshot-4-mainnet.loadbalancer.server.port=8080"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  traefik-net:
+    external: true
+    name: traefik-net

@@ -175,6 +175,27 @@ const OPERATOR_SOURCES: OperatorSource[] = [
     role: "supplier",
   },
   {
+    label: "supplier-qwen38-local-oneshot-2@inference-proxy",
+    host: "inference-proxy",
+    envPath: "/root/agents-marketplace/supplier/.env.qwen38-local-oneshot-2",
+    keyVar: "SUPPLIER_PRIV_KEY_HEX",
+    role: "supplier",
+  },
+  {
+    label: "supplier-qwen38-local-oneshot-3@inference-proxy",
+    host: "inference-proxy",
+    envPath: "/root/agents-marketplace/supplier/.env.qwen38-local-oneshot-3",
+    keyVar: "SUPPLIER_PRIV_KEY_HEX",
+    role: "supplier",
+  },
+  {
+    label: "supplier-qwen38-local-oneshot-4@inference-proxy",
+    host: "inference-proxy",
+    envPath: "/root/agents-marketplace/supplier/.env.qwen38-local-oneshot-4",
+    keyVar: "SUPPLIER_PRIV_KEY_HEX",
+    role: "supplier",
+  },
+  {
     label: "buyer@open-webui",
     host: "open-webui",
     envPath: "/root/marketplace-buyer-mainnet/.env",
