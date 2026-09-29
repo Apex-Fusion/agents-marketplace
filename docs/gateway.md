@@ -380,6 +380,12 @@ The indexer serves `GET /escrows/:ref/lineage` with exact transaction links.
 Settlement does not identify jobs by timestamps or by a lone Submitted output.
 Deploy this indexer endpoint before or with the concurrent gateway.
 
+The indexer resumes from its saved chain checkpoint.
+A rejected checkpoint does not clear its cached history.
+The default watchdog retries that checkpoint instead of falling back to genesis.
+Back up the indexer database before a release.
+Investigate repeated checkpoint rejections before changing or rebuilding the database.
+
 After a restart, recovery takes ownership only after the previous owner's
 heartbeat is stale for 60 seconds.
 It settles Submitted escrows and reclaims expired Open or Claimed escrows.

@@ -138,8 +138,10 @@ export class OgmiosSource extends EventEmitter implements ChainSyncSource {
   private sendFindIntersection(): void {
     const OPEN = 1;
     if (!this.ws || this.ws.readyState !== OPEN) return;
-    const points: Array<{ slot: number; id: string } | "origin"> = this.intersectAt
-      ? [this.intersectAt, "origin"]
+    // A rejected checkpoint must not silently reset persisted history.
+    // The watchdog retries the saved point if the node cannot find it.
+    const points: Array<{ slot: number; id: string } | "origin"> = this.intersectAt && this.intersectAt.id !== "origin"
+      ? [this.intersectAt]
       : ["origin"];
     this.ws.send(JSON.stringify({
       jsonrpc: "2.0",
