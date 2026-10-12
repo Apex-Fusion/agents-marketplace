@@ -211,14 +211,15 @@ The gateway supplies the financial journal and Accept/Reclaim integration.
 ## Verification record
 
 - All eight workspace type checks pass on Node 20.
-- The full suite passes: 1,916 tests in 152 files.
+- The full suite passes: 1,923 tests in 152 files.
 - Ten tests remain skipped, including one fully skipped file.
 - The buyer production bundle builds and loads in Chromium.
 - The control, publisher, and trusted Python runtime images build locally.
 - Native ledger parser checks accept long model identities, long endpoints, and UTF-8 chunks.
 - Existing advert and escrow golden encodings stay unchanged.
+- A real FastMCP tuple tool runs in the offline Docker runtime. Its JSON Schema 2020-12 input and output schemas validate, and wrong tuple lengths fail.
 
-### Paper-only execution check
+### Local paper-only execution check
 
 - Chromium submits only the URL of [Generalized Intersection over Union](https://arxiv.org/abs/1902.09630).
 - The real `gpt-5.6-sol` endpoint generates an implementation from the PDF in 17 total model calls.

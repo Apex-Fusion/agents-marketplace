@@ -30,7 +30,7 @@ Demo keys cannot execute paid tools.
 The supplier capability is `mcp.tool.execute.v1`.
 Its advert model is `paper2agent:<full-manifest-hash>`.
 MCP names have the form `p2a_<tool-name>_<first-16-hash-characters>`.
-Discovery returns validated input and output schemas with an explicit draft-07 dialect.
+Discovery returns validated input and output schemas with an explicit JSON Schema 2020-12 dialect.
 An approved call uses the full hash and supplier identity, not the short name alone.
 
 ### Operator approval

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import Ajv, { type ValidateFunction } from "ajv";
+import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 import { Point } from "@noble/ed25519";
 import { blake2b } from "@noble/hashes/blake2b";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils";
@@ -149,7 +149,7 @@ function limit(value: JsonValue | undefined, maximum: number, label: string): nu
 }
 
 // AJV supplies JSON Schema semantics. This preflight only bounds its execution:
-// draft-07, local acyclic JSON-pointer references, no regex/format evaluation.
+// 2020-12, local acyclic JSON-pointer references, no regex/format evaluation.
 function checkSchema(root: JsonObject): void {
   if (root.type !== "object") fail("schema root type must be object");
   const graph = new Map<JsonObject, JsonObject[]>();
@@ -163,31 +163,28 @@ function checkSchema(root: JsonObject): void {
     for (const key of ["pattern", "patternProperties", "format", "$async", "$id", "$anchor", "$dynamicAnchor", "$dynamicRef", "$recursiveRef"]) {
       if (Object.hasOwn(schema, key)) fail(`schema keyword ${key} is not allowed`);
     }
-    if (schema.$schema !== undefined && schema.$schema !== "http://json-schema.org/draft-07/schema#") {
-      fail("only JSON Schema draft-07 is supported");
+    if (schema.$schema !== undefined && schema.$schema !== "https://json-schema.org/draft/2020-12/schema") {
+      fail("only JSON Schema 2020-12 is supported");
     }
     function child(value: JsonValue): void {
       collect(value);
       if (typeof value !== "boolean") children.push(object(value, "schema"));
     }
-    for (const key of ["properties", "$defs", "definitions"]) {
+    for (const key of ["properties", "$defs", "definitions", "dependentSchemas"]) {
       if (schema[key] !== undefined) {
         for (const value of Object.values(object(schema[key], key))) child(value);
       }
     }
-    for (const key of ["additionalProperties", "additionalItems", "contains", "propertyNames", "not", "if", "then", "else"]) {
+    for (const key of ["additionalProperties", "unevaluatedProperties", "unevaluatedItems", "contentSchema", "contains", "propertyNames", "not", "if", "then", "else"]) {
       if (schema[key] !== undefined) child(schema[key]);
     }
-    for (const key of ["allOf", "anyOf", "oneOf"]) {
+    for (const key of ["allOf", "anyOf", "oneOf", "prefixItems"]) {
       if (schema[key] !== undefined) {
         if (!Array.isArray(schema[key])) fail(`${key} must be an array`);
         for (const value of schema[key]) child(value);
       }
     }
-    if (schema.items !== undefined) {
-      if (Array.isArray(schema.items)) schema.items.forEach(child);
-      else child(schema.items);
-    }
+    if (schema.items !== undefined) child(schema.items);
     if (schema.dependencies !== undefined) {
       for (const value of Object.values(object(schema.dependencies, "dependencies"))) {
         if (!Array.isArray(value)) child(value);
@@ -251,7 +248,7 @@ function compiled(manifest: Paper2AgentManifest): Validators {
   // Separate instances avoid collisions in root schemas. No fetch/loadSchema,
   // mutation, regex formats, or $data code paths are enabled.
   function compile(schema: JsonObject): ValidateFunction {
-    const ajv = new Ajv({
+    const ajv = new Ajv2020({
       strict: true, strictRequired: false, allErrors: false,
       coerceTypes: false, useDefaults: false, removeAdditional: false,
       ownProperties: true, inlineRefs: false, loopRequired: 32, loopEnum: 32,

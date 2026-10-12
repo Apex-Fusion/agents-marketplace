@@ -206,6 +206,50 @@ describe("Paper2Agent bounded JSON and maintained schema validation", () => {
     expect(() => validatePaper2AgentOutput(manifest(), { value: 7, extra: true })).toThrow(/schema/);
   });
 
+  it("validates FastMCP JSON Schema 2020-12 tuples without coercing or dropping coordinates", () => {
+    const configured = manifest();
+    const box: JsonObject = {
+      type: "array", minItems: 4, maxItems: 4,
+      prefixItems: [{ type: "number" }, { type: "number" }, { type: "number" }, { type: "number" }],
+    };
+    configured.input_schema = {
+      type: "object", $defs: { Box: box },
+      properties: { box: { $ref: "#/$defs/Box" } }, required: ["box"], additionalProperties: false,
+    };
+    const good = { box: [0, 1, 2, 3] };
+    expect(validatePaper2AgentInput(configured, good)).toEqual(good);
+    configured.output_schema = {
+      ...configured.input_schema, $schema: "https://json-schema.org/draft/2020-12/schema",
+    };
+    expect(validatePaper2AgentOutput(configured, good)).toEqual(good);
+    for (const box of [[0, 1, 2], [0, 1, 2, 3, 4], [0, 1, 2, "3"]]) {
+      expect(() => validatePaper2AgentInput(configured, { box })).toThrow(/schema/);
+      expect(() => validatePaper2AgentOutput(configured, { box })).toThrow(/schema/);
+    }
+  });
+
+  it.each([
+    { properties: { tuple: { type: "array", minItems: 1, maxItems: 1, prefixItems: [{ type: "string", pattern: "^(a+)+$" }] } } },
+    { dependentSchemas: { field: { type: "string", pattern: "^(a+)+$" } } },
+    { unevaluatedProperties: { type: "string", pattern: "^(a+)+$" } },
+    { properties: { list: { type: "array", unevaluatedItems: { type: "string", pattern: "^(a+)+$" } } } },
+    { properties: { content: { type: "string", contentSchema: { type: "string", pattern: "^(a+)+$" } } } },
+  ])("applies execution safeguards inside 2020-12 subschemas: %j", (children) => {
+    expect(() => parsePaper2AgentManifest({
+      ...manifest(), input_schema: { type: "object", ...children },
+    })).toThrow(/schema keyword pattern is not allowed/);
+  });
+
+  it("rejects a reference cycle through a tuple item before compiling it", () => {
+    expect(() => parsePaper2AgentManifest({
+      ...manifest(), input_schema: {
+        type: "object", properties: {
+          tuple: { type: "array", minItems: 1, maxItems: 1, prefixItems: [{ $ref: "#" }] },
+        },
+      },
+    })).toThrow(/cyclic schema reference/);
+  });
+
   it.each([
     { type: "object", $ref: "https://example.com/schema" },
     { type: "object", $ref: "file:///tmp/schema" },

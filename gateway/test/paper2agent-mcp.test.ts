@@ -381,17 +381,17 @@ describe("Paper2Agent authenticated MCP HTTP", () => {
     expect(f.submit).not.toHaveBeenCalled();
   });
 
-  it("uses draft-07 tuple schemas without changing the approved manifest", async () => {
+  it("executes tuple tools without changing the approved manifest", async () => {
     const manifest = parsePaper2AgentManifest({
       ...MANIFEST, name: "tuple_tool",
       input_schema: {
         type: "object", properties: {
-          point: { type: "array", items: [{ type: "number" }, { type: "string" }], minItems: 2, maxItems: 2 },
+          point: { type: "array", prefixItems: [{ type: "number" }, { type: "string" }], minItems: 2, maxItems: 2 },
         }, required: ["point"], additionalProperties: false,
       },
       output_schema: {
         type: "object", properties: {
-          label: { type: "array", items: [{ type: "string" }, { type: "number" }], minItems: 2, maxItems: 2 },
+          label: { type: "array", prefixItems: [{ type: "string" }, { type: "number" }], minItems: 2, maxItems: 2 },
         }, required: ["label"], additionalProperties: false,
       },
     });

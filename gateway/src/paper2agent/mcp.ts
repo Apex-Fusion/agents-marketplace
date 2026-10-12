@@ -14,10 +14,9 @@ import { asyncHandler, requestAbortSignal, sendError } from "../middleware/http.
 import { badRequest, forbidden, GatewayError, notFound } from "../openai/errors.js";
 import { executePaper2AgentCall, getPaper2AgentCall, isPaper2AgentOnlyKey, listPaper2AgentCalls } from "./service.js";
 
-// Shared manifests require object roots and use draft-07. MCP defaults to a
-// newer dialect when $schema is absent. Annotate copies, not signed manifests.
+// Make the MCP dialect explicit on copies, without changing signed manifests.
 function mcpSchema(schema: JsonObject): Tool["inputSchema"] {
-  return { $schema: "http://json-schema.org/draft-07/schema#", ...schema, type: "object" };
+  return { $schema: "https://json-schema.org/draft/2020-12/schema", ...schema, type: "object" };
 }
 
 /** A dedicated approval key cannot bypass its limits through a different API. */
