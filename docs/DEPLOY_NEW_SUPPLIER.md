@@ -451,6 +451,14 @@ Set the buyer control URL to `http://paper2agent-link:8095`.
 The link publishes no host ports and holds no wallet keys.
 Its Compose file documents the pinned host key, private key permissions, and recovery commands.
 
+The production host has about 8 GiB of RAM and no swap.
+During the 2026-10-12 image build, the kernel ran out of memory and killed Ollama.
+Docker restarted it automatically.
+Build application images off the production host.
+Transfer the built images with `docker save` and `docker load`.
+Then activate the selected services with `docker compose up --no-build`.
+Do not run a second production build just to apply a documentation-only commit.
+
 #### Build and transfer the trusted runtime
 
 Build the base image once on the isolated host:

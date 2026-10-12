@@ -1,6 +1,6 @@
 # Paper2Agent infrastructure for the Vector marketplace
 
-**Status:** Paper-only submission and execution are implemented and verified locally. Live publication needs a configured wallet and separate spending approval. No real-chain funds move in these checks.
+**Status:** Paper-only submission and execution are deployed and verified on the live marketplace. Live publication needs a configured wallet and separate spending approval. No real-chain funds move in these checks.
 
 ## Scope
 
@@ -233,6 +233,19 @@ The gateway supplies the financial journal and Accept/Reclaim integration.
 - Paper SHA-256: `56fceedbbe952fd132eb75a6e6bc637028c365fa5a8c6b584e4020ddf01f291e`.
 - This checks the metric implementation. It does not reproduce detector training or benchmark scores.
 
+
+### Production paper-only check (2026-10-12)
+
+- Chromium uploads the same GIoU PDF through the live paper-only page.
+- Attempt 1 stops at a model request deadline. The upstream service later reports HTTP 500 and a prematurely ended response.
+- Attempt 2 exposes the FastMCP tuple dialect mismatch. The validator now uses JSON Schema 2020-12 and keeps its execution safeguards.
+- One explicit retry after the fix reaches `awaiting_review` on attempt 3, with no review or publication.
+- The build and independent verification use 19 model calls and fresh offline Docker environments on `build-nixos-2`.
+- Four reference cases cover identical boxes, partial overlap, disjoint boxes with reversed predicted corners, and a degenerate prediction inside valid ground truth.
+- Chromium downloads a 3,633-byte ZIP. Python verifies its CRCs and checks every file's size and SHA-256 against the verified artifact.
+- ZIP SHA-256: `949c15ed534e23c0376a8c43b174a23494579ca5786084206fd477e6bdb3a096`.
+- Publication bundle SHA-256: `0d82fc442103afd63dd4dc97a8815b357c1d475b1b2bce802c5d39915aa25169`.
+- The gateway's public health check passes. Unauthenticated MCP access returns HTTP 401.
 
 ### Earlier paid-execution check
 
