@@ -43,6 +43,7 @@ export default defineConfig({
       "buyer/**/*.{test,spec}.tsx",
       "gateway/**/*.{test,spec}.ts",
       "supplier/**/*.{test,spec}.ts",
+      "paper2agent/**/*.{test,spec}.ts",
       "indexer/**/*.{test,spec}.ts",
     ],
     exclude: ["**/node_modules/**", "**/dist/**"],

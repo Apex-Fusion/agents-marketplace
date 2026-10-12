@@ -1,0 +1,51 @@
+# Host-side network guard for the rootless paper2agent build daemon.
+# The ExecStartPre of user@UID.service for paper2agent-build loads this file atomically, so the
+# daemon never starts without it. slirp4netns carries all container egress, and dockerd pulls images
+# from the host network namespace. Both run as paper2agent-build, so this file filters by that user.
+
+table inet paper2agent_build
+delete table inet paper2agent_build
+
+table inet paper2agent_build {
+	set denied_ipv4 {
+		type ipv4_addr
+		flags interval
+		elements = {
+			0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8,
+			169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24, 192.0.2.0/24,
+			192.168.0.0/16, 198.18.0.0/15, 198.51.100.0/24, 203.0.113.0/24,
+			224.0.0.0/3
+		}
+	}
+
+	chain output {
+		type filter hook output priority filter; policy accept;
+
+		# Loopback endpoints. 18095 is the control API that RootlessKit publishes for the build user.
+		# 18000 is the model relay that paper2agent-link opens with a reverse forward from production.
+		ip daddr 127.0.0.1 tcp dport 18095 ct state new meta skuid != { 0, "paper2agent-link" } counter reject with tcp reset
+		ip daddr 127.0.0.1 tcp dport 18000 ct state new meta skuid != { 0, "paper2agent-build" } counter reject with tcp reset
+
+		meta skuid "paper2agent-build" jump build_egress
+	}
+
+	# The build user may reach the model relay, DNS, NTP and public web ports. It may not reach
+	# other host addresses or ports, private networks or IPv6.
+	chain build_egress {
+		ct state established,related accept
+		meta nfproto ipv6 counter goto build_deny
+		ip daddr 127.0.0.1 tcp dport 18000 accept
+		fib daddr type local counter goto build_deny
+		ip daddr @denied_ipv4 counter goto build_deny
+		tcp dport { 53, 80, 443 } accept
+		udp dport { 53, 123, 443 } accept
+		counter goto build_deny
+	}
+
+	# A TCP reset makes a denied connection fail at once. With an ICMP reject a connection
+	# through user-mode networking waited until its own timeout.
+	chain build_deny {
+		meta l4proto tcp reject with tcp reset
+		reject
+	}
+}

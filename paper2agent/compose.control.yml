@@ -1,0 +1,32 @@
+# Run on a dedicated build host, not on the publisher or a wallet host.
+services:
+  paper2agent-control:
+    build:
+      context: ..
+      dockerfile: paper2agent/Dockerfile
+    image: vector-paper2agent-services:local
+    command: [control]
+    init: true
+    restart: unless-stopped
+    env_file: .env.control
+    environment:
+      PAPER2AGENT_CONTROL_HOST: 0.0.0.0
+      PAPER2AGENT_CONTROL_PORT: 8095
+      PAPER2AGENT_CONTROL_DATA_DIR: /repo/data/paper2agent-control
+      DOCKER_HOST: unix:///var/run/docker.sock
+    # Use the socket GID seen inside the container (0 for rootless Docker).
+    # A rootful Docker socket grants host-root access. Do not use a shared CI daemon.
+    group_add: ["${DOCKER_GID:?Set DOCKER_GID to the container-visible Docker socket group}"]
+    ports: ["${PAPER2AGENT_CONTROL_BIND_HOST:-127.0.0.1}:${PAPER2AGENT_CONTROL_PUBLISHED_PORT:-8095}:8095"]
+    volumes:
+      - control-data:/repo/data/paper2agent-control
+      - ${PAPER2AGENT_DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+    stop_grace_period: 3m
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:8095/jobs',{headers:{authorization:'Bearer '+process.env.PAPER2AGENT_CONTROL_TOKEN}}).then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 90s
+      retries: 3
+volumes:
+  control-data:

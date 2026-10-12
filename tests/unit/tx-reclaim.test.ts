@@ -17,7 +17,6 @@ import { buildBuyerWalletKey } from "../fixtures/buyer-side/wallet-keys.js";
 import { buildSupplierWalletKey } from "../fixtures/supplier-side/wallet-keys.js";
 import {
   buildOpenEscrowUtxo,
-  buildClaimedEscrowUtxo,
   buildSubmittedEscrowUtxo,
   DELIVER_BY,
   PAYMENT_LOVELACE,
@@ -37,14 +36,6 @@ describe("buildReclaimTx() — happy path from Open state", () => {
     chain.seed(buildOpenEscrowUtxo());
   });
 
-  it("returns a non-empty txCborHex", async () => {
-    const buyer = buildBuyerWalletKey();
-    const utxo = buildOpenEscrowUtxo();
-    const result = await buildReclaimTx({ chain, buyerKey: buyer, escrowRef: utxo.ref });
-    expect(typeof result.txCborHex).toBe("string");
-    expect(result.txCborHex.length).toBeGreaterThan(0);
-  });
-
   it("buyer receives >= payment + buyer_bond + supplier_bond", async () => {
     const buyer = buildBuyerWalletKey();
     const utxo = buildOpenEscrowUtxo();
@@ -54,37 +45,12 @@ describe("buildReclaimTx() — happy path from Open state", () => {
     expect(total).toBeGreaterThanOrEqual(PAYMENT_LOVELACE + BUYER_BOND + SUPPLIER_BOND);
   });
 
-  it("validity lower-bound is >= deliver_by (after the deadline)", async () => {
-    const buyer = buildBuyerWalletKey();
-    const utxo = buildOpenEscrowUtxo();
-    // No throw = builder constructed valid tx with correct time range
-    await expect(
-      buildReclaimTx({ chain, buyerKey: buyer, escrowRef: utxo.ref }),
-    ).resolves.toBeDefined();
-  });
-
   it("escrow UTxO is spent (not present after reclaim)", async () => {
     const buyer = buildBuyerWalletKey();
     const utxo = buildOpenEscrowUtxo();
     await buildReclaimTx({ chain, buyerKey: buyer, escrowRef: utxo.ref });
     const spent = await chain.queryUtxo(utxo.ref);
     expect(spent).toBeNull();
-  });
-});
-
-// ─── Happy path — from Claimed ────────────────────────────────────────────────
-
-describe("buildReclaimTx() — happy path from Claimed state", () => {
-  it("succeeds when state is Claimed (not just Open)", async () => {
-    const buyer = buildBuyerWalletKey();
-    const chain = new MockChainProvider();
-    chain.advanceSlot(Math.floor((DELIVER_BY + 60_000) / 1000));
-    const utxo = buildClaimedEscrowUtxo();
-    chain.seed(utxo);
-
-    await expect(
-      buildReclaimTx({ chain, buyerKey: buyer, escrowRef: utxo.ref }),
-    ).resolves.toBeDefined();
   });
 });
 

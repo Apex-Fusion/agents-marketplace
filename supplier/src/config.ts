@@ -33,6 +33,9 @@
  *                            client the chat job runner uses. Only meaningful
  *                            when CAPABILITY_KIND="chat".
  *   PORT                   — listen port (default 8080)
+ *   SUPPLIER_BIND_HOST     — IP literal to bind (default: all interfaces). A
+ *                            parent process that proxies a local supplier sets
+ *                            127.0.0.1 so the child port is not exposed.
  *   OLLAMA_TIMEOUT_MS      — ollama request timeout in ms (default 120_000)
  *   OPENAI_TIMEOUT_MS      — openai request timeout in ms (default 180_000 — GPT
  *                            first-token latency is longer than local Ollama)
@@ -57,6 +60,8 @@
  * On error: throws Error whose message names the offending field (matches
  * supplier-config.test.ts assertion that error message mentions field name).
  */
+
+import { isIP } from "node:net";
 
 const HEX64_RE = /^[0-9a-fA-F]{64}$/;
 const TX_HASH_RE = /^[0-9a-fA-F]{64}$/;
@@ -105,7 +110,7 @@ export interface AdvertRef {
  *                    image → one extraction). Upstream is an OpenAI-compatible
  *                    VISION endpoint (OPENAI_BASE_URL), e.g. vLLM serving
  *                    datalab-to/chandra-ocr-2. */
-export type CapabilityKind = "chat" | "tts" | "chat-session" | "ocr";
+export type CapabilityKind = "chat" | "tts" | "chat-session" | "ocr" | "paper2agent";
 
 /** Served-checkpoint probe cadence for the ocr capability.
  *   "per_job" — probe the upstream before every Claim (default when
@@ -149,6 +154,15 @@ export interface ResellerConfig {
   previewMaxChars: number;
 }
 
+
+export interface Paper2AgentConfig {
+  executable: string;
+  argv: string[];
+  cwd: string;
+  packagePath: string;
+  manifestPath: string;
+  journalDir: string;
+}
 
 export interface SupplierConfig {
   supplierPrivKeyHex: string;
@@ -207,6 +221,8 @@ export interface SupplierConfig {
   advertRef: AdvertRef;
   networkId: 0 | 1;
   port: number;
+  /** IP literal to bind. Undefined keeps the default all-interfaces listener. */
+  bindHost?: string;
   ollamaTimeoutMs: number;
   openaiTimeoutMs: number;
   piperTimeoutMs: number;
@@ -270,6 +286,7 @@ export interface SupplierConfig {
   walletHealthIntervalMs: number;
   /** Optional balance-aware provider resale mode. Null preserves legacy behavior. */
   reseller: ResellerConfig | null;
+  paper2agent?: Paper2AgentConfig;
 }
 
 function requireField(env: Record<string, string | undefined>, name: string): string {
@@ -314,11 +331,15 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
     capKindStr !== "chat" &&
     capKindStr !== "tts" &&
     capKindStr !== "chat-session" &&
-    capKindStr !== "ocr"
+    capKindStr !== "ocr" &&
+    capKindStr !== "paper2agent"
   ) {
-    throw new Error('loadConfig: CAPABILITY_KIND must be "chat", "tts", "chat-session", or "ocr"');
+    throw new Error('loadConfig: CAPABILITY_KIND must be "chat", "tts", "chat-session", "ocr", or "paper2agent"');
   }
   const capabilityKind: CapabilityKind = capKindStr;
+  const paper2agent = capabilityKind === "paper2agent"
+    ? loadPaper2AgentConfig(env)
+    : undefined;
 
   // LLM_BACKEND selects which HTTP client the chat job runner uses. Only
   // meaningful for capabilityKind="chat"; ignored when capabilityKind="tts".
@@ -367,7 +388,7 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
       openaiBaseUrl = env.OPENAI_BASE_URL ?? "";
     }
     piperUrl = env.PIPER_URL ?? "";
-  } else {
+  } else if (capabilityKind === "tts") {
     piperUrl = requireField(env, "PIPER_URL");
     ollamaUrl = env.OLLAMA_URL ?? "";
     openaiBaseUrl = env.OPENAI_BASE_URL ?? "";
@@ -389,6 +410,15 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
       throw new Error("loadConfig: PORT must be a positive integer");
     }
     port = Number(portStr);
+  }
+
+  const bindHostStr = env.SUPPLIER_BIND_HOST;
+  let bindHost: string | undefined;
+  if (bindHostStr !== undefined && bindHostStr !== "") {
+    if (isIP(bindHostStr) === 0) {
+      throw new Error("loadConfig: SUPPLIER_BIND_HOST must be an IP address literal");
+    }
+    bindHost = bindHostStr;
   }
 
   const timeoutStr = env.OLLAMA_TIMEOUT_MS;
@@ -714,6 +744,7 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
     advertRef,
     networkId,
     port,
+    bindHost,
     ollamaTimeoutMs,
     openaiTimeoutMs,
     piperTimeoutMs,
@@ -734,5 +765,25 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
     liveChain,
     walletHealthIntervalMs,
     reseller,
+    paper2agent,
   };
+}
+
+export function loadPaper2AgentConfig(env: Record<string, string | undefined>): Paper2AgentConfig {
+  const executable = requireField(env, "PAPER2AGENT_EXECUTABLE");
+  const cwd = requireField(env, "PAPER2AGENT_CWD");
+  const packagePath = requireField(env, "PAPER2AGENT_PACKAGE");
+  const manifestPath = requireField(env, "PAPER2AGENT_MANIFEST");
+  const journalDir = requireField(env, "PAPER2AGENT_JOURNAL_DIR");
+  for (const [name, value] of Object.entries({ executable, cwd, packagePath, manifestPath, journalDir })) {
+    if (!value.startsWith("/") || value.includes("\0")) {
+      throw new Error(`PAPER2AGENT ${name} must be an absolute local path`);
+    }
+  }
+  const argv: unknown = JSON.parse(requireField(env, "PAPER2AGENT_ARGV_JSON"));
+  if (!Array.isArray(argv) || argv.length > 64 ||
+      argv.some((arg) => typeof arg !== "string" || arg.includes("\0") || arg.length > 4096)) {
+    throw new Error("PAPER2AGENT_ARGV_JSON must be a bounded string array");
+  }
+  return { executable, argv, cwd, packagePath, manifestPath, journalDir };
 }

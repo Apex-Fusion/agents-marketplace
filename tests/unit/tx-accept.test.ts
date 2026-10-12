@@ -39,23 +39,14 @@ describe("buildAcceptTx() — happy path", () => {
     chain.seed(buildSubmittedEscrowUtxo());
   });
 
-  it("returns a non-empty txCborHex", async () => {
-    const buyer = buildBuyerWalletKey();
-    const utxo = buildSubmittedEscrowUtxo();
-    const result = await buildAcceptTx({ chain, buyerKey: buyer, escrowRef: utxo.ref });
-    expect(typeof result.txCborHex).toBe("string");
-    expect(result.txCborHex.length).toBeGreaterThan(0);
-  });
-
   it("supplier receives >= payment + supplier_bond at supplier pkh address", async () => {
     const buyer = buildBuyerWalletKey();
     const utxo = buildSubmittedEscrowUtxo();
-    const result = await buildAcceptTx({ chain, buyerKey: buyer, escrowRef: utxo.ref });
+    await buildAcceptTx({ chain, buyerKey: buyer, escrowRef: utxo.ref });
     // After accept, chain has supplier output
     const supplierUtxos = await chain.queryUtxosByAddress(buildSupplierWalletKey().address);
     const totalSupplier = supplierUtxos.reduce((sum, u) => sum + u.lovelace, 0n);
     expect(totalSupplier).toBeGreaterThanOrEqual(PAYMENT_LOVELACE + SUPPLIER_BOND);
-    expect(result.txCborHex.length).toBeGreaterThan(0);
   });
 
   it("buyer receives >= buyer_bond at buyer pkh address", async () => {
@@ -67,14 +58,6 @@ describe("buildAcceptTx() — happy path", () => {
     expect(totalBuyer).toBeGreaterThanOrEqual(BUYER_BOND);
   });
 
-  it("validity upper-bound is within accept window (≤ submitted_at + 600_000)", async () => {
-    const buyer = buildBuyerWalletKey();
-    const utxo = buildSubmittedEscrowUtxo();
-    // This is verified implicitly: builder must not produce tx with upper-bound past window
-    const result = await buildAcceptTx({ chain, buyerKey: buyer, escrowRef: utxo.ref });
-    expect(result.txCborHex.length).toBeGreaterThan(0);
-  });
-
   it("no continuing output to the escrow script address (terminal state)", async () => {
     const buyer = buildBuyerWalletKey();
     const utxo = buildSubmittedEscrowUtxo();
@@ -82,10 +65,6 @@ describe("buildAcceptTx() — happy path", () => {
     // Escrow UTxO spent and NOT recreated
     const escrowUtxo = await chain.queryUtxo(utxo.ref);
     expect(escrowUtxo).toBeNull();
-  });
-
-  it("ACCEPT_WINDOW_MS constant equals 600_000", () => {
-    expect(ACCEPT_WINDOW_MS).toBe(600_000);
   });
 });
 

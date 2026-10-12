@@ -24,6 +24,9 @@ export default defineConfig({
   build: {
     outDir: resolve(__dirname, "dist"),
     emptyOutDir: true,
+    // Preserve CommonJS initialization order. CborString -> Cbor -> SubCborRef
+    // is circular; hoisted requires make SubCborRef extend an undefined class.
+    commonjsOptions: { strictRequires: true },
   },
   server: {
     port: 5173,

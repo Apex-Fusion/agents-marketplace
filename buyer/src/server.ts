@@ -8,6 +8,8 @@
  *   POST /v1/accept                → resolve original escrow_ref → current Submitted
  *                                    UTxO via the indexer, run runAccept against
  *                                    the LiveOgmiosProvider, return the Accept tx hash
+ *   /v1/paper2agent/*              → operator proxy to the Paper2Agent control
+ *                                    service (see paper2agent/routes.ts)
  *   *                              → static SPA bundle from `distPath`, with
  *                                    SPA fallback to index.html
  *
@@ -37,6 +39,7 @@ import {
 import { runAccept } from "./cli/acceptFlow.js";
 import type { ResponseArchive } from "./db/archive.js";
 import { registerPdfRoutes } from "./pdf/routes.js";
+import { PAPER2AGENT_PATH_RE, registerPaper2AgentRoutes } from "./paper2agent/routes.js";
 import { defaultPdfCaps } from "./pdf/caps.js";
 import type { PdfCaps } from "./pdf/types.js";
 import type { JobStore } from "./pdf/summarize-job.js";
@@ -134,6 +137,11 @@ export interface AppDeps {
   jobStore?: JobStore;
   /** Sizing/safety knobs for the PDF summarizer. Defaults applied when absent. */
   pdfCaps?: PdfCaps;
+  /** Private Paper2Agent control service and its server-only bearer token.
+   * /v1/paper2agent/* proxies fixed routes there; with either value empty
+   * those routes respond 503. The token never reaches the browser. */
+  paper2agentControlUrl?: string;
+  paper2agentControlToken?: string;
 }
 
 interface ResolvedDeps {
@@ -218,7 +226,16 @@ function pkhToMainnetAddress(pubKeyHashHex: string): string {
 export function createApp(deps: AppDeps): Express {
   const app = express();
   app.disable("x-powered-by");
-  app.use(express.json({ limit: "1mb" }));
+  // Paper2Agent routes parse their own bounded bodies after the session gate;
+  // a JSON submission with a PDF is larger than this parser's 1 MiB limit.
+  const jsonBody = express.json({ limit: "1mb" });
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    if (PAPER2AGENT_PATH_RE.test(req.path)) {
+      next();
+      return;
+    }
+    jsonBody(req, res, next);
+  });
 
   app.get("/healthz", (_req: Request, res: Response) => {
     res.status(200).json({ ok: true });
@@ -1447,6 +1464,16 @@ export function createApp(deps: AppDeps): Express {
   // gate) and before the SPA static fallback. When jobStore is absent the
   // routes respond 503 (feature disabled).
   registerPdfRoutes(app, deps.jobStore, deps.pdfCaps ?? defaultPdfCaps());
+
+  // ── Paper2Agent operator workflow (/v1/paper2agent/*) ───────────────
+  // Fixed-route proxy to the private control service, behind the same session
+  // gate. It fails closed (503) when operator login is not configured.
+  registerPaper2AgentRoutes(app, {
+    authConfigured: authReady,
+    controlUrl: deps.paper2agentControlUrl ?? "",
+    controlToken: deps.paper2agentControlToken ?? "",
+    fetchImpl: deps.fetchImpl ?? globalThis.fetch,
+  });
 
   if (deps.distPath) {
     let isDir = false;

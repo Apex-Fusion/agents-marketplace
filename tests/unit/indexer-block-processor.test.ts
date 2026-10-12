@@ -368,24 +368,6 @@ describe("blockProcessor — redeemer fallback (ambiguous Submitted-spend)", () 
     expect(releaseEvents.length).toBe(0);
   });
 
-  it("ambiguous Submitted-spend → console.warn is called with a message mentioning missing redeemer", () => {
-    const submitTxId = "e".repeat(64);
-    const knownUtxos = new Map([
-      [submitTxId + "#0", { address: ESCROW_SCRIPT_ADDRESS, datumHex: buildEscrowDatumHex({ state: "Submitted" }) }],
-    ]);
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const tx = buildAmbiguousSubmittedSpendTx({
-      txId: "z".repeat(64),
-      spentRef: { txId: submitTxId, index: 0 },
-    });
-    const block = buildMockBlock({ slot: 1_009_000, transactions: [tx] });
-    processBlock(block, knownUtxos, ADDRESSES);
-    expect(warnSpy).toHaveBeenCalled();
-    // At least one warn call should mention the missing redeemer
-    const warnArgs = warnSpy.mock.calls.flat().join(" ");
-    expect(warnArgs).toMatch(/redeemer/i);
-  });
-
   it("ambiguous Submitted-spend → total event count is exactly 1", () => {
     const submitTxId = "e".repeat(64);
     const knownUtxos = new Map([

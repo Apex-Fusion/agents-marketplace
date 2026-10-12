@@ -75,6 +75,8 @@ import { triggerOnFailureConsolidate } from "./walletHealth.js";
 import type { ResellerRuntime } from "./reseller/runtime.js";
 import { formatUsdNanos } from "./reseller/money.js";
 import { renderResellerDashboardPage } from "./reseller/dashboardPage.js";
+import type { Paper2AgentRuntime } from "./paper2agent/runtime.js";
+import { paper2AgentRoutes } from "./paper2agent/routes.js";
 
 export interface SupplierDeps {
   chain: ChainProvider;
@@ -87,6 +89,7 @@ export interface SupplierDeps {
   chatSessions?: ChatSessionStore;
   /** Optional balance-aware resale runtime. Absent for every legacy supplier. */
   reseller?: ResellerRuntime;
+  paper2agent?: Paper2AgentRuntime;
 }
 
 const ESCROW_REF_RE = /^[0-9a-fA-F]{64}#(?:0|[1-9]\d*)$/;
@@ -138,6 +141,7 @@ interface ResolvedDeps {
   jobs: JobStore;
   chatSessions: ChatSessionStore;
   reseller?: ResellerRuntime;
+  paper2agent?: Paper2AgentRuntime;
 }
 
 function makeCapabilityHandler(deps: ResolvedDeps) {
@@ -166,6 +170,7 @@ function makeCapabilityHandler(deps: ResolvedDeps) {
           `advert is retired (status=${datum.status})`);
       }
 
+      if (deps.paper2agent) datum = await deps.paper2agent.advert();
       const advertRefStr = `${deps.config.advertRef.txHash}#${deps.config.advertRef.index}`;
       const llmCapability =
         deps.config.capabilityKind === "chat" ||
@@ -179,6 +184,9 @@ function makeCapabilityHandler(deps: ResolvedDeps) {
         advert_ref: advertRefStr,
         supplier_pkh: datum.supplier_pkh,
         pub_key_hex: deps.supplierKey.pubKeyHex,
+        ...(deps.paper2agent ? { paper2agent: {
+          manifest: deps.paper2agent.manifest, manifest_hash: deps.paper2agent.manifestHash,
+        } } : {}),
         ...(llmCapability
           ? {
               inference_api: "responses",
@@ -1614,7 +1622,11 @@ export function createApp(deps: SupplierDeps): Application {
     jobs: deps.jobs ?? new JobStore(),
     chatSessions: deps.chatSessions ?? new ChatSessionStore(),
     reseller: deps.reseller,
+    paper2agent: deps.paper2agent,
   };
+  if (resolved.config.capabilityKind === "paper2agent" && !resolved.paper2agent) {
+    throw new Error("Paper2Agent runtime must be initialized before serving requests");
+  }
 
   const app = express();
   app.disable("x-powered-by");
@@ -1622,7 +1634,7 @@ export function createApp(deps: SupplierDeps): Application {
   // below; every other route keeps the 1mb ceiling.
   const jsonBody = express.json({ limit: "1mb" });
   app.use((req, res, next) =>
-    req.path.startsWith("/v1/ocr/") ? next() : jsonBody(req, res, next));
+    req.path.startsWith("/v1/ocr/") || req.path.startsWith("/v1/paper2agent/") ? next() : jsonBody(req, res, next));
 
   // /healthz is mounted FIRST and uses no deps — it must succeed regardless
   // of chain/state/config (independent of /status free/working/offline).
@@ -1672,7 +1684,9 @@ export function createApp(deps: SupplierDeps): Application {
   // hang on a request that's guaranteed to fail capability validation; we'd
   // rather it 404 immediately. (The on-chain capability_id check still runs
   // on every request, so this is belt-and-braces.)
-  if (resolved.config.capabilityKind === "tts") {
+  if (resolved.config.capabilityKind === "paper2agent") {
+    app.use(paper2AgentRoutes(resolved.paper2agent!));
+  } else if (resolved.config.capabilityKind === "tts") {
     app.post("/v1/audio/synthesize", makeTtsHandler(resolved));
     app.get("/v1/audio/synthesize/:jobId", makeGetTtsJobHandler(resolved));
   } else if (resolved.config.capabilityKind === "ocr") {

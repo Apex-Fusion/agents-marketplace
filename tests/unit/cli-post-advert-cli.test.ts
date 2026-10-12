@@ -150,6 +150,10 @@ describe("parseCliArgs() — missing required env vars", () => {
     expect(() => parseCliArgs([], env)).toThrow(/ADVERT_MODEL/i);
   });
 
+  it.each(["ADVERT_CAPABILITY_ID", "ADVERT_MODEL"])("throws when %s is empty", (name) => {
+    expect(() => parseCliArgs([], { ...buildCliEnv(), [name]: "" })).toThrow(`missing required env var: ${name}`);
+  });
+
   it("throws when ADVERT_PRICE_LOVELACE is absent", () => {
     const env = { ...buildCliEnv() };
     delete env.ADVERT_PRICE_LOVELACE;

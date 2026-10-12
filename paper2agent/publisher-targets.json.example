@@ -1,0 +1,12 @@
+[
+  {
+    "id": "paper-tool-1",
+    "label": "Reviewed paper tool",
+    "env": {
+      "SUPPLIER_PRIV_KEY_HEX": "",
+      "NETWORK_ID": "0",
+      "OGMIOS_URL": "http://127.0.0.1:1337",
+      "LIVE_CHAIN": "0"
+    }
+  }
+]

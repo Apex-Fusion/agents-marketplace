@@ -8,6 +8,8 @@
  *   /pending  → <PendingReceipts />     UX-1: buyer-side Accept button
  *   /wallet   → <Wallet />
  *   /api-keys → <ApiKeys />             self-serve gateway API key generation
+ *   /paper2agent → <Paper2Agent />      build, review, and publish paper tools;
+ *                                       ?job=<id> reopens one job
  */
 
 import { Routes, Route, Link } from "react-router-dom";
@@ -18,6 +20,7 @@ import PendingReceipts from "./pages/PendingReceipts.js";
 import BookSummarizer from "./pages/BookSummarizer.js";
 import ApiKeys from "./pages/ApiKeys.js";
 import ResaleDashboard from "./pages/ResaleDashboard.js";
+import Paper2Agent from "./pages/Paper2Agent.js";
 import { RequireAuth, useAuth } from "./state/AuthContext.js";
 
 function SignOutButton() {
@@ -47,6 +50,7 @@ export default function App() {
           <Link to="/pending" className="font-medium hover:underline">Pending</Link>
           <Link to="/wallet" className="font-medium hover:underline">Wallet</Link>
           <Link to="/api-keys" className="font-medium hover:underline">API Keys</Link>
+          <Link to="/paper2agent" className="font-medium hover:underline">Paper2Agent</Link>
           <SignOutButton />
         </nav>
         <main className="p-6">
@@ -58,6 +62,7 @@ export default function App() {
             <Route path="/pending" element={<PendingReceipts />} />
             <Route path="/wallet" element={<Wallet />} />
             <Route path="/api-keys" element={<ApiKeys />} />
+            <Route path="/paper2agent" element={<Paper2Agent />} />
           </Routes>
         </main>
       </div>

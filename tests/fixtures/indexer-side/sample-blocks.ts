@@ -20,8 +20,8 @@
  * Added buildAmbiguousSubmittedSpendTx for fallback / warn tests.
  */
 
-import { Tag } from "cbor-x";
-import { encodePlutus } from "../../../packages/shared/src/cbor/plutus-encoder.js";
+import { encodeAdvertDatum } from "../../../packages/shared/src/cbor/AdvertDatum.js";
+import { encodeEscrowDatum } from "../../../packages/shared/src/cbor/EscrowDatum.js";
 
 // ─── EscrowRedeemerTag (mirrors indexer/src/follower/types.ts) ──────────────
 // Declared here as a const-type so fixture files are self-contained.
@@ -43,28 +43,6 @@ export const INDEXER_SUPPLIER_PKH = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 export const INDEXER_BUYER_PKH    = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 export const INDEXER_SUPPLIER_ENDPOINT = "https://indexer-test-supplier.example.com";
 
-// ─── Helpers ────────────────────────────────────────────────────────────────
-
-function hexToBytes(hex: string): Uint8Array {
-  const bytes = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < hex.length; i += 2) {
-    bytes[i / 2] = parseInt(hex.substring(i, i + 2), 16);
-  }
-  return bytes;
-}
-
-function bytesToHex(bytes: Uint8Array): string {
-  return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-function plutusTag(tagNumber: number, value: unknown): Tag {
-  return new (Tag as unknown as new (a: unknown, b: unknown) => Tag)(tagNumber, value);
-}
-
-function utf8Bytes(s: string): Uint8Array {
-  return new TextEncoder().encode(s);
-}
-
 // ─── AdvertDatum builder ────────────────────────────────────────────────────
 
 export interface AdvertDatumOpts {
@@ -84,53 +62,26 @@ export interface AdvertDatumOpts {
 }
 
 export function buildAdvertDatumHex(opts: AdvertDatumOpts = {}): string {
-  const supplierPkh = opts.supplierPkh ?? INDEXER_SUPPLIER_PKH;
-  const capabilityId = opts.capabilityId ?? "llm.text.generate.v1";
-  const model = opts.model ?? "qwen2.5:0.5b";
-  const maxOutputTokens = opts.maxOutputTokens ?? 512;
-  const maxProcessingMs = opts.maxProcessingMs ?? 60_000;
-  const priceLovelace = opts.priceLovelace ?? 2_000_000n;
-  const supplierBondLovelace = opts.supplierBondLovelace ?? 1_000_000n;
-  const buyerBondLovelace = opts.buyerBondLovelace ?? 1_000_000n;
-  const endpointUrl = opts.endpointUrl ?? INDEXER_SUPPLIER_ENDPOINT;
-  const detailUri = opts.detailUri ?? "ipfs://QmIndexerTest";
-  const detailHash = opts.detailHash ?? "b".repeat(64);
-  const advertisedAt = opts.advertisedAt ?? 1_750_000_000_000;
-  const status = opts.status ?? "Active";
-
-  const statusTag = status === "Active" ? plutusTag(121, []) : plutusTag(122, []);
-
-  const datum = plutusTag(121, [
-    hexToBytes(supplierPkh),
-    utf8Bytes(capabilityId),
-    utf8Bytes(model),
-    maxOutputTokens,
-    maxProcessingMs,
-    priceLovelace,
-    supplierBondLovelace,
-    buyerBondLovelace,
-    utf8Bytes(endpointUrl),
-    utf8Bytes(detailUri),
-    hexToBytes(detailHash),
-    advertisedAt,
-    statusTag,
-  ]);
-
-  return bytesToHex(encodePlutus(datum));
+  return encodeAdvertDatum({
+    supplier_pkh: opts.supplierPkh ?? INDEXER_SUPPLIER_PKH,
+    capability_id: opts.capabilityId ?? "llm.text.generate.v1",
+    model: opts.model ?? "qwen2.5:0.5b",
+    max_output_tokens: opts.maxOutputTokens ?? 512,
+    max_processing_ms: opts.maxProcessingMs ?? 60_000,
+    price_lovelace: opts.priceLovelace ?? 2_000_000n,
+    supplier_bond_lovelace: opts.supplierBondLovelace ?? 1_000_000n,
+    buyer_bond_lovelace: opts.buyerBondLovelace ?? 1_000_000n,
+    endpoint_url: opts.endpointUrl ?? INDEXER_SUPPLIER_ENDPOINT,
+    detail_uri: opts.detailUri ?? "ipfs://QmIndexerTest",
+    detail_hash: opts.detailHash ?? "b".repeat(64),
+    advertised_at: opts.advertisedAt ?? 1_750_000_000_000,
+    status: opts.status ?? "Active",
+  });
 }
 
 // ─── EscrowDatum builder ────────────────────────────────────────────────────
 
 export type EscrowStateTag = "Open" | "Claimed" | "Submitted" | "Accepted" | "Reclaimed" | "Released";
-
-const ESCROW_STATE_MAP: Record<EscrowStateTag, number> = {
-  Open: 121,
-  Claimed: 122,
-  Submitted: 123,
-  Accepted: 124,
-  Reclaimed: 125,
-  Released: 126,
-};
 
 export const SAMPLE_ADVERT_REF_TX = "a".repeat(64);
 export const SAMPLE_ADVERT_REF_INDEX = 0;
@@ -160,49 +111,25 @@ export interface EscrowDatumOpts {
 }
 
 export function buildEscrowDatumHex(opts: EscrowDatumOpts = {}): string {
-  const buyerPkh = opts.buyerPkh ?? INDEXER_BUYER_PKH;
-  const supplierPkh = opts.supplierPkh ?? INDEXER_SUPPLIER_PKH;
-  const advertRefTx = opts.advertRefTx ?? SAMPLE_ADVERT_REF_TX;
-  const advertRefIndex = opts.advertRefIndex ?? SAMPLE_ADVERT_REF_INDEX;
-  const capabilityId = opts.capabilityId ?? "llm.text.generate.v1";
-  const requestSpecHash = opts.requestSpecHash ?? SAMPLE_REQUEST_SPEC_HASH;
-  const promptHash = opts.promptHash ?? SAMPLE_PROMPT_HASH;
-  const paymentLovelace = opts.paymentLovelace ?? 2_000_000n;
-  const buyerBondLovelace = opts.buyerBondLovelace ?? 1_000_000n;
-  const supplierBondLovelace = opts.supplierBondLovelace ?? 1_000_000n;
-  const deliverBy = opts.deliverBy ?? SAMPLE_DELIVER_BY;
-  const postedAt = opts.postedAt ?? SAMPLE_POSTED_AT;
-  const submittedAt = opts.submittedAt !== undefined ? opts.submittedAt : null;
-  const resultReceiptHash = opts.resultReceiptHash !== undefined ? opts.resultReceiptHash : null;
-  const state = opts.state ?? "Open";
-
-  const advertRef = plutusTag(121, [hexToBytes(advertRefTx), advertRefIndex]);
-  const submittedAtOpt = submittedAt === null
-    ? plutusTag(122, [])
-    : plutusTag(121, [submittedAt]);
-  const receiptHashOpt = resultReceiptHash === null
-    ? plutusTag(122, [])
-    : plutusTag(121, [hexToBytes(resultReceiptHash)]);
-  const stateTag = plutusTag(ESCROW_STATE_MAP[state], []);
-
-  const datum = plutusTag(121, [
-    hexToBytes(buyerPkh),
-    hexToBytes(supplierPkh),
-    advertRef,
-    utf8Bytes(capabilityId),
-    hexToBytes(requestSpecHash),
-    hexToBytes(promptHash),
-    paymentLovelace,
-    buyerBondLovelace,
-    supplierBondLovelace,
-    deliverBy,
-    postedAt,
-    submittedAtOpt,
-    receiptHashOpt,
-    stateTag,
-  ]);
-
-  return bytesToHex(encodePlutus(datum));
+  return encodeEscrowDatum({
+    buyer_pkh: opts.buyerPkh ?? INDEXER_BUYER_PKH,
+    supplier_pkh: opts.supplierPkh ?? INDEXER_SUPPLIER_PKH,
+    advert_ref: {
+      txHash: opts.advertRefTx ?? SAMPLE_ADVERT_REF_TX,
+      index: opts.advertRefIndex ?? SAMPLE_ADVERT_REF_INDEX,
+    },
+    capability_id: opts.capabilityId ?? "llm.text.generate.v1",
+    request_spec_hash: opts.requestSpecHash ?? SAMPLE_REQUEST_SPEC_HASH,
+    prompt_hash: opts.promptHash ?? SAMPLE_PROMPT_HASH,
+    payment_lovelace: opts.paymentLovelace ?? 2_000_000n,
+    buyer_bond_lovelace: opts.buyerBondLovelace ?? 1_000_000n,
+    supplier_bond_lovelace: opts.supplierBondLovelace ?? 1_000_000n,
+    deliver_by: opts.deliverBy ?? SAMPLE_DELIVER_BY,
+    posted_at: opts.postedAt ?? SAMPLE_POSTED_AT,
+    submitted_at: opts.submittedAt ?? null,
+    result_receipt_hash: opts.resultReceiptHash ?? null,
+    state: opts.state ?? "Open",
+  });
 }
 
 // ─── Block / Tx builders ─────────────────────────────────────────────────────

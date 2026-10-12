@@ -118,6 +118,34 @@ describe("loadConfig(env)", () => {
       SURPLUS_DASHBOARD_URL: "file:///tmp/dashboard.json",
     })).toThrow(/SURPLUS_DASHBOARD_URL/);
   });
+
+  it("requires the Paper2Agent control URL and token together", () => {
+    const token = "t".repeat(32);
+    expect(loadConfig(VALID_ENV).paper2agentControlUrl).toBe("");
+    expect(() => loadConfig({ ...VALID_ENV, PAPER2AGENT_CONTROL_URL: "http://control:8095" }))
+      .toThrow(/PAPER2AGENT_CONTROL_URL and PAPER2AGENT_CONTROL_TOKEN/);
+    expect(() => loadConfig({ ...VALID_ENV, PAPER2AGENT_CONTROL_TOKEN: token }))
+      .toThrow(/PAPER2AGENT_CONTROL_URL and PAPER2AGENT_CONTROL_TOKEN/);
+    const config = loadConfig({
+      ...VALID_ENV,
+      PAPER2AGENT_CONTROL_URL: "http://control:8095/",
+      PAPER2AGENT_CONTROL_TOKEN: token,
+    });
+    expect(config.paper2agentControlUrl).toBe("http://control:8095");
+    expect(config.paper2agentControlToken).toBe(token);
+  });
+
+  it("rejects a weak Paper2Agent control token or an unsafe control URL", () => {
+    const pair = (url: string, token: string) => ({
+      ...VALID_ENV,
+      PAPER2AGENT_CONTROL_URL: url,
+      PAPER2AGENT_CONTROL_TOKEN: token,
+    });
+    expect(() => loadConfig(pair("http://control:8095", "t".repeat(31)))).toThrow(/PAPER2AGENT_CONTROL_TOKEN/);
+    expect(() => loadConfig(pair("file:///run/control.sock", "t".repeat(32)))).toThrow(/PAPER2AGENT_CONTROL_URL/);
+    expect(() => loadConfig(pair("http://user:secret@control:8095", "t".repeat(32))))
+      .toThrow(/PAPER2AGENT_CONTROL_URL/);
+  });
 });
 
 // ─── createApp tests ──────────────────────────────────────────────────────────

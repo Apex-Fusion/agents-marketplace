@@ -20,6 +20,7 @@ import { readFileSync } from "fs";
 import { dirname, resolve } from "path";
 import { fileURLToPath } from "url";
 
+import { SLOT_CONFIG_NETWORK } from "@lucid-evolution/lucid";
 import type { LucidEvolution, UTxO as LucidUTxO, Script } from "@lucid-evolution/lucid";
 
 import type { OutputReference, Utxo } from "../../chain/ChainProvider.js";
@@ -92,6 +93,7 @@ export interface LiveClaimParams {
   newDatum: EscrowDatum;
   deliverBy: number;
   tipMs: number;
+  beforeSubmit?: (built: BuildResult) => Promise<void>;
 }
 
 export interface LiveSubmitParams {
@@ -114,6 +116,7 @@ export interface LiveAcceptParams {
   datum: EscrowDatum;
   tipMs: number;
   windowEnd: number;
+  beforeSubmit?: (built: BuildResult) => Promise<void>;
 }
 
 export interface LiveReclaimParams {
@@ -123,6 +126,7 @@ export interface LiveReclaimParams {
   escrowUtxo: Utxo;
   datum: EscrowDatum;
   tipMs: number;
+  beforeSubmit?: (built: BuildResult) => Promise<void>;
 }
 
 export interface LiveReleaseParams {
@@ -608,6 +612,7 @@ export async function buildLiveTxForClaim(params: LiveClaimParams): Promise<Buil
     validFromMs: params.tipMs,
     validToMs: params.deliverBy,
     signerPkh: params.supplierKey.pubKeyHash,
+    beforeSubmit: params.beforeSubmit,
   });
 }
 
@@ -723,6 +728,7 @@ export async function buildLiveTxForAccept(params: LiveAcceptParams): Promise<Bu
 
   const txCborHex = signed.toCBOR();
   const expectedTxHash = signed.toHash();
+  await params.beforeSubmit?.({ txCborHex, expectedTxHash });
   await params.chain.submitTx(txCborHex);
 
   // Re-export the constant so callers that import from liveCbor still see
@@ -758,6 +764,9 @@ export async function buildLiveTxForReclaim(params: LiveReclaimParams): Promise<
   const realWalletUtxos = await lucid.wallet().getUtxos();
   assertCollateralCandidate(realWalletUtxos);
   const presetWalletInputs = realWalletUtxos;
+  const { zeroTime, slotLength } = SLOT_CONFIG_NETWORK.Mainnet;
+  const refundNotBefore = zeroTime +
+    Math.ceil((params.datum.deliver_by - zeroTime) / slotLength) * slotLength;
 
   let signed;
   try {
@@ -769,11 +778,9 @@ export async function buildLiveTxForReclaim(params: LiveReclaimParams): Promise<
       .collectFrom([lucidInput], reclaimRedeemerHex)
       .pay.ToAddress(buyerAddress, { lovelace: buyerLovelace })
       .addSignerKey(params.buyerKey.pubKeyHash)
-      // Validity range mirrors Accept's pattern: a narrow window centred on
-      // tipMs. The on-chain validator only checks `lower_bound >= deliver_by`,
-      // which holds as long as `tipMs - 60s >= deliver_by` — the caller has
-      // already verified tipMs >= deliver_by, so a 60s back-pad is safe.
-      .validFrom(params.tipMs - 60_000)
+      // Lucid rounds to the enclosing slot. Round the refund deadline up
+      // before applying the back-pad, so no part of the interval is early.
+      .validFrom(Math.max(refundNotBefore, params.tipMs - 60_000))
       .validTo(params.tipMs + 60_000)
       .setMinFee(500_000n);
 
@@ -790,6 +797,7 @@ export async function buildLiveTxForReclaim(params: LiveReclaimParams): Promise<
 
   const txCborHex = signed.toCBOR();
   const expectedTxHash = signed.toHash();
+  await params.beforeSubmit?.({ txCborHex, expectedTxHash });
   await params.chain.submitTx(txCborHex);
   return { txCborHex, expectedTxHash };
 }

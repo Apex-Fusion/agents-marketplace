@@ -127,6 +127,14 @@ export async function runMain(env: Record<string, string | undefined>): Promise<
     console.log("[buyer] pdf summarizer disabled (PDF_ENABLED=0)");
   }
 
+  // Paper2Agent operator workflow: the browser reaches the control service
+  // only through the authenticated /v1/paper2agent/* proxy.
+  console.log(
+    config.paper2agentControlUrl === ""
+      ? "[buyer] paper2agent workflow disabled (PAPER2AGENT_CONTROL_URL unset)"
+      : `[buyer] paper2agent control service at ${config.paper2agentControlUrl}`,
+  );
+
   const app = createApp({
     distPath,
     chain,
@@ -146,6 +154,8 @@ export async function runMain(env: Record<string, string | undefined>): Promise<
     resaleDashboardUrl: config.resaleDashboardUrl,
     jobStore,
     pdfCaps,
+    paper2agentControlUrl: config.paper2agentControlUrl,
+    paper2agentControlToken: config.paper2agentControlToken,
   });
 
   const server = app.listen(config.port, () => {

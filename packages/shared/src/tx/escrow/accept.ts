@@ -26,6 +26,7 @@ export interface AcceptParams {
   chain: ChainProvider;
   buyerKey: WalletKey;
   escrowRef: OutputReference;
+  beforeSubmit?: (built: BuildResult) => Promise<void>;
 }
 
 export { ACCEPT_WINDOW_MS };
@@ -108,6 +109,7 @@ export async function buildAcceptTx(
       datum,
       tipMs,
       windowEnd,
+      beforeSubmit: params.beforeSubmit,
     });
   }
 
@@ -139,6 +141,7 @@ export async function buildAcceptTx(
 
   const txCborHex = encodeTxBody(body);
   const expectedTxHash = sha256Hex(txCborHex);
+  await params.beforeSubmit?.({ txCborHex, expectedTxHash });
 
   await chain.submitTx(txCborHex);
 

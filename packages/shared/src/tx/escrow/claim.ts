@@ -23,6 +23,7 @@ export interface ClaimParams {
   chain: ChainProvider;
   supplierKey: WalletKey;
   escrowRef: OutputReference;
+  beforeSubmit?: (built: BuildResult) => Promise<void>;
 }
 
 export async function buildClaimTx(
@@ -90,6 +91,7 @@ export async function buildClaimTx(
       newDatum,
       deliverBy: datum.deliver_by,
       tipMs,
+      beforeSubmit: params.beforeSubmit,
     });
   }
 
@@ -113,6 +115,7 @@ export async function buildClaimTx(
 
   const txCborHex = encodeTxBody(body);
   const expectedTxHash = sha256Hex(txCborHex);
+  await params.beforeSubmit?.({ txCborHex, expectedTxHash });
 
   await chain.submitTx(txCborHex);
 

@@ -191,3 +191,18 @@ describe("sweeper — reclaim gating + settled-refs memory", () => {
     expect(settle.reclaim).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("sweeper — legacy Submitted settlement", () => {
+  it("closes a session whose Submitted escrow was already spent elsewhere", async () => {
+    const row = openRow("6", { state: "Submitted" });
+    const { deps, keyRow } = makeSweepDeps({ chatSettleMode: "full", escrows: [row] });
+    const sessionId = insertOpenSession(deps, keyRow.id, row.utxo_ref);
+    const settle = settleOk();
+
+    await runSweepOnce(deps, settle);
+
+    expect(settle.accept).not.toHaveBeenCalled();
+    expect(deps.store.getSession(sessionId)!.state).toBe("closed");
+    expect(deps.store.listUsage(keyRow.id, 10)).toMatchObject([{ status: "completed", cost_lovelace: "200000" }]);
+  });
+});

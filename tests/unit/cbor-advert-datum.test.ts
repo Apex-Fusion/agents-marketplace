@@ -1,12 +1,6 @@
 /**
- * AdvertDatum CBOR Round-trip Tests — M0-B RED phase
- *
- * Uses cbor-x with the Plutus Tag extension (see apex-dashboard cbor-decoder.ts).
- * Verifies encodeAdvertDatum / decodeAdvertDatum against realistic fixture values
- * from ARCHITECTURE.md §4.1.
- *
- * These tests MUST FAIL until Catherine implements encodeAdvertDatum /
- * decodeAdvertDatum in M0-C.
+ * AdvertDatum round trips and native ledger parser compatibility.
+ * The ledger limits each definite byte-string chunk to 64 bytes.
  *
  * CBOR encoding convention (must match implementation):
  *   AdvertDatum → Plutus Constr0 (tag 121) with 13 fields in declaration order.
@@ -26,6 +20,7 @@
  *     12: status               — Plutus Constr: tag 121 = Active, tag 122 = Retired
  */
 
+import { CML } from "@lucid-evolution/lucid";
 import { describe, it, expect } from "vitest";
 import { encodeAdvertDatum, decodeAdvertDatum } from "../../packages/shared/src/cbor/AdvertDatum.js";
 import type { AdvertDatum } from "../../packages/shared/src/cbor/types.js";
@@ -251,5 +246,24 @@ describe("AdvertDatum CBOR adversarial — invariant violations", () => {
       const decoded = decodeAdvertDatum(hex);
       expect(decoded.price_lovelace).toBe(-1n);
     }).not.toThrow();
+  });
+});
+
+describe("AdvertDatum native Plutus byte boundaries", () => {
+  it.each([
+    ["64-byte boundary", "x".repeat(64)],
+    ["65-byte boundary", "x".repeat(65)],
+    ["Paper2Agent manifest identity", `paper2agent:${"a".repeat(64)}`],
+    ["multi-byte UTF-8 across chunks", "研究".repeat(30)],
+  ])("preserves %s and a long endpoint through the ledger codec", (_label, model) => {
+    const datum: AdvertDatum = {
+      ...SAMPLE_ADVERT,
+      model,
+      endpoint_url: `https://supplier.example.com/tools/${"research-".repeat(16)}`,
+    };
+    const native = CML.PlutusData.from_cbor_hex(encodeAdvertDatum(datum));
+    try {
+      expect(decodeAdvertDatum(native.to_cbor_hex())).toEqual(datum);
+    } finally { native.free(); }
   });
 });

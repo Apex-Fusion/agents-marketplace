@@ -149,6 +149,12 @@ describe("loadConfig() — malformed values", () => {
     ).toThrow();
   });
 
+  it("binds only an IP literal from SUPPLIER_BIND_HOST, so a proxied child stays on loopback", () => {
+    expect(loadConfig({ ...buildSampleEnv(), SUPPLIER_BIND_HOST: "127.0.0.1" }).bindHost).toBe("127.0.0.1");
+    expect(loadConfig(buildSampleEnv()).bindHost).toBeUndefined();
+    expect(() => loadConfig({ ...buildSampleEnv(), SUPPLIER_BIND_HOST: "localhost" })).toThrow(/SUPPLIER_BIND_HOST/);
+  });
+
   it("error message mentions the missing/malformed field name", () => {
     const env = { ...buildSampleEnv() };
     delete env.SUPPLIER_PRIV_KEY_HEX;

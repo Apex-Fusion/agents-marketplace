@@ -23,6 +23,7 @@ export interface ReclaimParams {
   chain: ChainProvider;
   buyerKey: WalletKey;
   escrowRef: OutputReference;
+  beforeSubmit?: (built: BuildResult) => Promise<void>;
 }
 
 export async function buildReclaimTx(
@@ -85,6 +86,7 @@ export async function buildReclaimTx(
       escrowUtxo: utxo,
       datum,
       tipMs,
+      beforeSubmit: params.beforeSubmit,
     });
   }
 
@@ -112,6 +114,7 @@ export async function buildReclaimTx(
 
   const txCborHex = encodeTxBody(body);
   const expectedTxHash = sha256Hex(txCborHex);
+  await params.beforeSubmit?.({ txCborHex, expectedTxHash });
 
   await chain.submitTx(txCborHex);
 

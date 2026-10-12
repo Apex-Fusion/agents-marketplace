@@ -24,7 +24,8 @@ A supplier is one Docker container that:
 One supplier = one (model × capability) pair = one wallet = one advert = one
 compose file. Capabilities: `llm.text.generate.v1` (one-off) or `llm.chat.v1`
 (multi-turn session, `CAPABILITY_KIND=chat-session`). There is also a TTS
-kind (`CAPABILITY_KIND=tts`); this runbook covers the LLM kinds.
+kind (`CAPABILITY_KIND=tts`). Sections 2–8 cover the LLM kinds.
+For reviewed local MCP tools, use [Paper2Agent setup](#9-paper2agent-tools).
 
 ## 2. Prerequisites
 
@@ -368,3 +369,341 @@ requires `tx:retire-advert` (refunds the advert bond) + a fresh post-advert
   variants per backend).
 - `supplier/src/cli/` — `gen-keypair`, `post-advert`, `retire-advert`,
   `consolidate-wallet`, `publish-reference-scripts`.
+
+## 9. Paper2Agent tools
+
+`CAPABILITY_KIND=paper2agent` runs one configured local MCP tool.
+It does not use an LLM backend or accept a buyer-supplied executable.
+The package can expose other tools, but the configured name must be unique.
+Only that tool can run through the advert.
+
+### Agent-assisted operator workflow
+
+Use the buyer app's `/paper2agent` page to submit a PDF, paper URL, or paper text.
+Submission starts code generation and execution automatically under marketplace limits.
+No source repository is required.
+The [workflow guide](PAPER2AGENT_PLAN.md#paper-submission-and-review) explains results, review, and optional publication.
+The manual package setup below remains available for already prepared tools.
+
+#### Host and network boundaries
+
+- Run build control on a wallet-free host with its own Docker daemon.
+  Paper parsing, generated code, and verifier code are untrusted.
+  On a shared CI host, use a dedicated rootless daemon and unprivileged account.
+  Do not mount the CI Docker socket, CI credentials, or wallet keys.
+  Docker shares the host kernel; it does not provide a VM boundary.
+- Run the publisher on a separate trusted host.
+  It holds the configured wallet slots and supervises the tool suppliers.
+  Do not put a model API key on this host.
+- Both service containers have Docker socket access.
+  A rootful socket grants host-root access.
+  A rootless build socket controls the dedicated build account, not the host root daemon.
+  Do not use the build daemon for wallet services.
+- Keep management endpoints behind a private TLS proxy or a private tunnel.
+  The Compose defaults expose only host loopback ports: control `8095`, publisher `8096`.
+  `PAPER2AGENT_CONTROL_PUBLISHED_PORT` selects a different host loopback port.
+  `PAPER2AGENT_DOCKER_SOCKET` selects the dedicated build daemon socket.
+  Keep `PAPER2AGENT_CONTROL_BIND_HOST` at `127.0.0.1` on a shared host.
+  Configure URLs that are reachable from inside the calling containers.
+  A container's `127.0.0.1` is not the host or another container.
+- The publisher's public HTTPS proxy exposes only `/tools/*` and `/healthz`.
+  Do not expose `/targets` or `/publications` to the public network.
+  Management bearer tokens are separate from buyer access keys.
+
+#### Rootless Docker on build-nixos-2
+
+`paper2agent/deploy/build-host/provision.sh` installs the pinned Docker runtime and host guards.
+It does not rebuild NixOS or restart the CI Docker daemon.
+The dedicated account is `paper2agent-build`; its Docker socket is `/run/user/994/docker.sock`.
+The `paper2agent-docker` command runs the CLI as that account and clears the caller environment.
+Keep the release files under `/var/lib/paper2agent-build/release`, owned by that account.
+
+Add these Compose values to the private `paper2agent/.env.control` file:
+
+```dotenv
+DOCKER_GID=0
+PAPER2AGENT_DOCKER_SOCKET=/run/user/994/docker.sock
+PAPER2AGENT_CONTROL_BIND_HOST=127.0.0.1
+PAPER2AGENT_CONTROL_PUBLISHED_PORT=18095
+PAPER2AGENT_MODEL_BASE_URL=http://10.0.2.2:18000/v1
+PAPER2AGENT_MODEL=gpt-5.6-sol
+```
+
+Keep the control token private and set the exact loaded runtime image ID.
+Pass `--env-file` so Compose can read its interpolation values; service `env_file` alone is not sufficient.
+After loading the built images, run this command from the release root:
+
+```bash
+paper2agent-docker compose -p paper2agent -f paper2agent/compose.control.yml \
+  --env-file paper2agent/.env.control up -d --no-build --wait --wait-timeout 180
+```
+
+The user manager limits the whole build service to 8 GiB, four CPUs, and 4,096 processes.
+Each generated-code container also has its own limits and no network.
+The host guard permits model access but blocks other loopback services and private networks.
+The root Docker socket and CI credentials remain inaccessible to the build account.
+Disk use is not capped. Keep enough free space for build artifacts.
+
+On the production host, `deploy/mainnet/docker-compose.paper2agent-link.yml` runs the restricted SSH link.
+It forwards buyer control traffic to build-host loopback port `18095`.
+It forwards build-host loopback port `18000` to the private ChatMock service.
+Set the buyer control URL to `http://paper2agent-link:8095`.
+The link publishes no host ports and holds no wallet keys.
+Its Compose file documents the pinned host key, private key permissions, and recovery commands.
+
+#### Build and transfer the trusted runtime
+
+Build the base image once on the isolated host:
+
+```bash
+docker build -f paper2agent/runtime.Dockerfile -t vector-paper2agent-runtime:local .
+docker image inspect vector-paper2agent-runtime:local --format '{{.Id}}'
+docker save -o paper2agent-runtime.tar vector-paper2agent-runtime:local
+```
+
+Transfer the archive through the operator's trusted file channel.
+Load it on the publisher host:
+
+```bash
+docker load -i paper2agent-runtime.tar
+docker image inspect vector-paper2agent-runtime:local --format '{{.Id}}'
+```
+
+Verify that both Docker engines report the same exact `sha256:` image ID.
+Use compatible engines and the transferred image, not two independent rebuilds.
+Set `PAPER2AGENT_RUNTIME_IMAGE` to that exact ID on both hosts.
+The control artifact binds this ID; the publisher rejects a different base.
+The base provides Python 3.12 and FastMCP.
+Generated packages can add pinned binary wheels through the restricted build path.
+They cannot run online package installation or a package-supplied Dockerfile.
+
+#### Configure the two services
+
+On the build host:
+
+1. Copy `paper2agent/.env.control.example` to `paper2agent/.env.control`.
+2. Set a new random `PAPER2AGENT_CONTROL_TOKEN` of at least 32 characters.
+3. Set the OpenAI-compatible model URL, model name, and API key.
+   The endpoint must support function calls and the requested output-token limit.
+4. Set the exact runtime image ID.
+5. Set the private publisher URL and token only if publication is configured.
+   Leave both empty for paper generation, execution, review, and downloads without publication.
+6. Restrict the environment file to the operator.
+
+On the publisher host:
+
+1. Copy `paper2agent/.env.publisher.example` to `paper2agent/.env.publisher`.
+2. Set `PAPER2AGENT_PUBLISHER_TOKEN` to the same publisher token used by control.
+3. Set the public HTTPS base URL and exact runtime image ID.
+4. Copy `paper2agent/publisher-targets.json.example` to `paper2agent/publisher-targets.json`.
+5. Configure one fresh, dedicated wallet key for each target slot.
+   Do not reuse an existing LLM supplier wallet.
+6. Set the target's Ogmios URL, network, and required chain settings.
+   Live publication requires `LIVE_CHAIN=1` and `NETWORK_ID=1`.
+   The publisher process and live target must use the same `VECTOR_ZERO_TIME_MS`.
+   The template defaults to read-only operation.
+7. Set the target file owner to UID `1000` and permissions to `0600`.
+   The service image runs as that UID and refuses group/world-readable keys.
+
+Start each role only on its designated host.
+Run these commands from the repository root.
+On the build host:
+
+```bash
+export DOCKER_GID="$(stat -c %g /var/run/docker.sock)"
+docker compose -f paper2agent/compose.control.yml up -d --build
+```
+
+On the publisher host:
+
+```bash
+export DOCKER_GID="$(stat -c %g /var/run/docker.sock)"
+docker compose -f paper2agent/compose.publisher.yml up -d --build
+```
+
+The named volumes store the build queue, packages, reviews, publication journal,
+and supplier journals under `/repo/data`.
+Keep them across upgrades.
+Use a consistent backup of each volume.
+Keep wallet key backups private and separate.
+
+#### Connect the UI and roll out
+
+Set `PAPER2AGENT_CONTROL_URL` and `PAPER2AGENT_CONTROL_TOKEN` in `buyer/.env`.
+The buyer's existing `env_file` passes these settings to its server.
+Neither setting is sent to the browser.
+
+Update the indexer before the first advert publication.
+The new Plutus codec reads chunked byte strings required by the 76-byte tool identity.
+Roll out the buyer app and gateway with the normal drain and restart procedure.
+These services need the operator UI, tool API, and shared codec changes.
+
+A targeted manual rollout does **not** require restarting existing LLM suppliers.
+It adds build control and its private link.
+The optional publisher starts a managed supplier only after approved publication.
+A publisher upgrade restarts its own managed tool suppliers after they drain.
+The Compose stop grace is 17 minutes for the publisher and 3 minutes for control.
+
+Do not push this release to `main` before the selective rollout completes.
+The main auto-deploy rules select all running supplier projects for shared-code and lockfile changes.
+Push an immutable release branch first; its CI does not trigger mainnet CD.
+Back up the indexer, gateway database, and private configuration.
+Hold `/run/marketplace-deploy.lock` while deploying that exact commit.
+Build only the indexer, buyer, gateway, and new Paper2Agent services.
+Keep each existing Compose project name and volume.
+Restart and health-check the indexer, buyer, and gateway in that order.
+Do not run `FORCE=1`, the full deploy script, or a combined Compose project.
+After live checks pass, push the same commit to `main`.
+The automatic deploy then finds the already deployed commit and has no restart work.
+
+Open `/paper2agent` after the buyer restart.
+Check build readiness and submit a paper.
+Review the exact package and verification evidence before preparation.
+Fund the displayed target address manually before approving a live advert.
+The publication limit covers actual wallet debit, not just the supplier bond.
+Gateway buyer-key approval remains a separate step before customers can pay for tool calls.
+
+If publication has an unknown outcome, use **Refresh publication status**.
+Do not post a replacement advert.
+The stored signed transaction fixes the publication identity.
+A prepared slot stays reserved; there is no slot-release API.
+A slot with a signed publication is not reused.
+
+An interrupted build needs a new model-spend approval.
+Control startup removes only the containers that belong to its recorded attempts.
+If removal fails, restore Docker access and restart control before another build.
+Do not delete the attempt records to bypass cleanup.
+
+### Prepare the local package
+
+Review the code, licenses, data rights, and dependencies first.
+Pin the interpreter and dependencies.
+Install them in the supplier environment before registration.
+The standard Node supplier image does not install a Python scientific environment for you.
+
+The MCP server must use stdio.
+It must declare object input and output schemas.
+It must return an inline object in `structuredContent`.
+Text-only results, resource attachments, and file transfer are not supported.
+Tool discovery also executes local package code.
+Do not register untrusted code in a wallet process.
+Environment filtering is not a sandbox.
+Use operating-system isolation where needed.
+
+`PAPER2AGENT_PACKAGE` names one regular artifact file, not a directory.
+The digest covers that file.
+It does not cover the whole environment.
+Use a reviewed entry point or a prepared bundle with separately pinned dependencies.
+Keep the artifact unchanged while its advert is active.
+
+Set these absolute paths to the prepared installation:
+
+```bash
+export PAPER2AGENT_EXECUTABLE=/srv/tool-venv/bin/python
+export PAPER2AGENT_ARGV_JSON='["/srv/reviewed-tool/server.py"]'
+export PAPER2AGENT_CWD=/srv/reviewed-tool
+export PAPER2AGENT_PACKAGE=/srv/reviewed-tool/server.py
+
+export PAPER2AGENT_STATE_DIR="$HOME/.local/share/vector-paper2agent"
+install -d -m 700 "$PAPER2AGENT_STATE_DIR"
+export PAPER2AGENT_MANIFEST="$PAPER2AGENT_STATE_DIR/tool-v1.json"
+export PAPER2AGENT_JOURNAL_DIR="$PAPER2AGENT_STATE_DIR/jobs"
+```
+
+`PAPER2AGENT_STATE_DIR` is a shell convenience, not a supplier setting.
+Set `PAPER2AGENT_TOOL_NAME` to the exact name returned by the prepared MCP server.
+Choose explicit byte and runtime limits.
+For example:
+
+```bash
+export PAPER2AGENT_MAX_INPUT_BYTES=4096
+export PAPER2AGENT_MAX_OUTPUT_BYTES=4096
+export PAPER2AGENT_MAX_RUNTIME_MS=10000
+pnpm exec tsx supplier/src/cli/register-paper2agent.ts
+```
+
+Registration inspects the real local MCP server.
+It checks the artifact digest and both schemas.
+It does not invoke the selected tool, install code, or call the chain.
+It creates a new manifest file with mode `0600`.
+It refuses to overwrite an existing manifest.
+Use a new filename for a new version.
+
+The global input limit is 65,536 bytes.
+The global output limit is 262,144 bytes.
+The runtime limit is at most 120,000 milliseconds.
+The manifest limits can be smaller.
+They must be positive.
+
+### Publish and start
+
+Retain the registration output.
+It contains the full manifest hash and the required `post_advert_env` values.
+Use the same tool paths when posting the advert and starting the supplier.
+Set `CAPABILITY_KIND=paper2agent`.
+
+The advert uses:
+
+- Capability: `mcp.tool.execute.v1`.
+- Model: `paper2agent:<full-manifest-hash>`.
+- `max_output_tokens`: `0`.
+- Default `max_processing_ms`: the tool runtime limit plus `270000`.
+
+Use the normal wallet, network, endpoint, price, and bond settings.
+The registration defaults supply the tool capability and model to `post-advert.ts`.
+The default SLA allows time for Post confirmation before supplier admission.
+An explicit shorter SLA must still meet the supplier execution allowance.
+Do not exceed `390000` milliseconds: the buyer SDK rejects longer advert SLAs.
+
+Unlike the LLM bootstrap sequence, tool startup requires a confirmed matching advert.
+Complete offline registration before posting it.
+Post the advert only with approval to spend real funds.
+Set `ADVERT_REF` to its confirmed output reference.
+Then start the configured supplier.
+The supplier checks the advert, signing identity, and package digest at startup.
+It checks the package and live tool schemas again before Claim.
+
+Tool mode derives the address, public key, and PKH from `SUPPLIER_PRIV_KEY_HEX`.
+If the corresponding public identity variables are also set, they must match.
+Keep the private key out of the child configuration.
+Supply the required interpreter and reviewed artifact in the runtime image or mounts.
+Keep the journal directory on durable storage.
+
+Check `/healthz`, `/status`, and `/capability` after startup.
+The capability response includes the manifest, hash, and supplier public key.
+Share the full manifest hash and supplier PKH with the buyer's approving operator.
+See [gateway approval](gateway.md#paper2agent-tools).
+
+### Recovery and upgrades
+
+The supplier exposes three dedicated routes:
+
+| Route | Purpose |
+|---|---|
+| `POST /v1/paper2agent/run` | One paid admission for the original Open escrow |
+| `GET /v1/paper2agent/run/:jobId` | Read an existing job and its signed result |
+| `POST /v1/paper2agent/lookup` | Find an existing job without another admission |
+
+Admission and lookup use `X-Escrow-Ref`.
+Their body is exactly `{manifest_hash,input}`.
+Lookup requires the original request preimage.
+It returns the job ID, escrow reference, manifest hash, and stored status.
+It never starts a process, takes an execution slot, or signs a transaction.
+It can find a previous-version job after restart.
+
+Treat job IDs and request preimages as sensitive.
+Supplier lookup is not separate customer authentication.
+Low-entropy inputs can be guessed.
+The gateway adds bearer authentication and owner checks to its own job routes.
+
+Do not delete old journal files when changing a package.
+They preserve duplicate protection and result recovery.
+Drain active work before an upgrade.
+Register a new manifest instead of changing the old file.
+Publish the matching advert and obtain a new buyer approval.
+Keep historical results available.
+
+Execution that exceeds the declared runtime produces no signed result or Submit.
+The remaining Claim can be reclaimed after its deadline.
+A Submit confirmation error can still carry a valid signed result.
+The buyer must check the chain before deciding the financial outcome.

@@ -3,6 +3,7 @@ packages:
   - "buyer"
   - "gateway"
   - "supplier"
+  - "paper2agent"
   - "indexer"
   - "indexer-ui"
   - "wallet-monitor"

@@ -52,6 +52,12 @@
  *                         (/v1/pdf-* routes). Set "0" to disable the feature
  *                         entirely: no PDF job store is opened and every
  *                         /v1/pdf-* route responds 503.
+ *   PAPER2AGENT_CONTROL_URL   — Private base URL (http/https) of the
+ *                         Paper2Agent control service. The operator UI's
+ *                         /v1/paper2agent/* routes proxy fixed paths to it.
+ *   PAPER2AGENT_CONTROL_TOKEN — Server-only bearer token for that service,
+ *                         at least 32 chars. Set both or neither; with
+ *                         neither, every /v1/paper2agent/* route responds 503.
  */
 
 const HEX64_RE = /^[0-9a-fA-F]{64}$/;
@@ -77,6 +83,8 @@ export interface BuyerConfig {
   gatewayInternalUrl: string;
   gatewayAdminToken: string;
   resaleDashboardUrl: string;
+  paper2agentControlUrl: string;
+  paper2agentControlToken: string;
 }
 
 function requireField(env: Record<string, string | undefined>, name: string): string {
@@ -208,6 +216,31 @@ export function loadConfig(env: Record<string, string | undefined>): BuyerConfig
     }
   }
 
+  // PAPER2AGENT_CONTROL_URL + PAPER2AGENT_CONTROL_TOKEN — optional pair. The
+  // token stays on the server; the browser only reaches the fixed-route proxy.
+  const paper2agentControlUrl = (env.PAPER2AGENT_CONTROL_URL ?? "").trim().replace(/\/+$/, "");
+  const paper2agentControlToken = (env.PAPER2AGENT_CONTROL_TOKEN ?? "").trim();
+  if ((paper2agentControlUrl === "") !== (paper2agentControlToken === "")) {
+    throw new Error("loadConfig: PAPER2AGENT_CONTROL_URL and PAPER2AGENT_CONTROL_TOKEN must be set together");
+  }
+  if (paper2agentControlUrl !== "") {
+    let parsed: URL;
+    try {
+      parsed = new URL(paper2agentControlUrl);
+    } catch {
+      throw new Error("loadConfig: PAPER2AGENT_CONTROL_URL must be a valid URL");
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      throw new Error("loadConfig: PAPER2AGENT_CONTROL_URL must use http or https");
+    }
+    if (parsed.username !== "" || parsed.password !== "" || parsed.search !== "" || parsed.hash !== "") {
+      throw new Error("loadConfig: PAPER2AGENT_CONTROL_URL must not contain credentials, a query, or a fragment");
+    }
+  }
+  if (paper2agentControlToken !== "" && paper2agentControlToken.length < 32) {
+    throw new Error("loadConfig: PAPER2AGENT_CONTROL_TOKEN must be at least 32 chars");
+  }
+
   return {
     privKeyHex,
     indexerUrl,
@@ -227,5 +260,7 @@ export function loadConfig(env: Record<string, string | undefined>): BuyerConfig
     gatewayInternalUrl,
     gatewayAdminToken,
     resaleDashboardUrl,
+    paper2agentControlUrl,
+    paper2agentControlToken,
   };
 }

@@ -22,6 +22,9 @@ import {
 import type { AdvertDatum } from "@marketplace/shared/cbor";
 import type { WalletKey } from "@marketplace/shared/tx";
 import { runPostAdvert } from "./postAdvertFlow.js";
+import { PAPER2AGENT_CAPABILITY_ID, PAPER2AGENT_DELIVERY_OVERHEAD_MS, PAPER2AGENT_SUPPLIER_OVERHEAD_MS,
+  paper2AgentManifestHash, paper2AgentModel } from "@marketplace/shared/paper2agent";
+import { readManifest } from "../paper2agent/local.js";
 
 // Wire ed25519 sha512 hook (idempotent — matches buyer/src/index.ts).
 ed.etc.sha512Sync = (...messages: Uint8Array[]): Uint8Array => {
@@ -228,6 +231,9 @@ export function parseCliArgs(
   env: Record<string, string | undefined>,
 ): CliConfig {
   const flags = parseRawArgv(argv);
+  const toolManifest = env.CAPABILITY_KIND === "paper2agent"
+    ? readManifest(requireEnv(env, "PAPER2AGENT_MANIFEST"))
+    : undefined;
 
   // ── networkId ──
   const networkIdRaw = requireEnv(env, "NETWORK_ID");
@@ -261,22 +267,33 @@ export function parseCliArgs(
   }
 
   // ── advert env required ──
-  const capabilityId = flags.capabilityId ?? requireEnv(env, "ADVERT_CAPABILITY_ID");
-  const model = flags.model ?? requireEnv(env, "ADVERT_MODEL");
+  // An empty variable is absent. Only a Paper2Agent manifest supplies defaults.
+  const advertEnv = (name: string, toolDefault: string | undefined): string =>
+    env[name] || toolDefault || requireEnv(env, name);
+  const capabilityId = flags.capabilityId ??
+    advertEnv("ADVERT_CAPABILITY_ID", toolManifest && PAPER2AGENT_CAPABILITY_ID);
+  const model = flags.model ?? advertEnv("ADVERT_MODEL", toolManifest && paper2AgentModel(toolManifest));
 
-  const maxOutputTokensRaw =
-    flags.maxOutputTokens ?? requireEnv(env, "ADVERT_MAX_OUTPUT_TOKENS");
+  const maxOutputTokensRaw = flags.maxOutputTokens ??
+    advertEnv("ADVERT_MAX_OUTPUT_TOKENS", toolManifest && "0");
   const maxOutputTokens = parseIntStrict(
     "ADVERT_MAX_OUTPUT_TOKENS",
     maxOutputTokensRaw,
   );
 
-  const maxProcessingMsRaw =
-    flags.maxProcessingMs ?? requireEnv(env, "ADVERT_MAX_PROCESSING_MS");
+  // The default also covers the buyer's Post confirmation wait. A shorter
+  // explicit value stays valid while it keeps the supplier's own reserve.
+  const maxProcessingMsRaw = flags.maxProcessingMs ?? advertEnv("ADVERT_MAX_PROCESSING_MS",
+    toolManifest && String(toolManifest.limits.max_runtime_ms + PAPER2AGENT_DELIVERY_OVERHEAD_MS));
   const maxProcessingMs = parseIntStrict(
     "ADVERT_MAX_PROCESSING_MS",
     maxProcessingMsRaw,
   );
+  if (toolManifest && (capabilityId !== PAPER2AGENT_CAPABILITY_ID ||
+      model !== paper2AgentModel(toolManifest) || maxOutputTokens !== 0 ||
+      maxProcessingMs < toolManifest.limits.max_runtime_ms + PAPER2AGENT_SUPPLIER_OVERHEAD_MS)) {
+    throw new Error("Paper2Agent advert must match the manifest and include chain lifecycle time");
+  }
 
   const priceLovelaceRaw =
     flags.priceLovelace ?? requireEnv(env, "ADVERT_PRICE_LOVELACE");
@@ -312,7 +329,9 @@ export function parseCliArgs(
       : env.ADVERT_DETAIL_HASH !== undefined
         ? env.ADVERT_DETAIL_HASH
         : "";
-  const detailHash = detailHashRaw === "" ? SHA256_EMPTY : detailHashRaw;
+  const detailHash = detailHashRaw === ""
+    ? (toolManifest ? paper2AgentManifestHash(toolManifest) : SHA256_EMPTY)
+    : detailHashRaw;
 
   // ── awaitTimeoutMs ──
   const awaitTimeoutMs =

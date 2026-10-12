@@ -1,0 +1,34 @@
+# Run on the trusted publisher host. Never load the control service's model key here.
+services:
+  paper2agent-publisher:
+    build:
+      context: ..
+      dockerfile: paper2agent/Dockerfile
+    image: vector-paper2agent-services:local
+    command: [publisher]
+    init: true
+    restart: unless-stopped
+    env_file: .env.publisher
+    environment:
+      PAPER2AGENT_PUBLISHER_HOST: 0.0.0.0
+      PAPER2AGENT_PUBLISHER_PORT: 8096
+      PAPER2AGENT_PUBLISHER_DATA_DIR: /repo/data/paper2agent-publisher
+      PAPER2AGENT_PUBLISHER_TARGETS_FILE: /run/secrets/publisher-targets.json
+      DOCKER_HOST: unix:///var/run/docker.sock
+    group_add: ["${DOCKER_GID:?Set DOCKER_GID to the Docker socket group}"]
+    ports: ["127.0.0.1:8096:8096"]
+    volumes:
+      - publisher-data:/repo/data/paper2agent-publisher
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Host file: mode 0600, owned by the image's node UID (1000).
+      - ./publisher-targets.json:/run/secrets/publisher-targets.json:ro
+    # Managed suppliers drain accepted paid jobs before they stop.
+    stop_grace_period: 17m
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:8096/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 90s
+      retries: 3
+volumes:
+  publisher-data:

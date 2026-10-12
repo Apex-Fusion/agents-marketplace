@@ -28,22 +28,33 @@ import { OpenRouterCapacityProvider } from "./reseller/openRouterCapacity.js";
 import { CapacityGate } from "./reseller/capacityGate.js";
 import { ResellerEvidenceStore } from "./reseller/evidenceStore.js";
 import { ResellerRuntime } from "./reseller/runtime.js";
+import { deriveSupplierKey } from "./paper2agent/identity.js";
+import { Paper2AgentRuntime } from "./paper2agent/runtime.js";
 
 async function main(): Promise<void> {
   const cfg = loadConfig(process.env);
 
-  // Derive a WalletKey from the configured private key. v1 receipt-signing
-  // uses the same key as on-chain signing — see ARCHITECTURE.md §9 open
-  // follow-up (sub-keys are a future tightening, not v1).
-  // Public key + pkh are NOT derived here yet: M1-D will plug in the proper
-  // Ed25519 + blake2b-224 pipeline. For boot correctness today we read them
-  // from optional env vars; tests inject WalletKey directly.
-  const supplierKey = {
+  // Tool suppliers bind the actual signing key to every advertised identity.
+  // Keep the existing injected identities for other capability kinds.
+  const supplierKey = cfg.capabilityKind === "paper2agent"
+    ? deriveSupplierKey(cfg.supplierPrivKeyHex, cfg.networkId)
+    : {
     privateKeyHex: cfg.supplierPrivKeyHex,
     pubKeyHex: process.env.SUPPLIER_PUB_KEY_HEX ?? "",
     pubKeyHash: process.env.SUPPLIER_PKH ?? "",
     address: process.env.SUPPLIER_ADDRESS ?? "",
   };
+  if (cfg.capabilityKind === "paper2agent") {
+    for (const [name, derived] of [
+      ["SUPPLIER_PUB_KEY_HEX", supplierKey.pubKeyHex],
+      ["SUPPLIER_PKH", supplierKey.pubKeyHash],
+      ["SUPPLIER_ADDRESS", supplierKey.address],
+    ]) {
+      if (process.env[name] && process.env[name] !== derived) {
+        throw new Error(`${name} does not match the supplier signing key`);
+      }
+    }
+  }
 
   // M1-F-2: provider selection is driven by cfg.liveChain (LIVE_CHAIN=1).
   // ReadOnly is the safe default; live mode is explicit opt-in.
@@ -51,6 +62,10 @@ async function main(): Promise<void> {
   // chat-session kind serves N concurrent sessions; one-shot kinds stay 1.
   const state = new SupplierState(cfg.capabilityKind === "chat-session" ? cfg.maxChatSessions : 1);
   const jobs = new JobStore();
+  const paper2agent = cfg.capabilityKind === "paper2agent"
+    ? await Paper2AgentRuntime.create({ chain, state, supplierKey, networkId: cfg.networkId,
+      advertRef: cfg.advertRef, config: cfg.paper2agent! })
+    : undefined;
   let reseller: ResellerRuntime | undefined;
   if (cfg.reseller) {
     const advertUtxo = await chain.queryUtxo(cfg.advertRef);
@@ -118,13 +133,17 @@ async function main(): Promise<void> {
     supplierKey,
     jobs,
     reseller,
+    paper2agent,
   };
   const app = createApp(deps);
 
-  const server = app.listen(cfg.port, () => {
+  const onListening = () => {
     // eslint-disable-next-line no-console
-    console.log(`supplier listening on :${cfg.port}`);
-  });
+    console.log(`supplier listening on ${cfg.bindHost ?? ""}:${cfg.port}`);
+  };
+  const server = cfg.bindHost
+    ? app.listen(cfg.port, cfg.bindHost, onListening)
+    : app.listen(cfg.port, onListening);
 
   // M1-F-async-chat: evict expired terminal jobs every 60s (TTL = 10min).
   // .unref() prevents the timer from keeping the event loop alive after
@@ -152,8 +171,10 @@ async function main(): Promise<void> {
     clearInterval(evictInterval);
     walletHealthTicker?.stop();
     state.markOffline();
+    const runtimeCleanup = Promise.all([reseller?.close(), paper2agent?.close()])
+      .then(() => 0, () => 1);
     server.close(() => {
-      void (reseller?.close() ?? Promise.resolve()).finally(() => process.exit(0));
+      void runtimeCleanup.then((code) => process.exit(code));
     });
     setTimeout(() => process.exit(1), 5_000).unref();
   };

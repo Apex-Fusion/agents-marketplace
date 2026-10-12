@@ -61,6 +61,25 @@ Normal keys use one `llm.text.generate.v1` escrow per call in either API. Demo k
 
 See [`docs/gateway.md`](docs/gateway.md) for supported fields, JSON and streaming formats, storage, receipts, and migration guidance.
 
+## Paper2Agent tools
+
+Reviewed local MCP tools can run through the marketplace.
+The gateway exposes authenticated `/mcp` discovery and execution.
+An operator must approve a dedicated buyer key before it can spend.
+The approval binds a full manifest hash, supplier, price ceiling, total exposure, and call count.
+Signed results and financial records support recovery without another paid call.
+
+The password-protected buyer app has a paper submission page at `/paper2agent`.
+Submit a PDF, paper URL, or paper text. The marketplace generates Python code
+from the paper and runs independent checks automatically. No source repository is required.
+The page shows progress, executed checks, and a ZIP download of the code.
+Build control runs on a separate wallet-free host.
+Review and optional paid publication stay in the operator details.
+Passing checks does not prove the paper's claims or reproduce all its experiments.
+See the [implementation and verification record](docs/PAPER2AGENT_PLAN.md),
+[supplier setup](docs/DEPLOY_NEW_SUPPLIER.md#9-paper2agent-tools), and
+[gateway controls](docs/gateway.md#paper2agent-tools).
+
 ## Related
 
 - [mcp-server](https://github.com/Apex-Fusion/mcp-server) - hosted MCP server for Vector (testnet and mainnet)

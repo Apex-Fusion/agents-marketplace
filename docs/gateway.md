@@ -16,7 +16,128 @@ Use `client.responses.create(...)` with `input`, or `client.chat.completions.cre
 
 Optional `x_vector` receipt and supplier-routing fields and `public_preview` remain available for marketplace proof tools. Standard OpenAI clients do not need them.
 
-The model list includes only Active models the key can use: `llm.text.generate.v1` for normal keys and `llm.chat.v1` for demo keys.
+The OpenAI model list includes Active inference models: `llm.text.generate.v1` for normal keys and `llm.chat.v1` for demo keys. Dedicated Paper2Agent keys cannot spend through these APIs.
+
+## Paper2Agent tools
+
+`/mcp` exposes reviewed supplier-configured JSON tools through MCP.
+This route is separate from `/openai/v1`.
+It requires `Authorization: Bearer <gateway-api-key>` on every exchange.
+Browser Origins must also be in the gateway's CORS allowlist.
+Initialization and tool discovery do not spend funds.
+Demo keys cannot execute paid tools.
+
+The supplier capability is `mcp.tool.execute.v1`.
+Its advert model is `paper2agent:<full-manifest-hash>`.
+MCP names have the form `p2a_<tool-name>_<first-16-hash-characters>`.
+Discovery returns validated input and output schemas with an explicit draft-07 dialect.
+An approved call uses the full hash and supplier identity, not the short name alone.
+
+### Operator approval
+
+Create an unused, non-demo key through `/signup`.
+Use its database ID from the operator key inventory.
+Do not pass its raw bearer token to the approval command.
+Set `GATEWAY_DB_DIR` to the running gateway's database directory.
+Set `TOOL_KEY_ID`, `TOOL_MANIFEST_HASH`, and `TOOL_SUPPLIER_PKH` to the reviewed values.
+
+This example permits one attempt with a 2,000,000-lovelace service-price ceiling:
+
+```bash
+pnpm exec tsx gateway/src/cli/paper2agent-approval.ts approve \
+  --db "$GATEWAY_DB_DIR" \
+  --key-id "$TOOL_KEY_ID" \
+  --manifest-hash "$TOOL_MANIFEST_HASH" \
+  --supplier-pkh "$TOOL_SUPPLIER_PKH" \
+  --max-price-lovelace 2000000 \
+  --max-total-spend-lovelace 14000000 \
+  --max-calls 1
+```
+
+Approval values are immutable.
+The key must have no prior job, session, usage, pending transaction, or transaction outcome.
+Fund its wallet separately after approval.
+Use a new key for a different approval.
+Tool arguments cannot create or enlarge an approval.
+
+`max-price-lovelace` limits the advertised service price only.
+The buyer also funds both bonds.
+Normal Accept pays the supplier the service price plus the supplier bond.
+The total exposure limit covers these funds, signed transaction fees, and collateral at risk.
+The Post check also keeps a 7,000,000-lovelace settlement allowance.
+A wallet balance alone is not a spending limit.
+
+Only one unresolved liability can use a dedicated key at a time.
+An admitted attempt consumes the call allowance even if it fails before payment.
+Known costs reduce the remaining total budget.
+Unknown costs remain `null` and keep the budget reserved.
+
+To stop new funding:
+
+```bash
+pnpm exec tsx gateway/src/cli/paper2agent-approval.ts revoke \
+  --db "$GATEWAY_DB_DIR" --key-id "$TOOL_KEY_ID"
+```
+
+Revocation preserves result reads and financial recovery.
+It does not restore access to Responses, Chat Completions, OCR, or withdrawal.
+A missing approval makes revoke fail.
+
+### Results and interrupted calls
+
+Successful MCP calls return the scientific JSON in `structuredContent`.
+The text content contains the same JSON.
+`_meta.vector` contains the job ID, signed receipt, public key, escrow references, and financial outcome.
+The normal MCP response waits for confirmed Accept.
+
+The transport returns JSON rather than progress events.
+Set the MCP client's request timeout for the full operation, including chain confirmation.
+A client timeout does not prove that no payment occurs.
+Do not retry `tools/call` automatically.
+
+The same bearer key can read:
+
+| Route | Result |
+|---|---|
+| `GET /v1/paper2agent/jobs` | Newest own jobs; at most 20 per page |
+| `GET /v1/paper2agent/jobs?cursor=<next_cursor>` | The next page of own jobs |
+| `GET /v1/paper2agent/jobs/:id` | One own job, its signed result, and its financial record |
+
+The list response is `{jobs, next_cursor}`.
+The cursor is `null` on the last page.
+These responses use `Cache-Control: no-store`.
+Unknown and foreign cursors have the same error response.
+Another key cannot read a job.
+
+Each job has `state`, `result_status`, `error`, escrow references, `result`, and `financial`.
+`result` is `null` until verified evidence exists.
+When present, it contains the scientific object at `result.result`, plus the receipt and signature.
+Verified evidence can be available before settlement.
+Always inspect `financial.status` and `financial.actual_cost_lovelace`.
+Do not treat a valid signature as a settled payment.
+
+Recovery retains the confirmed original Post snapshot.
+It can retrieve an existing supplier job after a lost admission response.
+It uses a read-only lookup with the original request preimage.
+It does not start the tool or post another escrow.
+The gateway verifies the receipt and exact live Submitted lineage before Accept.
+The supplier journal and the indexer's `/escrows/:ref/lineage` endpoint must remain available.
+Missing or corrupt evidence fails closed.
+
+### Storage and trust
+
+Paper2Agent stores the manifest, input, Post snapshot, and signed result in plaintext in SQLite.
+The supplier also keeps plaintext job files.
+There is no `store:false` or automatic tool-result retention policy.
+Restrict access to the database, journal, and backups.
+Use non-sensitive data unless a separate policy permits this storage.
+
+The supplier sees the input.
+A receipt proves a signed statement, not correct computation.
+There is no wrong-result refund after Submitted.
+Release can also transfer the buyer bond to the supplier.
+See [supplier setup](DEPLOY_NEW_SUPPLIER.md#9-paper2agent-tools) and the
+[implementation and verification record](PAPER2AGENT_PLAN.md).
 
 ## SDK example
 
@@ -370,7 +491,7 @@ Supplier pins still apply; requests pinned to one supplier wait for that supplie
 ### Financial recovery
 
 The gateway records each original escrow reference before broadcast.
-Its financial journal contains no prompt text or generated output.
+The legacy inference job journal contains no prompt text or generated output.
 It remains active when the client sets `store: false`.
 The wallet journal stores the exact signed transaction until its outcome is known.
 An uncertain broadcast blocks replacement spending.
@@ -394,7 +515,7 @@ For an absent post, recovery requires either a definite submission rejection
 or transaction expiry plus proof that the indexer has caught up.
 An unknown outcome keeps the reservation.
 
-Recovery restores financial state, not a lost inference response.
+For inference, recovery restores financial state, not a lost response.
 It does not replay the prompt.
 An interrupted stored response remains failed unless it was already complete.
 Managed demo sessions retain their existing session lifecycle and settlement rules.
@@ -455,6 +576,7 @@ Input-cap and cost accounting use the complete transmitted execution request JSO
 ## Privacy and key rotation
 
 The gateway stores only a hash of each raw API key. Each custodial wallet private key uses a per-row AES-256-GCM nonce under `GATEWAY_MASTER_KEY`. Stored Responses and active session transcripts use the same sealed-row scheme.
+Paper2Agent tool records are a separate plaintext journal, as described above.
 
 Back up the gateway database and master key together. Losing the master key strands custodial wallets and encrypted response data. The rotation command decrypts and reseals all wallet keys, all stored request/response payloads, and every active session transcript in one database transaction. Restart the gateway with the new key after rotation.
 
@@ -493,7 +615,7 @@ before rolling out this API change.
 - `POST /account/withdraw` sends available funds to the requested address.
 - `GET /` serves the self-service key and account UI.
 
-Raw API keys are returned once. Withdrawal is the custodial exit path.
+Raw API keys are returned once. Withdrawal is the custodial exit path for ordinary keys. Dedicated Paper2Agent keys cannot use this route, including after revoke.
 
 ### Operator key inventory
 

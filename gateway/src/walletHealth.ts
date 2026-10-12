@@ -35,6 +35,7 @@ export function startWalletHealthTicker(deps: GatewayDeps): () => void {
     running = true;
     try {
       for (const keyRow of deps.store.listKeys()) {
+        if (deps.store.paper2agent.approval(keyRow.id)) continue;
         const ctx = deps.registry.getContext(keyRow);
         await ctx.mutex.run(() => ensureWalletHealthy(ctx.chain, ctx.walletKey)).catch(() => {
           /* skip wallets that can't consolidate (e.g. drained) */

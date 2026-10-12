@@ -15,6 +15,9 @@
     "test:watch": "vitest"
   },
   "devDependencies": {
+    "@marketplace/shared": "workspace:*",
+    "@modelcontextprotocol/client": "2.3.1",
+    "@noble/hashes": "^1.8.0",
     "@testing-library/jest-dom": "^6.4.0",
     "@testing-library/react": "^16.0.0",
     "@testing-library/user-event": "^14.5.2",
@@ -26,6 +29,7 @@
     "@types/supertest": "^6.0.2",
     "@vitejs/plugin-react": "^4.3.0",
     "@vitest/coverage-v8": "2.1.9",
+    "bech32": "^2.0.0",
     "cbor-x": "^1.5.4",
     "eventsource": "^2.0.2",
     "express": "^4.21.2",

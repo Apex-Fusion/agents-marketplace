@@ -39,6 +39,7 @@
  */
 
 import { randomUUID } from "crypto";
+import { decodeEscrowDatum } from "@marketplace/shared/cbor";
 import type { GatewayDeps } from "./deps.js";
 import type { SessionRow } from "./db/store.js";
 import { fetchEscrows, acceptAndConfirm, reclaimAndConfirm, type EscrowRow } from "./onchain/settle.js";
@@ -125,6 +126,7 @@ export async function runSweepOnce(
   const now = Date.now();
   deps.store.deleteExpiredResponses(now);
   for (const keyRow of deps.store.listKeys()) {
+    if (deps.store.paper2agent.approval(keyRow.id)) continue;
     if (protection.protectedKeys.has(keyRow.id)) continue;
     let rows: EscrowRow[];
     try {
@@ -148,12 +150,24 @@ export async function runSweepOnce(
       if (!ref) continue;
       if (settledRefs.has(row.utxo_ref)) continue;
       if (protection.protectedRefs.has(row.utxo_ref)) continue;
+      // A missing or damaged tool journal must never reach legacy automatic Accept.
+      if (row.capability_id === "mcp.tool.execute.v1") continue;
       const ageMs = now - (row.posted_at ?? 0);
       if (ageMs < MIN_AGE_MS) continue;
       const chatSession = sessionByPostedAt.get(row.posted_at);
 
       try {
         if (row.state === "Submitted") {
+          const live = await ctx.chain.queryUtxo(ref);
+          if (live === null) {
+            // Already spent by an in-flight request, an earlier sweep, or supplier Release.
+            markSettled(row.utxo_ref);
+            if (chatSession) {
+              closeSessionRow(deps, chatSession, { status: "completed", costLovelace: chatSession.price_lovelace });
+            }
+            continue;
+          }
+          if (!live.datumHex || decodeEscrowDatum(live.datumHex).capability_id === "mcp.tool.execute.v1") continue;
           try {
             await ctx.mutex.run(() => settle.accept(ctx.chain, ctx.walletKey, ref), "sweep-accept", 0);
             log(`accepted stranded Submitted escrow ${row.utxo_ref}`);

@@ -1,0 +1,102 @@
+# deploy/mainnet/docker-compose.paper2agent-link.yml — Paper2Agent build link — MAINNET
+#
+# One persistent outbound SSH session from vector-marketplace to the dedicated
+# Paper2Agent build host (paper2agent-link@144.76.217.30, restricted key):
+#   -L 0.0.0.0:8095:127.0.0.1:18095
+#      buyer -> http://paper2agent-link:8095 -> build host 127.0.0.1:18095
+#      -> paper2agent-control :8095, published as 127.0.0.1:18095 by the
+#      build host's dedicated rootless Docker
+#   -R 127.0.0.1:18000:marketplace-mainnet-chatmock:8000
+#      paper2agent-control -> build host 127.0.0.1:18000 (rootless Docker host
+#      loopback) -> this container -> ChatMock on marketplace-mainnet-net
+# No host-published ports: the listener exists only on marketplace-mainnet-net
+# and the model forward only on the build host's loopback. ssh resolves
+# marketplace-mainnet-chatmock through Docker DNS for every forwarded
+# connection, and the buyer resolves the paper2agent-link alias the same way,
+# so recreating either container needs no config change.
+#
+# No healthcheck: ssh exits on any session or forward failure
+# (ExitOnForwardFailure, ServerAlive 3x15s) and the restart policy reconnects.
+# If the build host still holds 127.0.0.1:18000 for a dead session (after a
+# crash or a network partition), the logs show "remote port forwarding failed
+# for listen port 18000" and the container retries. The build-host sshd Match
+# block for paper2agent-link (ClientAlive 15 s x 3) ends that session about
+# 60 s after the last client traffic. To end it at once, run as root on the
+# build host:
+#   pkill -u paper2agent-link -x sshd
+#
+# deploy.sh does not manage this project. Start, inspect and stop it by hand
+# from /root/agents-marketplace:
+#   docker compose -f deploy/mainnet/docker-compose.paper2agent-link.yml up -d --build
+#   docker logs -f marketplace-mainnet-paper2agent-link
+#   docker compose -f deploy/mainnet/docker-compose.paper2agent-link.yml down
+#
+# Host files live outside the checkout. Never commit them:
+#   /root/.ssh/paper2agent-build-link              private key, mode 0600,
+#                                                  owner 10001:10001 (image user)
+#   /root/.ssh/paper2agent-build-link.known_hosts  pinned build-host key
+# One-time setup or key rotation (root):
+#   umask 077
+#   ssh-keygen -t ed25519 -N '' -C paper2agent-link@vector-marketplace \
+#     -f /root/.ssh/paper2agent-build-link
+#   chown 10001:10001 /root/.ssh/paper2agent-build-link
+#   printf '%s\n' 'paper2agent-build-host ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEfBELE0koJCfy4iBRiydVqGRYKMBDu7Eh6LsvzA/83y' \
+#     > /root/.ssh/paper2agent-build-link.known_hosts   # SHA256:BZD4FlxE2ktjBWJDMQbbEEME+686AYfA4hENAdMBsqY
+#   chmod 0644 /root/.ssh/paper2agent-build-link.known_hosts
+# The build-host owner installs only the .pub file, in the authorized_keys file
+# of paper2agent-link:
+#   restrict,port-forwarding,from="91.98.147.172",permitopen="127.0.0.1:18095",permitlisten="127.0.0.1:18000",command="/run/current-system/sw/bin/false" ssh-ed25519 AAAA...
+# After a rotation, run `up -d --force-recreate` so the new key file is mounted.
+#
+# Optional compose-time overrides. The defaults are the production values:
+#   PAPER2AGENT_LINK_HOST, PAPER2AGENT_LINK_PORT, PAPER2AGENT_LINK_USER,
+#   PAPER2AGENT_LINK_KEY_FILE, PAPER2AGENT_LINK_KNOWN_HOSTS_FILE (absolute paths)
+
+name: marketplace-mainnet-paper2agent-link
+
+services:
+  paper2agent-link:
+    build:
+      context: ../..
+      dockerfile: paper2agent/tunnel.Dockerfile
+    container_name: marketplace-mainnet-paper2agent-link
+    init: true
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 32
+    command:
+      - "-L"
+      - "0.0.0.0:8095:127.0.0.1:18095"
+      - "-R"
+      - "127.0.0.1:18000:marketplace-mainnet-chatmock:8000"
+      - "-p"
+      - "${PAPER2AGENT_LINK_PORT:-22}"
+      - "${PAPER2AGENT_LINK_USER:-paper2agent-link}@${PAPER2AGENT_LINK_HOST:-144.76.217.30}"
+    volumes:
+      - type: bind
+        source: ${PAPER2AGENT_LINK_KEY_FILE:-/root/.ssh/paper2agent-build-link}
+        target: /run/paper2agent-link/id_ed25519
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${PAPER2AGENT_LINK_KNOWN_HOSTS_FILE:-/root/.ssh/paper2agent-build-link.known_hosts}
+        target: /run/paper2agent-link/known_hosts
+        read_only: true
+        bind:
+          create_host_path: false
+    networks:
+      marketplace-mainnet-net:
+        aliases: [paper2agent-link]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  marketplace-mainnet-net:
+    external: true
+    name: marketplace-mainnet-net

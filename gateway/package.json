@@ -9,11 +9,15 @@
     "dev": "tsx src/index.ts",
     "rotate-master-key": "tsx src/cli/rotate-master-key.ts",
     "create-demo-key": "tsx src/cli/create-demo-key.ts",
+    "paper2agent-approval": "tsx src/cli/paper2agent-approval.ts",
     "reseller-demo": "tsx src/cli/reseller-demo.ts"
   },
   "dependencies": {
     "@marketplace/buyer": "workspace:*",
     "@marketplace/shared": "workspace:*",
+    "@modelcontextprotocol/core": "2.3.1",
+    "@modelcontextprotocol/node": "2.1.1",
+    "@modelcontextprotocol/server": "2.3.1",
     "@noble/ed25519": "^2.3.0",
     "@noble/hashes": "^1.8.0",
     "bech32": "^2.0.0",
@@ -21,6 +25,7 @@
     "express": "^4.21.2"
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "2.3.1",
     "@types/better-sqlite3": "^7.6.12",
     "@types/express": "^5.0.3",
     "supertest": "^7.0.0",

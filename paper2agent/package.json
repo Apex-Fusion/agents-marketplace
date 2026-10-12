@@ -1,0 +1,29 @@
+{
+  "name": "@marketplace/paper2agent",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "start:control": "tsx src/index.ts control",
+    "start:publisher": "tsx src/index.ts publisher"
+  },
+  "dependencies": {
+    "@marketplace/shared": "workspace:*",
+    "@marketplace/supplier": "workspace:*",
+    "@modelcontextprotocol/client": "2.3.1",
+    "better-sqlite3": "^11.9.1",
+    "express": "^4.21.2",
+    "fflate": "0.8.3",
+    "ipaddr.js": "^2.2.0",
+    "tar-stream": "^3.1.7"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/express": "^5.0.3",
+    "@types/supertest": "^6.0.2",
+    "@types/tar-stream": "^3.1.4",
+    "supertest": "^7.0.0",
+    "typescript": "^5.7.2"
+  }
+}

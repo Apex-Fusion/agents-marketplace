@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "exports": {
-    "./sdk": "./src/sdk/index.ts"
+    "./sdk": "./src/sdk/index.ts",
+    "./sdk/paper2agent": "./src/sdk/paper2agent.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
