@@ -173,8 +173,13 @@ The build agent sends OpenAI Chat Completions requests to the buyer app at `POST
 The buyer app checks the bearer token `PAPER2AGENT_MODEL_TOKEN` before it reads the body or the wallet.
 Each request buys one marketplace call with the buyer wallet:
 
-1. The buyer app chooses the cheapest Active `llm.text.generate.v1` advert for the requested model.
-   It skips suppliers whose status is offline or working.
+1. The buyer app chooses an Active `llm.text.generate.v1` advert for the requested model.
+   The control sends `auto`, which allows every model whose advert offers at least 4096 output tokens.
+   Cached-free suppliers come first, then the cheapest price; equal prices are in random order, so calls spread across models.
+   The buyer app reads each candidate's live `/status`, because the indexer cache can be one 20 s poll old.
+   It skips a supplier that is not free or whose `/capability` refuses the request (no Responses inference, or no tool calls), before any funds move.
+   A build conversation can therefore change model between calls.
+   No free supplier gives HTTP 503 `model_unavailable` without a transaction.
 2. It checks the wallet like the gateway preflight: the escrow lock floor, 5 AP3X collateral, and a 2 AP3X fee reserve.
    If the wallet cannot pay, it answers HTTP 402 `insufficient_funds` with the deposit address and builds no transaction.
 3. It posts the escrow, verifies the supplier receipt, and waits for a confirmed Accept.
@@ -188,6 +193,10 @@ On 2026-10-13, one call to the `gpt-5.6-sol` advert (0.2 AP3X price, 1 AP3X bond
 Accept pays the supplier the price and the supplier bond, raised to the 2 AP3X output minimum.
 The Post and Accept fees make up the rest.
 If an Accept fails, the endpoint answers 502 `accept_failed` with the Submitted escrow; accept it with `POST /v1/accept` within 10 minutes.
+
+The build agent resends the same conversation after a failed model call (wait 60 s) or a reply without a tool call (no wait).
+Three such results in a row fail the run.
+On 2026-10-13 the build `ConsistendHashAlgoV2` failed for this reason with `gpt-5.6-sol` only: the indexer still listed the single supplier as working 134 ms after its previous call ended, the endpoint answered 503, and the agent failed on the first error.
 
 An unknown publication outcome permits status recovery, not a new advert.
 An interrupted build does not restart model spending.

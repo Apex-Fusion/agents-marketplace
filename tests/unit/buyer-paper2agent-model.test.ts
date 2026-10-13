@@ -11,7 +11,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ChainProvider, OutputReference, Utxo } from "@marketplace/shared/chain";
 import type { AdvertDatum } from "@marketplace/shared/cbor";
 import type { ResponseObject } from "@marketplace/shared/responses";
-import type { WalletKey } from "@marketplace/shared/tx";
+import { TxConstructionError, type WalletKey } from "@marketplace/shared/tx";
 import { PAPER2AGENT_MODEL_PATH, registerPaper2AgentModelRoute } from "../../buyer/src/paper2agent/model.js";
 import type { Marketplace } from "../../buyer/src/sdk/Marketplace.js";
 import type { PostedPrompt, PreparedPrompt, SubmitPromptOptions, SubmitPromptResult, SupplierView } from "../../buyer/src/sdk/types.js";
@@ -80,14 +80,27 @@ function gate(): { wait: Promise<void>; open: () => void } {
   return { wait, open };
 }
 
-function setup(options: { views?: SupplierView[]; walletUtxos?: Utxo[]; beforeExecute?: () => Promise<void>; accept?: () => Promise<string> } = {}) {
+function setup(options: {
+  views?: SupplierView[]; walletUtxos?: Utxo[]; beforeExecute?: () => Promise<void>; accept?: () => Promise<string>;
+  /** Live /status per endpoint URL; unlisted endpoints answer free. */
+  liveStatus?: Record<string, string>;
+  /** Advert byte whose supplier preflight refuses the request. */
+  incompatible?: string;
+} = {}) {
   const events: string[] = [];
   const views = options.views ?? [view("11", {})];
   const discoverSuppliers = vi.fn(async () => views);
   const preparePrompt = vi.fn(async (opts: SubmitPromptOptions): Promise<PreparedPrompt> => {
     const { advertRef, payment_lovelace, public_preview, ...requestOptions } = opts;
     events.push("prepare");
+    if (options.incompatible !== undefined && advertRef.txHash === options.incompatible.repeat(32)) {
+      throw new TxConstructionError("supplier_preflight_failed", "supplier capability does not advertise Responses inference");
+    }
     return { request: requestOptions, advertRef, advert: advertDatum(payment_lovelace), publicPreview: public_preview === true };
+  });
+  const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+    const endpoint = String(url).replace(/\/status$/, "");
+    return new Response(JSON.stringify({ status: options.liveStatus?.[endpoint] ?? "free" }));
   });
   const postPrompt = vi.fn(async (prepared: PreparedPrompt): Promise<PostedPrompt> => {
     events.push("post");
@@ -120,6 +133,7 @@ function setup(options: { views?: SupplierView[]; walletUtxos?: Utxo[]; beforeEx
     walletKey: WALLET,
     indexerUrl: "http://indexer.invalid",
     accept,
+    fetchImpl: fetchImpl as unknown as typeof globalThis.fetch,
   });
   return { app, events, discoverSuppliers, preparePrompt, postPrompt, executePrompt, accept, queryUtxosByAddress };
 }
@@ -235,8 +249,11 @@ describe("buyer Paper2Agent paid model endpoint", () => {
     expect(response.body.error.message).toContain(`${SUBMITTED.txHash}#0`);
   });
 
-  it("answers 503 without spending when no available advert offers the model", async () => {
-    const f = setup({ views: [view("31", { model: "other-model" }), view("32", { status: "offline" })] });
+  it("answers 503 without spending when no supplier of the model is free", async () => {
+    const f = setup({
+      views: [view("31", { model: "other-model" }), view("32", { status: "offline" }), view("33", { endpoint_url: "https://busy.example" })],
+      liveStatus: { "https://supplier.example": "offline", "https://busy.example": "working" },
+    });
 
     const response = await post(f.app);
 
@@ -244,5 +261,32 @@ describe("buyer Paper2Agent paid model endpoint", () => {
     expect(response.body.error.code).toBe("model_unavailable");
     expect(f.preparePrompt).not.toHaveBeenCalled();
     expect(f.postPrompt).not.toHaveBeenCalled();
+  });
+
+  it("buys from a supplier the indexer still lists as working once its live status is free", async () => {
+    const f = setup({ views: [view("41", { status: "working" })] });
+
+    const response = await post(f.app);
+
+    expect(response.status).toBe(200);
+    expect(f.preparePrompt.mock.calls[0][0].advertRef).toEqual({ txHash: "41".repeat(32), index: 0 });
+  });
+
+  it("auto buys from any model, skipping small adverts and suppliers that refuse the request", async () => {
+    const f = setup({
+      views: [
+        view("51", { model: "tiny", max_output_tokens: 512, price_lovelace: "100000" }),
+        view("52", { model: "ocr", price_lovelace: "150000" }),
+        view("53", { model: "deepseek", price_lovelace: "200000" }),
+      ],
+      incompatible: "52",
+    });
+
+    const response = await post(f.app, { ...AGENT_BODY, model: "auto" });
+
+    expect(response.status).toBe(200);
+    expect(f.preparePrompt.mock.calls.map(([options]) => options.advertRef.txHash)).toEqual(["52".repeat(32), "53".repeat(32)]);
+    expect(f.events).toEqual(["prepare", "prepare", "post", "execute", "accept"]);
+    expect(response.body.model).toBe("deepseek");
   });
 });

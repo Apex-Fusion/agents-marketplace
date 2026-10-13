@@ -41,7 +41,7 @@ const FINISH: Reply = {
 };
 const ADDRESS = `addr1${"q".repeat(53)}`;
 
-function session(baseUrl: string, signal: AbortSignal, fundsRetryMs: number) {
+function session(baseUrl: string, signal: AbortSignal, retryMs: number) {
   const shortfalls: FundsShortfall[] = [];
   const logs: string[] = [];
   let restored = 0;
@@ -55,7 +55,7 @@ function session(baseUrl: string, signal: AbortSignal, fundsRetryMs: number) {
     finishSchema: { type: "object" },
     validateFinish: () => undefined,
     log: (message) => logs.push(message),
-    fundsRetryMs,
+    retryMs,
     onFundsShortfall: (shortfall) => shortfalls.push(shortfall),
     onFundsRestored: () => { restored += 1; },
   };
@@ -89,15 +89,29 @@ describe("Paper2Agent coding agent", () => {
   });
 
   it.each([
-    ["another 402 error code", { status: 402, body: { error: { code: "billing_hard_limit_reached", message: "Limit." } } }, /HTTP 402/],
-    ["an unparsable 402 body", { status: 402, body: "Payment Required" }, /HTTP 402/],
-    ["a supplier failure", { status: 503, body: { error: "model_unavailable", message: "No supplier." } }, /HTTP 503/],
-  ] as const)("fails the build on %s instead of pausing", async (_label, reply, error) => {
+    ["another 402 error code", { status: 402, body: { error: { code: "billing_hard_limit_reached", message: "Limit." } } }, /HTTP 402 \(billing_hard_limit_reached\)/],
+    ["an unparsable 402 body", { status: 402, body: "Payment Required" }, /HTTP 402$/],
+    ["a supplier failure", { status: 503, body: { error: { code: "model_unavailable", message: "No supplier." } } }, /HTTP 503 \(model_unavailable\)/],
+    ["a reply without a tool call", { status: 200, body: { choices: [{ message: { content: "Done." } }] } }, /without completed package evidence: Done\./],
+  ] as const)("fails the build after three in a row of %s instead of pausing", async (_label, reply, error) => {
     const endpoint = await modelEndpoint([reply]);
     const run = session(endpoint.baseUrl, new AbortController().signal, 5);
     await expect(runCodingAgent(run.options)).rejects.toThrow(error);
     expect(run.shortfalls).toEqual([]);
-    expect(endpoint.requests).toHaveLength(1);
+    expect(endpoint.requests).toHaveLength(3);
+  });
+
+  it("resends the same conversation after a failed call or a reply without a tool call", async () => {
+    const endpoint = await modelEndpoint([
+      { status: 502, body: { error: { code: "supplier_failed", message: "Upstream error." } } },
+      { status: 200, body: { choices: [{ message: { content: "Let me think." } }] } },
+      FINISH,
+    ]);
+    const run = session(endpoint.baseUrl, new AbortController().signal, 5);
+    await expect(runCodingAgent(run.options)).resolves.toMatchObject({ result: { done: true } });
+    expect(endpoint.requests).toHaveLength(3);
+    expect(endpoint.requests[1]).toEqual(endpoint.requests[0]);
+    expect(endpoint.requests[2]).toEqual(endpoint.requests[0]);
   });
 
   it("stops waiting for funds as soon as the build is cancelled", async () => {

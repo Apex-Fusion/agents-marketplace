@@ -40,8 +40,8 @@ export interface AgentSessionOptions {
   finishSchema: Record<string, unknown>;
   validateFinish: (value: Record<string, unknown>) => void;
   log: (message: string) => void;
-  /** Wait between requests for a model call that the wallet cannot pay for. */
-  fundsRetryMs: number;
+  /** Wait before resending a model call that failed or that the wallet cannot pay for. */
+  retryMs: number;
   /** Every refusal of the waiting model call, before the next wait. */
   onFundsShortfall: (shortfall: FundsShortfall) => void;
   /** The refused model call succeeded; called once per pause. */
@@ -51,6 +51,8 @@ export interface AgentSessionOptions {
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_ERROR_BYTES = 64 * 1024;
 const LOVELACE = /^(?:0|[1-9][0-9]{0,19})$/;
+/** Calls may land on different marketplace models; this many failed or tool-less replies in a row end the run. */
+const MAX_MODEL_MISSES = 3;
 const ADDRESS = /^addr(?:_test)?1[02-9ac-hj-np-z]{20,200}$/;
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -105,18 +107,26 @@ async function requestModel(model: BuildModelConfig, messages: AgentMessage[], t
     signal,
     redirect: "error",
   });
-  if (response.status === 402) {
-    const shortfall = fundsShortfall(await boundedBody(response, MAX_ERROR_BYTES));
+  if (!response.ok) {
+    const text = await boundedBody(response, MAX_ERROR_BYTES).catch(() => "");
+    const shortfall = response.status === 402 ? fundsShortfall(text) : null;
     if (shortfall) throw new InsufficientFundsError(shortfall);
+    let code: unknown;
+    try {
+      const body = record(JSON.parse(text));
+      const nested = record(body?.error);
+      code = nested ? nested.code : body?.error;
+    } catch { /* non-JSON error body */ }
+    throw new Error(`Coding model returned HTTP ${response.status}${typeof code === "string" ? ` (${code.slice(0, 100)})` : ""}`);
   }
-  if (!response.ok) { await response.body?.cancel(); throw new Error(`Coding model returned HTTP ${response.status}`); }
   return JSON.parse(await boundedBody(response, MAX_RESPONSE_BYTES)) as ModelResponse;
 }
 
 /**
  * Each invocation has a new conversation and run identity; verifier context is never reused.
  * There is no call, token, or time limit. A call the wallet cannot pay for is sent again
- * after `fundsRetryMs` until it succeeds or the build is stopped.
+ * after `retryMs` until it succeeds or the build is stopped. A failed call or a reply
+ * without a tool call is retried; MAX_MODEL_MISSES in a row end the run.
  */
 export async function runCodingAgent(options: AgentSessionOptions): Promise<AgentRunResult> {
   const runId = randomUUID();
@@ -126,6 +136,7 @@ export async function runCodingAgent(options: AgentSessionOptions): Promise<Agen
   } }));
   tools.push({ type: "function", function: { name: "finish", description: "Finish only after the requested files and execution evidence exist.", parameters: options.finishSchema } });
   let paused = false;
+  let misses = 0;
   while (true) {
     options.signal.throwIfAborted();
     if (Buffer.byteLength(JSON.stringify(messages)) > 220_000) throw new Error("Coding-agent context exceeds limit");
@@ -135,10 +146,16 @@ export async function runCodingAgent(options: AgentSessionOptions): Promise<Agen
     try {
       body = await requestModel(options.model, messages, tools, options.signal);
     } catch (error) {
-      if (!(error instanceof InsufficientFundsError)) throw error;
+      options.signal.throwIfAborted();
+      if (!(error instanceof InsufficientFundsError)) {
+        if (++misses >= MAX_MODEL_MISSES) throw error;
+        options.log(`Model call ${callNumber} failed: ${error instanceof Error ? error.message.slice(0, 300) : "unknown error"}; retrying`);
+        await sleep(options.retryMs, undefined, { signal: options.signal });
+        continue;
+      }
       options.onFundsShortfall(error.shortfall);
       paused = true;
-      await sleep(options.fundsRetryMs, undefined, { signal: options.signal });
+      await sleep(options.retryMs, undefined, { signal: options.signal });
       continue;
     }
     options.usage.calls = callNumber;
@@ -155,11 +172,14 @@ export async function runCodingAgent(options: AgentSessionOptions): Promise<Agen
     if (!message || (message.content !== undefined && message.content !== null && typeof message.content !== "string")) throw new Error("Coding model returned an invalid message");
     const calls = message.tool_calls ?? [];
     if (!Array.isArray(calls) || calls.length > 8) throw new Error("Coding model tool-call limit exceeded");
-    messages.push({ role: "assistant", content: message.content ?? null, ...(calls.length ? { tool_calls: calls } : {}) });
     if (calls.length === 0) {
       const reason = typeof message.content === "string" ? message.content.slice(0, 2000) : "";
-      throw new Error(`Coding agent stopped without completed package evidence${reason ? `: ${reason}` : ""}`);
+      if (++misses >= MAX_MODEL_MISSES) throw new Error(`Coding agent stopped without completed package evidence${reason ? `: ${reason}` : ""}`);
+      options.log(`Model call ${callNumber} answered without a tool call; asking again`);
+      continue;
     }
+    misses = 0;
+    messages.push({ role: "assistant", content: message.content ?? null, tool_calls: calls });
     for (const call of calls) {
       if (typeof call.id !== "string" || call.id.length > 200 || call.type !== "function" ||
           typeof call.function?.name !== "string" || typeof call.function.arguments !== "string" || call.function.arguments.length > 100_000) {

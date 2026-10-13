@@ -5,9 +5,9 @@
  * POST /v1/paper2agent/model/chat/completions accepts the OpenAI Chat
  * Completions subset the build agent sends and buys one marketplace call with
  * the buyer wallet:
- *   cheapest available llm.text.generate.v1 advert for `model`
- *   → wallet preflight → PostEscrow → supplier → receipt verification
- *   → Accept (confirmed)
+ *   cheapest live-free llm.text.generate.v1 advert for `model` ("auto": any
+ *   model whose supplier accepts the request) → wallet preflight → PostEscrow
+ *   → supplier → receipt verification → Accept (confirmed)
  * Errors use the gateway's OpenAI shape. A wallet that cannot pay answers 402
  * insufficient_funds with x_vector amounts and the deposit address before any
  * transaction, as the gateway does, so the build waits instead of failing.
@@ -17,7 +17,7 @@
  * cannot pin wallet inputs, so concurrent posts would select the same UTxO.
  */
 
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, randomInt, timingSafeEqual } from "node:crypto";
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
 import { canonicalize } from "@marketplace/shared/cbor";
 import type { ChainProvider, OutputReference } from "@marketplace/shared/chain";
@@ -30,7 +30,7 @@ import {
   type ResponseObject,
   type ResponseRequest,
 } from "@marketplace/shared/responses";
-import { escrowLockFloor, type ChatMessage, type WalletKey } from "@marketplace/shared/tx";
+import { escrowLockFloor, TxConstructionError, type ChatMessage, type WalletKey } from "@marketplace/shared/tx";
 import { findSubmittedEscrowRef, runAccept } from "../cli/acceptFlow.js";
 import type { ResponseArchive } from "../db/archive.js";
 import { Mutex } from "../mutex.js";
@@ -49,6 +49,11 @@ const SUBMITTED_LOOKUP_TIMEOUT_MS = 30_000;
 /** The gateway preflight's reserve: Accept needs a pure-AP3X collateral UTxO and fee headroom. */
 const COLLATERAL_MIN_LOVELACE = 5_000_000n;
 const FEE_RESERVE_LOVELACE = 2_000_000n;
+/** Request model that buys from every model whose supplier accepts the request. */
+export const AUTO_MODEL = "auto";
+/** "auto" skips adverts too small to write one source file per tool call. */
+const AUTO_MIN_OUTPUT_TOKENS = 4096;
+const STATUS_PROBE_TIMEOUT_MS = 2_000;
 
 export interface Paper2AgentModelOptions {
   /** Bearer token shared with the build service. Empty disables the route. */
@@ -60,12 +65,18 @@ export interface Paper2AgentModelOptions {
   archive?: ResponseArchive;
   /** Settles one Submitted escrow and returns the confirmed Accept tx hash. */
   accept?: (escrowRef: OutputReference) => Promise<string>;
+  /** Reads supplier /status before each purchase; defaults to globalThis.fetch. */
+  fetchImpl?: typeof globalThis.fetch;
 }
 
 interface Advert {
   ref: OutputReference;
+  model: string;
+  endpointUrl: string;
   priceLovelace: bigint;
   maxOutputTokens: number;
+  /** The indexer's cached status, polled every 20 s, was neither working nor offline. */
+  cachedFree: boolean;
 }
 
 /** An OpenAI-shaped failure; `extra` carries top-level fields such as x_vector. */
@@ -180,27 +191,53 @@ function responseRequest(body: Record<string, unknown>): ResponseRequest {
   }
 }
 
-/** Cheapest Active advert for `model` whose supplier is neither offline nor working. */
-async function selectAdvert(marketplace: Marketplace, model: string): Promise<Advert> {
+/**
+ * Active adverts for `model` (AUTO_MODEL: every model with at least AUTO_MIN_OUTPUT_TOKENS),
+ * cached-free first, then cheapest; equal prices in random order so calls spread across
+ * suppliers. Cached working/offline adverts stay last: the cache lags up to one poll.
+ */
+async function candidateAdverts(marketplace: Marketplace, model: string): Promise<Advert[]> {
   const views = await marketplace.discoverSuppliers({ capability_id: CAPABILITY_ID });
   const adverts: Advert[] = [];
   for (const view of views) {
     const ref = ADVERT_REF_RE.exec(view.utxo_ref);
-    if (!ref || view.capability_id !== CAPABILITY_ID || view.model !== model || view.advert_status !== "Active" ||
-        view.status === "offline" || view.status === "working") continue;
+    if (!ref || view.capability_id !== CAPABILITY_ID || view.advert_status !== "Active") continue;
+    if (model === AUTO_MODEL ? view.max_output_tokens < AUTO_MIN_OUTPUT_TOKENS : view.model !== model) continue;
     let priceLovelace: bigint;
     try {
       priceLovelace = BigInt(view.price_lovelace);
     } catch {
       continue;
     }
-    adverts.push({ ref: { txHash: ref[1], index: Number(ref[2]) }, priceLovelace, maxOutputTokens: view.max_output_tokens });
+    adverts.push({
+      ref: { txHash: ref[1], index: Number(ref[2]) },
+      model: view.model,
+      endpointUrl: view.endpoint_url,
+      priceLovelace,
+      maxOutputTokens: view.max_output_tokens,
+      cachedFree: view.status !== "offline" && view.status !== "working",
+    });
   }
-  adverts.sort((a, b) => (a.priceLovelace < b.priceLovelace ? -1 : a.priceLovelace > b.priceLovelace ? 1 : 0));
-  if (adverts.length === 0) {
-    throw new ModelCallError(503, "model_unavailable", `No available ${CAPABILITY_ID} supplier offers ${model}.`);
+  for (let i = adverts.length - 1; i > 0; i--) {
+    const j = randomInt(i + 1);
+    [adverts[i], adverts[j]] = [adverts[j], adverts[i]];
   }
-  return adverts[0];
+  return adverts.sort((a, b) => Number(b.cachedFree) - Number(a.cachedFree) ||
+    (a.priceLovelace < b.priceLovelace ? -1 : a.priceLovelace > b.priceLovelace ? 1 : 0));
+}
+
+/** The supplier's own /status says free; the indexer's copy can be one poll old. */
+async function liveFree(endpointUrl: string, fetchImpl: typeof globalThis.fetch): Promise<boolean> {
+  try {
+    const response = await fetchImpl(`${endpointUrl.replace(/\/+$/, "")}/status`, {
+      signal: AbortSignal.timeout(STATUS_PROBE_TIMEOUT_MS),
+    });
+    if (!response.ok) return false;
+    const body = await response.json() as unknown;
+    return body !== null && typeof body === "object" && "status" in body && body.status === "free";
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -273,7 +310,7 @@ function chatCompletion(model: string, result: ResponseObject, vector: Record<st
 }
 
 export function registerPaper2AgentModelRoute(app: Express, options: Paper2AgentModelOptions): void {
-  const { token, marketplace, chain, walletKey, indexerUrl, archive } = options;
+  const { token, marketplace, chain, walletKey, indexerUrl, archive, fetchImpl = globalThis.fetch } = options;
   const expected = createHash("sha256").update(token).digest();
   const wallet = new Mutex();
   const accept = options.accept ?? (async (escrowRef: OutputReference): Promise<string> => {
@@ -318,16 +355,32 @@ export function registerPaper2AgentModelRoute(app: Express, options: Paper2Agent
         const request = responseRequest(body);
 
         // Discovery runs inside the lock so the chosen advert is current when its escrow posts.
+        // Busy, unreachable, or incompatible suppliers are skipped before any funds move.
         const call = await wallet.run(async () => {
-          const advert = await selectAdvert(marketplace!, model);
-          const prepared = await marketplace!.preparePrompt({
-            advertRef: advert.ref,
-            payment_lovelace: advert.priceLovelace,
-            ...request,
-            ...(request.max_output_tokens === undefined ? {} : {
-              max_output_tokens: Math.min(request.max_output_tokens, advert.maxOutputTokens),
-            }),
-          });
+          let selected: { advert: Advert; prepared: PreparedPrompt } | undefined;
+          for (const advert of await candidateAdverts(marketplace!, model)) {
+            if (!await liveFree(advert.endpointUrl, fetchImpl)) continue;
+            try {
+              selected = { advert, prepared: await marketplace!.preparePrompt({
+                advertRef: advert.ref,
+                payment_lovelace: advert.priceLovelace,
+                ...request,
+                ...(request.max_output_tokens === undefined ? {} : {
+                  max_output_tokens: Math.min(request.max_output_tokens, advert.maxOutputTokens),
+                }),
+              }) };
+              break;
+            } catch (error) {
+              if (!(error instanceof TxConstructionError) || error.reason === "invalid_response_request") throw error;
+              console.warn(`[paper2agent-model] skip ${advert.model} ${refString(advert.ref)}: ${error.reason}`);
+            }
+          }
+          if (!selected) {
+            throw new ModelCallError(503, "model_unavailable", model === AUTO_MODEL
+              ? `No free ${CAPABILITY_ID} supplier accepts this request.`
+              : `No free ${CAPABILITY_ID} supplier offers ${model}.`);
+          }
+          const { advert, prepared } = selected;
           await assertFunds(chain!, walletKey!, prepared);
           const submit = await marketplace!.executePrompt(await marketplace!.postPrompt(prepared));
           const submittedRef = submit.submittedRef ?? await findSubmittedEscrowRef(
@@ -362,9 +415,9 @@ export function registerPaper2AgentModelRoute(app: Express, options: Paper2Agent
             console.error(`[paper2agent-model] archive.persistChat failed for ${escrowRef}: ${errorMessage(error)}`);
           }
         }
-        console.log(`[paper2agent-model] ${model} escrow=${escrowRef} accept=${call.acceptTxHash} ` +
+        console.log(`[paper2agent-model] ${model}→${call.advert.model} escrow=${escrowRef} accept=${call.acceptTxHash} ` +
           `seconds=${((Date.now() - started) / 1000).toFixed(1)}`);
-        res.status(200).json(chatCompletion(model, call.submit.result, {
+        res.status(200).json(chatCompletion(call.advert.model, call.submit.result, {
           escrow_ref: escrowRef,
           submitted_ref: refString(call.submittedRef),
           accept_tx_hash: call.acceptTxHash,
