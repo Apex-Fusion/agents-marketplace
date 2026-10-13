@@ -169,7 +169,8 @@ That publication hash is not the ZIP download hash; the individual file hashes r
 
 ### Paid build model calls
 
-The build agent sends OpenAI Chat Completions requests to the buyer app at `POST /v1/paper2agent/model/chat/completions`.
+The build agent sends OpenAI Chat Completions requests to the buyer app at `POST https://api.marketplace.vector.apexfusion.org/v1/paper2agent/model/chat/completions`.
+That host is a direct A record to Traefik. Through the Cloudflare-proxied `marketplace.vector.apexfusion.org`, calls over 100 s end with HTTP 524 while the buyer still pays for them.
 The buyer app checks the bearer token `PAPER2AGENT_MODEL_TOKEN` before it reads the body or the wallet.
 Each request buys one marketplace call with the buyer wallet:
 
@@ -180,6 +181,7 @@ Each request buys one marketplace call with the buyer wallet:
    It skips a supplier that is not free or whose `/capability` refuses the request (no Responses inference, or no tool calls), before any funds move.
    A build conversation can therefore change model between calls.
    No free supplier gives HTTP 503 `model_unavailable` without a transaction.
+   A supplier whose paid call fails is skipped for 15 minutes.
 2. It checks the wallet like the gateway preflight: the escrow lock floor, 5 AP3X collateral, and a 2 AP3X fee reserve.
    If the wallet cannot pay, it answers HTTP 402 `insufficient_funds` with the deposit address and builds no transaction.
 3. It posts the escrow, verifies the supplier receipt, and waits for a confirmed Accept.

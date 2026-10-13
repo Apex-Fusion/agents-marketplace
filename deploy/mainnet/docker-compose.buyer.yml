@@ -56,6 +56,13 @@ services:
       - "traefik.http.routers.mp-buyer-mainnet.entrypoints=web"
       - "traefik.http.routers.mp-buyer-mainnet.rule=Host(`marketplace.vector.apexfusion.org`)"
       - "traefik.http.services.mp-buyer-mainnet.loadbalancer.server.port=8070"
+      # Paper2Agent build model calls take longer than Cloudflare's 100 s origin
+      # timeout (HTTP 524). The api host is a direct A record to Traefik; this rule
+      # is longer than the gateway's Host() router, so it wins.
+      - "traefik.http.routers.mp-buyer-mainnet-p2a-model-tls.entrypoints=websecure"
+      - "traefik.http.routers.mp-buyer-mainnet-p2a-model-tls.rule=Host(`api.marketplace.vector.apexfusion.org`) && Path(`/v1/paper2agent/model/chat/completions`)"
+      - "traefik.http.routers.mp-buyer-mainnet-p2a-model-tls.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.mp-buyer-mainnet-p2a-model-tls.service=mp-buyer-mainnet"
     logging:
       driver: json-file
       options:

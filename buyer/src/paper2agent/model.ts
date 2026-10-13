@@ -35,7 +35,7 @@ import { findSubmittedEscrowRef, runAccept } from "../cli/acceptFlow.js";
 import type { ResponseArchive } from "../db/archive.js";
 import { Mutex } from "../mutex.js";
 import type { Marketplace } from "../sdk/Marketplace.js";
-import type { PreparedPrompt } from "../sdk/types.js";
+import type { PreparedPrompt, SubmitPromptResult } from "../sdk/types.js";
 
 export const PAPER2AGENT_MODEL_PATH = "/v1/paper2agent/model/chat/completions";
 
@@ -54,6 +54,8 @@ export const AUTO_MODEL = "auto";
 /** "auto" skips adverts too small to write one source file per tool call. */
 const AUTO_MIN_OUTPUT_TOKENS = 4096;
 const STATUS_PROBE_TIMEOUT_MS = 2_000;
+/** A supplier whose paid call failed is not chosen again for this long. */
+const FAILED_SUPPLIER_COOLDOWN_MS = 15 * 60_000;
 
 export interface Paper2AgentModelOptions {
   /** Bearer token shared with the build service. Empty disables the route. */
@@ -313,6 +315,8 @@ export function registerPaper2AgentModelRoute(app: Express, options: Paper2Agent
   const { token, marketplace, chain, walletKey, indexerUrl, archive, fetchImpl = globalThis.fetch } = options;
   const expected = createHash("sha256").update(token).digest();
   const wallet = new Mutex();
+  /** Supplier endpoint → time until which it is skipped after a failed paid call. */
+  const failedUntil = new Map<string, number>();
   const accept = options.accept ?? (async (escrowRef: OutputReference): Promise<string> => {
     const result = await runAccept({
       chain: chain!, walletKey: walletKey!, escrowRef,
@@ -359,7 +363,7 @@ export function registerPaper2AgentModelRoute(app: Express, options: Paper2Agent
         const call = await wallet.run(async () => {
           let selected: { advert: Advert; prepared: PreparedPrompt } | undefined;
           for (const advert of await candidateAdverts(marketplace!, model)) {
-            if (!await liveFree(advert.endpointUrl, fetchImpl)) continue;
+            if ((failedUntil.get(advert.endpointUrl) ?? 0) > Date.now() || !await liveFree(advert.endpointUrl, fetchImpl)) continue;
             try {
               selected = { advert, prepared: await marketplace!.preparePrompt({
                 advertRef: advert.ref,
@@ -382,7 +386,14 @@ export function registerPaper2AgentModelRoute(app: Express, options: Paper2Agent
           }
           const { advert, prepared } = selected;
           await assertFunds(chain!, walletKey!, prepared);
-          const submit = await marketplace!.executePrompt(await marketplace!.postPrompt(prepared));
+          let submit: SubmitPromptResult;
+          try {
+            submit = await marketplace!.executePrompt(await marketplace!.postPrompt(prepared));
+          } catch (error) {
+            failedUntil.set(advert.endpointUrl, Date.now() + FAILED_SUPPLIER_COOLDOWN_MS);
+            console.error(`[paper2agent-model] ${advert.model} ${advert.endpointUrl} failed; skipped for 15 min`);
+            throw error;
+          }
           const submittedRef = submit.submittedRef ?? await findSubmittedEscrowRef(
             indexerUrl!, walletKey!.pubKeyHash, submit.receipt.prompt_hash, SUBMITTED_LOOKUP_TIMEOUT_MS);
           let acceptTxHash: string;

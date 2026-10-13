@@ -425,7 +425,7 @@ DOCKER_GID=0
 PAPER2AGENT_DOCKER_SOCKET=/run/user/994/docker.sock
 PAPER2AGENT_CONTROL_BIND_HOST=127.0.0.1
 PAPER2AGENT_CONTROL_PUBLISHED_PORT=18095
-PAPER2AGENT_MODEL_BASE_URL=https://marketplace.vector.apexfusion.org/v1/paper2agent/model
+PAPER2AGENT_MODEL_BASE_URL=https://api.marketplace.vector.apexfusion.org/v1/paper2agent/model
 PAPER2AGENT_MODEL=auto
 PAPER2AGENT_MODEL_API_KEY=<the same value as PAPER2AGENT_MODEL_TOKEN in production buyer/.env>
 ```
