@@ -444,13 +444,12 @@ paper2agent-docker compose -p paper2agent -f paper2agent/compose.control.yml \
 
 The user manager limits the whole build service to 8 GiB, four CPUs, and 4,096 processes.
 Each generated-code container also has its own limits and no network.
-The host guard permits model access but blocks other loopback services and private networks.
+The host guard permits public HTTPS, including the buyer's paid model endpoint, but blocks loopback services and private networks.
 The root Docker socket and CI credentials remain inaccessible to the build account.
 Disk use is not capped. Keep enough free space for build artifacts.
 
 On the production host, `deploy/mainnet/docker-compose.paper2agent-link.yml` runs the restricted SSH link.
 It forwards buyer control traffic to build-host loopback port `18095`.
-It forwards build-host loopback port `18000` to the private ChatMock service.
 Set the buyer control URL to `http://paper2agent-link:8095`.
 The link publishes no host ports and holds no wallet keys.
 Its Compose file documents the pinned host key, private key permissions, and recovery commands.

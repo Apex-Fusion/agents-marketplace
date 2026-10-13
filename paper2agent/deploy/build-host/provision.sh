@@ -7,13 +7,13 @@
 #   ssh root@HOST /root/paper2agent-build-host/provision.sh [--link-key FILE]
 #
 #   --link-key  The authorized_keys line for paper2agent-link: restrict,port-forwarding,
-#               [from=...,]permitopen="127.0.0.1:18095",permitlisten="127.0.0.1:18000"[,command=...] KEY
+#               [from=...,]permitopen="127.0.0.1:18095"[,command=...] KEY
 #
 # Result:
 #   paper2agent-build   system user without password, login shell or groups; private home /var/lib/paper2agent-build
 #   rootless dockerd    lingering systemd user service paper2agent-dockerd.service, socket /run/user/UID/docker.sock
 #   paper2agent-docker  Docker CLI for root; it runs docker as paper2agent-build against that socket
-#   nft table           inet paper2agent_build guards loopback 18095 and 18000 and the build user's egress
+#   nft table           inet paper2agent_build guards loopback 18095 and the build user's egress
 #
 # Repeated runs are safe. The script never rebuilds NixOS and never touches the root Docker daemon or
 # the CI runner. It restarts the sshd listener only when the paper2agent-link Match block is not
@@ -73,8 +73,8 @@ uid=$(id -u "$build_user")
 if [ -n "$link_key_file" ]; then
   [ "$(grep -c . "$link_key_file")" = 1 ] || die "--link-key must contain one line"
   line=$(grep . "$link_key_file")
-  re='^restrict,port-forwarding(,from="[0-9a-fA-F.:,/*!]+")?,permitopen="127\.0\.0\.1:18095",permitlisten="127\.0\.0\.1:18000"(,command="[^"]*")? (ssh-ed25519|ecdsa-sha2-nistp(256|384|521)|ssh-rsa) [A-Za-z0-9+/]+=*( [A-Za-z0-9@._-]+)?$'
-  [[ $line =~ $re ]] || die "--link-key does not match the required restrict/permitopen/permitlisten form"
+  re='^restrict,port-forwarding(,from="[0-9a-fA-F.:,/*!]+")?,permitopen="127\.0\.0\.1:18095"(,command="[^"]*")? (ssh-ed25519|ecdsa-sha2-nistp(256|384|521)|ssh-rsa) [A-Za-z0-9+/]+=*( [A-Za-z0-9@._-]+)?$'
+  [[ $line =~ $re ]] || die "--link-key does not match the required restrict/permitopen form"
   printf '%s\n' "$line" > "${link_keys%/*}/.paper2agent-link.new"
   ssh-keygen -lf "${link_keys%/*}/.paper2agent-link.new" >/dev/null || die "invalid link public key"
   chmod 0644 "${link_keys%/*}/.paper2agent-link.new"
@@ -97,12 +97,12 @@ systemctl daemon-reload
   die "$build_user-subid.path is not wanted by multi-user.target"
 systemctl start "$build_user-subid.path"
 
-# Apply the paper2agent-link Match block: idle link sessions close after 45 s and release port 18000.
+# Apply the paper2agent-link Match block: idle link sessions close after 45 s; no remote forwards.
 [ "$(systemctl show -p KillMode --value sshd.service)" = process ] || die "sshd.service must use KillMode=process"
 "$sshd_bin" -t -f "$link_sshd_config" || die "sshd rejects $link_sshd_config"
 link_view=$("$sshd_bin" -T -f "$link_sshd_config" -C "user=$link_user,host=link,addr=127.0.0.1")
 for want in "authenticationmethods publickey" "clientaliveinterval 15" "clientalivecountmax 3" \
-  "allowagentforwarding no" "allowstreamlocalforwarding no" "permitlisten 127.0.0.1:18000" \
+  "allowagentforwarding no" "allowstreamlocalforwarding no" "permitlisten none" \
   "permitopen 127.0.0.1:18095" "permittty no" "forcecommand /run/current-system/sw/bin/false"; do
   grep -qxF "$want" <<<"$link_view" || die "sshd -T for $link_user lacks '$want'"
 done
@@ -163,5 +163,5 @@ provision: ready
   socket   /run/user/$uid/docker.sock
   cli      paper2agent-docker ARGS (as root; the environment is reset, so pass Compose values with --env-file)
   limits   user@$uid.service MemoryMax=8G CPUQuota=400% TasksMax=4096; per container --memory --cpus --pids-limit
-  network  control host 127.0.0.1:18095 for root and $link_user; containers reach the model relay at 10.0.2.2:18000
+  network  control host 127.0.0.1:18095 for root and $link_user; containers reach no host loopback port
 EOF

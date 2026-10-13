@@ -6,23 +6,17 @@
 #      buyer -> http://paper2agent-link:8095 -> build host 127.0.0.1:18095
 #      -> paper2agent-control :8095, published as 127.0.0.1:18095 by the
 #      build host's dedicated rootless Docker
-#   -R 127.0.0.1:18000:marketplace-mainnet-chatmock:8000
-#      paper2agent-control -> build host 127.0.0.1:18000 (rootless Docker host
-#      loopback) -> this container -> ChatMock on marketplace-mainnet-net
-# No host-published ports: the listener exists only on marketplace-mainnet-net
-# and the model forward only on the build host's loopback. ssh resolves
-# marketplace-mainnet-chatmock through Docker DNS for every forwarded
-# connection, and the buyer resolves the paper2agent-link alias the same way,
-# so recreating either container needs no config change.
+# No host-published ports: the listener exists only on marketplace-mainnet-net.
+# The buyer resolves the paper2agent-link alias through Docker DNS, so
+# recreating this container needs no buyer config change. Build model calls
+# do not use this link: the control service calls the buyer's public paid
+# model endpoint over HTTPS.
 #
 # No healthcheck: ssh exits on any session or forward failure
 # (ExitOnForwardFailure, ServerAlive 3x15s) and the restart policy reconnects.
-# If the build host still holds 127.0.0.1:18000 for a dead session (after a
-# crash or a network partition), the logs show "remote port forwarding failed
-# for listen port 18000" and the container retries. The build-host sshd Match
-# block for paper2agent-link (ClientAlive 15 s x 3) ends that session about
-# 60 s after the last client traffic. To end it at once, run as root on the
-# build host:
+# The build-host sshd Match block for paper2agent-link (ClientAlive 15 s x 3)
+# ends a dead session about 60 s after the last client traffic. To end it at
+# once, run as root on the build host:
 #   pkill -u paper2agent-link -x sshd
 #
 # deploy.sh does not manage this project. Start, inspect and stop it by hand
@@ -45,7 +39,7 @@
 #   chmod 0644 /root/.ssh/paper2agent-build-link.known_hosts
 # The build-host owner installs only the .pub file, in the authorized_keys file
 # of paper2agent-link:
-#   restrict,port-forwarding,from="91.98.147.172",permitopen="127.0.0.1:18095",permitlisten="127.0.0.1:18000",command="/run/current-system/sw/bin/false" ssh-ed25519 AAAA...
+#   restrict,port-forwarding,from="91.98.147.172",permitopen="127.0.0.1:18095",command="/run/current-system/sw/bin/false" ssh-ed25519 AAAA...
 # After a rotation, run `up -d --force-recreate` so the new key file is mounted.
 #
 # Optional compose-time overrides. The defaults are the production values:
@@ -69,8 +63,6 @@ services:
     command:
       - "-L"
       - "0.0.0.0:8095:127.0.0.1:18095"
-      - "-R"
-      - "127.0.0.1:18000:marketplace-mainnet-chatmock:8000"
       - "-p"
       - "${PAPER2AGENT_LINK_PORT:-22}"
       - "${PAPER2AGENT_LINK_USER:-paper2agent-link}@${PAPER2AGENT_LINK_HOST:-144.76.217.30}"

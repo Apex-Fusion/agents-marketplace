@@ -21,20 +21,17 @@ table inet paper2agent_build {
 	chain output {
 		type filter hook output priority filter; policy accept;
 
-		# Loopback endpoints. 18095 is the control API that RootlessKit publishes for the build user.
-		# 18000 is the model relay that paper2agent-link opens with a reverse forward from production.
+		# Loopback endpoint 18095 is the control API that RootlessKit publishes for the build user.
 		ip daddr 127.0.0.1 tcp dport 18095 ct state new meta skuid != { 0, "paper2agent-link" } counter reject with tcp reset
-		ip daddr 127.0.0.1 tcp dport 18000 ct state new meta skuid != { 0, "paper2agent-build" } counter reject with tcp reset
 
 		meta skuid "paper2agent-build" jump build_egress
 	}
 
-	# The build user may reach the model relay, DNS, NTP and public web ports. It may not reach
-	# other host addresses or ports, private networks or IPv6.
+	# The build user may reach DNS, NTP and public web ports, including the buyer's paid model
+	# endpoint. It may not reach host addresses, private networks or IPv6.
 	chain build_egress {
 		ct state established,related accept
 		meta nfproto ipv6 counter goto build_deny
-		ip daddr 127.0.0.1 tcp dport 18000 accept
 		fib daddr type local counter goto build_deny
 		ip daddr @denied_ipv4 counter goto build_deny
 		tcp dport { 53, 80, 443 } accept

@@ -93,8 +93,8 @@ let
     WantedBy=multi-user.target
   '';
 
-  # User unit. newuidmap and newgidmap come from the NixOS setuid wrappers. With host loopback on,
-  # slirp4netns maps 10.0.2.2 to the host's 127.0.0.1; host-guard.nft allows only port 18000 there.
+  # User unit. newuidmap and newgidmap come from the NixOS setuid wrappers. Containers cannot reach
+  # host loopback; host-guard.nft also denies every host address to the build user.
   dockerdUnit = pkgs.writeText "paper2agent-dockerd.service" ''
     [Unit]
     Description=paper2agent rootless Docker daemon
@@ -115,7 +115,7 @@ let
     }
     Environment=DOCKERD_ROOTLESS_ROOTLESSKIT_NET=slirp4netns
     Environment=DOCKERD_ROOTLESS_ROOTLESSKIT_PORT_DRIVER=builtin
-    Environment=DOCKERD_ROOTLESS_ROOTLESSKIT_DISABLE_HOST_LOOPBACK=false
+    Environment=DOCKERD_ROOTLESS_ROOTLESSKIT_DISABLE_HOST_LOOPBACK=true
     ExecStart=${docker}/bin/dockerd-rootless --config-file=${daemonConfig}
     ExecReload=${pkgs.coreutils}/bin/kill -s HUP $MAINPID
     TimeoutStartSec=0
@@ -143,7 +143,7 @@ let
   # Server-side limits for the production link account. The NixOS sshd_config has no Include
   # directory, so this drop-in starts sshd with a file that includes the NixOS config first.
   # Settings from the NixOS config still apply; the Match block only narrows paper2agent-link.
-  # Dead link sessions close after 45 seconds and release the model relay port 18000.
+  # Dead link sessions close after 45 seconds. The link may forward only to the control API.
   linkSshdConfig = pkgs.writeText "paper2agent-link-sshd_config" ''
     Include /etc/ssh/sshd_config
 
@@ -153,7 +153,7 @@ let
       ClientAliveCountMax 3
       AllowAgentForwarding no
       AllowStreamLocalForwarding no
-      PermitListen 127.0.0.1:18000
+      PermitListen none
       PermitOpen 127.0.0.1:18095
       PermitTTY no
       ForceCommand /run/current-system/sw/bin/false
