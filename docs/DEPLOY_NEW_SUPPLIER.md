@@ -462,8 +462,23 @@ The build host's `paper2agent/.env.control` sets `PAPER2AGENT_PUBLISHER_URL=http
 It also sets `PAPER2AGENT_PUBLISHER_TOKEN` to the value in production `paper2agent/.env.publisher`.
 The wallet slots are in `/root/paper2agent-publisher/publisher-targets.json`, outside the checkout.
 That file is the only copy of each slot key. Back it up privately.
-The live slot `paper-tool-1` uses wallet `addr1vy78w47xjc9mjqxucg0aguslpdgakf3tvwzlkuv2pl6cndgvk27hx`.
-Its endpoint is `https://api.marketplace.vector.apexfusion.org/p2a/tools/paper-tool-1`.
+The publisher has six live slots, `paper-tool-1` to `paper-tool-6`. Each slot has its own wallet:
+
+| Slot | Wallet |
+|---|---|
+| `paper-tool-1` | `addr1vy78w47xjc9mjqxucg0aguslpdgakf3tvwzlkuv2pl6cndgvk27hx` |
+| `paper-tool-2` | `addr1vytv6mwyeun07qmgg49q0zhmxhz59qn0ym00k2xtg94dt5spa8572` |
+| `paper-tool-3` | `addr1v86wzs8azj64heh7y9slcd9fvz60vma0cprae0fpwu9cu7c2dewht` |
+| `paper-tool-4` | `addr1vx36s8tpwd82x4y290pyjux5a5tfqrw52wq39pv0x5w9g2qjez9jm` |
+| `paper-tool-5` | `addr1vy53jeuvplmk4lvz7kegkeysqmmqs397u59394w7425fajq7mmw7u` |
+| `paper-tool-6` | `addr1vxu2qc7k8h7vr7j628l630cgz76w3rjq6am049s38p4drqqrvg66t` |
+
+Each slot endpoint is `https://api.marketplace.vector.apexfusion.org/p2a/tools/<slot>`.
+To add a slot, append a target with a new key to the targets file.
+Then run `docker compose -f deploy/mainnet/docker-compose.paper2agent-publisher.yml up -d --no-build --force-recreate --wait`.
+The recreate drains and restarts the live tools.
+Each published tool adds one supplier process of about 100 MiB inside the publisher's 768 MiB `mem_limit`.
+Each tool session runs in a separate container with a 2 GiB memory limit.
 An advert endpoint is permanent on chain. A new public URL or target ID needs a new advert.
 `deploy.sh` does not manage the publisher. The Compose file lists the start command.
 

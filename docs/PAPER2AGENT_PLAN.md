@@ -1,6 +1,6 @@
 # Paper2Agent infrastructure for the Vector marketplace
 
-**Status:** Paper-only submission and execution are deployed and verified on the live marketplace. The mainnet publisher is deployed with one live wallet slot. Each live publication needs a funded slot wallet and separate spending approval. No real-chain funds move in these checks.
+**Status:** Paper-only submission and execution are deployed and verified on the live marketplace. The mainnet publisher is deployed with six live wallet slots. Each live publication needs a funded slot wallet and separate spending approval. No real-chain funds move in these checks.
 
 ## Scope
 
