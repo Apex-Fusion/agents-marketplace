@@ -36,11 +36,12 @@ import {
   type ResponseObject,
   type ResponseRequest,
 } from "@marketplace/shared/responses";
-import type { ChainProvider, OutputReference } from "@marketplace/shared/chain";
+import type { ChainProvider } from "@marketplace/shared/chain";
 import type { WalletKey } from "@marketplace/shared/tx";
 import type { Marketplace } from "../sdk/Marketplace.js";
 import type { ResponseArchive } from "../db/archive.js";
-import { runAccept } from "../cli/acceptFlow.js";
+import { findSubmittedEscrowRef, runAccept } from "../cli/acceptFlow.js";
+import { Mutex } from "../mutex.js";
 import { SUMMARIZE_CAPABILITY_ID, buildSupplierPool, SupplierPool } from "./supplier-pool.js";
 import { estimateJob, feeHeadroomLovelace, type JobEstimate } from "./estimate.js";
 import type {
@@ -54,7 +55,6 @@ import type {
 } from "./types.js";
 import type { PdfJobDb, JobRecord } from "./job-db.js";
 
-const ESCROW_REF_RE = /^([0-9a-f]{64})#(\d+)$/;
 const SUBMITTED_LOOKUP_TIMEOUT_MS = 30_000;
 
 /** The result of running one supplier call's full on-chain lifecycle. */
@@ -116,62 +116,9 @@ export interface EstimateView extends JobEstimate {
   no_capable_suppliers: boolean;
 }
 
-/** Minimal async mutex — serializes the chain-touching critical section. */
-class Mutex {
-  private tail: Promise<void> = Promise.resolve();
-  run<T>(fn: () => Promise<T>): Promise<T> {
-    const result = this.tail.then(fn);
-    // Keep the chain alive but swallow errors so one failure doesn't poison
-    // the queue; callers observe the real result/throw via `result`.
-    this.tail = result.then(
-      () => undefined,
-      () => undefined,
-    );
-    return result;
-  }
-}
-
 async function walletLovelace(chain: ChainProvider, address: string): Promise<bigint> {
   const utxos = await chain.queryUtxosByAddress(address);
   return utxos.reduce((acc, u) => acc + BigInt(u.lovelace), 0n);
-}
-
-/**
- * Poll the indexer for the current Submitted-state escrow ref matching this
- * prompt_hash. submitPrompt returns the Open ref, which Claim+Submit have
- * already spent — runAccept needs the live Submitted ref. Lifted from
- * buyer/src/cli/run-cycle.ts.
- */
-async function findSubmittedEscrowRef(
-  indexerUrl: string,
-  buyerPkh: string,
-  promptHash: string,
-  timeoutMs: number,
-): Promise<OutputReference> {
-  const deadline = Date.now() + timeoutMs;
-  const base = indexerUrl.replace(/\/+$/, "");
-  while (Date.now() < deadline) {
-    const resp = await fetch(`${base}/escrows?buyer=${buyerPkh}`);
-    if (resp.ok) {
-      const rows = (await resp.json()) as Array<{
-        utxo_ref: string;
-        prompt_hash: string;
-        state: string;
-        submitted_at: number | null;
-      }>;
-      const match = rows
-        .filter((r) => r.prompt_hash === promptHash && r.state === "Submitted")
-        .sort((a, b) => (b.submitted_at ?? 0) - (a.submitted_at ?? 0))[0];
-      if (match) {
-        const m = ESCROW_REF_RE.exec(match.utxo_ref);
-        if (m) return { txHash: m[1], index: Number(m[2]) };
-      }
-    }
-    await new Promise((r) => setTimeout(r, 2_000));
-  }
-  throw new Error(
-    `indexer: no Submitted escrow with prompt_hash=${promptHash} within ${timeoutMs}ms`,
-  );
 }
 
 function mapPrompt(chunk: Chunk): string {

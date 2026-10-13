@@ -134,6 +134,11 @@ export async function runMain(env: Record<string, string | undefined>): Promise<
       ? "[buyer] paper2agent workflow disabled (PAPER2AGENT_CONTROL_URL unset)"
       : `[buyer] paper2agent control service at ${config.paper2agentControlUrl}`,
   );
+  console.log(
+    config.paper2agentModelToken === ""
+      ? "[buyer] paper2agent paid model calls disabled (PAPER2AGENT_MODEL_TOKEN unset)"
+      : "[buyer] paper2agent paid model calls enabled",
+  );
 
   const app = createApp({
     distPath,
@@ -153,6 +158,7 @@ export async function runMain(env: Record<string, string | undefined>): Promise<
     pdfCaps,
     paper2agentControlUrl: config.paper2agentControlUrl,
     paper2agentControlToken: config.paper2agentControlToken,
+    paper2agentModelToken: config.paper2agentModelToken,
   });
 
   const server = app.listen(config.port, () => {

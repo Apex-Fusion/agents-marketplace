@@ -8,6 +8,8 @@
  *   POST /v1/accept                → resolve original escrow_ref → current Submitted
  *                                    UTxO via the indexer, run runAccept against
  *                                    the LiveOgmiosProvider, return the Accept tx hash
+ *   POST /v1/paper2agent/model/chat/completions → paid model call for the
+ *                                    Paper2Agent build service (see paper2agent/model.ts)
  *   /v1/paper2agent/*              → operator proxy to the Paper2Agent control
  *                                    service (see paper2agent/routes.ts)
  *   *                              → static SPA bundle from `distPath`, with
@@ -40,6 +42,7 @@ import { runAccept } from "./cli/acceptFlow.js";
 import type { ResponseArchive } from "./db/archive.js";
 import { registerPdfRoutes } from "./pdf/routes.js";
 import { PAPER2AGENT_PATH_RE, registerPaper2AgentRoutes } from "./paper2agent/routes.js";
+import { registerPaper2AgentModelRoute } from "./paper2agent/model.js";
 import { defaultPdfCaps } from "./pdf/caps.js";
 import type { PdfCaps } from "./pdf/types.js";
 import type { JobStore } from "./pdf/summarize-job.js";
@@ -117,6 +120,9 @@ export interface AppDeps {
    * those routes respond 503. The token never reaches the browser. */
   paper2agentControlUrl?: string;
   paper2agentControlToken?: string;
+  /** Bearer token of the build service's paid model endpoint
+   * (/v1/paper2agent/model/chat/completions). Empty disables that route. */
+  paper2agentModelToken?: string;
 }
 
 interface ResolvedDeps {
@@ -1306,6 +1312,18 @@ export function createApp(deps: AppDeps): Express {
   // Registered before the SPA static fallback. When jobStore is absent the
   // routes respond 503 (feature disabled).
   registerPdfRoutes(app, deps.jobStore, deps.pdfCaps ?? defaultPdfCaps());
+
+  // ── Paper2Agent build model calls (/v1/paper2agent/model/chat/completions) ──
+  // Registered before the control proxy, whose catch-all answers every other
+  // /v1/paper2agent path.
+  registerPaper2AgentModelRoute(app, {
+    token: deps.paper2agentModelToken ?? "",
+    marketplace: deps.marketplace,
+    chain: resolved?.chain,
+    walletKey: resolved?.walletKey,
+    indexerUrl: resolved?.indexerUrl,
+    archive: deps.archive,
+  });
 
   // ── Paper2Agent operator workflow (/v1/paper2agent/*) ───────────────
   // Fixed-route proxy to the private control service.

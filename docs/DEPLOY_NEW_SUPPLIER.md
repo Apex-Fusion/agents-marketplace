@@ -425,11 +425,15 @@ DOCKER_GID=0
 PAPER2AGENT_DOCKER_SOCKET=/run/user/994/docker.sock
 PAPER2AGENT_CONTROL_BIND_HOST=127.0.0.1
 PAPER2AGENT_CONTROL_PUBLISHED_PORT=18095
-PAPER2AGENT_MODEL_BASE_URL=http://10.0.2.2:18000/v1
+PAPER2AGENT_MODEL_BASE_URL=https://marketplace.vector.apexfusion.org/v1/paper2agent/model
 PAPER2AGENT_MODEL=gpt-5.6-sol
+PAPER2AGENT_MODEL_API_KEY=<the same value as PAPER2AGENT_MODEL_TOKEN in production buyer/.env>
 ```
 
 Keep the control token private and set the exact loaded runtime image ID.
+Generate the model token with `openssl rand -hex 32` and set it in both files.
+Each build model call is then a paid marketplace call from the buyer wallet.
+See [Paid build model calls](PAPER2AGENT_PLAN.md#paid-build-model-calls).
 Pass `--env-file` so Compose can read its interpolation values; service `env_file` alone is not sufficient.
 After loading the built images, run this command from the release root:
 

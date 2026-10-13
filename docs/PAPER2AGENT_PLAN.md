@@ -153,7 +153,8 @@ Control and publisher tokens stay on the server.
    The publisher checks the signed transaction's actual debit and journals it before broadcast.
    It confirms the advert before starting the managed supplier.
 
-Builds and downloads do not require a publisher or an on-chain payment.
+Each build model call is a marketplace purchase from the buyer wallet; see [Paid build model calls](#paid-build-model-calls).
+Downloads need no publisher and no on-chain payment.
 The parser accepts text-bearing PDFs of at most 200 pages.
 The model receives at most 60,000 UTF-8 bytes of extracted paper text.
 Image-only PDFs need text extraction before submission.
@@ -162,6 +163,28 @@ The download ZIP is made from the hash-verified internal bundle, not the mutable
 It contains the package files directly.
 The publication bundle keeps its original TAR format and SHA-256.
 That publication hash is not the ZIP download hash; the individual file hashes remain the same.
+
+### Paid build model calls
+
+The build agent sends OpenAI Chat Completions requests to the buyer app at `POST /v1/paper2agent/model/chat/completions`.
+The buyer app checks the bearer token `PAPER2AGENT_MODEL_TOKEN` before it reads the body or the wallet.
+Each request buys one marketplace call with the buyer wallet:
+
+1. The buyer app chooses the cheapest Active `llm.text.generate.v1` advert for the requested model.
+   It skips suppliers whose status is offline or working.
+2. It checks the wallet like the gateway preflight: the escrow lock floor, 5 AP3X collateral, and a 2 AP3X fee reserve.
+   If the wallet cannot pay, it answers HTTP 402 `insufficient_funds` with the deposit address and builds no transaction.
+3. It posts the escrow, verifies the supplier receipt, and waits for a confirmed Accept.
+
+Each model call therefore creates four transactions: Post, Claim, Submit, and Accept.
+Calls run one at a time, because the transaction builder cannot pin wallet inputs.
+The buyer key stays on the production host. The build host holds only the token.
+The buyer archive keeps each request, result, and signed receipt.
+
+On 2026-10-13, one call to the `gpt-5.6-sol` advert (0.2 AP3X price, 1 AP3X bonds) cost the buyer wallet 3.003256 AP3X.
+Accept pays the supplier the price and the supplier bond, raised to the 2 AP3X output minimum.
+The Post and Accept fees make up the rest.
+If an Accept fails, the endpoint answers 502 `accept_failed` with the Submitted escrow; accept it with `POST /v1/accept` within 10 minutes.
 
 An unknown publication outcome permits status recovery, not a new advert.
 An interrupted build does not restart model spending.

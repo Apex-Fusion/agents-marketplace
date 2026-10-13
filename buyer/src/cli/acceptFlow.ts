@@ -6,6 +6,7 @@
  * exported types without updating tests first.
  */
 
+import { setTimeout as delay } from "node:timers/promises";
 import type { ChainProvider, OutputReference } from "@marketplace/shared/chain";
 import {
   buildAcceptTx,
@@ -89,6 +90,45 @@ export async function runAccept(
   writeLog("confirmed");
 
   return { txHash: built.expectedTxHash };
+}
+
+const ESCROW_REF_RE = /^([0-9a-f]{64})#(\d+)$/;
+
+/**
+ * Poll the indexer for the current Submitted-state escrow ref matching this
+ * prompt_hash. submitPrompt returns the Open ref, which Claim+Submit have
+ * already spent — runAccept needs the live Submitted ref.
+ */
+export async function findSubmittedEscrowRef(
+  indexerUrl: string,
+  buyerPkh: string,
+  promptHash: string,
+  timeoutMs: number,
+): Promise<OutputReference> {
+  const deadline = Date.now() + timeoutMs;
+  const base = indexerUrl.replace(/\/+$/, "");
+  while (Date.now() < deadline) {
+    const resp = await fetch(`${base}/escrows?buyer=${buyerPkh}`);
+    if (resp.ok) {
+      const rows = (await resp.json()) as Array<{
+        utxo_ref: string;
+        prompt_hash: string;
+        state: string;
+        submitted_at: number | null;
+      }>;
+      const match = rows
+        .filter((r) => r.prompt_hash === promptHash && r.state === "Submitted")
+        .sort((a, b) => (b.submitted_at ?? 0) - (a.submitted_at ?? 0))[0];
+      if (match) {
+        const m = ESCROW_REF_RE.exec(match.utxo_ref);
+        if (m) return { txHash: m[1], index: Number(m[2]) };
+      }
+    }
+    await delay(2_000);
+  }
+  throw new Error(
+    `indexer: no Submitted escrow with prompt_hash=${promptHash} within ${timeoutMs}ms`,
+  );
 }
 
 /** Re-export for tests / consumers that want to discriminate. */

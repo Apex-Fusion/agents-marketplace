@@ -49,6 +49,11 @@
  *   PAPER2AGENT_CONTROL_TOKEN — Server-only bearer token for that service,
  *                         at least 32 chars. Set both or neither; with
  *                         neither, every /v1/paper2agent/* route responds 503.
+ *   PAPER2AGENT_MODEL_TOKEN — Bearer token of the Paper2Agent build service,
+ *                         at least 32 chars. Each request to
+ *                         /v1/paper2agent/model/chat/completions buys one marketplace
+ *                         call with the buyer wallet. Unset: that route
+ *                         responds 503.
  */
 
 const HEX64_RE = /^[0-9a-fA-F]{64}$/;
@@ -72,6 +77,7 @@ export interface BuyerConfig {
   resaleDashboardUrl: string;
   paper2agentControlUrl: string;
   paper2agentControlToken: string;
+  paper2agentModelToken: string;
 }
 
 function requireField(env: Record<string, string | undefined>, name: string): string {
@@ -206,6 +212,10 @@ export function loadConfig(env: Record<string, string | undefined>): BuyerConfig
   if (paper2agentControlToken !== "" && paper2agentControlToken.length < 32) {
     throw new Error("loadConfig: PAPER2AGENT_CONTROL_TOKEN must be at least 32 chars");
   }
+  const paper2agentModelToken = (env.PAPER2AGENT_MODEL_TOKEN ?? "").trim();
+  if (paper2agentModelToken !== "" && paper2agentModelToken.length < 32) {
+    throw new Error("loadConfig: PAPER2AGENT_MODEL_TOKEN must be at least 32 chars");
+  }
 
   return {
     privKeyHex,
@@ -225,5 +235,6 @@ export function loadConfig(env: Record<string, string | undefined>): BuyerConfig
     resaleDashboardUrl,
     paper2agentControlUrl,
     paper2agentControlToken,
+    paper2agentModelToken,
   };
 }
