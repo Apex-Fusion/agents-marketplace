@@ -1,0 +1,114 @@
+# deploy/mainnet/docker-compose.paper2agent-publisher.yml — Paper2Agent publisher — MAINNET
+#
+# Holds the Paper2Agent wallet slots, posts approved advert transactions and
+# supervises one supplier child per published tool (paper2agent/src/publisher.ts).
+# It holds no model key. Build control on build-nixos-2 calls its management API.
+#
+# Routes on the gateway host (Traefik strips the /p2a prefix):
+#   https://api.marketplace.vector.apexfusion.org/p2a/tools/<target id>/...  public supplier protocol
+#   https://api.marketplace.vector.apexfusion.org/p2a/healthz                public
+#   https://api.marketplace.vector.apexfusion.org/p2a/{targets,publications} build host IPv4 only,
+#                                                                            plus the bearer token
+# Build control setting (paper2agent/.env.control on the build host):
+#   PAPER2AGENT_PUBLISHER_URL=https://api.marketplace.vector.apexfusion.org/p2a
+#   PAPER2AGENT_PUBLISHER_TOKEN=<same value as below>
+# An advert's endpoint URL is permanent on chain. Changing PUBLIC_URL or a
+# target id needs a new advert.
+#
+# deploy.sh does not manage this project. Build the services image off-host
+# (or docker save/load the one from the build host) and start it by hand from
+# /root/agents-marketplace:
+#   docker compose -f deploy/mainnet/docker-compose.paper2agent-publisher.yml up -d --no-build --wait
+#   docker logs -f marketplace-mainnet-paper2agent-publisher
+#
+# Private files. Never commit them:
+#   paper2agent/.env.publisher (gitignored, mode 0600):
+#     PAPER2AGENT_PUBLISHER_TOKEN=<openssl rand -hex 32>
+#     PAPER2AGENT_RUNTIME_IMAGE=<exact sha256 ID of vector-paper2agent-runtime:local,
+#                                equal to the build host's value>
+#   /root/paper2agent-publisher/publisher-targets.json (mode 0600, owner 1000:1000,
+#   the image's node user). One fresh wallet per slot; see
+#   paper2agent/publisher-targets.json.example. Live mainnet slots set
+#   NETWORK_ID=1, LIVE_CHAIN=1, OGMIOS_URL, VECTOR_ZERO_TIME_MS=1756485600000,
+#   ESCROW_REF_UTXO and ADVERT_REF_UTXO (the gateway values).
+#
+# The production host has about 8 GiB of RAM and no swap. mem_limit keeps the
+# publisher and its supplier children from starting the global OOM killer.
+# Stop grace: managed suppliers drain accepted paid jobs before they stop.
+
+name: marketplace-mainnet-paper2agent-publisher
+
+services:
+  paper2agent-publisher:
+    build:
+      context: ../..
+      dockerfile: paper2agent/Dockerfile
+    image: vector-paper2agent-services:local
+    container_name: marketplace-mainnet-paper2agent-publisher
+    command: [publisher]
+    init: true
+    restart: unless-stopped
+    env_file:
+      - path: ../../paper2agent/.env.publisher
+        required: true
+    environment:
+      PAPER2AGENT_PUBLISHER_HOST: 0.0.0.0
+      PAPER2AGENT_PUBLISHER_PORT: "8096"
+      PAPER2AGENT_PUBLISHER_DATA_DIR: /repo/data/paper2agent-publisher
+      PAPER2AGENT_PUBLISHER_TARGETS_FILE: /run/secrets/publisher-targets.json
+      PAPER2AGENT_PUBLISHER_PUBLIC_URL: https://api.marketplace.vector.apexfusion.org/p2a
+      # Mainnet chain genesis. Each live target must set the same value.
+      VECTOR_ZERO_TIME_MS: "1756485600000"
+      DOCKER_HOST: unix:///var/run/docker.sock
+    # Group of /var/run/docker.sock on the production host.
+    group_add: ["${DOCKER_GID:-988}"]
+    volumes:
+      - publisher-data:/repo/data/paper2agent-publisher
+      - /var/run/docker.sock:/var/run/docker.sock
+      - type: bind
+        source: ${PAPER2AGENT_PUBLISHER_TARGETS_HOST_FILE:-/root/paper2agent-publisher/publisher-targets.json}
+        target: /run/secrets/publisher-targets.json
+        read_only: true
+        bind:
+          create_host_path: false
+    mem_limit: 768m
+    stop_grace_period: 17m
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:8096/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 90s
+      retries: 3
+    networks:
+      - traefik-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-net"
+      # Longer rules than the gateway's Host() router, so these paths win.
+      - "traefik.http.routers.mp-paper2agent-publisher-tls.entrypoints=websecure"
+      - "traefik.http.routers.mp-paper2agent-publisher-tls.rule=Host(`api.marketplace.vector.apexfusion.org`) && (PathPrefix(`/p2a/tools/`) || Path(`/p2a/healthz`))"
+      - "traefik.http.routers.mp-paper2agent-publisher-tls.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.mp-paper2agent-publisher-tls.middlewares=mp-paper2agent-publisher-strip"
+      - "traefik.http.routers.mp-paper2agent-publisher-tls.service=mp-paper2agent-publisher"
+      - "traefik.http.routers.mp-paper2agent-publisher-admin-tls.entrypoints=websecure"
+      - "traefik.http.routers.mp-paper2agent-publisher-admin-tls.rule=Host(`api.marketplace.vector.apexfusion.org`) && (PathPrefix(`/p2a/targets`) || PathPrefix(`/p2a/publications`))"
+      - "traefik.http.routers.mp-paper2agent-publisher-admin-tls.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.mp-paper2agent-publisher-admin-tls.middlewares=mp-paper2agent-publisher-build-host,mp-paper2agent-publisher-strip"
+      - "traefik.http.routers.mp-paper2agent-publisher-admin-tls.service=mp-paper2agent-publisher"
+      # build-nixos-2 (144.76.217.30), where paper2agent-control runs.
+      - "traefik.http.middlewares.mp-paper2agent-publisher-build-host.ipallowlist.sourcerange=144.76.217.30/32"
+      - "traefik.http.middlewares.mp-paper2agent-publisher-strip.stripprefix.prefixes=/p2a"
+      - "traefik.http.services.mp-paper2agent-publisher.loadbalancer.server.port=8096"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  traefik-net:
+    external: true
+    name: traefik-net
+
+volumes:
+  publisher-data:
