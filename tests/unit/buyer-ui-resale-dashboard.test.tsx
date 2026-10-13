@@ -4,7 +4,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import App from "../../buyer/src/ui/App.js";
-import { AuthProvider } from "../../buyer/src/ui/state/AuthContext.js";
 
 const DASHBOARD = {
   generatedAt: "2026-08-28T12:00:00.000Z",
@@ -113,15 +112,13 @@ afterEach(() => {
 });
 
 describe("Capacity markets dashboard", () => {
-  it("renders the authenticated route with a Vector proof state for every sale", async () => {
+  it("renders the route with a Vector proof state for every sale", async () => {
     const fetchMock = vi.fn(async () => Response.json(DASHBOARD));
     vi.stubGlobal("fetch", fetchMock);
 
     render(
       <MemoryRouter initialEntries={["/capacity"]}>
-        <AuthProvider initialStatus="authenticated">
-          <App />
-        </AuthProvider>
+        <App />
       </MemoryRouter>,
     );
 
@@ -159,9 +156,7 @@ describe("Capacity markets dashboard", () => {
 
     render(
       <MemoryRouter initialEntries={["/dashboard"]}>
-        <AuthProvider initialStatus="authenticated">
-          <App />
-        </AuthProvider>
+        <App />
       </MemoryRouter>,
     );
 

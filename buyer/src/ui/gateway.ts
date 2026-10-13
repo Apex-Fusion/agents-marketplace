@@ -4,13 +4,10 @@
  *
  * Resolution order:
  *   1. window.__BUYER_BOOT__.gatewayUrl — injected by the buyer server from the
- *      GATEWAY_PUBLIC_URL env (the configured value). Present on any page load
- *      made while the buyer_session cookie is valid.
+ *      GATEWAY_PUBLIC_URL env (the configured value).
  *   2. Derived "api." + current host — the deploy convention is exactly
- *      api.<buyer-host> (marketplace.… → api.marketplace.…). This covers the
- *      gap right after a fresh login, when the SPA flips auth state WITHOUT a
- *      page reload so the boot block (which is only injected into
- *      server-rendered HTML) hasn't been re-fetched yet.
+ *      api.<buyer-host> (marketplace.… → api.marketplace.…). Used when the
+ *      boot block carries no gatewayUrl.
  *
  * The result never has a trailing slash.
  */

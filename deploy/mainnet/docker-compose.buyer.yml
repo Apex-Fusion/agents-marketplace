@@ -1,7 +1,7 @@
 # deploy/mainnet/docker-compose.buyer.yml — Buyer (Express + Vite UI) — MAINNET
 #
 # Brought up on vector-marketplace at https://marketplace.vector.apexfusion.org.
-# Operator login is gated by BUYER_PASSWORD + SESSION_SECRET (see buyer/.env).
+# The app has no login: anyone who can reach it can spend from the buyer wallet.
 #
 # Code-level mainnet safety (env-gate / wallet allowlist / MAINNET=1 flag,
 # tracked in ARCHITECTURE.md §9 #5) is still a separate open follow-up.

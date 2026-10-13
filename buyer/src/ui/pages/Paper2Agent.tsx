@@ -822,7 +822,7 @@ function JobDetail({ jobId, readiness }: { jobId: string; readiness: PaperWorkfl
       <details className={PANEL}>
         <summary className="cursor-pointer font-medium">Operator review and publication</summary>
         <p className="text-sm text-gray-600">
-          These controls use the current signed-in session. Review and publication need explicit approval.
+          Review and publication need explicit approval.
           Submitting a paper does not spend wallet funds.
         </p>
         <SubmissionDetails job={job} />

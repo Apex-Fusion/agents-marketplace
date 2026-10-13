@@ -1,7 +1,7 @@
 /**
  * buyer/src/ui/App.tsx — router shell.
  *
- * Routes (all gated by <RequireAuth>):
+ * Routes:
  *   /         → <Dashboard />
  *   /tasks    → <TaskHistory />
  *   /capacity  → <ResaleDashboard />      Capacity markets and sale proofs
@@ -21,51 +21,34 @@ import BookSummarizer from "./pages/BookSummarizer.js";
 import ApiKeys from "./pages/ApiKeys.js";
 import ResaleDashboard from "./pages/ResaleDashboard.js";
 import Paper2Agent from "./pages/Paper2Agent.js";
-import { RequireAuth, useAuth } from "./state/AuthContext.js";
-
-function SignOutButton() {
-  const { signOut } = useAuth();
-  return (
-    <button
-      type="button"
-      onClick={() => { void signOut(); }}
-      className="ml-auto text-sm text-gray-600 hover:text-gray-900 hover:underline"
-    >
-      Sign out
-    </button>
-  );
-}
 
 export default function App() {
   return (
-    <RequireAuth>
-      <div className="min-h-screen bg-gray-50 text-gray-900">
-        <nav className="bg-white border-b border-gray-200 px-4 py-3 sm:px-6 flex flex-wrap items-center gap-x-6 gap-y-2">
-          <Link to="/" className="font-medium hover:underline">Dashboard</Link>
-          <Link to="/capacity" className="font-medium hover:underline">Capacity</Link>
-          {/* Book Summarizer tab hidden for now — the /book route and all PDF
-              summarize code remain intact; restore by re-adding this link:
-          <Link to="/book" className="font-medium hover:underline">Book Summarizer</Link> */}
-          <Link to="/tasks" className="font-medium hover:underline">Tasks</Link>
-          <Link to="/pending" className="font-medium hover:underline">Pending</Link>
-          <Link to="/wallet" className="font-medium hover:underline">Wallet</Link>
-          <Link to="/api-keys" className="font-medium hover:underline">API Keys</Link>
-          <Link to="/paper2agent" className="font-medium hover:underline">Paper2Agent</Link>
-          <SignOutButton />
-        </nav>
-        <main className="p-6">
-          <Routes>
-            <Route path="/" element={<Dashboard />} />
-            <Route path="/capacity" element={<ResaleDashboard />} />
-            <Route path="/book" element={<BookSummarizer />} />
-            <Route path="/tasks" element={<TaskHistory />} />
-            <Route path="/pending" element={<PendingReceipts />} />
-            <Route path="/wallet" element={<Wallet />} />
-            <Route path="/api-keys" element={<ApiKeys />} />
-            <Route path="/paper2agent" element={<Paper2Agent />} />
-          </Routes>
-        </main>
-      </div>
-    </RequireAuth>
+    <div className="min-h-screen bg-gray-50 text-gray-900">
+      <nav className="bg-white border-b border-gray-200 px-4 py-3 sm:px-6 flex flex-wrap items-center gap-x-6 gap-y-2">
+        <Link to="/" className="font-medium hover:underline">Dashboard</Link>
+        <Link to="/capacity" className="font-medium hover:underline">Capacity</Link>
+        {/* Book Summarizer tab hidden for now — the /book route and all PDF
+            summarize code remain intact; restore by re-adding this link:
+        <Link to="/book" className="font-medium hover:underline">Book Summarizer</Link> */}
+        <Link to="/tasks" className="font-medium hover:underline">Tasks</Link>
+        <Link to="/pending" className="font-medium hover:underline">Pending</Link>
+        <Link to="/wallet" className="font-medium hover:underline">Wallet</Link>
+        <Link to="/api-keys" className="font-medium hover:underline">API Keys</Link>
+        <Link to="/paper2agent" className="font-medium hover:underline">Paper2Agent</Link>
+      </nav>
+      <main className="p-6">
+        <Routes>
+          <Route path="/" element={<Dashboard />} />
+          <Route path="/capacity" element={<ResaleDashboard />} />
+          <Route path="/book" element={<BookSummarizer />} />
+          <Route path="/tasks" element={<TaskHistory />} />
+          <Route path="/pending" element={<PendingReceipts />} />
+          <Route path="/wallet" element={<Wallet />} />
+          <Route path="/api-keys" element={<ApiKeys />} />
+          <Route path="/paper2agent" element={<Paper2Agent />} />
+        </Routes>
+      </main>
+    </div>
   );
 }

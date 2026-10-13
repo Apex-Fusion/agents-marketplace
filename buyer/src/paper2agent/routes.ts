@@ -4,14 +4,12 @@
  *
  * Each /v1/paper2agent route maps to one fixed control-service path. The
  * control URL and bearer token come only from buyer configuration, so the
- * browser can neither choose an upstream nor read the token. createApp mounts
- * these routes behind the operator-session gate; they stay closed (503) when
- * that gate is not configured. The app-wide JSON parser skips this prefix, so
- * bodies are parsed only after authentication and with per-route bounds.
+ * browser can neither choose an upstream nor read the token. The app-wide
+ * JSON parser skips this prefix, so bodies are parsed with per-route bounds.
  *
  * Every change requires `X-Paper2Agent-Request: 1`. A cross-site form cannot
  * send that header, and a cross-site script needs a CORS preflight that this
- * server never grants, so the session cookie alone cannot authorize a change.
+ * server never grants.
  *
  *   GET  /status                       readiness and budget bounds
  *   GET  /jobs                         newest jobs
@@ -44,8 +42,6 @@ import { PAPER2AGENT_MAX_DOWNLOAD_BYTES } from "@marketplace/shared/paper2agent/
 export const PAPER2AGENT_PATH_RE = /^\/v1\/paper2agent(?:\/|$)/i;
 
 export interface Paper2AgentProxyOptions {
-  /** True only when the operator password and session secret are configured. */
-  authConfigured: boolean;
   /** Control-service base URL; empty disables the proxy. */
   controlUrl: string;
   /** Server-only bearer token for the control service; empty disables the proxy. */
@@ -165,7 +161,7 @@ function relayJson(res: ExpressResponse, status: number, text: string): void {
     return;
   }
   if (status === 401) {
-    // Never relay a 401: the SPA treats any 401 as an expired operator session.
+    // A rejected control token is a buyer configuration fault, not a browser error.
     jsonError(
       res,
       502,
@@ -229,7 +225,7 @@ function jobIdParam(req: ExpressRequest, res: ExpressResponse): string | null {
   return null;
 }
 
-/** Run a body parser after authentication and turn its failures into JSON errors. */
+/** Run a body parser and turn its failures into JSON errors. */
 async function parsedJsonObject(
   parser: RequestHandler,
   req: ExpressRequest,
@@ -259,19 +255,6 @@ async function parsedJsonObject(
 }
 
 export function registerPaper2AgentRoutes(app: Express, options: Paper2AgentProxyOptions): void {
-  if (!options.authConfigured) {
-    // Fail closed: without the operator login these routes would be public.
-    app.all(ROUTES_RE, (_req: ExpressRequest, res: ExpressResponse) => {
-      res.setHeader("Cache-Control", "no-store");
-      jsonError(
-        res,
-        503,
-        "auth_unconfigured",
-        "Operator login is not configured, so the Paper2Agent routes are closed.",
-      );
-    });
-    return;
-  }
   const controlUrl = options.controlUrl.replace(/\/+$/, "");
   const { controlToken, fetchImpl } = options;
   if (controlUrl === "" || controlToken === "") {
@@ -383,7 +366,7 @@ export function registerPaper2AgentRoutes(app: Express, options: Paper2AgentProx
     return submission;
   }
 
-  // Shared guard for the whole prefix, after the session gate in createApp.
+  // Shared guard for the whole prefix.
   app.use("/v1/paper2agent", (req: ExpressRequest, res: ExpressResponse, next: NextFunction) => {
     res.setHeader("Cache-Control", "no-store");
     if (req.method !== "GET" && req.method !== "HEAD" && req.get("x-paper2agent-request") !== "1") {

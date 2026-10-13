@@ -121,7 +121,7 @@ An error or lost result is not proof of a refund.
 
 ## Paper submission and review
 
-Open `/paper2agent` in the password-protected buyer app.
+Open `/paper2agent` in the buyer app.
 The browser uses the same-origin `/v1/paper2agent/*` proxy.
 Control and publisher tokens stay on the server.
 
@@ -145,7 +145,7 @@ Control and publisher tokens stay on the server.
 5. Read the executed check output and download the generated code as a `.zip` archive.
    The operator view contains source previews, licenses, manifest, hashes, verifier code, and review controls.
    Review approval binds the exact archive hash and separate code, data-rights/license, and result attestations.
-   The collapsed view is not a separate access-control role; the existing buyer operator session protects it.
+   The collapsed view is not an access-control role. Anyone who can open the buyer app can use it.
 6. Optional publication requires a configured publisher wallet slot and approved price and bonds.
    Preparation checks the archive and builds a server-owned runtime image offline.
    It does not broadcast an advert.

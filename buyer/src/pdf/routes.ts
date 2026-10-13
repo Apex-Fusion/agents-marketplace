@@ -1,10 +1,8 @@
 /**
  * buyer/src/pdf/routes.ts — HTTP surface for the PDF book summarizer.
  *
- * Mounted under /v1/pdf-* so it inherits the buyer app's session auth
- * (server.ts gates every /v1/* route except /v1/auth/*). The upload route
- * uses multer (multipart) so the global express.json({limit:"1mb"}) body
- * parser never sees the PDF.
+ * Mounted under /v1/pdf-*. The upload route uses multer (multipart) so the
+ * global express.json({limit:"1mb"}) body parser never sees the PDF.
  *
  * Endpoints:
  *   POST /v1/pdf-upload              multipart "file" → {job_id, chunk_count, ...}

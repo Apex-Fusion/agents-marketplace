@@ -69,7 +69,7 @@ An operator must approve a dedicated buyer key before it can spend.
 The approval binds a full manifest hash, supplier, price ceiling, total exposure, and call count.
 Signed results and financial records support recovery without another paid call.
 
-The password-protected buyer app has a paper submission page at `/paper2agent`.
+The buyer app has a paper submission page at `/paper2agent`.
 Submit a PDF, paper URL, or paper text. The marketplace generates Python code
 from the paper and runs independent checks automatically. No source repository is required.
 The page shows progress, executed checks, and a ZIP download of the code.

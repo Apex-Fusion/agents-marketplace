@@ -20,7 +20,6 @@ import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import App from "./App.js";
 import { MarketplaceProvider } from "./state/MarketplaceContext.js";
-import { AuthProvider } from "./state/AuthContext.js";
 // MemoryTaskHistoryStore is a no-op placeholder for the browser-side SDK
 // instance — submitPrompt now runs server-side, so the browser never
 // records anything to a history store. The /tasks page reads directly
@@ -78,11 +77,9 @@ if (!rootEl) throw new Error("[buyer] #root element not found");
 createRoot(rootEl).render(
   <StrictMode>
     <BrowserRouter>
-      <AuthProvider>
-        <MarketplaceProvider marketplace={marketplace}>
-          <App />
-        </MarketplaceProvider>
-      </AuthProvider>
+      <MarketplaceProvider marketplace={marketplace}>
+        <App />
+      </MarketplaceProvider>
     </BrowserRouter>
   </StrictMode>,
 );

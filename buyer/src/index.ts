@@ -128,7 +128,7 @@ export async function runMain(env: Record<string, string | undefined>): Promise<
   }
 
   // Paper2Agent operator workflow: the browser reaches the control service
-  // only through the authenticated /v1/paper2agent/* proxy.
+  // only through the /v1/paper2agent/* proxy.
   console.log(
     config.paper2agentControlUrl === ""
       ? "[buyer] paper2agent workflow disabled (PAPER2AGENT_CONTROL_URL unset)"
@@ -145,9 +145,6 @@ export async function runMain(env: Record<string, string | undefined>): Promise<
     openrouterApiKey: config.openrouterApiKey,
     openrouterBaseUrl: config.openrouterBaseUrl,
     archive,
-    password: config.password,
-    sessionSecret: config.sessionSecret,
-    cookieSecure: config.cookieSecure,
     gatewayPublicUrl: config.gatewayPublicUrl,
     gatewayInternalUrl: config.gatewayInternalUrl,
     gatewayAdminToken: config.gatewayAdminToken,

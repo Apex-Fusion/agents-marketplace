@@ -1,8 +1,6 @@
 /**
  * buyer-pdf-routes.test.ts — the /v1/pdf-* HTTP surface, via supertest against
- * createApp. Auth is unconfigured in these tests (no password/sessionSecret),
- * so the routes are reachable directly — same construction shape as
- * buyer-server-synth-speech.test.ts.
+ * createApp.
  */
 
 import { describe, it, expect } from "vitest";

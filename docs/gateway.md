@@ -632,10 +632,11 @@ list.
 The inventory reads wallets in sequence to avoid concurrent-load failures
 from the production Ogmios service.
 
-The browser calls `GET /v1/api-keys` on the buyer service. This route requires
-the operator session. The buyer then calls `GET /internal/api-keys` on the
-gateway with a server-only bearer token. Customer and demo API keys cannot
-access this inventory. Both responses use `Cache-Control: no-store`.
+The browser calls `GET /v1/api-keys` on the buyer service. The buyer app has no
+login, so anyone who can reach it can read this list. The buyer then calls
+`GET /internal/api-keys` on the gateway with a server-only bearer token.
+Customer and demo API keys cannot call that gateway route. Both responses use
+`Cache-Control: no-store`.
 
 To enable the list:
 

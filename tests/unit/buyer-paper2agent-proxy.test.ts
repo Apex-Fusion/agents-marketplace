@@ -8,8 +8,6 @@ import request from "supertest";
 import { createApp } from "../../buyer/src/server.js";
 import { PAPER2AGENT_MAX_DOWNLOAD_BYTES } from "@marketplace/shared/paper2agent/workflow";
 
-const PASSWORD = "operator-password";
-const SECRET = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const CONTROL_URL = "http://paper2agent-control.internal:8095";
 const CONTROL_TOKEN = "control-token-".repeat(3);
 const JOB_ID = "3f1c2a4b-5d6e-4f70-8a9b-0c1d2e3f4a5b";
@@ -30,57 +28,18 @@ function controlService(respond: () => Response) {
   return { calls, fetchImpl };
 }
 
-async function operatorSession(fetchImpl: typeof globalThis.fetch) {
-  const app = createApp({
-    password: PASSWORD,
-    sessionSecret: SECRET,
-    cookieSecure: false,
+function proxyApp(fetchImpl: typeof globalThis.fetch) {
+  return request.agent(createApp({
     paper2agentControlUrl: CONTROL_URL,
     paper2agentControlToken: CONTROL_TOKEN,
     fetchImpl,
-  });
-  const agent = request.agent(app);
-  await agent.post("/v1/auth/login").send({ password: PASSWORD }).expect(204);
-  return { app, agent };
+  }));
 }
 
 describe("buyer Paper2Agent proxy", () => {
-  it("keeps every route, including downloads and spending, behind the operator session", async () => {
-    const { calls, fetchImpl } = controlService(() => Response.json({}));
-    const { app } = await operatorSession(fetchImpl);
-
-    const responses = await Promise.all([
-      request(app).get("/v1/paper2agent/status"),
-      request(app).get(`/v1/paper2agent/jobs/${JOB_ID}/package`),
-      request(app).post("/v1/paper2agent/jobs").set("X-Paper2Agent-Request", "1").send({ title: "Paper" }),
-      request(app)
-        .post(`/v1/paper2agent/jobs/${JOB_ID}/publish`)
-        .set("X-Paper2Agent-Request", "1")
-        .send({ artifact_sha256: ARTIFACT_SHA, confirm: true, max_debit_lovelace: "5000000" }),
-    ]);
-
-    expect(responses.map((response) => response.status)).toEqual([401, 401, 401, 401]);
-    expect(calls).toHaveLength(0);
-  });
-
-  it("stays closed when operator login is not configured", async () => {
-    const { calls, fetchImpl } = controlService(() => Response.json({ jobs: [] }));
-    const app = createApp({
-      paper2agentControlUrl: CONTROL_URL,
-      paper2agentControlToken: CONTROL_TOKEN,
-      fetchImpl,
-    });
-
-    const response = await request(app).get("/v1/paper2agent/jobs");
-
-    expect(response.status).toBe(503);
-    expect(response.body.error).toBe("auth_unconfigured");
-    expect(calls).toHaveLength(0);
-  });
-
   it("requires the request header before a change reaches the control service", async () => {
     const { calls, fetchImpl } = controlService(() => Response.json({ id: JOB_ID, state: "cancelled" }));
-    const { agent } = await operatorSession(fetchImpl);
+    const agent = proxyApp(fetchImpl);
 
     const crossSite = await agent.post(`/v1/paper2agent/jobs/${JOB_ID}/cancel`);
     expect(crossSite.status).toBe(403);
@@ -101,7 +60,7 @@ describe("buyer Paper2Agent proxy", () => {
       maximum_budget: { max_model_calls: 64, max_output_tokens: 8192, timeout_ms: 3_600_000 },
     };
     const { calls, fetchImpl } = controlService(() => Response.json(readiness));
-    const { agent } = await operatorSession(fetchImpl);
+    const agent = proxyApp(fetchImpl);
 
     const status = await agent.get("/v1/paper2agent/status");
 
@@ -120,11 +79,11 @@ describe("buyer Paper2Agent proxy", () => {
     expect(calls).toHaveLength(1);
   });
 
-  it("does not turn a rejected control token into an operator sign-out", async () => {
+  it("reports a rejected control token as a buyer configuration fault", async () => {
     const { fetchImpl } = controlService(() =>
       Response.json({ error: "unauthorized", message: "invalid bearer token" }, { status: 401 }),
     );
-    const { agent } = await operatorSession(fetchImpl);
+    const agent = proxyApp(fetchImpl);
 
     const response = await agent.get("/v1/paper2agent/jobs");
 
@@ -139,7 +98,7 @@ describe("buyer Paper2Agent proxy", () => {
     const { calls, fetchImpl } = controlService(() =>
       Response.json({ id: JOB_ID, state: "queued", attempt: 1 }, { status: 202 }),
     );
-    const { agent } = await operatorSession(fetchImpl);
+    const agent = proxyApp(fetchImpl);
 
     const upload = await agent
       .post("/v1/paper2agent/jobs")
@@ -174,7 +133,7 @@ describe("buyer Paper2Agent proxy", () => {
 
   it("rejects obsolete fields and bounds uploads before sending them upstream", async () => {
     const { calls, fetchImpl } = controlService(() => Response.json({ id: JOB_ID }, { status: 202 }));
-    const { agent } = await operatorSession(fetchImpl);
+    const agent = proxyApp(fetchImpl);
     for (const name of ["repository_url", "revision", "task", "budget", "unexpected"]) {
       const json = await agent.post("/v1/paper2agent/jobs").set("X-Paper2Agent-Request", "1")
         .send({ paper_text: "Least squares equation", [name]: "obsolete" });
@@ -197,7 +156,7 @@ describe("buyer Paper2Agent proxy", () => {
   it("forwards paper URL or text alone once and preserves admission failures", async () => {
     const { calls, fetchImpl } = controlService(() =>
       Response.json({ error: "queue_full", message: "The build queue is full." }, { status: 429 }));
-    const { agent } = await operatorSession(fetchImpl);
+    const agent = proxyApp(fetchImpl);
     for (const body of [{ paper_url: "https://example.com/paper.pdf" }, { paper_text: "Equation 1: y = ax + b" }]) {
       const response = await agent.post("/v1/paper2agent/jobs").set("X-Paper2Agent-Request", "1").send(body);
       expect(response.status).toBe(429);
@@ -212,7 +171,7 @@ describe("buyer Paper2Agent proxy", () => {
     const { calls, fetchImpl } = controlService(() => {
       throw new TypeError("fetch failed");
     });
-    const { agent } = await operatorSession(fetchImpl);
+    const agent = proxyApp(fetchImpl);
     const change = (path: string, body: object) =>
       agent.post(`/v1/paper2agent/jobs/${JOB_ID}/${path}`).set("X-Paper2Agent-Request", "1").send(body);
 
@@ -245,7 +204,7 @@ describe("buyer Paper2Agent proxy", () => {
           },
         }),
     );
-    const { agent } = await operatorSession(fetchImpl);
+    const agent = proxyApp(fetchImpl);
 
     const response = await agent
       .get(`/v1/paper2agent/jobs/${JOB_ID}/package`)
@@ -267,7 +226,7 @@ describe("buyer Paper2Agent proxy", () => {
     { type: "application/zip", length: String(PAPER2AGENT_MAX_DOWNLOAD_BYTES + 1) },
   ])("rejects an invalid archive response before starting a download: $type / $length", async ({ type, length }) => {
     const { fetchImpl } = controlService(() => new Response("x", { headers: { "content-type": type, "content-length": length } }));
-    const { agent } = await operatorSession(fetchImpl);
+    const agent = proxyApp(fetchImpl);
     const response = await agent.get(`/v1/paper2agent/jobs/${JOB_ID}/package`);
     expect(response.status).toBe(502);
     expect(response.body.error).toBe("paper2agent_invalid_package");

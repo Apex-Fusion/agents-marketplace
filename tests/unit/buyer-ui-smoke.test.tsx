@@ -31,7 +31,6 @@ import SupplierCard from "../../buyer/src/ui/components/SupplierCard.js";
 import PromptForm from "../../buyer/src/ui/components/PromptForm.js";
 import ChatForm from "../../buyer/src/ui/components/ChatForm.js";
 import { MarketplaceProvider } from "../../buyer/src/ui/state/MarketplaceContext.js";
-import { AuthProvider } from "../../buyer/src/ui/state/AuthContext.js";
 import type { SupplierView } from "../../buyer/src/sdk/types.js";
 import { buildBuyerWalletKey } from "../fixtures/buyer-side/wallet-keys.js";
 import {
@@ -85,11 +84,9 @@ function makeSampleSupplierView(overrides: Partial<SupplierView> = {}): Supplier
 function wrap(element: React.ReactElement, mp: Marketplace) {
   return (
     <MemoryRouter>
-      <AuthProvider initialStatus="authenticated">
-        <MarketplaceProvider marketplace={mp}>
-          {element}
-        </MarketplaceProvider>
-      </AuthProvider>
+      <MarketplaceProvider marketplace={mp}>
+        {element}
+      </MarketplaceProvider>
     </MemoryRouter>
   );
 }
