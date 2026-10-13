@@ -34,8 +34,6 @@ const SUBMISSION = {
   paper_url: "",
   paper_text: "We fit y = ax + b by least squares.",
 };
-const BUDGET = { max_model_calls: 8, max_output_tokens: 2048, timeout_ms: 600_000 };
-const DEFAULT_BUDGET = { max_model_calls: 32, max_output_tokens: 4096, timeout_ms: 900_000 };
 const FILES: Record<string, string> = { "server.py": "print('fit')\n", "source/fit.py": "def fit(x):\n    return 1\n" };
 
 interface Deferred<T> {
@@ -201,7 +199,7 @@ async function createJob(app: Express, submission: object = SUBMISSION): Promise
 }
 
 function startBuild(app: Express, id: string): request.Test {
-  return request(app).post(`/jobs/${id}/build`).set("authorization", AUTH).send({ confirm: true, budget: BUDGET });
+  return request(app).post(`/jobs/${id}/build`).set("authorization", AUTH).send({ confirm: true });
 }
 
 /** A real bundle.tar, written by the shared archive helper inside the attempt directory. */
@@ -305,7 +303,8 @@ function seedLegacyStore(dataDir: string, records: Array<{
         publication_terms_json, publication_json, queued_at, last_event_seq
       ) VALUES (?, 1, 2, ?, 1, ?, ?, 'v1', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`).run(
         record.id, record.state, SUBMISSION.title, "https://github.com/example/old-code", submission,
-        record.pdf ?? null, JSON.stringify(BUDGET), record.artifact ? JSON.stringify(record.artifact) : null,
+        record.pdf ?? null, JSON.stringify({ max_model_calls: 8, max_output_tokens: 2048, timeout_ms: 600_000 }),
+        record.artifact ? JSON.stringify(record.artifact) : null,
         record.artifact ? "/private/original/bundle.tar" : null, record.artifact ? "/private/original/bundle" : null,
         record.artifact ? JSON.stringify({ original_review: "Retain this record exactly." }) : null,
         record.publication ? JSON.stringify(record.publication.terms) : null,
@@ -331,7 +330,7 @@ describe("Paper2Agent control service", () => {
     expect(service.listJobs()).toHaveLength(1);
     expect(store.queuedCount()).toBe(1);
     const accepted = responses.find(({ status }) => status === 202);
-    expect(accepted?.body).toMatchObject({ state: "queued", attempt: 1, budget: DEFAULT_BUDGET });
+    expect(accepted?.body).toMatchObject({ state: "queued", attempt: 1, pause: null });
     await request(app).post(`/jobs/${accepted?.body.id}/cancel`).set("authorization", AUTH).send({}).expect(200);
     const next = await createJob(app);
     expect(next.state).toBe("queued");
@@ -378,7 +377,7 @@ describe("Paper2Agent control service", () => {
     const { app, service, store } = openControl(tempDir(), builder, null);
     const url = await createJob(app, { paper_url: "https://example.com/papers/Line%20fit.pdf" });
     expect(url).toMatchObject({
-      state: "queued", attempt: 1, budget: DEFAULT_BUDGET,
+      state: "queued", attempt: 1, pause: null,
       submission: { title: "Line fit", paper_url: "https://example.com/papers/Line%20fit.pdf" },
     });
     const pdf = Buffer.from("%PDF-1.7\nprivate-paper-data");
@@ -390,16 +389,16 @@ describe("Paper2Agent control service", () => {
     expect(builder.calls).toHaveLength(0);
   });
 
-  it("recovers a durably queued first attempt without a second submission or budget approval", async () => {
+  it("recovers a durably queued first attempt without a second submission or spending approval", async () => {
     const dir = tempDir();
     const first = openControl(dir, new FakeBuilder(), null);
     const job = await createJob(first.app);
-    expect(job).toMatchObject({ state: "queued", attempt: 1, budget: DEFAULT_BUDGET });
+    expect(job).toMatchObject({ state: "queued", attempt: 1, pause: null });
     const builder = new FakeBuilder();
     const second = openControl(dir, builder, null);
     await second.service.start();
     const call = await builder.call(0);
-    expect(call.context).toMatchObject({ jobId: job.id, attempt: 1, budget: DEFAULT_BUDGET });
+    expect(call.context).toMatchObject({ jobId: job.id, attempt: 1 });
     call.result.reject(new Error("The paper omits the required dataset."));
     await second.service.whenIdle();
     expect(second.service.job(job.id)).toMatchObject({ state: "failed", attempt: 1, artifact: null });
@@ -504,7 +503,7 @@ describe("Paper2Agent control service", () => {
     expect(() => new PaperControlStore(dir)).toThrow();
   });
 
-  it("queues paper-only input automatically with marketplace limits and keeps retry approval explicit", async () => {
+  it("queues paper-only input automatically without build limits and keeps retry approval explicit", async () => {
     const dir = tempDir();
     const builder = new FakeBuilder();
     const { app, service, store } = openControl(dir, builder, null);
@@ -513,7 +512,7 @@ describe("Paper2Agent control service", () => {
       {}, { title: "No paper" }, { paper_text: " \n\t " }, { paper_url: null }, { paper_text: "\u0000" },
       { ...SUBMISSION, repository_url: "https://github.com/example/fit-line" },
       { ...SUBMISSION, revision: "main" }, { ...SUBMISSION, task: "Fit a line" },
-      { ...SUBMISSION, budget: BUDGET }, { ...SUBMISSION, paper_text: undefined },
+      { ...SUBMISSION, budget: { max_model_calls: 8 } }, { ...SUBMISSION, paper_text: undefined },
       { paper_url: "http://example.com/paper.pdf" }, { paper_url: "https://127.0.0.1/paper.pdf" },
       { paper_url: "https://user:secret@example.com/paper.pdf" },
       { paper_url: "https://example.com:8443/paper.pdf" },
@@ -530,37 +529,36 @@ describe("Paper2Agent control service", () => {
     const paper = "  Least squares line fit\nWe fit y = ax + b by least squares.\n";
     const job = await createJob(app, { paper_text: paper });
     expect(job).toMatchObject({
-      state: "building", attempt: 1, budget: DEFAULT_BUDGET,
+      state: "building", attempt: 1, pause: null,
       submission: { title: "Least squares line fit", paper_url: "", paper_text: paper },
     });
-    expect(store.events(job.id, 0, 10)[0]).toMatchObject({ phase: "queued", message: expect.stringContaining("marketplace limits") });
+    expect(store.events(job.id, 0, 10)[0]).toMatchObject({ phase: "queued" });
     const list = await request(app).get("/jobs").set("authorization", AUTH).expect(200);
     expect(list.body.jobs).toEqual([{
       id: job.id, title: "Least squares line fit", paper_url: "",
-      state: "building", publication_state: null, created_at: job.created_at, updated_at: job.updated_at,
+      state: "building", publication_state: null, paused: false, created_at: job.created_at, updated_at: job.updated_at,
     }]);
     expect(JSON.stringify(list.body)).not.toContain(paper);
     const { context, result } = await builder.call(0);
-    expect(context).toMatchObject({ jobId: job.id, attempt: 1, budget: DEFAULT_BUDGET, submission: { paper_text: paper } });
+    expect(context).toMatchObject({ jobId: job.id, attempt: 1, submission: { paper_text: paper } });
     expect(context.workDir).toBe(join(dir, "jobs", job.id, "1"));
     result.reject(new Error("The paper does not supply required data."));
     await service.whenIdle();
     expect(service.job(job.id)).toMatchObject({ state: "failed", attempt: 1, artifact: null, error: expect.stringContaining("required data") });
     expect(builder.calls).toHaveLength(1);
     for (const body of [
-      { budget: BUDGET },
-      { confirm: false, budget: BUDGET },
-      { confirm: true, budget: { ...BUDGET, max_model_calls: 65 } },
-      { confirm: true, budget: { ...BUDGET, max_model_calls: 3 } },
-      { confirm: true, budget: { ...BUDGET, timeout_ms: 3_600_001 } },
-      { confirm: true, budget: BUDGET, extra: true },
+      {},
+      { confirm: false },
+      { confirm: "true" },
+      { confirm: true, budget: { max_model_calls: 8, max_output_tokens: 1024, timeout_ms: 600_000 } },
+      { confirm: true, extra: true },
     ]) {
       await request(app).post(`/jobs/${job.id}/build`).set("authorization", AUTH).send(body).expect(400);
     }
     expect(builder.calls).toHaveLength(1);
     const retried = await startBuild(app, job.id).expect(202);
-    expect(retried.body).toMatchObject({ state: "building", attempt: 2, budget: BUDGET });
-    expect((await builder.call(1)).context.budget).toEqual(BUDGET);
+    expect(retried.body).toMatchObject({ state: "building", attempt: 2, pause: null });
+    expect((await builder.call(1)).context).toMatchObject({ jobId: job.id, attempt: 2 });
   });
 
   it("runs one build at a time, bounds the queue, and never restarts interrupted model spend", async () => {
@@ -641,6 +639,61 @@ describe("Paper2Agent control service", () => {
     expect((await startBuild(app, job.id).expect(202)).body.attempt).toBe(2);
     const retry = await builder.call(1);
     expect(retry.context.workDir).not.toBe(call.context.workDir);
+  });
+
+  it("pauses a running build while the wallet cannot pay and resumes it after the paid call", async () => {
+    const builder = new FakeBuilder();
+    const { app, service } = openControl(tempDir(), builder, null);
+    await service.start();
+    const job = await createJob(app);
+    const call = await builder.call(0);
+    const shortfall = {
+      message: "insufficient balance for this request", requiredLovelace: "9200000",
+      availableLovelace: "1000000", depositAddress: TARGET.deposit_address,
+    };
+    call.context.onFundsShortfall(shortfall);
+    const paused = service.job(job.id);
+    expect(paused).toMatchObject({ state: "building", pause: {
+      message: shortfall.message, required_lovelace: "9200000", available_lovelace: "1000000",
+      deposit_address: TARGET.deposit_address,
+    } });
+    expect(service.listJobs()[0]).toMatchObject({ id: job.id, paused: true });
+
+    // Each retry refreshes the pause; only the first refusal is an event.
+    call.context.onFundsShortfall({ ...shortfall, availableLovelace: "5000000" });
+    expect(service.job(job.id).pause).toMatchObject({ since: paused.pause?.since, available_lovelace: "5000000" });
+    const phases = () => service.events(job.id, undefined).events.map(({ phase }) => phase);
+    expect(phases().filter((phase) => phase === "paused")).toHaveLength(1);
+
+    call.context.onFundsRestored();
+    expect(service.job(job.id)).toMatchObject({ state: "building", pause: null });
+    expect(service.listJobs()[0]).toMatchObject({ paused: false });
+    expect(phases()).toContain("resumed");
+    call.result.resolve(await writePackage(call.context));
+    await service.whenIdle();
+    expect(service.job(job.id)).toMatchObject({ state: "awaiting_review", pause: null });
+  });
+
+  it("clears the pause when a paused build is cancelled or interrupted by a restart", async () => {
+    const dir = tempDir();
+    const builder = new FakeBuilder();
+    const first = openControl(dir, builder, null);
+    await first.service.start();
+    const shortfall = { message: "insufficient balance for this request", requiredLovelace: null, availableLovelace: null, depositAddress: null };
+    const cancelledJob = await createJob(first.app);
+    const cancelledCall = await builder.call(0);
+    cancelledCall.context.onFundsShortfall(shortfall);
+    await request(first.app).post(`/jobs/${cancelledJob.id}/cancel`).set("authorization", AUTH).send({}).expect(200);
+    expect(cancelledCall.context.signal.aborted).toBe(true);
+    // A late refusal from the stopped attempt changes nothing.
+    cancelledCall.context.onFundsShortfall(shortfall);
+    expect(first.service.job(cancelledJob.id)).toMatchObject({ state: "cancelled", pause: null });
+
+    const interruptedJob = await createJob(first.app);
+    (await builder.call(1)).context.onFundsShortfall(shortfall);
+    expect(first.service.job(interruptedJob.id).pause).not.toBeNull();
+    const restarted = openControl(dir, new FakeBuilder(), null);
+    expect(restarted.service.job(interruptedJob.id)).toMatchObject({ state: "interrupted", pause: null });
   });
 
   it("fails closed on artifact drift and accepts one attested approval of the exact current artifact", async () => {

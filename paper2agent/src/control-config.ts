@@ -16,13 +16,9 @@
  */
 import { isIP } from "node:net";
 import { resolve } from "node:path";
-import type { PaperBuildBudget } from "@marketplace/shared/paper2agent/workflow";
 
 const TOKEN_RE = /^[\x21-\x7e]{32,}$/;
 const PORT_RE = /^[1-9]\d{0,4}$/;
-
-const DEFAULT_BUDGET: PaperBuildBudget = { max_model_calls: 32, max_output_tokens: 4096, timeout_ms: 900_000 };
-const MAXIMUM_BUDGET: PaperBuildBudget = { max_model_calls: 64, max_output_tokens: 8192, timeout_ms: 3_600_000 };
 
 export interface PaperControlConfig {
   /** Absolute directory for control.db and build work directories. */
@@ -33,8 +29,6 @@ export interface PaperControlConfig {
   /** Both null, or both set. */
   publisherUrl: string | null;
   publisherToken: string | null;
-  defaultBudget: PaperBuildBudget;
-  maximumBudget: PaperBuildBudget;
   /** Waiting builds; at most one build runs at a time. */
   maxQueuedBuilds: number;
 }
@@ -83,8 +77,6 @@ export function loadPaperControlConfig(env: Record<string, string | undefined> =
     token: token(env, "PAPER2AGENT_CONTROL_TOKEN"),
     publisherUrl: url === "" ? null : publisherUrl(url),
     publisherToken: url === "" ? null : token(env, "PAPER2AGENT_PUBLISHER_TOKEN"),
-    defaultBudget: { ...DEFAULT_BUDGET },
-    maximumBudget: { ...MAXIMUM_BUDGET },
     maxQueuedBuilds: 20,
   };
 }

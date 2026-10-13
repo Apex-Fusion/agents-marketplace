@@ -14,10 +14,19 @@ export interface PaperSubmission {
   paper_pdf_base64?: string;
 }
 
-export interface PaperBuildBudget {
-  max_model_calls: number;
-  max_output_tokens: number;
-  timeout_ms: number;
+/**
+ * A running build waits here while the wallet cannot pay for its next model
+ * call. The build has no call, token, or time limit; the wallet is the limit.
+ */
+export interface PaperBuildPause {
+  /** First refusal of the waiting model call. */
+  since: number;
+  /** Latest refusal. The build retries the same call about once a minute. */
+  checked_at: number;
+  message: string;
+  required_lovelace: string | null;
+  available_lovelace: string | null;
+  deposit_address: string | null;
 }
 
 export interface PaperBuildEvent {
@@ -114,6 +123,7 @@ export interface PaperBuildJobSummary {
   paper_url: string;
   state: PaperBuildState;
   publication_state: PaperPublicationState | null;
+  paused: boolean;
   created_at: number;
   updated_at: number;
 }
@@ -125,7 +135,7 @@ export interface PaperBuildJob {
   attempt: number;
   created_at: number;
   updated_at: number;
-  budget: PaperBuildBudget | null;
+  pause: PaperBuildPause | null;
   artifact: PaperPackageArtifact | null;
   review: PaperReview | null;
   publication: PaperPublication | null;
@@ -137,8 +147,6 @@ export interface PaperWorkflowReadiness {
   build_error: string | null;
   publisher_ready: boolean;
   publisher_error: string | null;
-  default_budget: PaperBuildBudget;
-  maximum_budget: PaperBuildBudget;
 }
 
 export interface PaperPublishApproval {

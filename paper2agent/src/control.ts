@@ -4,7 +4,9 @@ import { requestDeadline } from "./deadline.js";
  * authenticated control API, operator review, and publisher integration.
  *
  * Model credentials live only in the injected builder; this service holds no
- * wallet keys. A submission starts its first build within marketplace limits.
+ * wallet keys. A submission starts its first build. Builds have no call, token,
+ * or time limit: a build pauses while the wallet cannot pay for its next model
+ * call and continues when the call succeeds.
  * Retries, publication preparation, and a live publish need explicit operator
  * requests. Interrupted builds and live publish requests are never retried.
  */
@@ -18,10 +20,10 @@ import type { Express, NextFunction, Request as ExpressRequest, RequestHandler, 
 import { paper2AgentManifestHash, parsePaper2AgentManifest, type JsonObject } from "@marketplace/shared/paper2agent";
 import type {
   PaperAcceptanceCase,
-  PaperBuildBudget,
   PaperBuildEvent,
   PaperBuildJob,
   PaperBuildJobSummary,
+  PaperBuildPause,
   PaperBuildState,
   PaperPackageArtifact,
   PaperPackageFile,
@@ -35,6 +37,7 @@ import type {
   PaperWorkflowReadiness,
 } from "@marketplace/shared/paper2agent/workflow";
 import { MAX_PACKAGE_BYTES, packageRelativePath, packageZip, verifyPackageFiles } from "./archive.js";
+import type { FundsShortfall } from "./agent.js";
 import type { PaperBuildResult, PaperPackageBuilder } from "./build.js";
 import type { PaperControlConfig } from "./control-config.js";
 import { isPublicAddress } from "./sources.js";
@@ -60,9 +63,6 @@ const MAX_PAPER_TEXT_CHARS = 100_000;
 const MAX_PREVIEW_BYTES = 64 * 1024;
 const MAX_ARTIFACT_JSON_BYTES = 4 * 1024 * 1024;
 const MAX_PACKAGE_FILES = 10_000;
-/** Builder and verifier are separate agents, each needing an action and a finish call. */
-const MIN_MODEL_CALLS = 4;
-const MIN_BUILD_TIMEOUT_MS = 60_000;
 const SUBMISSION_BODY_LIMIT = 8 * 1024 * 1024;
 const CONTROL_BODY_LIMIT = 64 * 1024;
 const READINESS_TIMEOUT_MS = 10_000;
@@ -98,7 +98,7 @@ class PublisherFailure extends ControlError {
 class ArtifactDrift extends Error {}
 
 class BuildStop extends Error {
-  constructor(readonly kind: "cancelled" | "timeout" | "shutdown") {
+  constructor(readonly kind: "cancelled" | "shutdown") {
     super(`Build ${kind}`);
   }
 }
@@ -157,13 +157,6 @@ function digest(value: unknown, label: string): string {
 function lovelace(value: unknown, label: string, positive: boolean): string {
   if (typeof value !== "string" || !LOVELACE.test(value) || BigInt(value) > MAX_LOVELACE || (positive && value === "0")) {
     throw invalid(`${label} must be a decimal string of whole lovelace${positive ? " above zero" : ""}.`);
-  }
-  return value;
-}
-
-function integer(value: unknown, label: string, minimum: number, maximum: number): number {
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < minimum || value > maximum) {
-    throw invalid(`${label} must be an integer from ${minimum} to ${maximum}.`);
   }
   return value;
 }
@@ -254,15 +247,9 @@ function submissionTitle(url: string, paperText: string | undefined): string {
   return "Research paper";
 }
 
-function parseBuildRequest(value: unknown, maximum: PaperBuildBudget): PaperBuildBudget {
-  const input = fields(value, "Build request", ["confirm", "budget"]);
-  if (input.confirm !== true) throw invalid("Set confirm to true to approve model spending within this budget.");
-  const budget = fields(input.budget, "budget", ["max_model_calls", "max_output_tokens", "timeout_ms"]);
-  return {
-    max_model_calls: integer(budget.max_model_calls, "budget.max_model_calls", MIN_MODEL_CALLS, maximum.max_model_calls),
-    max_output_tokens: integer(budget.max_output_tokens, "budget.max_output_tokens", 1, maximum.max_output_tokens),
-    timeout_ms: integer(budget.timeout_ms, "budget.timeout_ms", MIN_BUILD_TIMEOUT_MS, maximum.timeout_ms),
-  };
+function parseBuildRequest(value: unknown): void {
+  const input = fields(value, "Build request", ["confirm"]);
+  if (input.confirm !== true) throw invalid("Set confirm to true to approve model spending from the wallet for this attempt.");
 }
 
 interface ReviewDecision extends Omit<PaperReview, "reviewed_at"> {
@@ -380,7 +367,7 @@ function checkCases(value: unknown): PaperAcceptanceCase[] {
   });
 }
 
-function checkVerification(value: unknown, budget: PaperBuildBudget): PaperVerification {
+function checkVerification(value: unknown): PaperVerification {
   const evidence = fields(value, "Artifact verification",
     ["builder_run_id", "verifier_run_id", "paper_references", "checks", "test_source", "test_stdout", "cases", "model_calls", "input_tokens", "output_tokens"]);
   const { builder_run_id: builder, verifier_run_id: verifier, test_source: source, test_stdout: stdout, model_calls: calls } = evidence;
@@ -391,8 +378,8 @@ function checkVerification(value: unknown, budget: PaperBuildBudget): PaperVerif
   if (typeof source !== "string" || source === "" || typeof stdout !== "string") {
     throw new Error("Verification evidence needs the independent test program and its output");
   }
-  if (typeof calls !== "number" || !Number.isSafeInteger(calls) || calls < 0 || calls > budget.max_model_calls) {
-    throw new Error(`Verification reports ${String(calls)} model calls; the approved maximum is ${budget.max_model_calls}`);
+  if (typeof calls !== "number" || !Number.isSafeInteger(calls) || calls < 0) {
+    throw new Error(`Verification reports ${String(calls)} model calls; expected a non-negative integer`);
   }
   const references = textList(evidence.paper_references, "paper_references");
   if (references.length === 0 || references.some((reference) => reference.trim() === "")) {
@@ -413,7 +400,7 @@ function checkVerification(value: unknown, budget: PaperBuildBudget): PaperVerif
 }
 
 /** A clean copy of the builder's artifact; the manifest must bind the archive digest. */
-function checkArtifact(value: unknown, budget: PaperBuildBudget): PaperPackageArtifact {
+function checkArtifact(value: unknown): PaperPackageArtifact {
   const artifact = fields(value, "Artifact",
     ["sha256", "manifest_hash", "manifest", "paper_sha256", "runtime_image", "files", "verification"]);
   const { sha256, paper_sha256: paperHash, runtime_image: image } = artifact;
@@ -431,7 +418,7 @@ function checkArtifact(value: unknown, budget: PaperBuildBudget): PaperPackageAr
     paper_sha256: paperHash,
     runtime_image: image,
     files: checkFiles(artifact.files),
-    verification: checkVerification(artifact.verification, budget),
+    verification: checkVerification(artifact.verification),
   };
   if (Buffer.byteLength(JSON.stringify(checked)) > MAX_ARTIFACT_JSON_BYTES) throw new Error("Artifact metadata exceeds 4 MiB");
   return checked;
@@ -805,8 +792,6 @@ export class PaperControlService {
       build_error: build.error,
       publisher_ready: publisher.ready,
       publisher_error: publisher.error,
-      default_budget: { ...this.config.defaultBudget },
-      maximum_budget: { ...this.config.maximumBudget },
     };
   }
 
@@ -818,7 +803,7 @@ export class PaperControlService {
     return this.record(id).job;
   }
 
-  /** A submission durably queues its first build within the marketplace default limits. */
+  /** A submission durably queues its first build. */
   async createJob(value: unknown): Promise<PaperBuildJob> {
     this.assertOpen();
     const { submission, pdf } = parseSubmission(value);
@@ -828,20 +813,19 @@ export class PaperControlService {
       throw new ControlError(503, "builder_unavailable", this.halted ?? readiness.error ?? "The builder is not ready.");
     }
     this.assertQueueCapacity();
-    const budget = { ...this.config.defaultBudget };
-    const { job } = this.store.create(randomUUID(), submission, pdf, budget, Date.now(), {
+    const { job } = this.store.create(randomUUID(), submission, pdf, Date.now(), {
       phase: "queued",
-      message: `Build attempt 1 queued with marketplace limits: ${budget.max_model_calls} model calls, ` +
-        `max_output_tokens ${budget.max_output_tokens}, timeout ${budget.timeout_ms} ms. Publication still requires operator approval.`,
+      message: "Build attempt 1 queued. It has no call, token, or time limit and pauses while the wallet cannot pay " +
+        "for the next model call. Publication still requires operator approval.",
     });
     this.pump();
     return this.record(job.id).job;
   }
 
-  /** Explicit model-spend approval for an operator retry within the configured maximum budget. */
+  /** Explicit operator retry; it approves model spending from the wallet for one more attempt. */
   requestBuild(id: string, value: unknown): PaperBuildJob {
     this.assertOpen();
-    const budget = parseBuildRequest(value, this.config.maximumBudget);
+    parseBuildRequest(value);
     const { job, publicationTerms } = this.record(id);
     if (job.publication || publicationTerms) {
       throw new ControlError(409, "publication_prepared", "Publication preparation has started for this artifact, so this job cannot be rebuilt.");
@@ -855,11 +839,10 @@ export class PaperControlService {
     const attempt = job.attempt + 1;
     const now = Date.now();
     const queued = this.store.transition(id, { states: [job.state], attempt: job.attempt }, {
-      state: "queued", attempt, budget, artifact: null, archivePath: null, filesDir: null, review: null, error: null, queuedAt: now,
+      state: "queued", attempt, pause: null, artifact: null, archivePath: null, filesDir: null, review: null, error: null, queuedAt: now,
     }, {
       phase: "queued",
-      message: `Build attempt ${attempt} queued with operator-approved limits: ${budget.max_model_calls} model calls, ` +
-        `max_output_tokens ${budget.max_output_tokens}, timeout ${budget.timeout_ms} ms. These are resource limits, not a price quote.`,
+      message: `Build attempt ${attempt} queued by an operator retry. It pauses while the wallet cannot pay for the next model call.`,
     }, now);
     if (!queued) throw conflict();
     this.pump();
@@ -872,7 +855,7 @@ export class PaperControlService {
     if (!CANCELLABLE[job.state]) {
       throw new ControlError(409, "invalid_state", `Only queued or running builds can be cancelled; this job is ${job.state}.`);
     }
-    const cancelled = this.store.transition(id, { states: [job.state], attempt: job.attempt }, { state: "cancelled", queuedAt: null }, {
+    const cancelled = this.store.transition(id, { states: [job.state], attempt: job.attempt }, { state: "cancelled", pause: null, queuedAt: null }, {
       phase: "cancelled",
       message: `Build attempt ${job.attempt} cancelled by the operator.`,
     }, Date.now());
@@ -1181,7 +1164,7 @@ export class PaperControlService {
     for (const { job } of this.store.jobsInStates(["building", "verifying"])) {
       const reason = `Build attempt ${job.attempt} was interrupted by a control service restart. ` +
         "Model spending is never restarted automatically; start a new build to retry.";
-      this.store.transition(job.id, { states: [job.state], attempt: job.attempt }, { state: "interrupted", error: reason }, {
+      this.store.transition(job.id, { states: [job.state], attempt: job.attempt }, { state: "interrupted", pause: null, error: reason }, {
         phase: "interrupted",
         message: reason,
       }, now);
@@ -1222,29 +1205,27 @@ export class PaperControlService {
   }
 
   private async run(record: PaperJobRecord, controller: AbortController): Promise<void> {
-    const { id, attempt, budget, submission } = record.job;
-    const deadline = budget ? AbortSignal.timeout(budget.timeout_ms) : null;
-    const onDeadline = () => controller.abort(new BuildStop("timeout"));
-    deadline?.addEventListener("abort", onDeadline, { once: true });
+    const { id, attempt, submission } = record.job;
     let cleanupPending = false;
     try {
-      if (!budget) throw new Error("The queued build has no approved budget");
       const workDir = await this.workDir(id, attempt);
       const pdf = this.store.paperPdf(id);
       const result = await this.builder.build({
         jobId: id,
         attempt,
         submission: pdf ? { ...submission, paper_pdf_base64: pdf.toString("base64") } : submission,
-        budget,
+        onFundsShortfall: (shortfall) => this.fundsShortfall(id, attempt, shortfall),
+        onFundsRestored: () => this.fundsRestored(id, attempt),
         workDir,
         signal: controller.signal,
         log: (phase, detail) => this.builderLog(id, attempt, phase, detail),
       });
       controller.signal.throwIfAborted();
-      const output = await this.checkOutput(result, workDir, budget);
+      const output = await this.checkOutput(result, workDir);
       controller.signal.throwIfAborted();
       this.store.transition(id, { states: ["building", "verifying"], attempt }, {
         state: "awaiting_review",
+        pause: null,
         artifact: output.artifact,
         archivePath: output.archivePath,
         filesDir: output.filesDir,
@@ -1266,12 +1247,9 @@ export class PaperControlService {
       const state: PaperBuildState = stop === "shutdown" ? "interrupted" : "failed";
       const reason = stop === "shutdown"
         ? `Build attempt ${attempt} was interrupted because the control service stopped. Model spending is never restarted automatically; start a new build to retry.`
-        : stop === "timeout"
-          ? `Build attempt ${attempt} exceeded its approved time limit and was stopped.`
-          : `Build attempt ${attempt} failed: ${message(error)}`;
-      this.store.transition(id, { states: ["building", "verifying"], attempt }, { state, error: reason }, { phase: state, message: reason }, Date.now());
+        : `Build attempt ${attempt} failed: ${message(error)}`;
+      this.store.transition(id, { states: ["building", "verifying"], attempt }, { state, pause: null, error: reason }, { phase: state, message: reason }, Date.now());
     } finally {
-      deadline?.removeEventListener("abort", onDeadline);
       // A settled builder call has released its sandbox resources unless it reports cleanup still pending.
       // Then the marker stays, so the next start() recovers them before any further build.
       if (!cleanupPending) this.store.builderSettled(id, attempt);
@@ -1287,6 +1265,36 @@ export class PaperControlService {
     } else {
       this.store.appendEvent(id, { phase, message: detail }, Date.now());
     }
+  }
+
+  /** Records the first refusal as an event; later refusals of the same call only refresh the pause. */
+  private fundsShortfall(id: string, attempt: number, shortfall: FundsShortfall): void {
+    const current = this.store.job(id)?.job;
+    if (!current || current.attempt !== attempt || (current.state !== "building" && current.state !== "verifying")) return;
+    const now = Date.now();
+    const pause: PaperBuildPause = {
+      since: current.pause?.since ?? now,
+      checked_at: now,
+      message: boundedText(shortfall.message, 500),
+      required_lovelace: shortfall.requiredLovelace,
+      available_lovelace: shortfall.availableLovelace,
+      deposit_address: shortfall.depositAddress,
+    };
+    const event = current.pause ? null : {
+      phase: "paused",
+      message: `Paused: the wallet cannot pay for the next model call (${pause.message}). ` +
+        "The build retries the same call and continues when the wallet has enough funds.",
+    };
+    this.store.transition(id, { states: [current.state], attempt }, { pause }, event, now);
+  }
+
+  private fundsRestored(id: string, attempt: number): void {
+    const current = this.store.buildState(id);
+    if (!current || current.attempt !== attempt || (current.state !== "building" && current.state !== "verifying")) return;
+    this.store.transition(id, { states: [current.state], attempt }, { pause: null }, {
+      phase: "resumed",
+      message: "The wallet paid for the waiting model call. The build continues.",
+    }, Date.now());
   }
 
   /** A fresh server-named directory per attempt. Files of superseded attempts are removed. */
@@ -1316,8 +1324,8 @@ export class PaperControlService {
   }
 
   /** Builder output must stay inside the attempt directory and match its declared digests. */
-  private async checkOutput(result: PaperBuildResult, workDir: string, budget: PaperBuildBudget): Promise<{ artifact: PaperPackageArtifact; archivePath: string; filesDir: string }> {
-    const artifact = checkArtifact(result.artifact, budget);
+  private async checkOutput(result: PaperBuildResult, workDir: string): Promise<{ artifact: PaperPackageArtifact; archivePath: string; filesDir: string }> {
+    const artifact = checkArtifact(result.artifact);
     const root = await realpath(workDir);
     const inside = async (path: unknown): Promise<string> => {
       const actual = typeof path === "string" && isAbsolute(path) ? await realpath(path).catch(() => "") : "";

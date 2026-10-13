@@ -1,9 +1,21 @@
 import { randomUUID } from "node:crypto";
-import type { PaperBuildBudget } from "@marketplace/shared/paper2agent/workflow";
-import { requestDeadline } from "./deadline.js";
+import { setTimeout as sleep } from "node:timers/promises";
 
 export interface BuildModelConfig { baseUrl: string; model: string; apiKey?: string }
 export interface ModelUsage { calls: number; inputTokens: number | null; outputTokens: number | null }
+/** Why the wallet cannot pay for the next model call. */
+export interface FundsShortfall {
+  message: string;
+  requiredLovelace: string | null;
+  availableLovelace: string | null;
+  depositAddress: string | null;
+}
+/** The wallet cannot pay for the next model call. The refused request spent nothing. */
+export class InsufficientFundsError extends Error {
+  constructor(readonly shortfall: FundsShortfall) {
+    super(shortfall.message);
+  }
+}
 export interface AgentTool {
   name: string;
   description: string;
@@ -12,6 +24,7 @@ export interface AgentTool {
 }
 interface ToolCall { id: string; type: "function"; function: { name: string; arguments: string } }
 interface AgentMessage { role: "system" | "user" | "assistant" | "tool"; content: string | null; tool_calls?: ToolCall[]; tool_call_id?: string }
+interface ToolSpec { type: "function"; function: { name: string; description: string; parameters: Record<string, unknown> } }
 interface ModelResponse {
   choices?: Array<{ finish_reason?: string; message?: { content?: string | null; tool_calls?: ToolCall[] } }>;
   usage?: { prompt_tokens?: number; completion_tokens?: number };
@@ -19,7 +32,6 @@ interface ModelResponse {
 export interface AgentRunResult { runId: string; result: Record<string, unknown> }
 export interface AgentSessionOptions {
   model: BuildModelConfig;
-  budget: PaperBuildBudget;
   usage: ModelUsage;
   signal: AbortSignal;
   system: string;
@@ -28,49 +40,112 @@ export interface AgentSessionOptions {
   finishSchema: Record<string, unknown>;
   validateFinish: (value: Record<string, unknown>) => void;
   log: (message: string) => void;
+  /** Wait between requests for a model call that the wallet cannot pay for. */
+  fundsRetryMs: number;
+  /** Every refusal of the waiting model call, before the next wait. */
+  onFundsShortfall: (shortfall: FundsShortfall) => void;
+  /** The refused model call succeeded; called once per pause. */
+  onFundsRestored: () => void;
 }
 
-/** Each invocation has a new conversation and run identity; verifier context is never reused. */
+const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+const MAX_ERROR_BYTES = 64 * 1024;
+const LOVELACE = /^(?:0|[1-9][0-9]{0,19})$/;
+const ADDRESS = /^addr(?:_test)?1[02-9ac-hj-np-z]{20,200}$/;
+
+function record(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+async function boundedBody(response: Response, maximum: number): Promise<string> {
+  if (!response.body) throw new Error("Coding model returned an empty response");
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      size += chunk.value.byteLength;
+      if (size > maximum) { await reader.cancel(); throw new Error("Coding model response exceeds limit"); }
+      chunks.push(chunk.value);
+    }
+  } finally { reader.releaseLock(); }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+/**
+ * HTTP 402 insufficient_funds in the gateway shape `{error:{code,message},x_vector:{amounts}}`
+ * or the buyer shape `{error:"insufficient_funds",message,...amounts}`.
+ */
+function fundsShortfall(text: string): FundsShortfall | null {
+  let body: Record<string, unknown> | null;
+  try { body = record(JSON.parse(text)); } catch { return null; }
+  if (!body) return null;
+  const nested = record(body.error);
+  if ((nested ? nested.code : body.error) !== "insufficient_funds") return null;
+  const message = nested ? nested.message : body.message;
+  const details = record(body.x_vector) ?? body;
+  const matching = (value: unknown, pattern: RegExp): string | null => typeof value === "string" && pattern.test(value) ? value : null;
+  return {
+    message: typeof message === "string" && message.trim() !== ""
+      ? message.slice(0, 500) : "The wallet cannot pay for the next model call",
+    requiredLovelace: matching(details.required_lovelace, LOVELACE),
+    availableLovelace: matching(details.available_lovelace, LOVELACE),
+    depositAddress: matching(details.deposit_address, ADDRESS),
+  };
+}
+
+/** One paid model request. Throws InsufficientFundsError when the wallet cannot pay for it. */
+async function requestModel(model: BuildModelConfig, messages: AgentMessage[], tools: ToolSpec[], signal: AbortSignal): Promise<ModelResponse> {
+  const response = await fetch(`${model.baseUrl.replace(/\/+$/, "")}/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(model.apiKey ? { Authorization: `Bearer ${model.apiKey}` } : {}) },
+    body: JSON.stringify({ model: model.model, messages, tools, tool_choice: "auto", parallel_tool_calls: false, stream: false }),
+    signal,
+    redirect: "error",
+  });
+  if (response.status === 402) {
+    const shortfall = fundsShortfall(await boundedBody(response, MAX_ERROR_BYTES));
+    if (shortfall) throw new InsufficientFundsError(shortfall);
+  }
+  if (!response.ok) { await response.body?.cancel(); throw new Error(`Coding model returned HTTP ${response.status}`); }
+  return JSON.parse(await boundedBody(response, MAX_RESPONSE_BYTES)) as ModelResponse;
+}
+
+/**
+ * Each invocation has a new conversation and run identity; verifier context is never reused.
+ * There is no call, token, or time limit. A call the wallet cannot pay for is sent again
+ * after `fundsRetryMs` until it succeeds or the build is stopped.
+ */
 export async function runCodingAgent(options: AgentSessionOptions): Promise<AgentRunResult> {
   const runId = randomUUID();
   const messages: AgentMessage[] = [{ role: "system", content: options.system }, { role: "user", content: options.task }];
-  const tools = options.tools.map((tool) => ({ type: "function", function: {
+  const tools: ToolSpec[] = options.tools.map((tool) => ({ type: "function", function: {
     name: tool.name, description: tool.description, parameters: tool.parameters,
   } }));
   tools.push({ type: "function", function: { name: "finish", description: "Finish only after the requested files and execution evidence exist.", parameters: options.finishSchema } });
-  const endpoint = `${options.model.baseUrl.replace(/\/+$/, "")}/chat/completions`;
-  while (options.usage.calls < options.budget.max_model_calls) {
+  let paused = false;
+  while (true) {
     options.signal.throwIfAborted();
     if (Buffer.byteLength(JSON.stringify(messages)) > 220_000) throw new Error("Coding-agent context exceeds limit");
-    options.usage.calls++;
-    options.log(`Model call ${options.usage.calls}/${options.budget.max_model_calls} (${runId})`);
-    const deadline = requestDeadline(180_000, options.signal);
+    const callNumber = options.usage.calls + 1;
+    if (!paused) options.log(`Model call ${callNumber} (${runId})`);
     let body: ModelResponse;
     try {
-      const response = await fetch(endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...(options.model.apiKey ? { Authorization: `Bearer ${options.model.apiKey}` } : {}) },
-        body: JSON.stringify({ model: options.model.model, messages, tools, tool_choice: "auto", parallel_tool_calls: false,
-          max_completion_tokens: options.budget.max_output_tokens, stream: false }),
-        signal: deadline.signal,
-        redirect: "error",
-      });
-      if (!response.ok) { await response.body?.cancel(); throw new Error(`Coding model returned HTTP ${response.status}`); }
-      if (!response.body) throw new Error("Coding model returned an empty response");
-      const reader = response.body.getReader();
-      const chunks: Uint8Array[] = [];
-      let size = 0;
-      try {
-        while (true) {
-          const chunk = await reader.read();
-          if (chunk.done) break;
-          size += chunk.value.byteLength;
-          if (size > 2 * 1024 * 1024) { await reader.cancel(); throw new Error("Coding model response exceeds limit"); }
-          chunks.push(chunk.value);
-        }
-      } finally { reader.releaseLock(); }
-      body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as ModelResponse;
-    } finally { deadline.dispose(); }
+      body = await requestModel(options.model, messages, tools, options.signal);
+    } catch (error) {
+      if (!(error instanceof InsufficientFundsError)) throw error;
+      options.onFundsShortfall(error.shortfall);
+      paused = true;
+      await sleep(options.fundsRetryMs, undefined, { signal: options.signal });
+      continue;
+    }
+    options.usage.calls = callNumber;
+    if (paused) {
+      paused = false;
+      options.onFundsRestored();
+    }
     const usage = body.usage;
     options.usage.inputTokens = options.usage.inputTokens !== null && Number.isSafeInteger(usage?.prompt_tokens) && usage!.prompt_tokens! >= 0
       ? options.usage.inputTokens + usage!.prompt_tokens! : null;
@@ -112,5 +187,4 @@ export async function runCodingAgent(options: AgentSessionOptions): Promise<Agen
       messages.push({ role: "tool", tool_call_id: call.id, content });
     }
   }
-  throw new Error("Coding-agent model-call budget exhausted");
 }

@@ -11,7 +11,7 @@
  * send that header, and a cross-site script needs a CORS preflight that this
  * server never grants.
  *
- *   GET  /status                       readiness and budget bounds
+ *   GET  /status                       build and publisher readiness
  *   GET  /jobs                         newest jobs
  *   POST /jobs                         JSON PaperSubmission or multipart upload
  *   GET  /jobs/:id
@@ -430,7 +430,7 @@ export function registerPaper2AgentRoutes(app: Express, options: Paper2AgentProx
         res,
         400,
         "confirmation_required",
-        "Starting a build approves model spending. Send confirm: true with the budget.",
+        "Starting a build approves model spending from the wallet. Send confirm: true.",
       );
       return;
     }

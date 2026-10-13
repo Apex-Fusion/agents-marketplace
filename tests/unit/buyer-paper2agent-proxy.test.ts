@@ -56,8 +56,6 @@ describe("buyer Paper2Agent proxy", () => {
       build_error: "Docker is not reachable from the control service",
       publisher_ready: false,
       publisher_error: "PAPER2AGENT_PUBLISHER_URL is not configured",
-      default_budget: { max_model_calls: 32, max_output_tokens: 4096, timeout_ms: 900_000 },
-      maximum_budget: { max_model_calls: 64, max_output_tokens: 8192, timeout_ms: 3_600_000 },
     };
     const { calls, fetchImpl } = controlService(() => Response.json(readiness));
     const agent = proxyApp(fetchImpl);
@@ -175,8 +173,8 @@ describe("buyer Paper2Agent proxy", () => {
     const change = (path: string, body: object) =>
       agent.post(`/v1/paper2agent/jobs/${JOB_ID}/${path}`).set("X-Paper2Agent-Request", "1").send(body);
 
-    const budget = { max_model_calls: 8, max_output_tokens: 1024, timeout_ms: 600_000 };
-    expect((await change("build", { budget })).status).toBe(400);
+    expect((await change("build", {})).status).toBe(400);
+    expect((await change("build", { confirm: "true" })).status).toBe(400);
     expect((await change("publish", { artifact_sha256: ARTIFACT_SHA, max_debit_lovelace: "5000000" })).status).toBe(
       400,
     );

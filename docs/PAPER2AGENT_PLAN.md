@@ -11,7 +11,7 @@ Different suppliers can publish different packages through the existing advert s
 No scientific method needs to be selected to use the infrastructure.
 
 The buyer UI accepts a paper as a PDF, URL, or text.
-Submission starts code generation and execution under marketplace resource limits.
+Submission starts code generation and execution. A build has no call, token, or time limit; the wallet that pays for model calls is the limit.
 The coding model implements a bounded method from the paper as a Python JSON MCP tool.
 No source repository, revision, task description, or user-selected build budget is required.
 A separate verifier checks the implementation against the paper before human review.
@@ -128,8 +128,11 @@ Control and publisher tokens stay on the server.
 1. Submit a public HTTPS paper URL, pasted text, or a PDF of at most 5 MiB.
    The service derives a title and queues attempt 1 immediately.
    It rejects submission if the builder is unavailable or its queue is full.
-2. The marketplace applies the default build limits: 32 model calls, 4,096 output tokens per call, and 15 minutes.
-   These are resource limits, not a currency quote.
+2. The build has no call, token, or time limit.
+   When the wallet cannot pay for the next model call (HTTP 402 `insufficient_funds`), the build pauses.
+   It sends the same call again every minute and continues after funds arrive. Nothing is spent while it waits.
+   The job shows the pause, the wallet balance, and the amount needed. Cancel the build to stop spending.
+   A paused build keeps the build slot; queued builds wait. A control service restart interrupts it.
    An operator must approve a retry; there is no automatic paid retry.
 3. The control service hashes the exact submitted or fetched paper bytes.
    The coding model implements one useful method from the paper's equations and algorithm steps.

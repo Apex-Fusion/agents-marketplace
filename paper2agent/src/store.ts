@@ -7,10 +7,10 @@ import { join } from "node:path";
 import Database from "better-sqlite3";
 import type { Database as SqliteDatabase, Statement } from "better-sqlite3";
 import type {
-  PaperBuildBudget,
   PaperBuildEvent,
   PaperBuildJob,
   PaperBuildJobSummary,
+  PaperBuildPause,
   PaperBuildState,
   PaperPackageArtifact,
   PaperPublication,
@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   paper_url TEXT NOT NULL,
   submission_json TEXT NOT NULL,
   paper_pdf BLOB,
-  budget_json TEXT,
+  pause_json TEXT,
   artifact_json TEXT,
   archive_path TEXT,
   files_dir TEXT,
@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS events (
 ) WITHOUT ROWID;
 `;
 
-const JOB_COLUMNS = "id, created_at, updated_at, state, attempt, submission_json, budget_json, artifact_json, " +
+const JOB_COLUMNS = "id, created_at, updated_at, state, attempt, submission_json, pause_json, artifact_json, " +
   "archive_path, files_dir, review_json, publication_terms_json, publication_json, error";
 
 export type PaperSubmissionView = PaperBuildJob["submission"];
@@ -79,7 +79,7 @@ export interface PaperJobRecord {
 export interface PaperJobPatch {
   state?: PaperBuildState;
   attempt?: number;
-  budget?: PaperBuildBudget | null;
+  pause?: PaperBuildPause | null;
   artifact?: PaperPackageArtifact | null;
   archivePath?: string | null;
   filesDir?: string | null;
@@ -106,7 +106,7 @@ export interface PaperEventInput {
 const PATCH_COLUMNS: Record<keyof PaperJobPatch, { column: string; json: boolean }> = {
   state: { column: "state", json: false },
   attempt: { column: "attempt", json: false },
-  budget: { column: "budget_json", json: true },
+  pause: { column: "pause_json", json: true },
   artifact: { column: "artifact_json", json: true },
   archivePath: { column: "archive_path", json: false },
   filesDir: { column: "files_dir", json: false },
@@ -125,7 +125,7 @@ interface JobRow {
   state: PaperBuildState;
   attempt: number;
   submission_json: string;
-  budget_json: string | null;
+  pause_json: string | null;
   artifact_json: string | null;
   archive_path: string | null;
   files_dir: string | null;
@@ -156,7 +156,7 @@ function toRecord(row: JobRow): PaperJobRecord {
       attempt: row.attempt,
       created_at: row.created_at,
       updated_at: row.updated_at,
-      budget: parsed<PaperBuildBudget>(row.budget_json),
+      pause: parsed<PaperBuildPause>(row.pause_json),
       artifact: parsed<PaperPackageArtifact>(row.artifact_json),
       review: parsed<PaperReview>(row.review_json),
       publication: parsed<PaperPublication>(row.publication_json),
@@ -197,6 +197,15 @@ function migratePaperOnly(db: SqliteDatabase): void {
   })();
 }
 
+/** Builds have no stored call, token, or time limit; a running build can record a funds pause. */
+function migrateFundsLimit(db: SqliteDatabase): void {
+  const columns = new Set((db.pragma("table_info(jobs)") as Array<{ name: string }>).map(({ name }) => name));
+  db.transaction(() => {
+    if (columns.has("budget_json")) db.exec("ALTER TABLE jobs DROP COLUMN budget_json");
+    if (!columns.has("pause_json")) db.exec("ALTER TABLE jobs ADD COLUMN pause_json TEXT");
+  })();
+}
+
 export class PaperControlStore {
   private readonly db: SqliteDatabase;
   private readonly statements = new Map<string, Statement>();
@@ -211,6 +220,7 @@ export class PaperControlStore {
       db.pragma("foreign_keys = ON");
       db.exec(SCHEMA);
       migratePaperOnly(db);
+      migrateFundsLimit(db);
     } catch (error) {
       db.close();
       throw error;
@@ -218,11 +228,11 @@ export class PaperControlStore {
     this.db = db;
   }
 
-  create(id: string, submission: PaperSubmissionView, paperPdf: Buffer | null, budget: PaperBuildBudget, now: number, event: PaperEventInput): PaperJobRecord {
+  create(id: string, submission: PaperSubmissionView, paperPdf: Buffer | null, now: number, event: PaperEventInput): PaperJobRecord {
     return this.db.transaction(() => {
-      this.sql("INSERT INTO jobs (id, created_at, updated_at, state, attempt, title, paper_url, submission_json, paper_pdf, budget_json, queued_at) " +
-        "VALUES (?, ?, ?, 'queued', 1, ?, ?, ?, ?, ?, ?)")
-        .run(id, now, now, submission.title, submission.paper_url, JSON.stringify(submission), paperPdf, JSON.stringify(budget), now);
+      this.sql("INSERT INTO jobs (id, created_at, updated_at, state, attempt, title, paper_url, submission_json, paper_pdf, queued_at) " +
+        "VALUES (?, ?, ?, 'queued', 1, ?, ?, ?, ?, ?)")
+        .run(id, now, now, submission.title, submission.paper_url, JSON.stringify(submission), paperPdf, now);
       this.insertEvent(id, event, now);
       return this.required(id);
     })();
@@ -235,8 +245,10 @@ export class PaperControlStore {
 
   /** Newest first. Reads only list columns: never the paper text, PDF, artifact, or review. */
   summaries(limit: number): PaperBuildJobSummary[] {
-    return this.sql("SELECT id, title, paper_url, state, json_extract(publication_json, '$.state') AS publication_state, " +
-      "created_at, updated_at FROM jobs ORDER BY created_at DESC, rowid DESC LIMIT ?").all(limit) as PaperBuildJobSummary[];
+    const rows = this.sql("SELECT id, title, paper_url, state, json_extract(publication_json, '$.state') AS publication_state, " +
+      "pause_json IS NOT NULL AS paused, created_at, updated_at FROM jobs ORDER BY created_at DESC, rowid DESC LIMIT ?")
+      .all(limit) as Array<Omit<PaperBuildJobSummary, "paused"> & { paused: number }>;
+    return rows.map((row) => ({ ...row, paused: row.paused === 1 }));
   }
 
   jobsInStates(states: readonly PaperBuildState[]): PaperJobRecord[] {

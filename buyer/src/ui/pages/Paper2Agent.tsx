@@ -14,10 +14,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import type {
-  PaperBuildBudget,
   PaperBuildEvent,
   PaperBuildJob,
   PaperBuildJobSummary,
+  PaperBuildPause,
   PaperBuildState,
   PaperPackageArtifact,
   PaperPublication,
@@ -43,8 +43,6 @@ const MAX_VISIBLE_EVENTS = 2_000;
 const MAX_LISTED_FILES = 500;
 const MAX_PDF_BYTES = 5 * 1024 * 1024;
 const MAX_PAPER_TEXT_CHARS = 100_000;
-/** The control service rejects build time limits under one minute. */
-const MIN_BUILD_MINUTES = 1;
 const LOVELACE_PER_AP3X = 1_000_000n;
 /** An advert output holds the supplier bond, but never less than this minimum. */
 const MIN_ADVERT_OUTPUT_LOVELACE = 2_000_000n;
@@ -256,31 +254,6 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
-function budgetText(budget: PaperBuildBudget): string {
-  return `${budget.max_model_calls} model calls, ${budget.max_output_tokens} output tokens per call, ${
-    budget.timeout_ms / 60_000
-  } minutes in total`;
-}
-
-/** Validate the operator's build limits against the service maximum. */
-function parseBudget(calls: string, tokens: string, minutes: string, max: PaperBuildBudget): PaperBuildBudget | string {
-  const whole = (text: string): number => (/^\d{1,9}$/.test(text.trim()) ? Number(text.trim()) : 0);
-  const maxMinutes = Math.floor(max.timeout_ms / 60_000);
-  const callCount = whole(calls);
-  const tokenCount = whole(tokens);
-  const minuteCount = whole(minutes);
-  if (callCount < 4 || callCount > max.max_model_calls) {
-    return `Model calls must be a whole number from 4 to ${max.max_model_calls}.`;
-  }
-  if (tokenCount < 1 || tokenCount > max.max_output_tokens) {
-    return `Output tokens per call must be a whole number from 1 to ${max.max_output_tokens}.`;
-  }
-  if (minuteCount < MIN_BUILD_MINUTES || minuteCount > maxMinutes) {
-    return `Total time must be a whole number of minutes from ${MIN_BUILD_MINUTES} to ${maxMinutes}.`;
-  }
-  return { max_model_calls: callCount, max_output_tokens: tokenCount, timeout_ms: minuteCount * 60_000 };
-}
-
 // ─── Small building blocks ────────────────────────────────────────────────
 
 function Badge({ tone, children }: { tone: Tone; children: ReactNode }) {
@@ -447,9 +420,6 @@ function ReadinessPanel({ readiness }: { readiness: Resource<PaperWorkflowReadin
             <dl className="mt-3">
               <ServiceState name="Publisher" ready={data.publisher_ready} problem={data.publisher_error} />
             </dl>
-            <p className="mt-2 text-xs text-gray-500">
-              Build limits: default {budgetText(data.default_budget)}; maximum {budgetText(data.maximum_budget)}.
-            </p>
           </details>
         </>
       )}
@@ -530,6 +500,7 @@ function JobList() {
                     <td className="py-2 pr-4 align-top">
                       <div className="flex flex-wrap gap-1">
                         <Badge tone={state.tone}>{state.label}</Badge>
+                        {job.paused && <Badge tone="attention">Paused: needs funds</Badge>}
                         {job.publication_state !== null && <PublicationBadge state={job.publication_state} />}
                       </div>
                     </td>
@@ -640,7 +611,9 @@ function SubmissionForm({ onCreated }: { onCreated: (job: PaperBuildJob) => void
         New submission
       </h2>
       <p className="text-sm text-gray-600">
-        Submission starts code generation and execution. Missing data or an unsupported method can stop the build.
+        Submission starts code generation and execution. Each model call is paid from the wallet on the Wallet page.
+        A build has no call, token, or time limit: when the wallet cannot pay for the next call, the build pauses and
+        continues after you add funds. Missing data or an unsupported method can stop the build.
         Do not submit confidential or personal data. Papers, code, and results are stored as plain text.
       </p>
 
@@ -817,18 +790,13 @@ function JobDetail({ jobId, readiness }: { jobId: string; readiness: PaperWorkfl
           {state.active ? " Retrying automatically." : ""}
         </ErrorMessage>
       )}
+      {job.pause !== null && <PauseNotice pause={job.pause} />}
       <ProgressPanel job={job} events={events} />
       {job.artifact !== null && <ResultsPanel job={job} artifact={job.artifact} />}
       <details className={PANEL}>
         <summary className="cursor-pointer font-medium">Operator review and publication</summary>
-        <p className="text-sm text-gray-600">
-          Review and publication need explicit approval.
-          Submitting a paper does not spend wallet funds.
-        </p>
+        <p className="text-sm text-gray-600">Review and publication need explicit approval.</p>
         <SubmissionDetails job={job} />
-        {job.budget !== null && (
-          <p className="text-sm text-gray-600">Approved build limits: {budgetText(job.budget)}.</p>
-        )}
         {state.buildable && job.publication === null && <BuildPanel job={job} readiness={readiness} onJob={applyJob} />}
         {state.active && <CancelBuild job={job} onJob={applyJob} />}
         {job.artifact !== null && <ArtifactPanel job={job} artifact={job.artifact} />}
@@ -853,6 +821,7 @@ function JobHeader({ job, onRefresh }: { job: PaperBuildJob; onRefresh: () => vo
       <div className="flex flex-wrap items-center gap-3">
         <h2 className="text-xl font-semibold">{job.submission.title}</h2>
         <Badge tone={state.tone}>{state.label}</Badge>
+        {job.pause !== null && <Badge tone="attention">Paused: needs funds</Badge>}
         {job.publication !== null && <PublicationBadge state={job.publication.state} />}
         <button type="button" onClick={onRefresh} className={`${SECONDARY_BUTTON} ml-auto`}>
           Refresh
@@ -932,25 +901,16 @@ function BuildApprovalForm({
   readiness: PaperWorkflowReadiness;
   onJob: (job: PaperBuildJob) => void;
 }) {
-  const max = readiness.maximum_budget;
-  const initial = job.budget ?? readiness.default_budget;
-  const maxMinutes = Math.floor(max.timeout_ms / 60_000);
-  const [calls, setCalls] = useState(String(Math.min(initial.max_model_calls, max.max_model_calls)));
-  const [tokens, setTokens] = useState(String(Math.min(initial.max_output_tokens, max.max_output_tokens)));
-  const [minutes, setMinutes] = useState(
-    String(Math.min(Math.max(MIN_BUILD_MINUTES, Math.round(initial.timeout_ms / 60_000)), maxMinutes)),
-  );
   const [approved, setApproved] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const budget = parseBudget(calls, tokens, minutes, max);
 
   const startBuild = async (): Promise<void> => {
-    if (typeof budget === "string" || !approved || busy) return;
+    if (!approved || busy) return;
     setBusy(true);
     setError(null);
     try {
-      onJob(await change<PaperBuildJob>(`/jobs/${job.id}/build`, { confirm: true, budget }));
+      onJob(await change<PaperBuildJob>(`/jobs/${job.id}/build`, { confirm: true }));
     } catch (e) {
       setError(errorText(e));
     } finally {
@@ -958,22 +918,16 @@ function BuildApprovalForm({
     }
   };
 
-  // Any edit to the limits withdraws the approval for the old limits.
-  const edit = (setter: (value: string) => void) => (value: string): void => {
-    setter(value);
-    setApproved(false);
-  };
-
   return (
     <div className="space-y-3">
       <p className="text-sm text-gray-600">
-        The build service calls the configured language model. The generated code runs in an isolated container.
-        A separate verifier run uses a fresh conversation to write and run its own test program.
-        You approve the limits below for this job only.
+        The build service calls the language model through the marketplace. The generated code runs in an isolated
+        container. A separate verifier run uses a fresh conversation to write and run its own test program.
       </p>
       <Callout tone="attention">
-        These are resource limits, not a price quote. The model provider bills its configured account for actual
-        usage. The marketplace does not convert these limits to AP3X or to any other currency.
+        Each model call is paid from the wallet on the Wallet page. The attempt has no call, token, or time limit. When
+        the wallet cannot pay for the next call, the build pauses and continues after you add funds. Cancel the build to
+        stop spending.
       </Callout>
       {job.artifact !== null && (
         <p className="text-sm text-gray-600">A new attempt builds a new artifact that you must review again.</p>
@@ -981,68 +935,20 @@ function BuildApprovalForm({
       {!readiness.build_ready && (
         <ErrorMessage>The build service is not ready: {readiness.build_error ?? "it did not report a reason."}</ErrorMessage>
       )}
-      <div className="grid gap-3 sm:grid-cols-3">
-        <label className="block text-sm font-medium text-gray-700">
-          Model calls (4–{max.max_model_calls})
-          <input
-            type="number"
-            inputMode="numeric"
-            min={4}
-            max={max.max_model_calls}
-            step={1}
-            value={calls}
-            onChange={(e) => edit(setCalls)(e.target.value)}
-            disabled={busy}
-            className={INPUT}
-          />
-        </label>
-        <label className="block text-sm font-medium text-gray-700">
-          Output tokens per call (1–{max.max_output_tokens})
-          <input
-            type="number"
-            inputMode="numeric"
-            min={1}
-            max={max.max_output_tokens}
-            step={1}
-            value={tokens}
-            onChange={(e) => edit(setTokens)(e.target.value)}
-            disabled={busy}
-            className={INPUT}
-          />
-        </label>
-        <label className="block text-sm font-medium text-gray-700">
-          Total time in minutes ({MIN_BUILD_MINUTES}–{maxMinutes})
-          <input
-            type="number"
-            inputMode="numeric"
-            min={MIN_BUILD_MINUTES}
-            max={maxMinutes}
-            step={1}
-            value={minutes}
-            onChange={(e) => edit(setMinutes)(e.target.value)}
-            disabled={busy}
-            className={INPUT}
-          />
-        </label>
-      </div>
-      {typeof budget === "string" ? (
-        <p className="text-xs text-red-700">{budget}</p>
-      ) : (
-        <label className="flex items-start gap-2 text-sm">
-          <input
-            type="checkbox"
-            checked={approved}
-            onChange={(e) => setApproved(e.target.checked)}
-            disabled={busy}
-            className="mt-1"
-          />
-          <span>I approve model spending for this job within these limits: {budgetText(budget)}.</span>
-        </label>
-      )}
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="checkbox"
+          checked={approved}
+          onChange={(e) => setApproved(e.target.checked)}
+          disabled={busy}
+          className="mt-1"
+        />
+        <span>I approve model spending from the wallet for this attempt.</span>
+      </label>
       <button
         type="button"
         onClick={() => void startBuild()}
-        disabled={typeof budget === "string" || !approved || busy || !readiness.build_ready}
+        disabled={!approved || busy || !readiness.build_ready}
         className={PRIMARY_BUTTON}
       >
         {busy ? "Starting…" : "Start build"}
@@ -1091,6 +997,39 @@ function CancelBuild({ job, onJob }: { job: PaperBuildJob; onJob: (job: PaperBui
   );
 }
 
+/** A running build waits until the wallet can pay for its next model call. */
+function PauseNotice({ pause }: { pause: PaperBuildPause }) {
+  return (
+    <Callout tone="attention">
+      <p className="font-medium">Paused: the wallet cannot pay for the next model call.</p>
+      <p className="mt-1">
+        Add funds to the wallet on the{" "}
+        <Link to="/wallet" className="underline">
+          Wallet
+        </Link>{" "}
+        page. The build retries the same call and continues by itself. Cancel the build to stop.
+      </p>
+      <dl className="mt-3 grid gap-x-6 gap-y-2 sm:grid-cols-2">
+        <Detail label="Reason">{pause.message}</Detail>
+        {pause.available_lovelace !== null && (
+          <Detail label="Wallet balance">{lovelaceLabel(pause.available_lovelace)}</Detail>
+        )}
+        {pause.required_lovelace !== null && (
+          <Detail label="Balance needed for the next call">{lovelaceLabel(pause.required_lovelace)}</Detail>
+        )}
+        {pause.deposit_address !== null && (
+          <Detail label="Deposit address">
+            <Mono>{pause.deposit_address}</Mono>
+            <CopyButton value={pause.deposit_address} label="Copy" />
+          </Detail>
+        )}
+        <Detail label="Paused since">{new Date(pause.since).toLocaleString()}</Detail>
+        <Detail label="Last checked">{new Date(pause.checked_at).toLocaleString()}</Detail>
+      </dl>
+    </Callout>
+  );
+}
+
 function ProgressPanel({ job, events }: { job: PaperBuildJob; events: PaperBuildEvent[] }) {
   const state = jobState(job.state);
   const logRef = useRef<HTMLOListElement | null>(null);
@@ -1103,8 +1042,9 @@ function ProgressPanel({ job, events }: { job: PaperBuildJob; events: PaperBuild
     <Panel id="p2a-progress" title="Build progress">
       {state.active && (
         <p role="status" className="text-sm text-blue-800">
-          {state.label}. This page refreshes every 3 seconds while the build runs. You can leave and reopen this job
-          later; the build continues on the server.
+          {job.pause === null ? state.label : "Paused until the wallet can pay for the next model call"}. This page
+          refreshes every 3 seconds while the build runs. You can leave and reopen this job later; the build continues on
+          the server.
         </p>
       )}
       {events.length === 0 ? (
