@@ -451,6 +451,19 @@ Set the buyer control URL to `http://paper2agent-link:8095`.
 The link publishes no host ports and holds no wallet keys.
 Its Compose file documents the pinned host key, private key permissions, and recovery commands.
 
+The production host also runs the publisher, with `deploy/mainnet/docker-compose.paper2agent-publisher.yml`.
+Traefik serves it on the gateway host under `/p2a` and removes that prefix.
+Public routes are `/p2a/tools/<target id>/*` and `/p2a/healthz`.
+The management routes `/p2a/targets` and `/p2a/publications` accept only the build host IPv4 address and the bearer token.
+The build host's `paper2agent/.env.control` sets `PAPER2AGENT_PUBLISHER_URL=https://api.marketplace.vector.apexfusion.org/p2a`.
+It also sets `PAPER2AGENT_PUBLISHER_TOKEN` to the value in production `paper2agent/.env.publisher`.
+The wallet slots are in `/root/paper2agent-publisher/publisher-targets.json`, outside the checkout.
+That file is the only copy of each slot key. Back it up privately.
+The live slot `paper-tool-1` uses wallet `addr1vy78w47xjc9mjqxucg0aguslpdgakf3tvwzlkuv2pl6cndgvk27hx`.
+Its endpoint is `https://api.marketplace.vector.apexfusion.org/p2a/tools/paper-tool-1`.
+An advert endpoint is permanent on chain. A new public URL or target ID needs a new advert.
+`deploy.sh` does not manage the publisher. The Compose file lists the start command.
+
 The production host has about 8 GiB of RAM and no swap.
 During the 2026-10-12 image build, the kernel ran out of memory and killed Ollama.
 Docker restarted it automatically.
