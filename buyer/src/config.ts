@@ -54,6 +54,9 @@
  *                         /v1/paper2agent/model/chat/completions buys one marketplace
  *                         call with the buyer wallet. Unset: that route
  *                         responds 503.
+ *   PAPER2AGENT_MODEL_AUTO_EXCLUDE — Comma-separated advert model names that
+ *                         the build's "auto" model never buys from. An explicit
+ *                         model request still buys them. Default: none.
  */
 
 const HEX64_RE = /^[0-9a-fA-F]{64}$/;
@@ -78,6 +81,7 @@ export interface BuyerConfig {
   paper2agentControlUrl: string;
   paper2agentControlToken: string;
   paper2agentModelToken: string;
+  paper2agentModelAutoExclude: string[];
 }
 
 function requireField(env: Record<string, string | undefined>, name: string): string {
@@ -216,6 +220,8 @@ export function loadConfig(env: Record<string, string | undefined>): BuyerConfig
   if (paper2agentModelToken !== "" && paper2agentModelToken.length < 32) {
     throw new Error("loadConfig: PAPER2AGENT_MODEL_TOKEN must be at least 32 chars");
   }
+  const paper2agentModelAutoExclude = (env.PAPER2AGENT_MODEL_AUTO_EXCLUDE ?? "")
+    .split(",").map((model) => model.trim()).filter((model) => model !== "");
 
   return {
     privKeyHex,
@@ -236,5 +242,6 @@ export function loadConfig(env: Record<string, string | undefined>): BuyerConfig
     paper2agentControlUrl,
     paper2agentControlToken,
     paper2agentModelToken,
+    paper2agentModelAutoExclude,
   };
 }

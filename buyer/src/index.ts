@@ -137,7 +137,9 @@ export async function runMain(env: Record<string, string | undefined>): Promise<
   console.log(
     config.paper2agentModelToken === ""
       ? "[buyer] paper2agent paid model calls disabled (PAPER2AGENT_MODEL_TOKEN unset)"
-      : "[buyer] paper2agent paid model calls enabled",
+      : "[buyer] paper2agent paid model calls enabled" + (config.paper2agentModelAutoExclude.length === 0
+        ? ""
+        : `; auto excludes ${config.paper2agentModelAutoExclude.join(", ")}`),
   );
 
   const app = createApp({
@@ -159,6 +161,7 @@ export async function runMain(env: Record<string, string | undefined>): Promise<
     paper2agentControlUrl: config.paper2agentControlUrl,
     paper2agentControlToken: config.paper2agentControlToken,
     paper2agentModelToken: config.paper2agentModelToken,
+    paper2agentModelAutoExclude: config.paper2agentModelAutoExclude,
   });
 
   const server = app.listen(config.port, () => {

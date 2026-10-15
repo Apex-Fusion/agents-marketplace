@@ -86,6 +86,7 @@ function setup(options: {
   liveStatus?: Record<string, string>;
   /** Advert byte whose supplier preflight refuses the request. */
   incompatible?: string;
+  autoExcludedModels?: string[];
 } = {}) {
   const events: string[] = [];
   const views = options.views ?? [view("11", {})];
@@ -134,6 +135,7 @@ function setup(options: {
     indexerUrl: "http://indexer.invalid",
     accept,
     fetchImpl: fetchImpl as unknown as typeof globalThis.fetch,
+    autoExcludedModels: options.autoExcludedModels,
   });
   return { app, events, discoverSuppliers, preparePrompt, postPrompt, executePrompt, accept, queryUtxosByAddress };
 }
@@ -288,5 +290,20 @@ describe("buyer Paper2Agent paid model endpoint", () => {
     expect(f.preparePrompt.mock.calls.map(([options]) => options.advertRef.txHash)).toEqual(["52".repeat(32), "53".repeat(32)]);
     expect(f.events).toEqual(["prepare", "prepare", "post", "execute", "accept"]);
     expect(response.body.model).toBe("deepseek");
+  });
+
+  it("auto never buys an excluded model, but an explicit request for it still does", async () => {
+    const f = setup({
+      views: [view("61", { model: "swarm", price_lovelace: "100000" }), view("62", { model: "deepseek", price_lovelace: "200000" })],
+      autoExcludedModels: ["swarm"],
+    });
+
+    const auto = await post(f.app, { ...AGENT_BODY, model: "auto" });
+    const explicit = await post(f.app, { ...AGENT_BODY, model: "swarm" });
+
+    expect(auto.status).toBe(200);
+    expect(auto.body.model).toBe("deepseek");
+    expect(explicit.status).toBe(200);
+    expect(f.preparePrompt.mock.calls.map(([options]) => options.advertRef.txHash)).toEqual(["62".repeat(32), "61".repeat(32)]);
   });
 });

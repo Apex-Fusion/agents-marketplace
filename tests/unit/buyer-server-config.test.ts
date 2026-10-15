@@ -114,6 +114,12 @@ describe("loadConfig(env)", () => {
     expect(() => loadConfig(pair("http://user:secret@control:8095", "t".repeat(32))))
       .toThrow(/PAPER2AGENT_CONTROL_URL/);
   });
+
+  it("reads the Paper2Agent auto exclude list as trimmed, comma-separated model names", () => {
+    expect(loadConfig(VALID_ENV).paper2agentModelAutoExclude).toEqual([]);
+    expect(loadConfig({ ...VALID_ENV, PAPER2AGENT_MODEL_AUTO_EXCLUDE: " swarm-qwen38-27b-gptq4 ,, org/model:7b " })
+      .paper2agentModelAutoExclude).toEqual(["swarm-qwen38-27b-gptq4", "org/model:7b"]);
+  });
 });
 
 // ─── createApp tests ──────────────────────────────────────────────────────────

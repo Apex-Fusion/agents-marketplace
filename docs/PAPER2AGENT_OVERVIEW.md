@@ -77,7 +77,7 @@ An unknown publish result goes to `confirmation_pending`. The publisher never si
 - The buyer app buys each call as one marketplace escrow from the buyer wallet (Post, Claim, Submit, Accept).
   One call runs at a time.
   A call costs about 3 AP3X (measured: 3.003256 AP3X for a 0.2 AP3X price and 1 AP3X bonds).
-- `auto` chooses from all Active `llm.text.generate.v1` adverts with at least 4096 output tokens:
+- `auto` chooses from all Active `llm.text.generate.v1` adverts with at least 4096 output tokens, except the models in the buyer's `PAPER2AGENT_MODEL_AUTO_EXCLUDE`:
   - Suppliers that the indexer shows as free come first. Then the lowest price comes first. Equal prices are in random order.
   - The live `/status` of the supplier must be `free`.
   - The buyer app skips a supplier whose `/capability` refuses Responses requests with tools. This occurs before payment.

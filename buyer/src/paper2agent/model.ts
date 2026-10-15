@@ -69,6 +69,8 @@ export interface Paper2AgentModelOptions {
   accept?: (escrowRef: OutputReference) => Promise<string>;
   /** Reads supplier /status before each purchase; defaults to globalThis.fetch. */
   fetchImpl?: typeof globalThis.fetch;
+  /** Models that "auto" never buys from. An explicit request for one still buys it. */
+  autoExcludedModels?: readonly string[];
 }
 
 interface Advert {
@@ -194,17 +196,20 @@ function responseRequest(body: Record<string, unknown>): ResponseRequest {
 }
 
 /**
- * Active adverts for `model` (AUTO_MODEL: every model with at least AUTO_MIN_OUTPUT_TOKENS),
- * cached-free first, then cheapest; equal prices in random order so calls spread across
- * suppliers. Cached working/offline adverts stay last: the cache lags up to one poll.
+ * Active adverts for `model` (AUTO_MODEL: every model with at least AUTO_MIN_OUTPUT_TOKENS
+ * that is not in `autoExcluded`), cached-free first, then cheapest; equal prices in random
+ * order so calls spread across suppliers. Cached working/offline adverts stay last: the
+ * cache lags up to one poll.
  */
-async function candidateAdverts(marketplace: Marketplace, model: string): Promise<Advert[]> {
+async function candidateAdverts(marketplace: Marketplace, model: string, autoExcluded: ReadonlySet<string>): Promise<Advert[]> {
   const views = await marketplace.discoverSuppliers({ capability_id: CAPABILITY_ID });
   const adverts: Advert[] = [];
   for (const view of views) {
     const ref = ADVERT_REF_RE.exec(view.utxo_ref);
     if (!ref || view.capability_id !== CAPABILITY_ID || view.advert_status !== "Active") continue;
-    if (model === AUTO_MODEL ? view.max_output_tokens < AUTO_MIN_OUTPUT_TOKENS : view.model !== model) continue;
+    if (model === AUTO_MODEL
+      ? view.max_output_tokens < AUTO_MIN_OUTPUT_TOKENS || autoExcluded.has(view.model)
+      : view.model !== model) continue;
     let priceLovelace: bigint;
     try {
       priceLovelace = BigInt(view.price_lovelace);
@@ -317,6 +322,7 @@ export function registerPaper2AgentModelRoute(app: Express, options: Paper2Agent
   const wallet = new Mutex();
   /** Supplier endpoint → time until which it is skipped after a failed paid call. */
   const failedUntil = new Map<string, number>();
+  const autoExcluded = new Set(options.autoExcludedModels ?? []);
   const accept = options.accept ?? (async (escrowRef: OutputReference): Promise<string> => {
     const result = await runAccept({
       chain: chain!, walletKey: walletKey!, escrowRef,
@@ -362,7 +368,7 @@ export function registerPaper2AgentModelRoute(app: Express, options: Paper2Agent
         // Busy, unreachable, or incompatible suppliers are skipped before any funds move.
         const call = await wallet.run(async () => {
           let selected: { advert: Advert; prepared: PreparedPrompt } | undefined;
-          for (const advert of await candidateAdverts(marketplace!, model)) {
+          for (const advert of await candidateAdverts(marketplace!, model, autoExcluded)) {
             if ((failedUntil.get(advert.endpointUrl) ?? 0) > Date.now() || !await liveFree(advert.endpointUrl, fetchImpl)) continue;
             try {
               selected = { advert, prepared: await marketplace!.preparePrompt({

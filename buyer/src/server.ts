@@ -123,6 +123,8 @@ export interface AppDeps {
   /** Bearer token of the build service's paid model endpoint
    * (/v1/paper2agent/model/chat/completions). Empty disables that route. */
   paper2agentModelToken?: string;
+  /** Advert model names that the build's "auto" model never buys from. */
+  paper2agentModelAutoExclude?: readonly string[];
 }
 
 interface ResolvedDeps {
@@ -1323,6 +1325,7 @@ export function createApp(deps: AppDeps): Express {
     walletKey: resolved?.walletKey,
     indexerUrl: resolved?.indexerUrl,
     archive: deps.archive,
+    autoExcludedModels: deps.paper2agentModelAutoExclude,
   });
 
   // ── Paper2Agent operator workflow (/v1/paper2agent/*) ───────────────

@@ -175,7 +175,7 @@ The buyer app checks the bearer token `PAPER2AGENT_MODEL_TOKEN` before it reads 
 Each request buys one marketplace call with the buyer wallet:
 
 1. The buyer app chooses an Active `llm.text.generate.v1` advert for the requested model.
-   The control sends `auto`, which allows every model whose advert offers at least 4096 output tokens.
+   The control sends `auto`, which allows every model whose advert offers at least 4096 output tokens, except the models in the buyer's `PAPER2AGENT_MODEL_AUTO_EXCLUDE` (comma-separated).
    Cached-free suppliers come first, then the cheapest price; equal prices are in random order, so calls spread across models.
    The buyer app reads each candidate's live `/status`, because the indexer cache can be one 20 s poll old.
    It skips a supplier that is not free or whose `/capability` refuses the request (no Responses inference, or no tool calls), before any funds move.
