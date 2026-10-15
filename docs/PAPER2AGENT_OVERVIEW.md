@@ -1,6 +1,6 @@
 # Paper2Agent: how it works and current state
 
-State recorded on 2026-10-15 at 07:30 UTC. Updated at 08:15 UTC after the buyer wallet repair.
+State recorded on 2026-10-15 at 07:30 UTC. Updated at 09:05 UTC after the `auto` exclusion release.
 For the full design, limits, and payment rules, see [PAPER2AGENT_PLAN.md](PAPER2AGENT_PLAN.md).
 
 ## Summary
@@ -111,14 +111,14 @@ An unknown publish result goes to `confirmation_pending`. The publisher never si
 
 | Service | Version | Running since (UTC) | Status |
 |---|---|---|---|
-| Buyer app | commit `e847a55`, image `a1f525ba` | 2026-10-13 09:57 | healthy |
+| Buyer app | commit `0748e76`, image `7cebc290`, `PAPER2AGENT_MODEL_AUTO_EXCLUDE=swarm-qwen38-27b-gptq4` | 2026-10-15 08:55 | healthy |
 | Control service | commit `61b20af`, image `84d0b72e`, `PAPER2AGENT_MODEL=auto` | 2026-10-13 09:58 | `build_ready: true` |
 | Publisher | image `3b378beb` | 2026-10-13 | `publisher_ready: true` |
 | Gateway | — | 2026-10-12 11:16 | healthy |
 
 Both hosts use the runtime base image `sha256:d9b9ddd03b60157362426ceb437fb1d43425a1f7463d86968a55ed997e995009`.
-The production checkout is at `49e3b03`.
-That commit adds only `papers/Replicating-SwarmWorld-with-open-weight-models.pdf` (4.2 MB). No job uses this paper.
+The production checkout follows `main`.
+Commit `49e3b03` adds only `papers/Replicating-SwarmWorld-with-open-weight-models.pdf` (4.2 MB). No job uses this paper.
 
 ### Jobs
 
@@ -126,7 +126,7 @@ That commit adds only `papers/Replicating-SwarmWorld-with-open-weight-models.pdf
 |---|---|---|---|---|
 | paper2agent-giou-smoke | `ee7202fa` | 3 | `approved`, published | `calculate_giou` on slot `paper-tool-2` |
 | ConsistentHashAlgo | `76b3e9df` | 1 | `approved`, published | `assign_buckets` on slot `paper-tool-1` |
-| ConsistendHashAlgoV2 | `091194bd` | 6 | `building` | No artifact yet |
+| ConsistendHashAlgoV2 | `091194bd` | 7 | `building` | No artifact yet |
 
 ConsistendHashAlgoV2 history (UTC):
 
@@ -134,7 +134,8 @@ ConsistendHashAlgoV2 history (UTC):
 - 2026-10-13: attempt 3 (09:49) failed after a Cloudflare HTTP 524 and two supplier failures.
 - 2026-10-13: attempt 4 (09:58) made more than 24 model calls. It failed at 10:52 after three supplier HTTP 502 errors in a row.
 - 2026-10-13: attempt 5 (11:12) paused at model call 11 at 11:27, because the buyer wallet had no collateral UTxO. The operator cancelled it on 2026-10-15 at 08:04.
-- 2026-10-15: attempt 6 started at 08:08. By 08:12 it made 3 paid model calls (deepseek/deepseek-v4-flash, Qwen/Qwen3.6-35B-A3B-FP8, gpt-5.6-sol). Two more calls failed at `swarm-qwen38-27b-gptq4` suppliers (HTTP 502 and 504).
+- 2026-10-15: attempt 6 (08:08) made 4 paid model calls. It failed at 08:16 after three failed calls in a row on model call 5: meta-llama/Llama-3.3-70B-Instruct, then `swarm-qwen38-27b-gptq4` twice. 4 of its 5 failed calls went to `swarm-qwen38-27b-gptq4`.
+- 2026-10-15: attempt 7 started at 08:57, after the `auto` exclusion release. By 09:04 it made 4 paid model calls (gpt-5.6-sol, Qwen/Qwen3.6-35B-A3B-FP8, and deepseek/deepseek-v4-flash twice) and no call to `swarm-qwen38-27b-gptq4`. Two calls failed: deepseek-v4-pro (HTTP 400) and moonshotai/kimi-k2.6 (no output).
 
 ### Published tools
 
@@ -152,7 +153,7 @@ ConsistendHashAlgoV2 history (UTC):
 
 | Wallet | Address | Balance (AP3X) | UTxOs |
 |---|---|---|---|
-| Buyer (pays build model calls) | `addr1vye6p9pau98dspuk0mu85htah6x9k2caz94fssshdhj777gta0gpx` | 584.53 (08:08, before attempt 6) | 26, largest 527.52 AP3X |
+| Buyer (pays build model calls) | `addr1vye6p9pau98dspuk0mu85htah6x9k2caz94fssshdhj777gta0gpx` | 567.50 (08:57, before attempt 7) | 35, largest 491.49 AP3X |
 | `paper-tool-1` (published) | `addr1vy78w47xjc9mjqxucg0aguslpdgakf3tvwzlkuv2pl6cndgvk27hx` | 214.31 | 4 |
 | `paper-tool-2` (published) | `addr1vytv6mwyeun07qmgg49q0zhmxhz59qn0ym00k2xtg94dt5spa8572` | 97.32 | 1 |
 | `paper-tool-3` (free) | `addr1v86wzs8azj64heh7y9slcd9fvz60vma0cprae0fpwu9cu7c2dewht` | 100 | 1 |
@@ -174,20 +175,22 @@ All UTxOs hold only AP3X.
 | deepseek-v4-pro | 1 |
 
 The 50 successful calls cost about 150 AP3X (estimate: 50 × 3 AP3X).
-23 more paid calls failed at the supplier (see problem 4). Their escrows were reclaimed on 2026-10-15 (see [Buyer wallet repair](#buyer-wallet-repair-2026-10-15)).
+23 more paid calls failed at the supplier (see problem 4). Their escrows were reclaimed on 2026-10-15 (see [Changes on 2026-10-15](#changes-on-2026-10-15)).
 
-## Buyer wallet repair (2026-10-15)
+## Changes on 2026-10-15
 
 | Time (UTC) | Action | Result |
 |---|---|---|
 | 08:04 | Cancelled attempt 5 | It was paused and spent nothing. A running build would use the same wallet inputs as the Reclaims. |
-| 08:05 | Consolidated the wallet | Transaction `5dd99f9f9f2ae2a03572d169ca1ab31e3a29023deb256c3eb99dc8e652d48069`: 248 inputs, 9,199 bytes, fee 0.591836 AP3X. Outputs: 5 AP3X collateral, 539.04 AP3X working, 1.41 AP3X change. |
+| 08:05 | Consolidated the buyer wallet | Transaction `5dd99f9f9f2ae2a03572d169ca1ab31e3a29023deb256c3eb99dc8e652d48069`: 248 inputs, 9,199 bytes, fee 0.591836 AP3X. Outputs: 5 AP3X collateral, 539.04 AP3X working, 1.41 AP3X change. |
 | 08:05–08:08 | Ran `reclaim-orphans.ts` | 23 Reclaims confirmed. They returned 50.62 AP3X for 11.54 AP3X in fees. The other 1,002 index rows were already spent and sent no transaction. |
-| 08:08 | Started attempt 6 | The build makes paid model calls again. |
+| 08:08 | Started attempt 6 | It failed at 08:16 (see [Jobs](#jobs)). |
+| 08:55 | Released buyer `0748e76` with `PAPER2AGENT_MODEL_AUTO_EXCLUDE=swarm-qwen38-27b-gptq4` | `auto` does not buy from `swarm-qwen38-27b-gptq4`. Only the buyer container restarted. |
+| 08:56–08:57 | Ran `reclaim-orphans.ts` again | 5 Reclaims confirmed. They returned the 11.0 AP3X that the failed calls of attempt 6 locked. |
+| 08:57 | Started attempt 7 | See [Jobs](#jobs). |
 
-The buyer wallet went from 546.04 AP3X to 584.53 AP3X (+38.49 AP3X net).
-At 08:08 UTC no expired buyer escrow was locked.
-The two failed calls of attempt 6 (08:08 and 08:11) locked two new escrows (see problem 3).
+Before attempt 6, the buyer wallet went from 546.04 AP3X to 584.53 AP3X (+38.49 AP3X net).
+At 08:57 UTC no expired buyer escrow was locked.
 
 ## Open problems
 
@@ -228,10 +231,12 @@ The two failed calls of attempt 6 (08:08 and 08:11) locked two new escrows (see 
 | deepseek/deepseek-v4-flash | 1 |
 
 - Seen causes: swarm-qwen38 upstream HTTP 502 and 504; Llama-3.3 upstream HTTP 402 ("You have no remaining …"); one Qwen3.8-27B call took more than 300 s.
-- `swarm-qwen38-27b-gptq4` has 5 adverts and no successful build call. Attempt 6 had two more failures with it in its first four minutes.
+- `swarm-qwen38-27b-gptq4` has 5 adverts and no successful build call. It had 4 of the 5 failed calls of attempt 6. Since 2026-10-15 08:55 UTC the buyer sets `PAPER2AGENT_MODEL_AUTO_EXCLUDE=swarm-qwen38-27b-gptq4`, so `auto` does not buy from it.
+- deepseek-v4-pro fails after the first turn of a build conversation. Its upstream answers HTTP 400 "The `reasoning_text` in the thinking mode must be passed back to the API.", and the build conversation does not keep the model's reasoning.
+- meta-llama/Llama-3.3-70B-Instruct still fails with upstream HTTP 402 (no provider credits).
 - Each failure costs a Post fee and locks an escrow until a Reclaim (see problem 3).
 - The 15-minute skip list covers one endpoint, and it is lost when the buyer app restarts.
-- Options: repair or retire these adverts, or add an exclude list to `auto`.
+- To exclude more models, add them to `PAPER2AGENT_MODEL_AUTO_EXCLUDE` in the production `buyer/.env` (comma-separated). Then recreate the buyer container.
 
 ### 5. Model quality varies
 
