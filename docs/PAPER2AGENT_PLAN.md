@@ -19,14 +19,15 @@ This is a repository-owned workflow, not an invocation of upstream Paper2MCP.
 It does not prove the paper's claims or promise to reproduce all its experiments.
 
 ```text
-Buyer agent
-  -> authenticated marketplace MCP
-  -> approved buyer wallet and escrow
-  -> supplier HTTP admission
-  -> configured local MCP tool
-  -> signed result and Submitted escrow
-  -> verified Accept and financial record
+MCP client (no API key)
+  -> public marketplace MCP (per-IP and gateway-wide limits)
+  -> token-gated publisher route
+  -> supplier free-call route
+  -> configured local MCP tool in a new offline container
+  -> JSON result, validated against the manifest
 ```
+
+A direct on-chain buyer can still pay a tool supplier: escrow, supplier admission, signed result and Submitted escrow, then Accept.
 
 ## Implemented components
 
@@ -35,10 +36,9 @@ Buyer agent
 | Shared tool contract | `@marketplace/shared/paper2agent`: manifest, bounded JSON schemas, canonical commitments, and Ed25519 receipt verification |
 | Supplier | `CAPABILITY_KIND=paper2agent`: local stdio MCP, package hash checks, declared limits, and a durable job journal |
 | Registration | `supplier/src/cli/register-paper2agent.ts`: local discovery and a new immutable manifest file; no chain calls |
-| Buyer SDK | Node-only `@marketplace/buyer/sdk/paper2agent`: discovery, prepare, Post, execute, and read-only recovery |
-| Marketplace MCP | Authenticated `/mcp`: discovery and execution through the official MCP transport |
-| Spending control | Operator approval of an unused dedicated key, a full manifest hash, a supplier, price, total exposure, and call count |
-| Financial recovery | Signed transaction journal, early receipt storage, exact escrow lineage, and recovery after lost responses |
+| Buyer SDK | Node-only `@marketplace/buyer/sdk/paper2agent`: discovery and free calls without a wallet; prepare, Post, execute, and read-only recovery for direct paid buyers |
+| Marketplace MCP | Public `/mcp`: free discovery and calls through the official MCP transport, with per-IP limits, a gateway-wide call limit, and a short queue |
+| Paid supplier route | `POST /v1/paper2agent/run` for direct on-chain buyers: escrow admission, signed receipt, and a durable supplier journal |
 | Submission UI | Buyer `/paper2agent`: paper-only submission, automatic execution, progress, actual check output, and code download; review and publication in a collapsed operator view |
 | Build control | Private `paper2agent` control service: durable SQLite queue, exact paper hash, offline Docker builds, and separate verifier sessions |
 | Publisher | Separate private service: reviewed archive checks, offline runtime image, dedicated wallet slots, signed advert journal, and managed tool suppliers |
@@ -46,8 +46,7 @@ Buyer agent
 The capability is `mcp.tool.execute.v1`.
 The advert model is `paper2agent:<full-manifest-hash>`.
 The MCP name is `p2a_<tool-name>_<first-16-hash-characters>`.
-The short name does not authorize spending.
-Paid calls use the approved full hash and supplier identity.
+A free call sends the full manifest hash, not the short name alone.
 Discovery omits ambiguous short-name collisions.
 
 ## Data and execution limits
@@ -73,51 +72,39 @@ Discovery has a 128-matching-advert bound.
 It filters unrelated capabilities before applying that bound.
 It uses bounded concurrent probes.
 A failed supplier does not remove healthy offers.
-Approved calls use narrow supplier and manifest filters.
+The gateway caches the tool list for 30 seconds.
+It also lists tools that the indexer reports as `working` or `unknown`; a call to a busy tool waits or reports busy.
 
-## Payment and recovery
+## Free calls and direct payment
 
+The gateway's `/mcp` calls tools for free.
+It needs no API key, approval, funded wallet, or escrow.
+The gateway sends each call to the supplier's `POST /v1/paper2agent/call` route through the publisher.
+A secret token that the gateway and the publisher share protects this route.
+The gateway lists and calls only tools whose advert endpoint is under `PAPER2AGENT_PUBLISHER_PUBLIC_URL/tools/`, so the token never goes to another host.
+A free result has no receipt and no chain record.
+The gateway allows one call for each supplier and two calls in total.
+Other calls wait for at most 60 seconds; then the call reports that the tool is busy.
+See [gateway limits](gateway.md#limits).
+
+Publication is still on chain.
+A direct on-chain buyer can still pay the supplier through the Node SDK stages below.
 Both bonds come from the buyer's wallet.
 Normal Accept pays the supplier the service price plus the supplier bond.
-The service-price ceiling is therefore not a complete cost ceiling.
-The total exposure limit also covers escrow funds, fees, and collateral at risk.
-The Post check keeps a separate 7,000,000-lovelace settlement allowance.
-
-The gateway reads actual signed transaction fees and wallet movements.
-It counts the signed total collateral when that value is present.
-It otherwise counts the full pledged collateral.
-It does not count returned collateral as money at risk.
-Known net costs reduce the approval budget.
-An unknown cost remains `null` and keeps the reservation.
-
-One dedicated key can have only one unresolved tool liability.
-An admitted attempt consumes a call allowance, even if it later fails before payment.
-Revocation stops new funding.
-It does not stop result reads or financial recovery.
-It does not restore access to other spending APIs or wallet withdrawal.
-
-The gateway saves the original confirmed Post snapshot before supplier admission.
-It saves a verified signed result before waiting for node or indexer visibility.
-Accept still requires the exact live Submitted lineage and receipt commitment.
-A signature alone never permits Accept.
-
-After a lost response:
-
-1. Find the job through authenticated `GET /v1/paper2agent/jobs`.
-2. Read its result and financial state through `GET /v1/paper2agent/jobs/:id`.
-3. Let recovery retrieve the existing supplier job and settle it.
-4. Do not repeat the paid MCP call.
+The supplier admits a paid call only for a confirmed Open escrow.
+A free call and a paid admission share the supplier's single slot.
+During a free call, a paid admission gets HTTP 409 `supplier_busy`, and the buyer can reclaim the escrow only after its deadline.
+Check that the indexer reports the tool as `free` immediately before you post an escrow.
 
 Supplier lookup uses the original escrow reference and request preimage.
 It does not admit or execute a job.
-Recovery can use the saved snapshot after the original Open output is spent.
-The previous gateway owner's heartbeat must be stale before takeover.
-An ambiguous broadcast can replay the same signed bytes, not a replacement purchase.
-
 Reclaim applies only to expired Open or Claimed escrows.
 There is no buyer wrong-result refund after Submitted.
 Supplier Release can also take the buyer bond.
 An error or lost result is not proof of a refund.
+
+The gateway no longer pays for tool calls.
+It keeps its old approval and call tables, but does not use them.
 
 ## Paper submission and review
 
@@ -143,7 +130,8 @@ Control and publisher tokens stay on the server.
 4. A fresh verifier session receives the paper and frozen package.
    It derives reference outputs from the paper, analytical examples, or a separate calculation.
    It must not obtain expected values from the implementation under test.
-   The service runs the check program and replays each reference case through real MCP in a fresh container.
+   The service runs the check program and replays each reference case through real MCP in a fresh container when the verifier finishes.
+   If a check fails, the verifier receives the error and can repair `check.py` or `cases.json` up to 2 times; the next failure ends the attempt.
    A failed check leaves no approvable artifact.
 5. Read the executed check output and download the generated code as a `.zip` archive.
    The operator view contains source previews, licenses, manifest, hashes, verifier code, and review controls.
@@ -184,19 +172,23 @@ Each request buys one marketplace call with the buyer wallet:
    A supplier whose paid call fails is skipped for 15 minutes.
 2. It checks the wallet like the gateway preflight: the escrow lock floor, 5 AP3X collateral, and a 2 AP3X fee reserve.
    If the wallet cannot pay, it answers HTTP 402 `insufficient_funds` with the deposit address and builds no transaction.
-3. It posts the escrow, verifies the supplier receipt, and waits for a confirmed Accept.
+3. It posts the escrow and verifies the supplier receipt. It answers after Submit and sends the Accept in the background.
+   A failed Accept is sent again up to 3 times, 10 s apart. The buyer app checks for confirmations every 0.5 s.
 
 Each model call therefore creates four transactions: Post, Claim, Submit, and Accept.
-Calls run one at a time, because the transaction builder cannot pin wallet inputs.
+The buyer app posts one escrow at a time and never sends a second call to a supplier with an open call.
+The next Post does not spend the inputs or the collateral of an Accept that is not in a block yet.
+If the other wallet outputs cannot pay, the call waits for the pending Accepts.
+On shutdown the buyer app waits up to 60 s for background Accepts.
 The buyer key stays on the production host. The build host holds only the token.
 The buyer archive keeps each request, result, and signed receipt.
 
 On 2026-10-13, one call to the `gpt-5.6-sol` advert (0.2 AP3X price, 1 AP3X bonds) cost the buyer wallet 3.003256 AP3X.
 Accept pays the supplier the price and the supplier bond, raised to the 2 AP3X output minimum.
 The Post and Accept fees make up the rest.
-If an Accept fails, the endpoint answers 502 `accept_failed` with the Submitted escrow; accept it with `POST /v1/accept` within 10 minutes.
+If all Accept attempts fail, the buyer log shows `accept_failed` with the Submitted escrow; accept it with `POST /v1/accept` within 10 minutes of its submission.
 
-The build agent resends the same conversation after a failed model call (wait 60 s) or a reply without a tool call (no wait).
+The build agent resends the same conversation after a failed model call (wait 10 s × the number of failures in sequence) or a reply without a tool call (no wait).
 Three such results in a row fail the run.
 On 2026-10-13 the build `ConsistendHashAlgoV2` failed for this reason with `gpt-5.6-sol` only: the indexer still listed the single supplier as working 134 ms after its previous call ended, the endpoint answered 503, and the agent failed on the first error.
 
@@ -224,13 +216,15 @@ Model test reports are evidence for review, not proof of scientific correctness.
 
 - [Supplier preparation and registration](DEPLOY_NEW_SUPPLIER.md#9-paper2agent-tools).
 - [Agent-assisted build and publisher deployment](DEPLOY_NEW_SUPPLIER.md#agent-assisted-operator-workflow).
-- [Gateway approval, MCP access, and job recovery](gateway.md#paper2agent-tools).
+- [Public MCP access and limits](gateway.md#paper2agent-tools).
 
-The Node SDK exposes explicit stages:
+The Node SDK exposes these methods.
+Only the paid stages need a `walletKey`:
 
 | Method | Effect |
 |---|---|
-| `discover(filters?)` | Read verified available offers |
+| `discover(filters?)` | Read verified offers; `includeBusy` also returns `working` and `unknown` tools |
+| `call(offer, input, { token })` | One free call through the token-gated route; no escrow or receipt |
 | `prepare(options)` | Check the manifest, supplier, input, and service-price ceiling |
 | `post(prepared, beforeSubmit?)` | Sign, journal through the hook, submit, and confirm one escrow |
 | `execute(posted, options?)` | Admit once, verify the receipt, and prove Submitted lineage |
@@ -243,7 +237,7 @@ Preserve bigint values when storing and restoring the snapshot.
 That callback does not prove settlement.
 `recover` accepts a known job ID or uses request-preimage lookup.
 Its default deadline is 30 seconds.
-The gateway supplies the financial journal and Accept/Reclaim integration.
+A direct paid buyer supplies its own financial journal and its Accept or Reclaim step.
 
 ## Verification record
 
@@ -342,17 +336,19 @@ On a shared build host, use a dedicated rootless daemon and account, not the CI 
 Rootless Docker shares the host kernel and gives less isolation than a VM.
 The trusted publisher also has root-equivalent Docker socket access on its host.
 The supplier sees the input.
-Tool inputs and results remain in plaintext in the gateway database and supplier journal.
+Paid tool inputs and results remain in plaintext in the supplier journal.
+The gateway does not store free call inputs or results.
 Use non-sensitive data unless a separate data-protection policy permits this storage.
 
 A receipt proves a supplier statement about particular bytes.
 It does not prove scientific correctness or that the declared program ran.
+A free result has no receipt.
 The local reference calculation verifies the adapter path, not a research method.
 
 This work does not add arbitrary remote MCP routing, paid file transfer, long-running
 scientific pipelines, new dispute protection, or automatic paid retries.
 Generated packages install their dependencies from pinned wheels in offline build containers.
-Real-chain publication and paid execution still require explicit spending approval.
+Real-chain publication still requires explicit spending approval.
 
 ## Sources
 
@@ -361,6 +357,6 @@ Real-chain publication and paid execution still require explicit spending approv
 - [Supplier execution](../supplier/src/paper2agent/runtime.ts).
 - [Operator control](../paper2agent/src/control.ts), [isolated builder](../paper2agent/src/build.ts), and [publisher](../paper2agent/src/publisher.ts).
 - [Buyer SDK](../buyer/src/sdk/paper2agent.ts).
-- [Gateway MCP](../gateway/src/paper2agent/mcp.ts) and [financial recovery](../gateway/src/paper2agent/recovery.ts).
+- [Gateway MCP](../gateway/src/paper2agent/mcp.ts) and [free calls](../gateway/src/paper2agent/service.ts).
 - [Escrow payout and refund rules](../contracts/marketplace/validators/escrow.ak).
 

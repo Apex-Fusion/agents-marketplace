@@ -37,7 +37,7 @@ flowchart LR
 | Buyer app | Production host `91.98.147.172`, `https://marketplace.vector.apexfusion.org` | Submission, progress, review, and publication page. Proxy for `/v1/paper2agent/*`. Paid model endpoint for builds. |
 | Control service | `build-nixos-2` (`144.76.217.30`), rootless Docker | Job database (SQLite). Build queue that runs one build at a time. Offline build and verifier containers. |
 | Publisher | Production host | Six wallet slots. Runtime images, advert transactions, and one managed supplier for each published tool. |
-| Gateway | Production host, `https://api.marketplace.vector.apexfusion.org/mcp` | MCP access for buyer agents. Spending approval, escrow, receipt checks, and recovery. |
+| Gateway | Production host, `https://api.marketplace.vector.apexfusion.org/mcp` | Public MCP access for agents. Free tool calls with limits for each client IP. No API key. |
 | Indexer | Production host | Adverts and supplier status. It reads each supplier status about every 20 s. |
 
 ## From paper to published tool
@@ -53,8 +53,9 @@ flowchart LR
 3. **Verify** (`verifying`).
    A new agent session receives the paper and the frozen package.
    It makes reference outputs from the paper, not from the implementation.
-   The control service runs the checks and replays each reference case through real MCP in a new container.
-   A failed check gives no artifact.
+   When the verifier finishes, the control service runs the checks and replays each reference case through real MCP in a new container.
+   If a check fails, the verifier gets the error and can repair `check.py` or `cases.json`. It can do this up to 2 times.
+   The next failure ends the attempt. A failed check gives no artifact.
 4. **Review** (`awaiting_review`, then `approved` or `rejected`).
    The page shows the check output, the source, the manifest, the licenses, and the hashes. It also gives a ZIP download.
    Approval binds the archive SHA-256 and three attestations: code, license and data rights, and results.
@@ -75,7 +76,11 @@ An unknown publish result goes to `confirmation_pending`. The publisher never si
   This host connects directly to Traefik.
   Do not use the Cloudflare host `marketplace.vector.apexfusion.org`: Cloudflare stops responses after 100 s (HTTP 524), but the buyer still pays.
 - The buyer app buys each call as one marketplace escrow from the buyer wallet (Post, Claim, Submit, Accept).
-  One call runs at a time.
+  It posts one escrow at a time, and it does not send a second call to a supplier that has an open call.
+  The answer returns after Submit. The Accept transaction runs in the background (up to 3 attempts, 10 s apart).
+  The next Post does not spend the wallet outputs of an Accept that is not confirmed.
+  If the other outputs cannot pay, the next call waits for the pending Accepts.
+  The buyer app checks for a confirmation every 0.5 s.
   A call costs about 3 AP3X (measured: 3.003256 AP3X for a 0.2 AP3X price and 1 AP3X bonds).
 - `auto` chooses from all Active `llm.text.generate.v1` adverts with at least 4096 output tokens, except the models in the buyer's `PAPER2AGENT_MODEL_AUTO_EXCLUDE`:
   - Suppliers that the indexer shows as free come first. Then the lowest price comes first. Equal prices are in random order.
@@ -85,25 +90,26 @@ An unknown publish result goes to `confirmation_pending`. The publisher never si
 - A build has no call, token, or time limit. The buyer wallet is the only limit.
   If the wallet cannot pay, the endpoint answers HTTP 402 before any transaction.
   The build then pauses and sends the same call again every 60 s.
-- The build sends a failed call again after 60 s. It sends a reply without a tool call again immediately.
+- After a failed call, the build waits 10 s × the number of failures in sequence, then sends the call again.
+  It sends a reply without a tool call again immediately.
   Three such results with no good reply between them end the attempt.
 - Node `fetch` stops a call when the response headers take more than 300 s.
 
-## Paid calls to a published tool
+## Calls to a published tool
 
-- Endpoint: `https://api.marketplace.vector.apexfusion.org/mcp`.
+- Endpoint: `https://api.marketplace.vector.apexfusion.org/mcp`. It needs no API key and no payment.
   The tool name is `p2a_<tool name>_<first 16 hex characters of the manifest hash>`.
   The advert has the capability `mcp.tool.execute.v1` and the model `paper2agent:<manifest hash>`.
-- Any API key can list the tools.
-  A paid call needs a dedicated, unused key that an operator approves (`gateway/src/cli/paper2agent-approval.ts`).
-  The approval sets the manifest hash, the supplier, the maximum price, the maximum total spend, and the maximum number of calls.
-- One call is one escrow.
-  The tool supplier runs the tool in an offline container and signs a receipt.
-  The gateway checks the receipt and sends Accept.
-  After a lost response, recovery reads the existing job. It does not buy a second call.
-- Limits: JSON object input of at most 64 KiB, output of at most 256 KiB, and run time of at most 120 s. The advert SLA is 390 s.
-- Measured cost: 3.003256 AP3X for one call of a tool with a 0.2 AP3X price and 1 AP3X bonds.
-  Accept pays the supplier at least 2 AP3X because of the minimum UTxO value.
+- `tools/list` also shows a busy tool. The gateway caches the list for 30 s.
+- `tools/call` is free. The gateway sends the call to the publisher with `PAPER2AGENT_TOOL_CALL_TOKEN`.
+  The tool supplier runs the tool in a new offline container. There is no escrow and no receipt.
+- The gateway lists only tools whose advert endpoint is under `PAPER2AGENT_PUBLISHER_PUBLIC_URL/tools/`.
+  The call token never goes to another host.
+- Gateway limits: 120 `/mcp` requests and 20 calls per minute for each client IP, 1 call in progress for each IP,
+  1 call for each tool supplier, and 2 calls in total. Other calls wait for at most 60 s, then the call reports busy.
+- Limits: JSON object input of at most 64 KiB, output of at most 256 KiB, and run time of at most 120 s.
+- A direct on-chain buyer can still pay the tool supplier through escrow with the Node SDK. The advert SLA is 390 s.
+  One paid call cost 3.003256 AP3X for a tool with a 0.2 AP3X price and 1 AP3X bonds.
 
 ## Current state (2026-10-15)
 
