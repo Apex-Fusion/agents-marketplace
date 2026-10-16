@@ -13,6 +13,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { LiveOgmiosProvider } from "../../packages/shared/src/chain/LiveOgmiosProvider.js";
+import { inspectSignedTransactionFinancials } from "../../packages/shared/src/tx/server.js";
 import { buildAcceptTx, ACCEPT_WINDOW_MS } from "../../packages/shared/src/tx/escrow/accept.js";
 import { TxConstructionError } from "../../packages/shared/src/tx/types.js";
 import { encodeEscrowDatum, decodeEscrowDatum } from "../../packages/shared/src/cbor/EscrowDatum.js";
@@ -56,7 +57,17 @@ function rpcOk<T>(result: T) {
   return { ok: true, json: async () => ({ jsonrpc: "2.0", result }) };
 }
 
-function makeOgmiosUtxo(txId: string, index: number, address: string, lovelace: number, datumHex?: string) {
+interface OgmiosUtxo {
+  transaction: { id: string };
+  index: number;
+  address: string;
+  value: { ada: { lovelace: number } };
+  datum: string | null;
+  datumHash: null;
+  script: null;
+}
+
+function makeOgmiosUtxo(txId: string, index: number, address: string, lovelace: number, datumHex?: string): OgmiosUtxo {
   return { transaction: { id: txId }, index, address, value: { ada: { lovelace } }, datum: datumHex ?? null, datumHash: null, script: null };
 }
 
@@ -82,7 +93,7 @@ function buildLiveChain(): LiveOgmiosProvider {
   return new LiveOgmiosProvider({ ogmiosUrl: "http://ogmios:1337", fetch: mockFetch });
 }
 
-function setupAcceptHappyPath(escrowDatumHex: string): void {
+function setupAcceptHappyPath(escrowDatumHex: string, extraWalletUtxos: OgmiosUtxo[] = []): void {
   const buyer = buildBuyerWalletKey();
   const submittedUtxo = buildSubmittedEscrowUtxo();
   const escrowAddress = submittedUtxo.address;
@@ -98,7 +109,7 @@ function setupAcceptHappyPath(escrowDatumHex: string): void {
       if ((body.params ?? {}).outputReferences) {
         return rpcOk([makeOgmiosUtxo(ESCROW_TX_HASH, ESCROW_INDEX, escrowAddress, 4_000_000, escrowDatumHex)]);
       }
-      return rpcOk([makeOgmiosUtxo("c".repeat(64), 0, buyer.address, COLLATERAL_LOVELACE)]);
+      return rpcOk([makeOgmiosUtxo("c".repeat(64), 0, buyer.address, COLLATERAL_LOVELACE), ...extraWalletUtxos]);
     }
     if (method === "queryNetwork/tip") return rpcOk({ slot: tipSlot, id: "a".repeat(64) });
     // Like real Ogmios, return the script-spend redeemer with its true index:
@@ -146,6 +157,24 @@ describe("buildAcceptTx() [live] — CBOR shape", () => {
 
     expect(/^[0-9a-f]+$/i.test(result.txCborHex)).toBe(true);
     expect(result.txCborHex.length).toBeGreaterThan(0);
+  });
+});
+
+describe("buildAcceptTx() [live] — excluded inputs", () => {
+  it("never spends a wallet output that a pending transaction spends", async () => {
+    const buyer = buildBuyerWalletKey();
+    const pending = { txHash: "e".repeat(64), index: 0 };
+    setupAcceptHappyPath(buildSubmittedEscrowUtxo().datumHex!,
+      [makeOgmiosUtxo(pending.txHash, pending.index, buyer.address, 2 * COLLATERAL_LOVELACE)]);
+
+    const result = await buildAcceptTx({
+      chain: buildLiveChain(),
+      buyerKey: buyer,
+      escrowRef: { txHash: ESCROW_TX_HASH, index: ESCROW_INDEX },
+      excludeInputs: [pending],
+    });
+
+    expect(inspectSignedTransactionFinancials(result.txCborHex).inputs).not.toContainEqual(pending);
   });
 });
 

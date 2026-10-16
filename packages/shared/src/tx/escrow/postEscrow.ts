@@ -52,6 +52,8 @@ export interface PostEscrowParams {
   payment_lovelace: bigint;
   /** Runs after signing and before any broadcast. Rejection prevents submit. */
   beforeSubmit?: (built: PostEscrowBuildResult) => Promise<void>;
+  /** Wallet outputs that a submitted, unconfirmed transaction spends; never selected (live backend). */
+  excludeInputs?: readonly OutputReference[];
 }
 
 function sha256Utf8Hex(s: string): string {
@@ -196,6 +198,7 @@ export async function buildPostEscrowTx(
       deliverBy,
       postedAt,
       beforeSubmit: params.beforeSubmit,
+      excludeInputs: params.excludeInputs,
     });
   }
 

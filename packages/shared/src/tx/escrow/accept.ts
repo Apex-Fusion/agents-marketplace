@@ -27,6 +27,8 @@ export interface AcceptParams {
   buyerKey: WalletKey;
   escrowRef: OutputReference;
   beforeSubmit?: (built: BuildResult) => Promise<void>;
+  /** Wallet outputs that a submitted, unconfirmed transaction spends; never selected (live backend). */
+  excludeInputs?: readonly OutputReference[];
 }
 
 export { ACCEPT_WINDOW_MS };
@@ -110,6 +112,7 @@ export async function buildAcceptTx(
       tipMs,
       windowEnd,
       beforeSubmit: params.beforeSubmit,
+      excludeInputs: params.excludeInputs,
     });
   }
 

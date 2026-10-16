@@ -15,6 +15,10 @@ services:
       dockerfile: buyer/Dockerfile
     container_name: marketplace-mainnet-buyer
     restart: unless-stopped
+    # On SIGTERM the buyer finishes in-flight requests (a paid Paper2Agent build
+    # model call lasts up to its advert SLA, 300 s) and then its background
+    # Accepts (at most 60 s) before it exits.
+    stop_grace_period: 330s
     env_file:
       - path: ../../buyer/.env
         required: false

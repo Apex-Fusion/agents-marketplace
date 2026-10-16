@@ -2,7 +2,7 @@ import { once } from "node:events";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
-import { runCodingAgent, type AgentSessionOptions, type FundsShortfall } from "../src/agent.js";
+import { FatalFinishError, repairableFinishCheck, runCodingAgent, type AgentSessionOptions, type FundsShortfall } from "../src/agent.js";
 
 interface Reply { status: number; body: unknown }
 
@@ -55,11 +55,17 @@ function session(baseUrl: string, signal: AbortSignal, retryMs: number) {
     finishSchema: { type: "object" },
     validateFinish: () => undefined,
     log: (message) => logs.push(message),
-    retryMs,
+    fundsRetryMs: retryMs,
+    failureRetryMs: retryMs,
     onFundsShortfall: (shortfall) => shortfalls.push(shortfall),
     onFundsRestored: () => { restored += 1; },
   };
   return { options, shortfalls, logs, restored: () => restored };
+}
+
+function lastMessage(request: unknown): unknown {
+  if (!request || typeof request !== "object" || !("messages" in request) || !Array.isArray(request.messages)) throw new Error("Expected a chat request");
+  return request.messages.at(-1);
 }
 
 describe("Paper2Agent coding agent", () => {
@@ -123,5 +129,53 @@ describe("Paper2Agent coding agent", () => {
     await expect(runCodingAgent(run.options)).rejects.toThrow();
     expect(Date.now() - started).toBeLessThan(5_000);
     expect(endpoint.requests).toHaveLength(1);
+  });
+
+  it("returns a finish error to the model and ends the run on a fatal finish error", async () => {
+    const endpoint = await modelEndpoint([FINISH]);
+    const run = session(endpoint.baseUrl, new AbortController().signal, 5);
+    let finishes = 0;
+    run.options.validateFinish = async () => {
+      finishes += 1;
+      if (finishes === 1) throw new Error("cases.json is missing");
+      throw new FatalFinishError("Verification cannot continue");
+    };
+    await expect(runCodingAgent(run.options)).rejects.toThrow(new FatalFinishError("Verification cannot continue"));
+    expect(endpoint.requests).toHaveLength(2);
+    expect(lastMessage(endpoint.requests[1])).toEqual({
+      role: "tool", tool_call_id: "call-1", content: JSON.stringify({ error: "cases.json is missing" }),
+    });
+  });
+
+  it("repairs a failed final check on the next finish", async () => {
+    const endpoint = await modelEndpoint([FINISH]);
+    const run = session(endpoint.baseUrl, new AbortController().signal, 5);
+    let checks = 0;
+    run.options.validateFinish = repairableFinishCheck(2, run.options.signal, run.options.log, async () => {
+      checks += 1;
+      if (checks === 1) throw new Error("Paper2Agent: input does not match its JSON schema");
+    });
+    await expect(runCodingAgent(run.options)).resolves.toMatchObject({ result: { done: true } });
+    expect(endpoint.requests).toHaveLength(2);
+    const failure = "Final check failed (repair 1 of 2): Paper2Agent: input does not match its JSON schema";
+    expect(lastMessage(endpoint.requests[1])).toMatchObject({ role: "tool", content: JSON.stringify({ error: failure }) });
+    expect(run.logs).toContain(failure);
+  });
+
+  it("ends the attempt with the check error on the third failed final check", async () => {
+    const endpoint = await modelEndpoint([FINISH]);
+    const run = session(endpoint.baseUrl, new AbortController().signal, 5);
+    run.options.validateFinish = repairableFinishCheck(2, run.options.signal, run.options.log, async () => {
+      throw new Error("Independent verification failed: AssertionError");
+    });
+    const failed = runCodingAgent(run.options);
+    await expect(failed).rejects.toBeInstanceOf(FatalFinishError);
+    await expect(failed).rejects.toThrow(/^Independent verification failed: AssertionError$/);
+    expect(endpoint.requests).toHaveLength(3);
+    expect(run.logs.filter((message) => message.startsWith("Final check failed"))).toEqual([
+      "Final check failed (repair 1 of 2): Independent verification failed: AssertionError",
+      "Final check failed (repair 2 of 2): Independent verification failed: AssertionError",
+      "Final check failed (no repairs left): Independent verification failed: AssertionError",
+    ]);
   });
 });

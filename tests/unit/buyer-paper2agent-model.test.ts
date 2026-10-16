@@ -2,7 +2,7 @@
  * buyer-paper2agent-model.test.ts — the buyer's paid model endpoint for the
  * Paper2Agent build service: authentication before spending, the gateway's
  * insufficient-funds contract, advert choice, Chat Completions translation,
- * Accept, and one wallet transaction sequence at a time.
+ * the background Accept, and wallet outputs that a pending Accept reserves.
  */
 
 import express from "express";
@@ -12,7 +12,11 @@ import type { ChainProvider, OutputReference, Utxo } from "@marketplace/shared/c
 import type { AdvertDatum } from "@marketplace/shared/cbor";
 import type { ResponseObject } from "@marketplace/shared/responses";
 import { TxConstructionError, type WalletKey } from "@marketplace/shared/tx";
-import { PAPER2AGENT_MODEL_PATH, registerPaper2AgentModelRoute } from "../../buyer/src/paper2agent/model.js";
+import {
+  PAPER2AGENT_MODEL_PATH,
+  registerPaper2AgentModelRoute,
+  type SubmittedAccept,
+} from "../../buyer/src/paper2agent/model.js";
 import type { Marketplace } from "../../buyer/src/sdk/Marketplace.js";
 import type { PostedPrompt, PreparedPrompt, SubmitPromptOptions, SubmitPromptResult, SupplierView } from "../../buyer/src/sdk/types.js";
 
@@ -81,7 +85,13 @@ function gate(): { wait: Promise<void>; open: () => void } {
 }
 
 function setup(options: {
-  views?: SupplierView[]; walletUtxos?: Utxo[]; beforeExecute?: () => Promise<void>; accept?: () => Promise<string>;
+  views?: SupplierView[]; walletUtxos?: Utxo[];
+  beforePost?: () => Promise<void>; beforeExecute?: () => Promise<void>;
+  /** Replaces the default Accept builder, which spends `acceptSpends`. */
+  submitAccept?: (escrowRef: OutputReference, excludeInputs: readonly OutputReference[]) => Promise<SubmittedAccept>;
+  acceptSpends?: OutputReference[];
+  /** Block confirmation of a submitted transaction; resolves at once by default. */
+  awaitTx?: (txHash: string) => Promise<void>;
   /** Live /status per endpoint URL; unlisted endpoints answer free. */
   liveStatus?: Record<string, string>;
   /** Advert byte whose supplier preflight refuses the request. */
@@ -103,7 +113,9 @@ function setup(options: {
     const endpoint = String(url).replace(/\/status$/, "");
     return new Response(JSON.stringify({ status: options.liveStatus?.[endpoint] ?? "free" }));
   });
-  const postPrompt = vi.fn(async (prepared: PreparedPrompt): Promise<PostedPrompt> => {
+  const postPrompt = vi.fn(async (prepared: PreparedPrompt, _beforeSubmit?: unknown,
+    _options?: { excludeInputs?: readonly OutputReference[] }): Promise<PostedPrompt> => {
+    await options.beforePost?.();
     events.push("post");
     return { ...prepared, escrowRef: { txHash: "cc".repeat(32), index: 0 }, postedAt: 1, deliverBy: 2 };
   });
@@ -121,23 +133,32 @@ function setup(options: {
       receiptSignature: "ff".repeat(64), escrowRef: posted.escrowRef, submittedRef: SUBMITTED,
     };
   });
-  const accept = vi.fn(options.accept ?? (async () => {
+  const submitAccept = vi.fn(options.submitAccept ?? (async (): Promise<SubmittedAccept> => {
     events.push("accept");
-    return ACCEPT_TX;
+    return { txHash: ACCEPT_TX, spentInputs: options.acceptSpends ?? [] };
   }));
+  const awaitTx = vi.fn(options.awaitTx ?? (async () => undefined));
   const queryUtxosByAddress = vi.fn(async () => options.walletUtxos ?? [utxo(100_000_000n, 0), utxo(6_000_000n, 1)]);
+  const backgroundTasks = new Set<Promise<unknown>>();
   const app = express();
   registerPaper2AgentModelRoute(app, {
     token: TOKEN,
     marketplace: { discoverSuppliers, preparePrompt, postPrompt, executePrompt } as unknown as Marketplace,
-    chain: { queryUtxosByAddress } as unknown as ChainProvider,
+    chain: { queryUtxosByAddress, awaitTx } as unknown as ChainProvider,
     walletKey: WALLET,
     indexerUrl: "http://indexer.invalid",
-    accept,
+    submitAccept,
+    acceptRetryMs: 1,
+    backgroundTasks,
     fetchImpl: fetchImpl as unknown as typeof globalThis.fetch,
     autoExcludedModels: options.autoExcludedModels,
   });
-  return { app, events, discoverSuppliers, preparePrompt, postPrompt, executePrompt, accept, queryUtxosByAddress };
+  /** Resolves when every background Accept has ended. */
+  const settled = async (): Promise<void> => {
+    while (backgroundTasks.size > 0) await Promise.allSettled([...backgroundTasks]);
+  };
+  return { app, events, discoverSuppliers, preparePrompt, postPrompt, executePrompt, submitAccept, awaitTx,
+    queryUtxosByAddress, settled };
 }
 
 /** The request shape the Paper2Agent build agent sends after one tool round. */
@@ -199,7 +220,8 @@ describe("buyer Paper2Agent paid model endpoint", () => {
       { type: "function_call_output", call_id: "call_1", output: "{\"stdout\":\"server.py\"}" },
     ]);
     expect(options.tools).toEqual([{ type: "function", name: "exec", description: "Run a command", parameters: { type: "object" } }]);
-    expect(f.accept).toHaveBeenCalledWith(SUBMITTED);
+    await f.settled();
+    expect(f.submitAccept).toHaveBeenCalledWith(SUBMITTED, []);
     expect(f.events).toEqual(["prepare", "post", "execute", "accept"]);
     expect(response.body.choices[0]).toEqual({
       index: 0,
@@ -207,7 +229,7 @@ describe("buyer Paper2Agent paid model endpoint", () => {
       finish_reason: "tool_calls",
     });
     expect(response.body.usage).toEqual({ prompt_tokens: 120, completion_tokens: 7, total_tokens: 127 });
-    expect(response.body.x_vector.accept_tx_hash).toBe(ACCEPT_TX);
+    expect(response.body.x_vector.accept).toBe("pending");
     expect(response.body.x_vector.submitted_ref).toBe(`${SUBMITTED.txHash}#0`);
   });
 
@@ -224,31 +246,83 @@ describe("buyer Paper2Agent paid model endpoint", () => {
     expect(f.postPrompt).not.toHaveBeenCalled();
   });
 
-  it("runs one wallet transaction sequence at a time", async () => {
-    const first = gate();
-    let calls = 0;
-    const f = setup({ beforeExecute: async () => { if (++calls === 1) await first.wait; } });
+  it("posts one escrow at a time and keeps a supplier with an open call out of the next choice", async () => {
+    const firstPost = gate();
+    const firstExecute = gate();
+    let posts = 0;
+    let executes = 0;
+    const f = setup({
+      views: [view("71", { endpoint_url: "https://a.example" }), view("72", { endpoint_url: "https://b.example" })],
+      beforePost: async () => { if (++posts === 1) await firstPost.wait; },
+      beforeExecute: async () => { if (++executes === 1) await firstExecute.wait; },
+    });
 
     const one = post(f.app).then((response) => response);
     await vi.waitFor(() => expect(f.postPrompt).toHaveBeenCalledTimes(1));
     const two = post(f.app).then((response) => response);
     await new Promise((resolve) => setImmediate(resolve));
+    // The second discovery waits for the first Post.
     expect(f.preparePrompt).toHaveBeenCalledTimes(1);
 
-    first.open();
+    firstPost.open();
+    // The second call reaches its supplier while the first supplier call is still open.
+    await vi.waitFor(() => expect(f.executePrompt).toHaveBeenCalledTimes(2));
+    firstExecute.open();
     const [a, b] = await Promise.all([one, two]);
     expect([a.status, b.status]).toEqual([200, 200]);
-    expect(f.events).toEqual(["prepare", "post", "execute", "accept", "prepare", "post", "execute", "accept"]);
+    expect(new Set(f.preparePrompt.mock.calls.map(([options]) => options.advertRef.txHash)))
+      .toEqual(new Set(["71".repeat(32), "72".repeat(32)]));
   });
 
-  it("reports a failed Accept with the Submitted reference to accept by hand", async () => {
-    const f = setup({ accept: async () => { throw new Error("awaitTx timed out"); } });
+  it("answers before the Accept confirms and keeps the pending Accept's inputs out of the next Post", async () => {
+    const confirmed = gate();
+    const spent = { txHash: "99".repeat(32), index: 1 };
+    const f = setup({ awaitTx: () => confirmed.wait, acceptSpends: [spent] });
 
-    const response = await post(f.app);
+    const first = await post(f.app);
+    expect(first.status).toBe(200);
+    expect(first.body.x_vector.accept).toBe("pending");
+    await vi.waitFor(() => expect(f.submitAccept).toHaveBeenCalledTimes(1));
 
-    expect(response.status).toBe(502);
-    expect(response.body.error.code).toBe("accept_failed");
-    expect(response.body.error.message).toContain(`${SUBMITTED.txHash}#0`);
+    expect((await post(f.app)).status).toBe(200);
+    expect(f.postPrompt.mock.calls[1][2]).toEqual({ excludeInputs: [spent] });
+
+    confirmed.open();
+    await f.settled();
+    expect((await post(f.app)).status).toBe(200);
+    expect(f.postPrompt.mock.calls[2][2]).toEqual({ excludeInputs: [] });
+  });
+
+  it("waits for a pending Accept when the outputs it does not spend cannot pay", async () => {
+    const confirmed = gate();
+    // The Accept spends the 100 AP3X output; 6 AP3X alone is below the preflight.
+    const f = setup({ awaitTx: () => confirmed.wait, acceptSpends: [{ txHash: "99".repeat(32), index: 0 }] });
+
+    expect((await post(f.app)).status).toBe(200);
+    await vi.waitFor(() => expect(f.submitAccept).toHaveBeenCalledTimes(1));
+    const second = post(f.app).then((response) => response);
+    await vi.waitFor(() => expect(f.queryUtxosByAddress).toHaveBeenCalledTimes(2));
+    expect(f.postPrompt).toHaveBeenCalledTimes(1);
+
+    confirmed.open();
+    expect((await second).status).toBe(200);
+    expect(f.postPrompt.mock.calls[1][2]).toEqual({ excludeInputs: [] });
+  });
+
+  it("sends the Accept again when it does not confirm, and stops when the escrow is no longer Submitted", async () => {
+    const notConfirmed = setup({ awaitTx: vi.fn()
+      .mockRejectedValueOnce(new Error("awaitTx timed out"))
+      .mockResolvedValue(undefined) });
+    expect((await post(notConfirmed.app)).status).toBe(200);
+    await notConfirmed.settled();
+    expect(notConfirmed.submitAccept).toHaveBeenCalledTimes(2);
+
+    const alreadySpent = setup({ submitAccept: async () => {
+      throw new TxConstructionError("escrow ref not on chain", "no UTxO");
+    } });
+    expect((await post(alreadySpent.app)).status).toBe(200);
+    await alreadySpent.settled();
+    expect(alreadySpent.submitAccept).toHaveBeenCalledTimes(1);
   });
 
   it("answers 503 without spending when no supplier of the model is free", async () => {
@@ -288,8 +362,9 @@ describe("buyer Paper2Agent paid model endpoint", () => {
 
     expect(response.status).toBe(200);
     expect(f.preparePrompt.mock.calls.map(([options]) => options.advertRef.txHash)).toEqual(["52".repeat(32), "53".repeat(32)]);
-    expect(f.events).toEqual(["prepare", "prepare", "post", "execute", "accept"]);
     expect(response.body.model).toBe("deepseek");
+    await f.settled();
+    expect(f.events).toEqual(["prepare", "prepare", "post", "execute", "accept"]);
   });
 
   it("auto never buys an excluded model, but an explicit request for it still does", async () => {

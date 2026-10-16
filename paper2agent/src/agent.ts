@@ -16,6 +16,8 @@ export class InsufficientFundsError extends Error {
     super(shortfall.message);
   }
 }
+/** A finish validation error that ends the run instead of returning to the model. */
+export class FatalFinishError extends Error {}
 export interface AgentTool {
   name: string;
   description: string;
@@ -38,10 +40,13 @@ export interface AgentSessionOptions {
   task: string;
   tools: AgentTool[];
   finishSchema: Record<string, unknown>;
-  validateFinish: (value: Record<string, unknown>) => void;
+  /** Each error returns to the model as the finish result; a FatalFinishError ends the run. */
+  validateFinish: (value: Record<string, unknown>) => void | Promise<void>;
   log: (message: string) => void;
-  /** Wait before resending a model call that failed or that the wallet cannot pay for. */
-  retryMs: number;
+  /** Wait before resending a model call that the wallet cannot pay for. */
+  fundsRetryMs: number;
+  /** Wait before resending a failed model call, times the number of failures in a row. */
+  failureRetryMs: number;
   /** Every refusal of the waiting model call, before the next wait. */
   onFundsShortfall: (shortfall: FundsShortfall) => void;
   /** The refused model call succeeded; called once per pause. */
@@ -123,10 +128,37 @@ async function requestModel(model: BuildModelConfig, messages: AgentMessage[], t
 }
 
 /**
+ * A finish check whose failures return to the model, so it can repair its work and finish again.
+ * The failure after `maxRepairs` repairs ends the run with that failure's message.
+ */
+export function repairableFinishCheck(maxRepairs: number, signal: AbortSignal, log: (message: string) => void,
+  check: (value: Record<string, unknown>) => Promise<void>): (value: Record<string, unknown>) => Promise<void> {
+  let failures = 0;
+  return async (value) => {
+    try {
+      await check(value);
+    } catch (error) {
+      signal.throwIfAborted();
+      if (error instanceof FatalFinishError) throw error;
+      failures += 1;
+      const reason = error instanceof Error ? error.message : String(error);
+      if (failures > maxRepairs) {
+        log(`Final check failed (no repairs left): ${reason.slice(0, 500)}`);
+        throw new FatalFinishError(reason, { cause: error });
+      }
+      const failure = `Final check failed (repair ${failures} of ${maxRepairs}): ${reason}`;
+      log(failure.slice(0, 600));
+      throw new Error(failure, { cause: error });
+    }
+  };
+}
+
+/**
  * Each invocation has a new conversation and run identity; verifier context is never reused.
  * There is no call, token, or time limit. A call the wallet cannot pay for is sent again
- * after `retryMs` until it succeeds or the build is stopped. A failed call or a reply
- * without a tool call is retried; MAX_MODEL_MISSES in a row end the run.
+ * after `fundsRetryMs` until it succeeds or the build is stopped. A failed call is retried
+ * after `failureRetryMs` times the misses in a row, and a reply without a tool call at once;
+ * MAX_MODEL_MISSES in a row end the run.
  */
 export async function runCodingAgent(options: AgentSessionOptions): Promise<AgentRunResult> {
   const runId = randomUUID();
@@ -150,12 +182,12 @@ export async function runCodingAgent(options: AgentSessionOptions): Promise<Agen
       if (!(error instanceof InsufficientFundsError)) {
         if (++misses >= MAX_MODEL_MISSES) throw error;
         options.log(`Model call ${callNumber} failed: ${error instanceof Error ? error.message.slice(0, 300) : "unknown error"}; retrying`);
-        await sleep(options.retryMs, undefined, { signal: options.signal });
+        await sleep(options.failureRetryMs * misses, undefined, { signal: options.signal });
         continue;
       }
       options.onFundsShortfall(error.shortfall);
       paused = true;
-      await sleep(options.retryMs, undefined, { signal: options.signal });
+      await sleep(options.fundsRetryMs, undefined, { signal: options.signal });
       continue;
     }
     options.usage.calls = callNumber;
@@ -191,7 +223,7 @@ export async function runCodingAgent(options: AgentSessionOptions): Promise<Agen
         if (!arguments_ || typeof arguments_ !== "object" || Array.isArray(arguments_)) throw new Error("Tool arguments must be an object");
         if (call.function.name === "finish") {
           if (calls.length !== 1) throw new Error("finish must be the only tool call");
-          options.validateFinish(arguments_ as Record<string, unknown>);
+          await options.validateFinish(arguments_ as Record<string, unknown>);
           return { runId, result: arguments_ as Record<string, unknown> };
         }
         const tool = options.tools.find((item) => item.name === call.function.name);
@@ -200,6 +232,7 @@ export async function runCodingAgent(options: AgentSessionOptions): Promise<Agen
         result = await tool.execute(arguments_ as Record<string, unknown>);
       } catch (error) {
         options.signal.throwIfAborted();
+        if (error instanceof FatalFinishError) throw error;
         result = { error: error instanceof Error ? error.message.slice(0, 4000) : "Build tool failed" };
       }
       let content = JSON.stringify(result);

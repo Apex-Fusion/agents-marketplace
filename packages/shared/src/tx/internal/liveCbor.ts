@@ -83,6 +83,8 @@ export interface LivePostEscrowParams {
   postedAt: number;
   /** Runs after signing and before any broadcast. Rejection prevents submit. */
   beforeSubmit?: (built: PostEscrowBuildResult) => Promise<void>;
+  /** Wallet outputs that a submitted, unconfirmed transaction spends; never selected. */
+  excludeInputs?: readonly OutputReference[];
 }
 
 export interface LiveClaimParams {
@@ -117,6 +119,8 @@ export interface LiveAcceptParams {
   tipMs: number;
   windowEnd: number;
   beforeSubmit?: (built: BuildResult) => Promise<void>;
+  /** Wallet outputs that a submitted, unconfirmed transaction spends; never selected. */
+  excludeInputs?: readonly OutputReference[];
 }
 
 export interface LiveReclaimParams {
@@ -415,6 +419,13 @@ export function reserveCollateralInputs(
   return remaining;
 }
 
+/** Wallet outputs minus the ones that a submitted, unconfirmed transaction already spends. */
+function withoutInputs(utxos: LucidUTxO[], excluded: readonly OutputReference[] | undefined): LucidUTxO[] {
+  if (!excluded?.length) return utxos;
+  const spent = new Set(excluded.map((ref) => `${ref.txHash}#${ref.index}`));
+  return utxos.filter((utxo) => !spent.has(`${utxo.txHash}#${utxo.outputIndex}`));
+}
+
 // ─── PostEscrow ──────────────────────────────────────────────────────
 
 export async function buildLiveTxForEscrow(
@@ -442,7 +453,7 @@ export async function buildLiveTxForEscrow(
   // Preserve a pure-ADA collateral UTxO so the buyer's later Accept/Reclaim
   // script-spend can find collateral. Without this, PostEscrow coin selection
   // can consume the 5-ADA collateral UTxO and strand the escrow at Accept.
-  const walletUtxos = await lucid.wallet().getUtxos();
+  const walletUtxos = withoutInputs(await lucid.wallet().getUtxos(), params.excludeInputs);
   const reservedInputs = reserveCollateralInputs(walletUtxos, lockedLovelace);
 
   let signed;
@@ -468,10 +479,12 @@ export async function buildLiveTxForEscrow(
       .setMinFee(500_000n);
 
     // When we can reserve collateral, restrict coin selection to the remaining
-    // (working) UTxOs so the collateral candidate survives for Accept. Else
-    // fall back to lucid's default selection (single/large-UTxO cases are safe).
-    const completed = reservedInputs
-      ? await txBuilder.complete({ presetWalletInputs: reservedInputs, localUPLCEval: false })
+    // (working) UTxOs so the collateral candidate survives for Accept. Excluded
+    // inputs also need an explicit set. Else fall back to lucid's default
+    // selection (single/large-UTxO cases are safe).
+    const presetWalletInputs = reservedInputs ?? (params.excludeInputs?.length ? walletUtxos : null);
+    const completed = presetWalletInputs
+      ? await txBuilder.complete({ presetWalletInputs, localUPLCEval: false })
       : await txBuilder.complete();
     signed = await completed.sign.withWallet().complete();
   } catch (err) {
@@ -692,9 +705,10 @@ export async function buildLiveTxForAccept(params: LiveAcceptParams): Promise<Bu
   const supplierLovelace = supplierDue < MIN_UTXO_LOVELACE ? MIN_UTXO_LOVELACE : supplierDue;
   const buyerLovelace = buyerDue < MIN_UTXO_LOVELACE ? MIN_UTXO_LOVELACE : buyerDue;
 
-  // Real wallet UTxOs only; the test-side synthetic padding input is removed
-  // (it caused unknownOutputReferences errors against the real ledger).
-  const realWalletUtxos = await lucid.wallet().getUtxos();
+  // Real wallet UTxOs only, minus the ones a pending transaction spends; the
+  // test-side synthetic padding input is removed (it caused
+  // unknownOutputReferences errors against the real ledger).
+  const realWalletUtxos = withoutInputs(await lucid.wallet().getUtxos(), params.excludeInputs);
   assertCollateralCandidate(realWalletUtxos);
   const presetWalletInputs = realWalletUtxos;
 

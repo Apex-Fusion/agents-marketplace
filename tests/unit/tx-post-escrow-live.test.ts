@@ -21,7 +21,7 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Decoder } from "cbor-x";
-import { inspectSignedTransaction } from "../../packages/shared/src/tx/server.js";
+import { inspectSignedTransaction, inspectSignedTransactionFinancials } from "../../packages/shared/src/tx/server.js";
 import { LiveOgmiosProvider } from "../../packages/shared/src/chain/LiveOgmiosProvider.js";
 import { buildPostEscrowTx } from "../../packages/shared/src/tx/escrow/postEscrow.js";
 import { TxConstructionError } from "../../packages/shared/src/tx/types.js";
@@ -70,13 +70,23 @@ function makeActiveAdvert(): AdvertDatum {
   };
 }
 
+interface OgmiosUtxo {
+  transaction: { id: string };
+  index: number;
+  address: string;
+  value: { ada: { lovelace: number } };
+  datum: string | null;
+  datumHash: null;
+  script: null;
+}
+
 function makeOgmiosUtxo(
   txId: string,
   index: number,
   address: string,
   lovelace: number,
   datumHex?: string,
-) {
+): OgmiosUtxo {
   return {
     transaction: { id: txId },
     index,
@@ -100,7 +110,7 @@ function buildLiveChain(): LiveOgmiosProvider {
   return new LiveOgmiosProvider({ ogmiosUrl: "http://ogmios:1337", fetch: mockFetch });
 }
 
-function setupMocksForHappyPath(): void {
+function setupMocksForHappyPath(extraWalletUtxos: OgmiosUtxo[] = []): void {
   const buyer = buildBuyerWalletKey();
   const advert = makeActiveAdvert();
   const advertDatumHex = encodeAdvertDatum(advert);
@@ -140,7 +150,7 @@ function setupMocksForHappyPath(): void {
         return rpcOk([makeOgmiosUtxo(ADVERT_TX_HASH, ADVERT_INDEX, "addr_script_advert", 2_000_000, advertDatumHex)]);
       }
       // If querying by address (buyer wallet for UTxO selection / collateral)
-      return rpcOk([makeOgmiosUtxo("c".repeat(64), 0, buyer.address, BUYER_COLLATERAL_LOVELACE)]);
+      return rpcOk([makeOgmiosUtxo("c".repeat(64), 0, buyer.address, BUYER_COLLATERAL_LOVELACE), ...extraWalletUtxos]);
     }
 
     if (method === "queryNetwork/tip") {
@@ -246,6 +256,28 @@ describe("buildPostEscrowTx() [live] — CBOR shape", () => {
       return body.method === "submitTransaction";
     });
     expect(submitted).toBe(true);
+  });
+});
+
+describe("buildPostEscrowTx() [live] — excluded inputs", () => {
+  it("never spends a wallet output that a pending transaction spends", async () => {
+    const buyer = buildBuyerWalletKey();
+    // Coin selection would fund from the larger output and keep the smaller one for collateral.
+    setupMocksForHappyPath([makeOgmiosUtxo("e".repeat(64), 0, buyer.address, 2 * BUYER_COLLATERAL_LOVELACE)]);
+    const pending = { txHash: "e".repeat(64), index: 0 };
+
+    const result = await buildPostEscrowTx({
+      chain: buildLiveChain(),
+      buyerKey: buyer,
+      advertRef: { txHash: ADVERT_TX_HASH, index: ADVERT_INDEX },
+      messages: SAMPLE_MESSAGES,
+      payment_lovelace: PAYMENT,
+      excludeInputs: [pending],
+    });
+
+    const inputs = inspectSignedTransactionFinancials(result.txCborHex).inputs;
+    expect(inputs).not.toContainEqual(pending);
+    expect(inputs).toContainEqual({ txHash: "c".repeat(64), index: 0 });
   });
 });
 

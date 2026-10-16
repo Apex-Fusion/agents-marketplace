@@ -125,6 +125,8 @@ export interface AppDeps {
   paper2agentModelToken?: string;
   /** Advert model names that the build's "auto" model never buys from. */
   paper2agentModelAutoExclude?: readonly string[];
+  /** Background work (Accepts of paid build model calls) that shutdown waits for. */
+  backgroundTasks?: Set<Promise<unknown>>;
 }
 
 interface ResolvedDeps {
@@ -1326,6 +1328,7 @@ export function createApp(deps: AppDeps): Express {
     indexerUrl: resolved?.indexerUrl,
     archive: deps.archive,
     autoExcludedModels: deps.paper2agentModelAutoExclude,
+    backgroundTasks: deps.backgroundTasks,
   });
 
   // ── Paper2Agent operator workflow (/v1/paper2agent/*) ───────────────

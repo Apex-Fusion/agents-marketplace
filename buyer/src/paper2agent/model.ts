@@ -7,17 +7,22 @@
  * the buyer wallet:
  *   cheapest live-free llm.text.generate.v1 advert for `model` ("auto": any
  *   model whose supplier accepts the request) → wallet preflight → PostEscrow
- *   → supplier → receipt verification → Accept (confirmed)
+ *   (confirmed) → supplier → receipt verification → answer
+ * Accept runs in the background after the answer, so the build does not wait
+ * for its block.
  * Errors use the gateway's OpenAI shape. A wallet that cannot pay answers 402
  * insufficient_funds with x_vector amounts and the deposit address before any
  * transaction, as the gateway does, so the build waits instead of failing.
  *
  * The build service authenticates with a bearer token; the buyer key never
- * leaves this server. One call runs at a time: the shared transaction builder
- * cannot pin wallet inputs, so concurrent posts would select the same UTxO.
+ * leaves this server. The shared transaction builder does not track pending
+ * transactions, so a lock serializes building and submitting wallet
+ * transactions, and every build excludes the outputs that a submitted,
+ * unconfirmed Accept spends.
  */
 
 import { createHash, randomInt, timingSafeEqual } from "node:crypto";
+import { setTimeout as sleep } from "node:timers/promises";
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
 import { canonicalize } from "@marketplace/shared/cbor";
 import type { ChainProvider, OutputReference } from "@marketplace/shared/chain";
@@ -30,12 +35,13 @@ import {
   type ResponseObject,
   type ResponseRequest,
 } from "@marketplace/shared/responses";
-import { escrowLockFloor, TxConstructionError, type ChatMessage, type WalletKey } from "@marketplace/shared/tx";
-import { findSubmittedEscrowRef, runAccept } from "../cli/acceptFlow.js";
+import { buildAcceptTx, escrowLockFloor, TxConstructionError, type ChatMessage, type WalletKey } from "@marketplace/shared/tx";
+import { inspectSignedTransactionFinancials } from "@marketplace/shared/tx/server";
+import { findSubmittedEscrowRef } from "../cli/acceptFlow.js";
 import type { ResponseArchive } from "../db/archive.js";
 import { Mutex } from "../mutex.js";
 import type { Marketplace } from "../sdk/Marketplace.js";
-import type { PreparedPrompt, SubmitPromptResult } from "../sdk/types.js";
+import type { PostedPrompt, PreparedPrompt, SubmitPromptResult } from "../sdk/types.js";
 
 export const PAPER2AGENT_MODEL_PATH = "/v1/paper2agent/model/chat/completions";
 
@@ -56,6 +62,22 @@ const AUTO_MIN_OUTPUT_TOKENS = 4096;
 const STATUS_PROBE_TIMEOUT_MS = 2_000;
 /** A supplier whose paid call failed is not chosen again for this long. */
 const FAILED_SUPPLIER_COOLDOWN_MS = 15 * 60_000;
+/** The supplier answers result polls from memory; 500 ms adds at most half a second. */
+const RESULT_POLL_MS = 500;
+/** Background Accept: attempts per Submitted escrow, default wait between them, confirmation budget. */
+const ACCEPT_ATTEMPTS = 3;
+const ACCEPT_RETRY_MS = 10_000;
+const ACCEPT_CONFIRM_TIMEOUT_MS = 120_000;
+/** Accept build refusals that no retry can change. */
+const FINAL_ACCEPT_REASONS: Record<string, true> = {
+  "escrow ref not on chain": true, "wrong state": true, "accept window expired": true,
+};
+
+/** One submitted Accept: its hash and every output it spends. */
+export interface SubmittedAccept {
+  txHash: string;
+  spentInputs: OutputReference[];
+}
 
 export interface Paper2AgentModelOptions {
   /** Bearer token shared with the build service. Empty disables the route. */
@@ -65,8 +87,12 @@ export interface Paper2AgentModelOptions {
   walletKey?: WalletKey;
   indexerUrl?: string;
   archive?: ResponseArchive;
-  /** Settles one Submitted escrow and returns the confirmed Accept tx hash. */
-  accept?: (escrowRef: OutputReference) => Promise<string>;
+  /** Builds and submits one Accept without waiting for its block. Defaults to the live builder. */
+  submitAccept?: (escrowRef: OutputReference, excludeInputs: readonly OutputReference[]) => Promise<SubmittedAccept>;
+  /** Wait between background Accept attempts. Default 10 s. */
+  acceptRetryMs?: number;
+  /** Background Accepts are added here while they run, so shutdown can wait for them. */
+  backgroundTasks?: Set<Promise<unknown>>;
   /** Reads supplier /status before each purchase; defaults to globalThis.fetch. */
   fetchImpl?: typeof globalThis.fetch;
   /** Models that "auto" never buys from. An explicit request for one still buys it. */
@@ -249,11 +275,13 @@ async function liveFree(endpointUrl: string, fetchImpl: typeof globalThis.fetch)
 
 /**
  * The gateway's one-shot preflight: the escrow lock floor plus the collateral and
- * fee reserve, and one pure-AP3X UTxO for Accept collateral. Refuses before any
- * transaction is built.
+ * fee reserve, and one pure-AP3X UTxO for Accept collateral. Outputs that a pending
+ * Accept spends do not count. Refuses before any transaction is built.
  */
-async function assertFunds(chain: ChainProvider, walletKey: WalletKey, prepared: PreparedPrompt): Promise<void> {
-  const utxos = await chain.queryUtxosByAddress(walletKey.address);
+async function assertFunds(chain: ChainProvider, walletKey: WalletKey, prepared: PreparedPrompt,
+  reserved: readonly OutputReference[]): Promise<void> {
+  const spent = new Set(reserved.map(refString));
+  const utxos = (await chain.queryUtxosByAddress(walletKey.address)).filter((utxo) => !spent.has(refString(utxo.ref)));
   const available = utxos.reduce((sum, utxo) => sum + utxo.lovelace, 0n);
   const collateralOk = utxos.some((utxo) => utxo.lovelace >= COLLATERAL_MIN_LOVELACE && Object.keys(utxo.assets).length === 0);
   const { advert } = prepared;
@@ -319,17 +347,59 @@ function chatCompletion(model: string, result: ResponseObject, vector: Record<st
 export function registerPaper2AgentModelRoute(app: Express, options: Paper2AgentModelOptions): void {
   const { token, marketplace, chain, walletKey, indexerUrl, archive, fetchImpl = globalThis.fetch } = options;
   const expected = createHash("sha256").update(token).digest();
+  /** Serializes building and submitting wallet transactions; block confirmations wait outside it. */
   const wallet = new Mutex();
   /** Supplier endpoint → time until which it is skipped after a failed paid call. */
   const failedUntil = new Map<string, number>();
+  /** Supplier endpoints with a paid call between Post and result; never chosen for a second call. */
+  const busyEndpoints = new Set<string>();
   const autoExcluded = new Set(options.autoExcludedModels ?? []);
-  const accept = options.accept ?? (async (escrowRef: OutputReference): Promise<string> => {
-    const result = await runAccept({
-      chain: chain!, walletKey: walletKey!, escrowRef,
-      log: (line) => console.log(`[paper2agent-model] ${line}`),
-    });
-    return result.txHash;
+  /** Submitted Accepts that are not in a block yet: tx hash → spent outputs and confirmation. */
+  const pendingAccepts = new Map<string, { inputs: OutputReference[]; confirmed: Promise<void> }>();
+  const acceptRetryMs = options.acceptRetryMs ?? ACCEPT_RETRY_MS;
+  const submitAccept = options.submitAccept ?? (async (escrowRef: OutputReference,
+    excludeInputs: readonly OutputReference[]): Promise<SubmittedAccept> => {
+    const built = await buildAcceptTx({ chain: chain!, buyerKey: walletKey!, escrowRef, excludeInputs });
+    // Collateral must also stay unspent until the Accept is in a block.
+    const { inputs, collateralInputs } = inspectSignedTransactionFinancials(built.txCborHex);
+    return { txHash: built.expectedTxHash, spentInputs: [...inputs, ...collateralInputs] };
   });
+  const reservedInputs = (): OutputReference[] => [...pendingAccepts.values()].flatMap((accept) => accept.inputs);
+
+  /** Accepts one Submitted escrow; retries a failed attempt and stops when no retry can succeed. */
+  const settle = async (submittedRef: OutputReference, escrowRef: string): Promise<void> => {
+    const submitted = refString(submittedRef);
+    for (let attempt = 1; attempt <= ACCEPT_ATTEMPTS; attempt += 1) {
+      if (attempt > 1) await sleep(acceptRetryMs);
+      let accept: { txHash: string; confirmed: Promise<void> };
+      try {
+        accept = await wallet.run(async () => {
+          const sent = await submitAccept(submittedRef, reservedInputs());
+          const confirmed = chain!.awaitTx(sent.txHash, ACCEPT_CONFIRM_TIMEOUT_MS);
+          confirmed.catch(() => undefined); // awaited below; this only marks the rejection handled
+          pendingAccepts.set(sent.txHash, { inputs: sent.spentInputs, confirmed });
+          return { txHash: sent.txHash, confirmed };
+        });
+      } catch (error) {
+        if (error instanceof TxConstructionError && FINAL_ACCEPT_REASONS[error.reason]) {
+          console.warn(`[paper2agent-model] accept of ${submitted} not sent: ${error.reason}`);
+          return;
+        }
+        console.error(`[paper2agent-model] accept of ${submitted} attempt ${attempt} failed: ${errorMessage(error)}`);
+        continue;
+      }
+      try {
+        await accept.confirmed;
+        console.log(`[paper2agent-model] accepted escrow=${escrowRef} accept=${accept.txHash}`);
+        return;
+      } catch (error) {
+        console.error(`[paper2agent-model] accept ${accept.txHash} of ${submitted} not confirmed: ${errorMessage(error)}`);
+      } finally {
+        pendingAccepts.delete(accept.txHash);
+      }
+    }
+    console.error(`[paper2agent-model] accept_failed ${submitted}: accept it with POST /v1/accept within 10 minutes of its submission`);
+  };
 
   // Authenticate before reading the body or touching the wallet.
   const authorize = (req: Request, res: Response, next: NextFunction): void => {
@@ -352,6 +422,7 @@ export function registerPaper2AgentModelRoute(app: Express, options: Paper2Agent
     async (req: Request, res: Response) => {
       const started = Date.now();
       let model = "";
+      let busyEndpoint: string | undefined;
       try {
         const body = record(req.body, "request body");
         const extra = Object.keys(body).find((field) => !REQUEST_FIELDS.includes(field));
@@ -366,10 +437,12 @@ export function registerPaper2AgentModelRoute(app: Express, options: Paper2Agent
 
         // Discovery runs inside the lock so the chosen advert is current when its escrow posts.
         // Busy, unreachable, or incompatible suppliers are skipped before any funds move.
-        const call = await wallet.run(async () => {
+        // The lock ends with the confirmed Post; the supplier call and the Accept run outside it.
+        const { advert, posted } = await wallet.run(async () => {
           let selected: { advert: Advert; prepared: PreparedPrompt } | undefined;
           for (const advert of await candidateAdverts(marketplace!, model, autoExcluded)) {
-            if ((failedUntil.get(advert.endpointUrl) ?? 0) > Date.now() || !await liveFree(advert.endpointUrl, fetchImpl)) continue;
+            if (busyEndpoints.has(advert.endpointUrl) || (failedUntil.get(advert.endpointUrl) ?? 0) > Date.now() ||
+                !await liveFree(advert.endpointUrl, fetchImpl)) continue;
             try {
               selected = { advert, prepared: await marketplace!.preparePrompt({
                 advertRef: advert.ref,
@@ -391,55 +464,67 @@ export function registerPaper2AgentModelRoute(app: Express, options: Paper2Agent
               : `No free ${CAPABILITY_ID} supplier offers ${model}.`);
           }
           const { advert, prepared } = selected;
-          await assertFunds(chain!, walletKey!, prepared);
-          let submit: SubmitPromptResult;
+          busyEndpoint = advert.endpointUrl;
+          busyEndpoints.add(busyEndpoint);
+          const fundAndPost = async (): Promise<PostedPrompt> => {
+            const reserved = reservedInputs();
+            await assertFunds(chain!, walletKey!, prepared, reserved);
+            return marketplace!.postPrompt(prepared, undefined, { excludeInputs: reserved });
+          };
           try {
-            submit = await marketplace!.executePrompt(await marketplace!.postPrompt(prepared));
+            return { advert, posted: await fundAndPost() };
           } catch (error) {
-            failedUntil.set(advert.endpointUrl, Date.now() + FAILED_SUPPLIER_COOLDOWN_MS);
-            console.error(`[paper2agent-model] ${advert.model} ${advert.endpointUrl} failed; skipped for 15 min`);
-            throw error;
+            // Outputs of pending Accepts stay reserved. If the rest cannot pay, wait for those blocks once.
+            // Both errors come before any broadcast, so the second Post cannot duplicate the first.
+            const reservedShortfall = pendingAccepts.size > 0 &&
+              (error instanceof TxConstructionError || (error instanceof ModelCallError && error.status === 402));
+            if (!reservedShortfall) throw error;
+            await Promise.allSettled([...pendingAccepts.values()].map((accept) => accept.confirmed));
+            return { advert, posted: await fundAndPost() };
           }
-          const submittedRef = submit.submittedRef ?? await findSubmittedEscrowRef(
-            indexerUrl!, walletKey!.pubKeyHash, submit.receipt.prompt_hash, SUBMITTED_LOOKUP_TIMEOUT_MS);
-          let acceptTxHash: string;
-          try {
-            acceptTxHash = await accept(submittedRef);
-          } catch (error) {
-            throw new ModelCallError(502, "accept_failed",
-              `The paid call succeeded, but Accept of ${refString(submittedRef)} failed: ${errorMessage(error)}. ` +
-              "Accept it with POST /v1/accept within 10 minutes of its submission.");
-          }
-          return { advert, submit, submittedRef, acceptTxHash };
         });
 
-        const escrowRef = refString(call.submit.escrowRef);
+        let submit: SubmitPromptResult;
+        try {
+          submit = await marketplace!.executePrompt(posted, undefined, { pollIntervalMs: RESULT_POLL_MS });
+        } catch (error) {
+          failedUntil.set(advert.endpointUrl, Date.now() + FAILED_SUPPLIER_COOLDOWN_MS);
+          console.error(`[paper2agent-model] ${advert.model} ${advert.endpointUrl} failed; skipped for 15 min`);
+          throw error;
+        }
+        const submittedRef = submit.submittedRef ?? await findSubmittedEscrowRef(
+          indexerUrl!, walletKey!.pubKeyHash, submit.receipt.prompt_hash, SUBMITTED_LOOKUP_TIMEOUT_MS);
+        const escrowRef = refString(submit.escrowRef);
+        // The build continues while the Accept waits for its block.
+        const settlement = settle(submittedRef, escrowRef);
+        options.backgroundTasks?.add(settlement);
+        void settlement.finally(() => options.backgroundTasks?.delete(settlement));
         if (archive) {
           try {
             archive.persistChat({
               escrow_ref: escrowRef,
               posted_at: started,
               capability_id: CAPABILITY_ID,
-              supplier_pkh: call.submit.receipt.supplier_pkh,
-              model: call.submit.receipt.model,
-              payment_lovelace: call.advert.priceLovelace.toString(),
-              request_envelope: call.submit.request,
-              response_canonical: canonicalize(responseResultCommitment(call.submit.result)),
-              receipt: call.submit.receipt as unknown as Record<string, unknown>,
-              receipt_signature: call.submit.receiptSignature,
+              supplier_pkh: submit.receipt.supplier_pkh,
+              model: submit.receipt.model,
+              payment_lovelace: advert.priceLovelace.toString(),
+              request_envelope: submit.request,
+              response_canonical: canonicalize(responseResultCommitment(submit.result)),
+              receipt: submit.receipt as unknown as Record<string, unknown>,
+              receipt_signature: submit.receiptSignature,
             });
           } catch (error) {
             console.error(`[paper2agent-model] archive.persistChat failed for ${escrowRef}: ${errorMessage(error)}`);
           }
         }
-        console.log(`[paper2agent-model] ${model}→${call.advert.model} escrow=${escrowRef} accept=${call.acceptTxHash} ` +
+        console.log(`[paper2agent-model] ${model}→${advert.model} escrow=${escrowRef} ` +
           `seconds=${((Date.now() - started) / 1000).toFixed(1)}`);
-        res.status(200).json(chatCompletion(call.advert.model, call.submit.result, {
+        res.status(200).json(chatCompletion(advert.model, submit.result, {
           escrow_ref: escrowRef,
-          submitted_ref: refString(call.submittedRef),
-          accept_tx_hash: call.acceptTxHash,
-          receipt: call.submit.receipt,
-          receipt_signature: call.submit.receiptSignature,
+          submitted_ref: refString(submittedRef),
+          accept: "pending",
+          receipt: submit.receipt,
+          receipt_signature: submit.receiptSignature,
         }));
       } catch (error) {
         if (error instanceof ModelCallError) {
@@ -450,6 +535,8 @@ export function registerPaper2AgentModelRoute(app: Express, options: Paper2Agent
         const reason = error instanceof Error && "reason" in error ? String(error.reason) : "paid_call_failed";
         console.error(`[paper2agent-model] ${model} failed reason=${reason}: ${errorMessage(error)}`);
         sendError(res, new ModelCallError(502, reason.slice(0, 100), errorMessage(error).slice(0, 4000)));
+      } finally {
+        if (busyEndpoint) busyEndpoints.delete(busyEndpoint);
       }
     });
 

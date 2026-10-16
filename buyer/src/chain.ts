@@ -14,11 +14,14 @@ import {
 } from "@marketplace/shared/chain";
 import type { BuyerConfig } from "./config.js";
 
+/** Blocks come about every 4 s; a 500 ms poll sees a confirmation within half a second, not 2 s. */
+const CONFIRM_POLL_MS = 500;
+
 export function buildChainProvider(
   config: BuyerConfig,
   fetchFn?: typeof globalThis.fetch,
 ): ChainProvider {
-  const opts = { ogmiosUrl: config.ogmiosUrl, fetch: fetchFn };
+  const opts = { ogmiosUrl: config.ogmiosUrl, fetch: fetchFn, pollIntervalMs: CONFIRM_POLL_MS };
   if (config.liveChain) {
     // eslint-disable-next-line no-console
     console.log("[buyer] chain: LiveOgmiosProvider selected (LIVE_CHAIN=1)");

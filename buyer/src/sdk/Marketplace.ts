@@ -481,6 +481,7 @@ export class Marketplace extends EventEmitterBase {
   async postPrompt(
     prepared: PreparedPrompt,
     beforeSubmit?: (built: PostEscrowBuildResult) => Promise<void>,
+    options: { excludeInputs?: readonly OutputReference[] } = {},
   ): Promise<PostedPrompt> {
     const postedAtFallback = Date.now();
     let built: PostEscrowBuildResult;
@@ -495,6 +496,7 @@ export class Marketplace extends EventEmitterBase {
         prompt_hash: promptHash,
         payment_lovelace: prepared.advert.price_lovelace,
         beforeSubmit,
+        excludeInputs: options.excludeInputs,
       });
     } catch (error) {
       const reason = error instanceof TxConstructionError
@@ -556,6 +558,7 @@ export class Marketplace extends EventEmitterBase {
   async executePrompt(
     posted: PostedPrompt,
     onJobAccepted?: (jobId: string) => Promise<void>,
+    options: { pollIntervalMs?: number } = {},
   ): Promise<SubmitPromptResult> {
     const escrowRefStr = refToString(posted.escrowRef);
     const recordFailure = (reason: string): void => {
@@ -625,7 +628,7 @@ export class Marketplace extends EventEmitterBase {
       let firstPoll = true;
       while (Date.now() < pollDeadline) {
         if (!firstPoll) {
-          await new Promise<void>((resolve) => setTimeout(resolve, 2_000));
+          await new Promise<void>((resolve) => setTimeout(resolve, options.pollIntervalMs ?? 2_000));
         }
         firstPoll = false;
         try {

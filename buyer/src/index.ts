@@ -7,6 +7,7 @@
  */
 
 import { resolve } from "path";
+import { setTimeout as delay } from "node:timers/promises";
 import { createHash } from "crypto";
 import * as ed from "@noble/ed25519";
 import { blake2b } from "@noble/hashes/blake2b";
@@ -20,6 +21,9 @@ import { JobStore } from "./pdf/summarize-job.js";
 import { PdfJobDb } from "./pdf/job-db.js";
 import { loadPdfCaps } from "./pdf/caps.js";
 import type { WalletKey } from "@marketplace/shared/tx";
+
+/** Longest wait at shutdown for background Accepts after in-flight requests end. */
+const SHUTDOWN_DRAIN_MS = 60_000;
 
 // Wire ed25519 sha512 hook (idempotent — same as receipt/sign.ts).
 ed.etc.sha512Sync = (...messages: Uint8Array[]): Uint8Array => {
@@ -142,6 +146,8 @@ export async function runMain(env: Record<string, string | undefined>): Promise<
         : `; auto excludes ${config.paper2agentModelAutoExclude.join(", ")}`),
   );
 
+  /** Accepts of paid build model calls finish after the answer; shutdown waits for them. */
+  const backgroundTasks = new Set<Promise<unknown>>();
   const app = createApp({
     distPath,
     chain,
@@ -162,6 +168,7 @@ export async function runMain(env: Record<string, string | undefined>): Promise<
     paper2agentControlToken: config.paper2agentControlToken,
     paper2agentModelToken: config.paper2agentModelToken,
     paper2agentModelAutoExclude: config.paper2agentModelAutoExclude,
+    backgroundTasks,
   });
 
   const server = app.listen(config.port, () => {
@@ -172,7 +179,11 @@ export async function runMain(env: Record<string, string | undefined>): Promise<
   const shutdown = (): void => {
     // eslint-disable-next-line no-console
     console.log("[buyer] shutting down...");
-    server.close(() => process.exit(0));
+    // In-flight requests end first, then background Accepts, for at most SHUTDOWN_DRAIN_MS.
+    server.close(() => {
+      void Promise.race([Promise.allSettled([...backgroundTasks]), delay(SHUTDOWN_DRAIN_MS)])
+        .then(() => process.exit(0));
+    });
   };
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
