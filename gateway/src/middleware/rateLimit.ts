@@ -3,7 +3,7 @@
  *
  * Small sliding-window limiter (same shape as buyer/src/auth.ts createRateLimiter,
  * inlined to avoid coupling the operator-auth module into the gateway). Used to
- * bound public /signup abuse (per IP) and per-key request volume (429 + Retry-After).
+ * bound public /signup and /mcp abuse (per IP) and per-key request volume (429 + Retry-After).
  */
 
 import type { Request, Response, NextFunction } from "express";
@@ -16,15 +16,25 @@ interface Bucket {
   windowStart: number;
 }
 
-interface Limiter {
+export interface Limiter {
   attempt(key: string): { allowed: boolean; retryAfterMs: number };
 }
 
-function createLimiter(opts: { max: number; windowMs: number }): Limiter {
+/** Expired windows are dropped (at most once per window) when this many keys exist. */
+const PRUNE_AT = 10_000;
+
+export function createLimiter(opts: { max: number; windowMs: number }): Limiter {
   const buckets = new Map<string, Bucket>();
+  let prunedAt = 0;
   return {
     attempt(key: string) {
       const t = Date.now();
+      if (buckets.size >= PRUNE_AT && t - prunedAt >= opts.windowMs) {
+        prunedAt = t;
+        for (const [name, bucket] of buckets) {
+          if (t - bucket.windowStart >= opts.windowMs) buckets.delete(name);
+        }
+      }
       const existing = buckets.get(key);
       if (!existing || t - existing.windowStart >= opts.windowMs) {
         buckets.set(key, { count: 1, windowStart: t });

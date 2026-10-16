@@ -6,6 +6,9 @@
 # Secrets live in gateway/.env (NOT committed):
 #   GATEWAY_MASTER_KEY=<openssl rand -hex 32>   # losing this locks ALL user funds
 #   GATEWAY_ADMIN_TOKEN=<separate random token, matching buyer/.env>
+#   PAPER2AGENT_TOOL_CALL_TOKEN=<random token, same value as the Paper2Agent publisher>
+# /mcp is public: free Paper2Agent tool calls need no API key (per-IP limits;
+# see MCP_* in gateway/.env.example).
 # Back up BOTH gateway/.env (the master key) AND the gateway-mainnet-data volume
 # (the gateway.db holds every user's encrypted wallet key + usage).
 
@@ -41,6 +44,9 @@ services:
       # frontend's "API Keys" page (served from marketplace.vector…) POSTs to
       # /signup here. Comma-separated; empty disables CORS entirely.
       GATEWAY_CORS_ORIGINS: https://marketplace.vector.apexfusion.org
+      # Public /mcp lists and calls only Paper2Agent tools under this URL (the
+      # publisher's PAPER2AGENT_PUBLISHER_PUBLIC_URL). The call token goes nowhere else.
+      PAPER2AGENT_PUBLISHER_PUBLIC_URL: https://api.marketplace.vector.apexfusion.org/p2a
       # Ticket mode: the escrow post at session open is the only chain op;
       # the sweeper reclaims Open escrows after deliver_by. Must match the
       # kimi-chat suppliers' CHAT_SETTLE_MODE.

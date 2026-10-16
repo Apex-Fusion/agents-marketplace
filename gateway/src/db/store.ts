@@ -3,7 +3,6 @@ import { join, resolve } from "path";
 import Database from "better-sqlite3";
 import type { Database as BetterDatabase, Statement } from "better-sqlite3";
 import { CREATE_TABLES_SQL } from "./schema.js";
-import { Paper2AgentStore } from "./paper2agent.js";
 
 export interface ApiKeyRow {
   id: string;
@@ -169,7 +168,6 @@ const ONE_SHOT_MUTABLE_FIELDS: Partial<Record<keyof OneShotJobRow, true>> = {
 
 export class GatewayStore {
   private readonly db: BetterDatabase;
-  readonly paper2agent: Paper2AgentStore;
   private readonly sInsertKey: Statement;
   private readonly sGetKeyByHash: Statement;
   private readonly sGetKeyById: Statement;
@@ -224,7 +222,6 @@ export class GatewayStore {
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("busy_timeout = 5000");
     this.db.exec(CREATE_TABLES_SQL);
-    this.paper2agent = new Paper2AgentStore(this.db);
 
     const keyCols = this.db.pragma("table_info(api_keys)") as Array<{ name: string }>;
     if (!keyCols.some((column) => column.name === "demo")) {
@@ -460,7 +457,6 @@ export class GatewayStore {
   insertOneShotJob(
     row: Pick<OneShotJobRow, "id" | "key_id" | "owner_id" | "model" | "created_at">,
     maxOutstanding = 64,
-    onAdmit?: () => void,
   ): boolean {
     if (!Number.isSafeInteger(maxOutstanding) || maxOutstanding < 0) {
       throw new RangeError("maxOutstanding must be a non-negative safe integer");
@@ -469,7 +465,6 @@ export class GatewayStore {
       const count = this.sCountOneShotOutstanding.get({ key_id: row.key_id }) as { n: number };
       if (count.n >= maxOutstanding) return false;
       this.sInsertOneShotJob.run(row);
-      onAdmit?.();
       return true;
     });
     return insert.immediate();
@@ -590,13 +585,6 @@ export class GatewayStore {
 
   putPendingWalletTransaction(row: PendingWalletTransaction): boolean {
     const put = this.db.transaction(() => {
-      if (this.paper2agent.approval(row.key_id)) {
-        const authorized = this.db.prepare(`SELECT 1 FROM paper2agent_transactions AS tx
-          JOIN paper2agent_calls AS call ON call.job_id = tx.job_id
-          WHERE call.key_id = ? AND tx.tx_hash = ? AND tx.tx_cbor = ?`)
-          .get(row.key_id, row.tx_hash, row.tx_cbor);
-        if (!authorized) return false;
-      }
       const inserted = this.sInsertPendingWalletTransaction.run(row);
       if (inserted.changes > 0) return true;
       const existing = this.sGetPendingWalletTransaction.get({

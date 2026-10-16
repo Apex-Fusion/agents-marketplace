@@ -18,6 +18,10 @@
  *   PAPER2AGENT_PUBLISHER_PORT         — default 8096.
  *   PAPER2AGENT_PUBLISHER_HOST         — listen address (IP literal), default 127.0.0.1.
  *   PAPER2AGENT_PUBLISHER_DATA_DIR     — default ./data/paper2agent-publisher.
+ *   PAPER2AGENT_TOOL_CALL_TOKEN        — bearer token for unpaid tool calls
+ *                                        (POST /tools/<id>/v1/paper2agent/call): at least 32
+ *                                        printable characters without whitespace, the same
+ *                                        value as the gateway's. Unset: the route answers 404.
  *   DOCKER_HOST                        — unix:// socket for docker builds and for the
  *                                        supplier's fixed tool command.
  *
@@ -128,6 +132,8 @@ export interface PaperPublisherConfig {
   port: number;
   host: string;
   token: string;
+  /** Bearer token of the unpaid tool-call route, or null when the route is disabled. */
+  toolCallToken: string | null;
   /** No trailing slash. */
   publicUrl: string;
   /** Exact local base image ID, equal to every accepted artifact.runtime_image. */
@@ -279,6 +285,12 @@ export function loadPaperPublisherConfig(env: Record<string, string | undefined>
   if (!IMAGE_ID_RE.test(runtimeImage)) fail("PAPER2AGENT_RUNTIME_IMAGE must be an exact local image ID (sha256:<64 hex>)");
   const managementToken = env.PAPER2AGENT_PUBLISHER_TOKEN ?? "";
   if (!TOKEN_RE.test(managementToken)) fail("PAPER2AGENT_PUBLISHER_TOKEN must be at least 32 printable characters without whitespace");
+  const toolCallToken = env.PAPER2AGENT_TOOL_CALL_TOKEN || null;
+  if (toolCallToken !== null && !TOKEN_RE.test(toolCallToken)) {
+    fail("PAPER2AGENT_TOOL_CALL_TOKEN must be at least 32 printable characters without whitespace");
+  }
+  // The gateway holds this token; it must not grant management access.
+  if (toolCallToken === managementToken) fail("PAPER2AGENT_TOOL_CALL_TOKEN must differ from PAPER2AGENT_PUBLISHER_TOKEN");
   const url = publicUrl(env.PAPER2AGENT_PUBLISHER_PUBLIC_URL);
   const targetsFile = env.PAPER2AGENT_PUBLISHER_TARGETS_FILE ?? "";
   if (targetsFile === "") fail("PAPER2AGENT_PUBLISHER_TARGETS_FILE is required");
@@ -291,6 +303,7 @@ export function loadPaperPublisherConfig(env: Record<string, string | undefined>
     port,
     host,
     token: managementToken,
+    toolCallToken,
     publicUrl: url,
     runtimeImage,
     dockerPath: dockerExecutable(env.PATH),

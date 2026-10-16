@@ -162,6 +162,12 @@ export interface Paper2AgentConfig {
   packagePath: string;
   manifestPath: string;
   journalDir: string;
+  /**
+   * PAPER2AGENT_FREE_CALLS=1 enables the unpaid POST /v1/paper2agent/call route.
+   * The route has no authentication: enable it only behind a proxy that
+   * authenticates callers, such as the Paper2Agent publisher.
+   */
+  freeCalls?: boolean;
 }
 
 export interface SupplierConfig {
@@ -785,5 +791,6 @@ export function loadPaper2AgentConfig(env: Record<string, string | undefined>): 
       argv.some((arg) => typeof arg !== "string" || arg.includes("\0") || arg.length > 4096)) {
     throw new Error("PAPER2AGENT_ARGV_JSON must be a bounded string array");
   }
-  return { executable, argv, cwd, packagePath, manifestPath, journalDir };
+  // Strict "1" only, mirroring LIVE_CHAIN.
+  return { executable, argv, cwd, packagePath, manifestPath, journalDir, freeCalls: env.PAPER2AGENT_FREE_CALLS === "1" };
 }

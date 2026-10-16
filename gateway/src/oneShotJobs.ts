@@ -9,7 +9,6 @@ import { isResponseObject, streamFailure } from "./openai/shapes.js";
 import { acceptAndConfirm, fetchEscrowLineage, reclaimAndConfirm } from "./onchain/settle.js";
 import type { EscrowLineage } from "./onchain/settle.js";
 import { parseRef, type SupplierCandidate } from "./routing/selectSupplier.js";
-import { recoverPaper2AgentJob } from "./paper2agent/recovery.js";
 
 const HEARTBEAT_MS = 5_000;
 const OWNER_STALE_MS = 60_000;
@@ -119,14 +118,14 @@ export async function reserveOneShotSupplier(
 export async function runOneShotJob<T>(
   deps: GatewayDeps,
   key: ApiKeyRow,
-  args: { id: string; model: string; signal?: AbortSignal; onAdmit?: () => void },
+  args: { id: string; model: string; signal?: AbortSignal },
   execute: () => Promise<T>,
 ): Promise<T> {
   checkAbort(args.signal);
   const current = runtime(deps);
   if (!deps.store.insertOneShotJob({
     id: args.id, key_id: key.id, owner_id: current.owner, model: args.model, created_at: Date.now(),
-  }, deps.config.oneShotMaxOutstanding, args.onAdmit)) {
+  }, deps.config.oneShotMaxOutstanding)) {
     throw new GatewayError(429, "rate_limit_error", "concurrency_queue_full", "this key has reached its outstanding request limit");
   }
   current.start(args.id);
@@ -216,10 +215,6 @@ export async function recoverOneShotJobs(deps: GatewayDeps): Promise<OneShotReco
     try {
       const job = deps.store.getOneShotJob(initial.id);
       if (!job || job.owner_id !== current.owner) continue;
-      if (job.model.startsWith("paper2agent:") || deps.store.paper2agent.call(job.id) || deps.store.paper2agent.approval(job.key_id)) {
-        await recoverPaper2AgentJob(deps, job);
-        continue;
-      }
       if (job.escrow_ref === null) {
         recordRecoveredOutcome(deps, job, "failed", "request interrupted before payment");
         continue;
@@ -271,9 +266,6 @@ export async function recoverOneShotJobs(deps: GatewayDeps): Promise<OneShotReco
         const utxo = await ctx.chain.queryUtxo(ref);
         if (!utxo?.datumHex) return; // spent after the indexer's snapshot
         const datum = decodeEscrowDatum(utxo.datumHex);
-        if (datum.capability_id === "mcp.tool.execute.v1") {
-          throw new Error("paper2agent_journal_missing");
-        }
         if (datum.buyer_pkh !== key.wallet_pkh || datum.supplier_pkh !== job.supplier_pkh) {
           throw new Error("escrow lineage wallet mismatch");
         }
@@ -293,10 +285,8 @@ export async function recoverOneShotJobs(deps: GatewayDeps): Promise<OneShotReco
         }
       }, "recover-one-shot", 0);
     } catch (error) {
-      const toolJob = initial.model.startsWith("paper2agent:") || deps.store.paper2agent.call(initial.id);
-      const message = error instanceof Error ? error.message : String(error);
       deps.store.updateOneShotJob(initial.id, current.owner, {
-        state: "recovering", error: toolJob && !/^paper2agent_[a-z_]+$/.test(message) ? "paper2agent_recovery_pending" : message,
+        state: "recovering", error: error instanceof Error ? error.message : String(error),
       });
     } finally {
       current.stop(initial.id);

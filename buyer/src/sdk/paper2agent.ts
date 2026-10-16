@@ -1,4 +1,4 @@
-/** Node-only, explicitly staged purchases of supplier-configured JSON MCP tools. */
+/** Node-only discovery, free calls, and explicitly staged purchases of supplier-configured JSON MCP tools. */
 import type { ChainProvider, OutputReference, Utxo } from "@marketplace/shared/chain";
 import { decodeAdvertDatum, decodeEscrowDatum, encodeAdvertDatum, encodeEscrowDatum } from "@marketplace/shared/cbor";
 import type { AdvertDatum, EscrowDatum } from "@marketplace/shared/cbor";
@@ -48,6 +48,12 @@ export interface Paper2AgentResult {
   escrow_ref: string;
   submitted_ref: string;
 }
+/** A free call result. It has no receipt, escrow, or chain record. */
+export interface Paper2AgentCallResult {
+  manifest_hash: string;
+  result: JsonObject;
+  wallclock_ms: number;
+}
 
 export interface Paper2AgentExecutionOptions {
   onJobAccepted?: (jobId: string) => Promise<void>;
@@ -71,6 +77,8 @@ const DISCOVERY_CONCURRENCY = 8;
 const DISCOVERY_PROBE_MS = 3000;
 const MAX_PROCESSING_MS = MAX_TOOL_RUNTIME_MS + PAPER2AGENT_DELIVERY_OVERHEAD_MS;
 const MAX_EXECUTION_MS = MAX_PROCESSING_MS + NETWORK_BUFFER_MS + SUPPLIER_SLACK_MS;
+/** Container start, tool discovery, and close around the declared tool runtime. */
+const CALL_OVERHEAD_MS = 60_000;
 
 function fail(message: string): never {
   throw new TxConstructionError("paper2agent_validation_failed", message);
@@ -155,16 +163,22 @@ function sameLineageImmutable(row: Record<string, unknown>, original: EscrowDatu
 
 export class Paper2AgentClient {
   private readonly chain: ChainProvider;
-  private readonly walletKey: WalletKey;
+  private readonly walletKey?: WalletKey;
   private readonly indexerUrl: string;
   private readonly fetchFn: typeof fetch;
   private readonly blueprint = loadBlueprint();
 
-  constructor(options: { chain: ChainProvider; walletKey: WalletKey; indexerUrl: string; fetchFn?: typeof fetch }) {
+  /** `walletKey` is necessary only for the paid stages. Discovery and free calls do not sign. */
+  constructor(options: { chain: ChainProvider; walletKey?: WalletKey; indexerUrl: string; fetchFn?: typeof fetch }) {
     this.chain = options.chain;
     this.walletKey = options.walletKey;
     this.indexerUrl = baseUrl(options.indexerUrl);
     this.fetchFn = options.fetchFn ?? globalThis.fetch.bind(globalThis);
+  }
+
+  private wallet(): WalletKey {
+    if (!this.walletKey) fail("a wallet key is required for paid calls");
+    return this.walletKey;
   }
 
   private scriptUtxo(utxo: Utxo | null, kind: "advert" | "escrow", ref: OutputReference): Utxo {
@@ -258,7 +272,12 @@ export class Paper2AgentClient {
     return { advertRef, advert, manifest, manifestHash, supplierPublicKeyHex: metadata.pub_key_hex, endpointUrl };
   }
 
-  async discover(filters: { manifestHash?: string; supplierPkh?: string } = {}): Promise<Paper2AgentOffer[]> {
+  /**
+   * By default, only tools that the indexer reports as `free` are returned, because a busy
+   * supplier rejects a paid admission. `includeBusy` also returns `working` and `unknown`
+   * tools, for free calls that wait or report busy.
+   */
+  async discover(filters: { manifestHash?: string; supplierPkh?: string; includeBusy?: boolean } = {}): Promise<Paper2AgentOffer[]> {
     if ((filters.manifestHash !== undefined && !/^[0-9a-f]{64}$/.test(filters.manifestHash)) ||
         (filters.supplierPkh !== undefined && !/^[0-9a-f]{56}$/.test(filters.supplierPkh))) {
       fail("invalid discovery identity filter");
@@ -272,7 +291,8 @@ export class Paper2AgentClient {
     for (const value of response.body) {
       if (!value || typeof value !== "object" || Array.isArray(value)) continue;
       const row = value as Record<string, unknown>;
-      if (row.capability_id !== PAPER2AGENT_CAPABILITY_ID || row.advert_status !== "Active" || row.status !== "free" ||
+      const listed = row.status === "free" || (filters.includeBusy === true && (row.status === "working" || row.status === "unknown"));
+      if (row.capability_id !== PAPER2AGENT_CAPABILITY_ID || row.advert_status !== "Active" || !listed ||
           (filters.supplierPkh !== undefined && row.supplier_pkh !== filters.supplierPkh) ||
           (filters.manifestHash !== undefined && row.model !== `paper2agent:${filters.manifestHash}`)) continue;
       let ref;
@@ -305,11 +325,52 @@ export class Paper2AgentClient {
     return offers.filter((offer): offer is Paper2AgentOffer => offer !== undefined);
   }
 
+  /**
+   * One free call through the tool's token-gated route. It has no escrow, receipt, or chain
+   * transaction, and it never retries. The caller owns concurrency limits. Supplier and
+   * transport failures are `SupplierError`s whose `reason` is the route's error code,
+   * `timeout`, `unreachable`, `malformed_response`, or `invalid_tool_output`.
+   */
+  async call(offer: Paper2AgentOffer, input: unknown, options: { token: string }): Promise<Paper2AgentCallResult> {
+    if (typeof options.token !== "string" || options.token.length < 32) fail("tool call token must have at least 32 characters");
+    const manifest = parsePaper2AgentManifest(offer.manifest);
+    if (paper2AgentManifestHash(manifest) !== offer.manifestHash) fail("offer manifest does not match its hash");
+    const url = `${baseUrl(offer.endpointUrl)}/v1/paper2agent/call`;
+    const body = JSON.stringify({ manifest_hash: offer.manifestHash, input: validatePaper2AgentInput(manifest, input) });
+    const deadline = Date.now() + manifest.limits.max_runtime_ms + CALL_OVERHEAD_MS;
+    let response: { status: number; body: unknown };
+    try {
+      response = await this.json(url, MAX_RESULT_BYTES, deadline, {
+        method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${options.token}` }, body,
+      }, remaining(deadline));
+    } catch (error) {
+      const kind = error instanceof HttpError ? error.kind : undefined;
+      throw new SupplierError(kind === "timeout" ? "timeout" : kind === "parse_error" ? "malformed_response" : "unreachable");
+    }
+    const value = response.body && typeof response.body === "object" && !Array.isArray(response.body)
+      ? response.body as Record<string, unknown> : undefined;
+    if (response.status !== 200) {
+      const reason = value?.reason;
+      throw new SupplierError(typeof reason === "string" && /^[a-z_]{1,64}$/.test(reason) ? reason : "call_failed", { status: response.status });
+    }
+    const wallclock = value?.wallclock_ms;
+    if (!value || value.manifest_hash !== offer.manifestHash || typeof wallclock !== "number" || !Number.isSafeInteger(wallclock) || wallclock < 0) {
+      throw new SupplierError("malformed_response");
+    }
+    let result: JsonObject;
+    try {
+      result = validatePaper2AgentOutput(manifest, value.result);
+    } catch {
+      throw new SupplierError("invalid_tool_output");
+    }
+    return { manifest_hash: offer.manifestHash, result, wallclock_ms: wallclock };
+  }
+
   async prepare(options: { advertRef: OutputReference; manifestHash: string; input: unknown; expectedSupplierPkh: string; maxPriceLovelace: bigint }): Promise<PreparedPaper2Agent> {
     if (typeof options.maxPriceLovelace !== "bigint" || options.maxPriceLovelace < 0n) fail("maxPriceLovelace must be a nonnegative bigint");
     const offer = await this.offer(options.advertRef, Date.now() + PREFLIGHT_MS);
     if (offer.manifestHash !== options.manifestHash || offer.advert.supplier_pkh !== options.expectedSupplierPkh ||
-        offer.advert.price_lovelace > options.maxPriceLovelace || offer.advert.supplier_pkh === this.walletKey.pubKeyHash) {
+        offer.advert.price_lovelace > options.maxPriceLovelace || offer.advert.supplier_pkh === this.wallet().pubKeyHash) {
       fail("offer does not match the approved manifest, supplier, or price limit");
     }
     const input = validatePaper2AgentInput(offer.manifest, options.input);
@@ -332,7 +393,7 @@ export class Paper2AgentClient {
   private validateOpen(posted: PostedPaper2Agent): void {
     this.validatePrepared(posted);
     const datum = posted.escrowDatum;
-    if (datum.state !== "Open" || datum.buyer_pkh !== this.walletKey.pubKeyHash ||
+    if (datum.state !== "Open" || datum.buyer_pkh !== this.wallet().pubKeyHash ||
         datum.supplier_pkh !== posted.advert.supplier_pkh || refString(datum.advert_ref) !== refString(posted.advertRef) ||
         datum.capability_id !== PAPER2AGENT_CAPABILITY_ID || datum.prompt_hash !== posted.requestHash ||
         datum.request_spec_hash !== paper2AgentRequestSpecHash(posted.manifest) ||
@@ -365,7 +426,7 @@ export class Paper2AgentClient {
     }
     const deadline = Date.now() + PREFLIGHT_MS + ESCROW_CONFIRM_TIMEOUT_MS;
     const built = await bounded(() => buildPostEscrowTx({
-      chain: this.chain, buyerKey: this.walletKey, advertRef: refreshed.advertRef,
+      chain: this.chain, buyerKey: this.wallet(), advertRef: refreshed.advertRef,
       prompt_hash: refreshed.requestHash, payment_lovelace: refreshed.advert.price_lovelace,
       beforeSubmit: async (candidate) => {
         remaining(deadline);

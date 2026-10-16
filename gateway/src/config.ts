@@ -25,6 +25,18 @@
  *   ONE_SHOT_CONCURRENCY — active paid LLM jobs per key (default 4).
  *   ONE_SHOT_MAX_OUTSTANDING — active + queued + recovering jobs per key (default 64).
  *   ONE_SHOT_QUEUE_TIMEOUT_MS — wait for admission before spending (default 60000).
+ *   MCP_IP_RATE_MAX / MCP_IP_RATE_WINDOW_MS — public /mcp requests per IP (default 120/min).
+ *   MCP_CALL_IP_RATE_MAX / MCP_CALL_IP_RATE_WINDOW_MS — tools/call per IP (default 20/min).
+ *   MCP_CALL_IP_CONCURRENCY — tools/call in flight per IP (default 1).
+ *   MCP_CALL_CONCURRENCY — tool calls in flight for the gateway (default 2).
+ *   MCP_CALL_QUEUE_TIMEOUT_MS — wait for a free tool slot (default 60000).
+ *   MCP_CATALOG_TTL_MS — cache time of the tools/list catalog (default 30000).
+ *   PAPER2AGENT_TOOL_CALL_TOKEN — shared secret for free tool calls through the
+ *                         publisher. At least 32 chars; unset disables tools/call.
+ *   PAPER2AGENT_PUBLISHER_PUBLIC_URL — the publisher's public base URL, the same
+ *                         value as the publisher's. /mcp lists only tools whose
+ *                         advert endpoint is under <url>/tools/, so the token
+ *                         never goes to another host. Required with the token.
  *   GATEWAY_CORS_ORIGINS — comma-separated allowlist of browser Origins that may
  *                         call the gateway cross-origin (e.g. the marketplace
  *                         frontend's "Generate API key" page). Default empty =
@@ -62,6 +74,16 @@ export interface GatewayConfig {
   oneShotConcurrency: number;
   oneShotMaxOutstanding: number;
   oneShotQueueTimeoutMs: number;
+  mcpIpRate: { max: number; windowMs: number };
+  mcpCallIpRate: { max: number; windowMs: number };
+  mcpCallIpConcurrency: number;
+  mcpCallConcurrency: number;
+  mcpCallQueueTimeoutMs: number;
+  mcpCatalogTtlMs: number;
+  /** Bearer token for the publisher's free tool-call route. Unset disables tools/call. */
+  paper2agentToolCallToken?: string;
+  /** `<PAPER2AGENT_PUBLISHER_PUBLIC_URL>/tools/`: the only endpoint prefix that /mcp lists and calls. */
+  paper2agentToolEndpointPrefix?: string;
   corsOrigins: string[];
   /** Capability id the /v1/ocr/extract route escrows against. Model-scoped
    * per the marketplace convention (one model, one id). Env: OCR_CAPABILITY_ID. */
@@ -99,6 +121,23 @@ function posInt(
   return Number(v);
 }
 
+/** `<publisher URL>/tools/` in normalized form, or undefined when the URL is unset. */
+function paper2AgentToolEndpointPrefix(raw: string): string | undefined {
+  const value = raw.trim();
+  if (value === "") return undefined;
+  let url: URL | undefined;
+  try {
+    url = new URL(value);
+  } catch {
+    url = undefined;
+  }
+  if (!url || (url.protocol !== "https:" && url.protocol !== "http:") || url.username !== "" || url.password !== "" ||
+      url.search !== "" || url.hash !== "") {
+    throw new Error("loadConfig: PAPER2AGENT_PUBLISHER_PUBLIC_URL must be an http(s) URL without credentials, query or fragment");
+  }
+  return `${url.href.replace(/\/+$/, "")}/tools/`;
+}
+
 export function loadConfig(env: Record<string, string | undefined>): GatewayConfig {
   const masterKeyHex = requireField(env, "GATEWAY_MASTER_KEY");
   if (!HEX64_RE.test(masterKeyHex)) {
@@ -109,6 +148,14 @@ export function loadConfig(env: Record<string, string | undefined>): GatewayConf
   const adminToken = (env.GATEWAY_ADMIN_TOKEN ?? "").trim();
   if (adminToken !== "" && adminToken.length < 32) {
     throw new Error("loadConfig: GATEWAY_ADMIN_TOKEN must be at least 32 chars");
+  }
+  const toolCallToken = (env.PAPER2AGENT_TOOL_CALL_TOKEN ?? "").trim();
+  if (toolCallToken !== "" && toolCallToken.length < 32) {
+    throw new Error("loadConfig: PAPER2AGENT_TOOL_CALL_TOKEN must be at least 32 chars");
+  }
+  const toolEndpointPrefix = paper2AgentToolEndpointPrefix(env.PAPER2AGENT_PUBLISHER_PUBLIC_URL ?? "");
+  if (toolCallToken !== "" && toolEndpointPrefix === undefined) {
+    throw new Error("loadConfig: PAPER2AGENT_PUBLISHER_PUBLIC_URL is required with PAPER2AGENT_TOOL_CALL_TOKEN");
   }
 
   const indexerUrl = requireField(env, "INDEXER_URL").replace(/\/+$/, "");
@@ -172,6 +219,20 @@ export function loadConfig(env: Record<string, string | undefined>): GatewayConf
     oneShotConcurrency: posInt(env, "ONE_SHOT_CONCURRENCY", 4),
     oneShotMaxOutstanding: posInt(env, "ONE_SHOT_MAX_OUTSTANDING", 64),
     oneShotQueueTimeoutMs: posInt(env, "ONE_SHOT_QUEUE_TIMEOUT_MS", 60_000),
+    mcpIpRate: {
+      max: posInt(env, "MCP_IP_RATE_MAX", 120),
+      windowMs: posInt(env, "MCP_IP_RATE_WINDOW_MS", 60 * 1000),
+    },
+    mcpCallIpRate: {
+      max: posInt(env, "MCP_CALL_IP_RATE_MAX", 20),
+      windowMs: posInt(env, "MCP_CALL_IP_RATE_WINDOW_MS", 60 * 1000),
+    },
+    mcpCallIpConcurrency: posInt(env, "MCP_CALL_IP_CONCURRENCY", 1),
+    mcpCallConcurrency: posInt(env, "MCP_CALL_CONCURRENCY", 2),
+    mcpCallQueueTimeoutMs: posInt(env, "MCP_CALL_QUEUE_TIMEOUT_MS", 60_000),
+    mcpCatalogTtlMs: posInt(env, "MCP_CATALOG_TTL_MS", 30_000),
+    paper2agentToolCallToken: toolCallToken || undefined,
+    paper2agentToolEndpointPrefix: toolEndpointPrefix,
     ocrCapabilityId: env.OCR_CAPABILITY_ID ?? "ocr.page.extract.chandra-ocr-2.v1",
     preferredSupplierPkh: preferredSupplierPkhRaw === ""
       ? undefined

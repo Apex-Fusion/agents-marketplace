@@ -1,7 +1,8 @@
 /**
  * gateway/src/server.ts — Express app wiring.
  *
- * Public:   GET /healthz, GET /, POST /signup (IP rate-limited).
+ * Public:   GET /healthz, GET /, POST /signup (IP rate-limited),
+ *           /mcp (free Paper2Agent tools; IP rate-limited, Origin allowlist).
  * Bearer:   GET /account, POST /account/withdraw,
  *           POST /openai/v1/responses, GET/DELETE /openai/v1/responses/:id,
  *           POST /openai/v1/chat/completions, GET /openai/v1/models.
@@ -24,12 +25,7 @@ import { makeModelsHandler } from "./openai/models.js";
 import { makeChatCompletionsHandler } from "./openai/chatCompletions.js";
 import { makeSignupHandler, makeAccountHandler, makeWithdrawHandler, makeListKeysHandler } from "./account/routes.js";
 import { INDEX_HTML } from "./ui/page.js";
-import {
-  denyOtherPaper2AgentSpending,
-  makePaper2AgentJobHandler,
-  makePaper2AgentJobsHandler,
-  makePaper2AgentMcpHandler,
-} from "./paper2agent/mcp.js";
+import { makePaper2AgentMcpHandler } from "./paper2agent/mcp.js";
 
 const MCP_PATH = /^\/mcp\/?$/i;
 
@@ -39,7 +35,7 @@ const MCP_PATH = /^\/mcp\/?$/i;
  * gateway). Only echoes Access-Control-* headers when the request's Origin is
  * in the configured allowlist; an empty allowlist disables CORS entirely.
  * No credentials are allowed — the signup call is a plain bearer-less POST, so
- * cookies never ride along cross-origin. MCP preflight still requires auth.
+ * cookies never ride along cross-origin.
  */
 function corsMiddleware(allowOrigins: string[]) {
   const allow = new Set(allowOrigins);
@@ -53,7 +49,7 @@ function corsMiddleware(allowOrigins: string[]) {
       res.setHeader("Access-Control-Expose-Headers", "X-Vector-Escrow-Ref, MCP-Protocol-Version, MCP-Session-Id");
       res.setHeader("Access-Control-Max-Age", "600");
     }
-    if (req.method === "OPTIONS" && !MCP_PATH.test(req.path)) {
+    if (req.method === "OPTIONS") {
       res.status(204).end();
       return;
     }
@@ -92,18 +88,15 @@ export function createApp(deps: GatewayDeps): Express {
   const krl = keyRateLimit(deps.config.keyRate);
   const dirl = demoIpRateLimit(deps.config.demoIpRate);
   const gated = [auth, krl, dirl] as const;
-  const denyToolOnly = denyOtherPaper2AgentSpending(deps);
 
-  // Authenticate every MCP exchange before parsing or protocol dispatch.
-  app.all("/mcp", ...gated, jsonBody, makePaper2AgentMcpHandler(deps));
-  app.get("/v1/paper2agent/jobs", auth, makePaper2AgentJobsHandler(deps));
-  app.get("/v1/paper2agent/jobs/:id", auth, makePaper2AgentJobHandler(deps));
+  // Public MCP: the per-IP limit runs before parsing or protocol dispatch.
+  app.all("/mcp", ipRateLimit(deps.config.mcpIpRate), jsonBody, makePaper2AgentMcpHandler(deps));
 
   app.get("/account", auth, makeAccountHandler(deps));
-  app.post("/account/withdraw", auth, denyToolOnly, makeWithdrawHandler(deps));
+  app.post("/account/withdraw", auth, makeWithdrawHandler(deps));
 
-  app.post("/openai/v1/responses", ...gated, denyToolOnly, makeResponsesHandler(deps));
-  app.post("/openai/v1/chat/completions", ...gated, denyToolOnly, makeChatCompletionsHandler(deps));
+  app.post("/openai/v1/responses", ...gated, makeResponsesHandler(deps));
+  app.post("/openai/v1/chat/completions", ...gated, makeChatCompletionsHandler(deps));
   app.get("/openai/v1/responses/:id", ...gated, makeGetResponseHandler(deps));
   app.delete("/openai/v1/responses/:id", ...gated, makeDeleteResponseHandler(deps));
   // Model-scoped OCR: 16mb parser covers MAX_OCR_IMAGE_B64_CHARS
@@ -111,7 +104,7 @@ export function createApp(deps: GatewayDeps): Express {
   // limits) run BEFORE the parser so an unauthenticated caller cannot
   // buffer/JSON.parse up to 16mb before getting a 401, and rate limiting
   // can actually throttle the request (2026-08 review finding C2).
-  app.post("/v1/ocr/extract", ...gated, denyToolOnly, express.json({ limit: "16mb" }), makeOcrExtractHandler(deps));
+  app.post("/v1/ocr/extract", ...gated, express.json({ limit: "16mb" }), makeOcrExtractHandler(deps));
   app.get("/openai/v1/models", auth, makeModelsHandler(deps));
 
   // OpenAI-shaped 404 for anything else.

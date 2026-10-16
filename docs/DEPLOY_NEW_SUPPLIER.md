@@ -533,15 +533,19 @@ On the publisher host:
 
 1. Copy `paper2agent/.env.publisher.example` to `paper2agent/.env.publisher`.
 2. Set `PAPER2AGENT_PUBLISHER_TOKEN` to the same publisher token used by control.
-3. Set the public HTTPS base URL and exact runtime image ID.
-4. Copy `paper2agent/publisher-targets.json.example` to `paper2agent/publisher-targets.json`.
-5. Configure one fresh, dedicated wallet key for each target slot.
+3. Set `PAPER2AGENT_TOOL_CALL_TOKEN` to the same value as the gateway's `PAPER2AGENT_TOOL_CALL_TOKEN`.
+   Use a new random value of at least 32 characters, for example `openssl rand -hex 32`.
+   It must differ from the publisher token.
+   Leave it empty to disable unpaid tool calls.
+4. Set the public HTTPS base URL and exact runtime image ID.
+5. Copy `paper2agent/publisher-targets.json.example` to `paper2agent/publisher-targets.json`.
+6. Configure one fresh, dedicated wallet key for each target slot.
    Do not reuse an existing LLM supplier wallet.
-6. Set the target's Ogmios URL, network, and required chain settings.
+7. Set the target's Ogmios URL, network, and required chain settings.
    Live publication requires `LIVE_CHAIN=1` and `NETWORK_ID=1`.
    The publisher process and live target must use the same `VECTOR_ZERO_TIME_MS`.
    The template defaults to read-only operation.
-7. Set the target file owner to UID `1000` and permissions to `0600`.
+8. Set the target file owner to UID `1000` and permissions to `0600`.
    The service image runs as that UID and refuses group/world-readable keys.
 
 Start each role only on its designated host.
@@ -600,7 +604,7 @@ Check build readiness and submit a paper.
 Review the exact package and verification evidence before preparation.
 Fund the displayed target address manually before approving a live advert.
 The publication limit covers actual wallet debit, not just the supplier bond.
-Gateway buyer-key approval remains a separate step before customers can pay for tool calls.
+After the advert confirms, the gateway's public `/mcp` lists the tool and calls it for free.
 
 If publication has an unknown outcome, use **Refresh publication status**.
 Do not post a replacement advert.
@@ -710,18 +714,19 @@ Keep the journal directory on durable storage.
 
 Check `/healthz`, `/status`, and `/capability` after startup.
 The capability response includes the manifest, hash, and supplier public key.
-Share the full manifest hash and supplier PKH with the buyer's approving operator.
-See [gateway approval](gateway.md#paper2agent-tools).
+The gateway's public `/mcp` lists a confirmed tool without an operator step.
+See [public MCP access](gateway.md#paper2agent-tools).
 
 ### Recovery and upgrades
 
-The supplier exposes three dedicated routes:
+The supplier exposes four dedicated routes:
 
 | Route | Purpose |
 |---|---|
 | `POST /v1/paper2agent/run` | One paid admission for the original Open escrow |
 | `GET /v1/paper2agent/run/:jobId` | Read an existing job and its signed result |
 | `POST /v1/paper2agent/lookup` | Find an existing job without another admission |
+| `POST /v1/paper2agent/call` | One unpaid tool call, only when `PAPER2AGENT_FREE_CALLS=1` |
 
 Admission and lookup use `X-Escrow-Ref`.
 Their body is exactly `{manifest_hash,input}`.
@@ -730,16 +735,30 @@ It returns the job ID, escrow reference, manifest hash, and stored status.
 It never starts a process, takes an execution slot, or signs a transaction.
 It can find a previous-version job after restart.
 
+The unpaid call uses the same body as admission, without `X-Escrow-Ref`.
+It returns `{manifest_hash,result,wallclock_ms}` with HTTP 200.
+It uses the same execution slot as paid admission.
+When the slot is in use, it returns HTTP 409 `supplier_busy`.
+It writes no journal entry, sends no transaction, and signs no receipt.
+The supplier route has no authentication.
+Do not set `PAPER2AGENT_FREE_CALLS` on a supplier with a public endpoint.
+The publisher sets it for its managed suppliers only when `PAPER2AGENT_TOOL_CALL_TOKEN` is set.
+The publisher forwards `POST /tools/<id>/v1/paper2agent/call` only with `Authorization: Bearer <token>`.
+It returns HTTP 401 for a missing or wrong token, and HTTP 404 when no token is set.
+It never forwards the token to the supplier.
+During a drain, it refuses new calls with HTTP 503 `supplier_draining` and waits for active calls.
+A direct buyer whose escrow arrives during an unpaid call gets `supplier_busy`.
+
 Treat job IDs and request preimages as sensitive.
 Supplier lookup is not separate customer authentication.
 Low-entropy inputs can be guessed.
-The gateway adds bearer authentication and owner checks to its own job routes.
+The gateway has no job routes for tool calls.
 
 Do not delete old journal files when changing a package.
 They preserve duplicate protection and result recovery.
 Drain active work before an upgrade.
 Register a new manifest instead of changing the old file.
-Publish the matching advert and obtain a new buyer approval.
+Publish the matching advert.
 Keep historical results available.
 
 Execution that exceeds the declared runtime produces no signed result or Submit.

@@ -64,10 +64,9 @@ See [`docs/gateway.md`](docs/gateway.md) for supported fields, JSON and streamin
 ## Paper2Agent tools
 
 Reviewed local MCP tools can run through the marketplace.
-The gateway exposes authenticated `/mcp` discovery and execution.
-An operator must approve a dedicated buyer key before it can spend.
-The approval binds a full manifest hash, supplier, price ceiling, total exposure, and call count.
-Signed results and financial records support recovery without another paid call.
+The gateway's public `/mcp` lists and calls them for free: no API key, wallet, or payment.
+Per-IP limits and a small gateway-wide call limit protect the shared tool capacity.
+Tool adverts are still published on chain, and a direct on-chain buyer can still pay a tool supplier through escrow.
 
 The buyer app has a paper submission page at `/paper2agent`.
 Submit a PDF, paper URL, or paper text. The marketplace generates Python code

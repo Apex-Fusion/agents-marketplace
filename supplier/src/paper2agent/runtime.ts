@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import type { ChainProvider, OutputReference } from "@marketplace/shared/chain";
 import { decodeAdvertDatum, decodeEscrowDatum, type AdvertDatum, type EscrowDatum } from "@marketplace/shared/cbor";
@@ -23,6 +24,15 @@ export interface ToolRuntimeDeps {
   config: Paper2AgentConfig;
   sessionFactory?: ToolSessionFactory;
 }
+
+/** The free-call reply: the validated tool output and its measured runtime. */
+export interface ToolCallResult {
+  manifest_hash: string;
+  result: JsonObject;
+  wallclock_ms: number;
+}
+
+const DRAIN_MARKER_PATH = "/dev/shm/marketplace-draining";
 
 export class ToolAdmissionError extends Error {
   constructor(readonly status: number, readonly reason: string, readonly job?: ToolJob) {
@@ -84,6 +94,22 @@ export class Paper2AgentRuntime {
     return task;
   }
 
+  /** Whether the operator enabled the unpaid call route. */
+  get freeCalls(): boolean {
+    return this.deps.config.freeCalls === true;
+  }
+
+  /**
+   * One unpaid tool call. It shares the execution slot with paid admission.
+   * It writes no journal entry, sends no transaction, and signs no receipt.
+   */
+  call(body: unknown): Promise<ToolCallResult> {
+    const task = this.callTool(body);
+    this.tasks.add(task);
+    void task.finally(() => this.tasks.delete(task)).catch(() => undefined);
+    return task;
+  }
+
   private async now(): Promise<number> {
     return detectCborBackend(this.deps.chain) === "live" ? Date.now()
       : mockSlotToWallclockMs(await this.deps.chain.tip());
@@ -113,7 +139,7 @@ export class Paper2AgentRuntime {
   }
 
   private async admitJob(refHeader: unknown, body: unknown): Promise<ToolJob> {
-    if (this.closing || existsSync("/dev/shm/marketplace-draining")) throw new ToolAdmissionError(503, "supplier_draining");
+    if (this.closing || existsSync(DRAIN_MARKER_PATH)) throw new ToolAdmissionError(503, "supplier_draining");
     const refText = escrowRefText(refHeader);
     const [txHash, indexText] = refText.split("#");
     const escrowRef = { txHash, index: Number(indexText) };
@@ -196,6 +222,44 @@ export class Paper2AgentRuntime {
       throw new ToolAdmissionError(503, "tool_preflight_failed");
     } finally {
       if (!handedOff) await this.release(session, refText);
+    }
+  }
+
+  private async callTool(body: unknown): Promise<ToolCallResult> {
+    if (!this.freeCalls) throw new ToolAdmissionError(404, "not_found");
+    if (this.closing || existsSync(DRAIN_MARKER_PATH)) throw new ToolAdmissionError(503, "supplier_draining");
+    let request;
+    try { request = parsePaper2AgentRequest(this.manifest, body); }
+    catch { throw new ToolAdmissionError(400, "invalid_tool_request"); }
+    try { await this.advert(); }
+    catch { throw new ToolAdmissionError(503, "supplier_unavailable"); }
+    const { state, config } = this.deps;
+    // A unique slot key: it never matches an escrow ref, and it shares capacity with paid admission.
+    const key = `free:${randomUUID()}`;
+    if (this.closing || !state.tryAcquire(key)) throw new ToolAdmissionError(409, "supplier_busy");
+    let session: ToolSession | undefined;
+    let executing = false;
+    try {
+      await verifyPackage(config, this.manifest);
+      session = this.deps.sessionFactory?.(config) ?? new LocalToolSession(config);
+      this.sessions.add(session);
+      checkTool(this.manifest, await session.discover());
+      if (this.closing) throw new ToolAdmissionError(503, "supplier_draining");
+      executing = true;
+      const started = performance.now();
+      const result = validatePaper2AgentOutput(this.manifest,
+        await session.execute(this.manifest.name, request.input, this.manifest.limits.max_runtime_ms));
+      const wallclockMs = Math.ceil(performance.now() - started);
+      if (wallclockMs > this.manifest.limits.max_runtime_ms) throw new Error("Tool exceeded its manifest runtime");
+      // Terminate before the reply. A cleanup failure is not success.
+      await session.close();
+      this.sessions.delete(session);
+      return { manifest_hash: this.manifestHash, result, wallclock_ms: wallclockMs };
+    } catch (error) {
+      if (error instanceof ToolAdmissionError) throw error;
+      throw executing ? new ToolAdmissionError(502, "tool_execution_failed") : new ToolAdmissionError(503, "supplier_unavailable");
+    } finally {
+      await this.release(session, key);
     }
   }
 

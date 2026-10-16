@@ -71,21 +71,25 @@ const ADVERT_FIELDS = ["supplier_pkh", "capability_id", "model", "max_output_tok
 
 interface SupplierRoute {
   timeoutMs: number;
-  /** A paid admission: counted for drain and refused once shutdown starts. */
+  /** A tool execution (paid or free): counted for drain and refused once shutdown starts. */
   admission: boolean;
   /** Refused during shutdown so discovery does not send new buyers. */
   refusedWhileDraining: boolean;
+  /** Needs the tool-call bearer token; answers 404 when none is configured. */
+  toolCall: boolean;
 }
 
 /** The public supplier protocol. Nothing else under /tools/:targetId is forwarded. */
 const SUPPLIER_ROUTES: Record<string, SupplierRoute> = {
-  "GET /healthz": { timeoutMs: 5_000, admission: false, refusedWhileDraining: false },
-  "GET /status": { timeoutMs: 5_000, admission: false, refusedWhileDraining: false },
-  "GET /capability": { timeoutMs: 30_000, admission: false, refusedWhileDraining: true },
-  "POST /v1/paper2agent/run": { timeoutMs: 300_000, admission: true, refusedWhileDraining: true },
-  "POST /v1/paper2agent/lookup": { timeoutMs: 30_000, admission: false, refusedWhileDraining: false },
+  "GET /healthz": { timeoutMs: 5_000, admission: false, refusedWhileDraining: false, toolCall: false },
+  "GET /status": { timeoutMs: 5_000, admission: false, refusedWhileDraining: false, toolCall: false },
+  "GET /capability": { timeoutMs: 30_000, admission: false, refusedWhileDraining: true, toolCall: false },
+  "POST /v1/paper2agent/run": { timeoutMs: 300_000, admission: true, refusedWhileDraining: true, toolCall: false },
+  // 15 s discovery + 120 s maximum runtime + container stop.
+  "POST /v1/paper2agent/call": { timeoutMs: 180_000, admission: true, refusedWhileDraining: true, toolCall: true },
+  "POST /v1/paper2agent/lookup": { timeoutMs: 30_000, admission: false, refusedWhileDraining: false, toolCall: false },
 };
-const JOB_ROUTE: SupplierRoute = { timeoutMs: 30_000, admission: false, refusedWhileDraining: false };
+const JOB_ROUTE: SupplierRoute = { timeoutMs: 30_000, admission: false, refusedWhileDraining: false, toolCall: false };
 
 export class PublisherError extends Error {
   constructor(readonly status: number, readonly code: string, message: string) {
@@ -371,7 +375,7 @@ interface SupervisedSupplier {
   port: number;
   process: SupplierProcess;
   ready: boolean;
-  /** Proxied paid admissions still in flight. */
+  /** Proxied admissions (paid or free) still in flight. */
   admissions: number;
 }
 
@@ -384,6 +388,8 @@ export interface ChildRequest {
   body?: Buffer;
   contentType?: string;
   escrowRef?: string;
+  /** The caller's Authorization header. forward() checks it; it is never sent to the child. */
+  authorization?: string;
 }
 
 export interface PaperPublisherDeps {
@@ -414,6 +420,7 @@ export class PaperPublisherService {
   private readonly activations = new Map<string, Promise<void>>();
   private readonly preparations = new Set<AbortController>();
   private readonly restartAttempts = new Map<string, number>();
+  private readonly toolCallDigest: Buffer | null;
   private closing = false;
   private closed?: Promise<void>;
 
@@ -427,6 +434,7 @@ export class PaperPublisherService {
     this.postAdvert = deps.postAdvert ?? runPostAdvert;
     this.now = deps.now ?? Date.now;
     this.sleep = deps.sleep ?? ((ms) => new Promise<void>((resolve) => { setTimeout(resolve, ms); }));
+    this.toolCallDigest = config.toolCallToken ? createHash("sha256").update(config.toolCallToken).digest() : null;
   }
 
   /** Opens durable state, applies restart recovery, and restarts published suppliers in the background. */
@@ -579,6 +587,14 @@ export class PaperPublisherService {
     const route = Object.hasOwn(SUPPLIER_ROUTES, key) ? SUPPLIER_ROUTES[key] : method === "GET" && JOB_PATH.test(path) ? JOB_ROUTE : undefined;
     const reply = (status: number, reason: string): ChildReply => ({ status, body: Buffer.from(JSON.stringify({ reason, message: reason })) });
     if (!route || !this.config.targets.some((target) => target.id === targetId)) return reply(404, "not_found");
+    if (route.toolCall) {
+      if (!this.toolCallDigest) return reply(404, "not_found");
+      const header = request.authorization ?? "";
+      const supplied = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : "";
+      if (supplied === "" || !timingSafeEqual(createHash("sha256").update(supplied).digest(), this.toolCallDigest)) {
+        return reply(401, "unauthorized");
+      }
+    }
     if (this.closing && route.refusedWhileDraining) return reply(503, "supplier_draining");
     const child = this.children.get(targetId);
     if (!child?.ready || child.process.exitCode !== null) {
@@ -964,6 +980,8 @@ export class PaperPublisherService {
       PAPER2AGENT_PACKAGE: join(record.work_dir, "bundle.tar"),
       PAPER2AGENT_MANIFEST: join(record.work_dir, "manifest.json"),
       PAPER2AGENT_JOURNAL_DIR: join(targetDir, "journal"),
+      // The child route has no authentication; forward() checks the token.
+      ...(this.config.toolCallToken ? { PAPER2AGENT_FREE_CALLS: "1" } : {}),
     };
     const child: SupervisedSupplier = {
       publicationId: record.id, port, process: this.launchSupplier({ targetId: target.id, port, env }), ready: false, admissions: 0,
@@ -1106,7 +1124,7 @@ export function createPaperPublisherApp(service: PaperPublisherService): Express
     const reply = match
       ? service.forward(match[1], req.method, match[2], {
         body: Buffer.isBuffer(req.body) ? req.body : undefined,
-        contentType: req.get("content-type"), escrowRef: req.get("x-escrow-ref"),
+        contentType: req.get("content-type"), escrowRef: req.get("x-escrow-ref"), authorization: req.get("authorization"),
       })
       : Promise.resolve({ status: 404, body: Buffer.from(JSON.stringify({ reason: "not_found", message: "not_found" })) });
     void reply.catch(() => ({

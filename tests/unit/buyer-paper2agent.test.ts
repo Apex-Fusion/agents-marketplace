@@ -87,6 +87,7 @@ function fixture() {
     accepted?: (body: Record<string, unknown>) => Response | Promise<Response>;
     result?: (body: Paper2AgentResult) => Response | Promise<Response>;
     lineage?: (body: Record<string, unknown>) => Response;
+    call?: (body: { manifest_hash: string; input: { text: string } }, init: RequestInit) => Response | Promise<Response>;
   } = {};
   const indexerRow = {
     utxo_ref: refString(ADVERT_REF), advert_status: "Active", status: "free", capability_id: PAPER2AGENT_CAPABILITY_ID,
@@ -104,6 +105,10 @@ function fixture() {
       if (!success || success.escrow_ref !== escrow || body.manifest_hash !== manifestHash ||
           paper2AgentRequestHash(body.manifest_hash, body.input) !== success.receipt.prompt_hash) return json({ error: "not_found" }, 404);
       return json({ job_id: "job_1", escrow_ref: escrow, manifest_hash: manifestHash, status: "done" });
+    }
+    if (path.endsWith("/v1/paper2agent/call")) {
+      const body = JSON.parse(String(init!.body)) as { manifest_hash: string; input: { text: string } };
+      return hooks.call?.(body, init!) ?? json({ manifest_hash: body.manifest_hash, result: { value: body.input.text }, wallclock_ms: 3 });
     }
     if (init?.method === "POST") {
       if (hooks.admission) return hooks.admission();
@@ -556,5 +561,83 @@ describe("Paper2Agent Node buyer", () => {
     f.fetchFn.mockClear();
     await expect(f.client.recover(posted)).rejects.toThrow("snapshot is invalid");
     expect(f.fetchFn).not.toHaveBeenCalled();
+  });
+});
+
+describe("Paper2Agent free calls and walletless discovery", () => {
+  const TOKEN = "k".repeat(40);
+
+  it("discovers and calls a tool without a wallet, an escrow, or a receipt", async () => {
+    const f = fixture();
+    const submit = vi.spyOn(f.chain, "submitTx");
+    const client = new Paper2AgentClient({ chain: f.chain, indexerUrl: "https://indexer.test", fetchFn: f.fetchFn });
+    const [offer] = await client.discover();
+    expect(offer).toMatchObject({ endpointUrl: "https://supplier.test", manifestHash: f.manifestHash });
+    const called = await client.call(offer!, { text: "e\u0301" }, { token: TOKEN });
+    expect(called).toEqual({ manifest_hash: f.manifestHash, result: { value: "é" }, wallclock_ms: 3 });
+    const posts = f.fetchFn.mock.calls.filter(([, init]) => init?.method === "POST");
+    expect(posts).toHaveLength(1);
+    const [url, init] = posts[0]!;
+    expect(String(url)).toBe("https://supplier.test/v1/paper2agent/call");
+    const headers = new Headers(init!.headers);
+    expect(headers.get("authorization")).toBe(`Bearer ${TOKEN}`);
+    expect(headers.has("x-escrow-ref")).toBe(false);
+    expect(JSON.parse(String(init!.body))).toEqual({ manifest_hash: f.manifestHash, input: { text: "é" } });
+    expect(init!.redirect).toBe("error");
+    expect(init!.credentials).toBe("omit");
+    expect(submit).not.toHaveBeenCalled();
+    // Paid stages still need the wallet.
+    await expect(client.prepare({ advertRef: ADVERT_REF, manifestHash: f.manifestHash, input: { text: "x" },
+      expectedSupplierPkh: supplier.pubKeyHash, maxPriceLovelace: f.advert.price_lovelace })).rejects.toThrow(/wallet key is required/);
+  });
+
+  it.each([
+    ["free", 1, 1],
+    ["working", 0, 1],
+    ["unknown", 0, 1],
+    ["offline", 0, 0],
+  ])("lists a %s tool by default %i times and with includeBusy %i times", async (status, byDefault, withBusy) => {
+    const f = fixture();
+    f.indexerRow.status = status;
+    expect(await f.client.discover()).toHaveLength(byDefault);
+    expect(await f.client.discover({ includeBusy: true })).toHaveLength(withBusy);
+  });
+
+  it("checks the token and input before any request", async () => {
+    const f = fixture();
+    const [offer] = await f.client.discover();
+    f.fetchFn.mockClear();
+    await expect(f.client.call(offer!, { text: "x" }, { token: "short" })).rejects.toThrow(/at least 32 characters/);
+    await expect(f.client.call(offer!, { text: 1 }, { token: TOKEN })).rejects.toThrow();
+    await expect(f.client.call({ ...offer!, manifestHash: "d".repeat(64) }, { text: "x" }, { token: TOKEN })).rejects.toThrow(/does not match its hash/);
+    expect(f.fetchFn).not.toHaveBeenCalled();
+  });
+
+  it.each<[string, (hash: string) => Response, Record<string, unknown>]>([
+    ["a route error", () => json({ reason: "supplier_busy", message: "supplier_busy" }, 409), { reason: "supplier_busy", status: 409 }],
+    ["an unknown error body", () => json({ reason: "Not A Code" }, 400), { reason: "call_failed", status: 400 }],
+    ["an HTML proxy error", () => new Response("<html>bad gateway</html>", { status: 502 }), { reason: "call_failed", status: 502 }],
+    ["output outside the schema", (hash) => json({ manifest_hash: hash, result: { value: 1 }, wallclock_ms: 1 }), { reason: "invalid_tool_output" }],
+    ["another manifest", () => json({ manifest_hash: "d".repeat(64), result: { value: "x" }, wallclock_ms: 1 }), { reason: "malformed_response" }],
+    ["a negative wallclock", (hash) => json({ manifest_hash: hash, result: { value: "x" }, wallclock_ms: -1 }), { reason: "malformed_response" }],
+    ["a network failure", () => { throw new TypeError("fetch failed"); }, { reason: "unreachable" }],
+  ])("reports %s as a SupplierError without a retry", async (_label, respond, expected) => {
+    const f = fixture();
+    const [offer] = await f.client.discover();
+    f.hooks.call = (body) => respond(body.manifest_hash);
+    await expect(f.client.call(offer!, { text: "x" }, { token: TOKEN })).rejects.toMatchObject({ name: "SupplierError", ...expected });
+    expect(f.fetchFn.mock.calls.filter(([url]) => String(url).endsWith("/v1/paper2agent/call"))).toHaveLength(1);
+  });
+
+  it("bounds a stalled call by the tool runtime plus the call overhead", async () => {
+    const f = fixture();
+    const [offer] = await f.client.discover();
+    vi.useFakeTimers();
+    f.hooks.call = (_body, init) => new Promise<Response>((_resolve, reject) => {
+      init.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+    });
+    const pending = expect(f.client.call(offer!, { text: "x" }, { token: TOKEN })).rejects.toMatchObject({ reason: "timeout" });
+    await vi.advanceTimersByTimeAsync(f.tool.limits.max_runtime_ms + 60_000);
+    await pending;
   });
 });

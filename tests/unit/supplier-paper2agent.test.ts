@@ -10,7 +10,8 @@ import { encodeAdvertDatum, encodeEscrowDatum, type AdvertDatum, type EscrowDatu
 import { loadBlueprint, NETWORK_BUFFER_MS } from "@marketplace/shared/tx";
 import { parsePaper2AgentManifest, paper2AgentManifestHash, paper2AgentModel,
   paper2AgentRequestHash, paper2AgentRequestSpecHash, verifyPaper2AgentReceipt,
-  PAPER2AGENT_CAPABILITY_ID, PAPER2AGENT_DELIVERY_OVERHEAD_MS, PAPER2AGENT_SUPPLIER_OVERHEAD_MS } from "@marketplace/shared/paper2agent";
+  PAPER2AGENT_CAPABILITY_ID, PAPER2AGENT_DELIVERY_OVERHEAD_MS, PAPER2AGENT_SUPPLIER_OVERHEAD_MS,
+  MAX_TOOL_INPUT_BYTES } from "@marketplace/shared/paper2agent";
 import { SupplierState } from "../../supplier/src/state.js";
 import { JobStore } from "../../supplier/src/jobs.js";
 import { createApp } from "../../supplier/src/server.js";
@@ -404,6 +405,166 @@ describe("supplier Paper2Agent read-only recovery and durable records", () => {
   });
 });
 
+describe("supplier Paper2Agent unpaid calls", () => {
+  /** The next tool call waits until the test releases it. */
+  function heldExecution(execute: { mockImplementationOnce(implementation: () => Promise<typeof input>): unknown }): () => void {
+    let finish!: () => void;
+    execute.mockImplementationOnce(() => new Promise<typeof input>((resolve) => { finish = () => resolve(input); }));
+    return () => finish();
+  }
+
+  it("runs one call and writes no journal entry, chain transaction, or receipt", async () => {
+    const f = fixture();
+    f.config.freeCalls = true;
+    const runtime = await f.create();
+    const submit = vi.spyOn(f.chain, "submitTx");
+    const awaitTx = vi.spyOn(f.chain, "awaitTx");
+    const reply = await request(f.serve(runtime)).post("/v1/paper2agent/call").send(body);
+    expect(reply.status).toBe(200);
+    expect(reply.headers["cache-control"]).toBe("no-store");
+    expect(reply.body).toEqual({ manifest_hash: manifestHash, result: input, wallclock_ms: expect.any(Number) });
+    expect(Number.isSafeInteger(reply.body.wallclock_ms)).toBe(true);
+    expect(f.session.execute).toHaveBeenCalledWith(manifest.name, input, manifest.limits.max_runtime_ms);
+    expect(f.session.close).toHaveBeenCalled();
+    expect(submit).not.toHaveBeenCalled();
+    expect(awaitTx).not.toHaveBeenCalled();
+    expect(readdirSync(f.config.journalDir)).toEqual([]);
+    expect(f.state.snapshot().status).toBe("free");
+  });
+
+  it("answers 404 before reading the body when the operator did not enable it", async () => {
+    const f = fixture();
+    const runtime = await f.create();
+    const app = f.serve(runtime);
+    for (const payload of [JSON.stringify(body), "{not json"]) {
+      const reply = await request(app).post("/v1/paper2agent/call").set("Content-Type", "application/json").send(payload);
+      expect([reply.status, reply.body]).toEqual([404, { reason: "not_found", message: "not_found" }]);
+    }
+    await expect(runtime.call(body)).rejects.toMatchObject({ status: 404, reason: "not_found" });
+    expect(f.factory).not.toHaveBeenCalled();
+  });
+
+  it("rejects invalid, oversized, and unadvertised calls before taking the slot or starting a process", async () => {
+    const f = fixture();
+    f.config.freeCalls = true;
+    const runtime = await f.create();
+    const acquire = vi.spyOn(f.state, "tryAcquire");
+    const app = f.serve(runtime);
+    const call = (payload: string | object) => request(app).post("/v1/paper2agent/call").set("Content-Type", "application/json").send(payload);
+    for (const invalid of [{ ...body, command: "run-me" }, { ...body, manifest_hash: "00".repeat(32) },
+      { ...body, input: { value: 1 } }, { input }, "{not json"]) {
+      const reply = await call(invalid);
+      expect([reply.status, reply.body]).toEqual([400, { reason: "invalid_tool_request", message: "invalid_tool_request" }]);
+    }
+    const large = await call({ ...body, input: { value: "x".repeat(MAX_TOOL_INPUT_BYTES + 512) } });
+    expect([large.status, large.body]).toEqual([413, { reason: "request_too_large", message: "request_too_large" }]);
+    f.advert.status = "Retired";
+    f.seedAdvert();
+    const retired = await call(body);
+    expect([retired.status, retired.body]).toEqual([503, { reason: "supplier_unavailable", message: "supplier_unavailable" }]);
+    expect(acquire).not.toHaveBeenCalled();
+    expect(f.factory).not.toHaveBeenCalled();
+  });
+
+  it("shares the single slot with paid admission in both directions", async () => {
+    const f = fixture();
+    f.config.freeCalls = true;
+    const runtime = await f.create();
+    const app = f.serve(runtime);
+
+    // A free call holds the slot.
+    const finishFree = heldExecution(f.session.execute);
+    const inFlight = runtime.call(body);
+    await vi.waitFor(() => expect(f.session.execute).toHaveBeenCalledTimes(1));
+    expect(f.state.snapshot().status).toBe("working");
+    await expect(runtime.call(body)).rejects.toMatchObject({ status: 409, reason: "supplier_busy" });
+    const submit = vi.spyOn(f.chain, "submitTx");
+    await expect(runtime.admit(escrowText, body)).rejects.toMatchObject({ status: 409, reason: "supplier_busy" });
+    expect(runtime.journal.hasEscrow(escrowText)).toBe(false);
+    expect(submit).not.toHaveBeenCalled();
+    expect(f.factory).toHaveBeenCalledTimes(1);
+    finishFree();
+    await expect(inFlight).resolves.toMatchObject({ manifest_hash: manifestHash, result: input });
+    expect(f.state.snapshot().status).toBe("free");
+
+    // A paid job holds the slot. The escrow refused above is still admissible.
+    const finishPaid = heldExecution(f.session.execute);
+    const job = await runtime.admit(escrowText, body);
+    await vi.waitFor(() => expect(f.session.execute).toHaveBeenCalledTimes(2));
+    const busy = await request(app).post("/v1/paper2agent/call").send(body);
+    expect([busy.status, busy.body]).toEqual([409, { reason: "supplier_busy", message: "supplier_busy" }]);
+    expect(f.factory).toHaveBeenCalledTimes(2);
+    finishPaid();
+    await vi.waitFor(() => expect(job.status).toBe("done"));
+    await vi.waitFor(() => expect(f.state.snapshot().status).toBe("free"));
+  });
+
+  it("returns 502 for a failed, schema-invalid, or late tool call without a transaction", async () => {
+    const f = fixture();
+    f.config.freeCalls = true;
+    const runtime = await f.create();
+    const submit = vi.spyOn(f.chain, "submitTx");
+    const app = f.serve(runtime);
+    f.session.execute.mockRejectedValueOnce(new Error("tool failed"));
+    f.session.execute.mockImplementationOnce(async () => ({ value: "hello", extra: true }));
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const reply = await request(app).post("/v1/paper2agent/call").send(body);
+      expect([reply.status, reply.body]).toEqual([502, { reason: "tool_execution_failed", message: "tool_execution_failed" }]);
+      expect(f.state.snapshot().status).toBe("free");
+    }
+    f.session.execute.mockImplementationOnce(async () => {
+      const late = performance.now() + manifest.limits.max_runtime_ms + 1;
+      vi.spyOn(performance, "now").mockReturnValue(late);
+      return input;
+    });
+    await expect(runtime.call(body)).rejects.toMatchObject({ status: 502, reason: "tool_execution_failed" });
+    expect(f.session.close).toHaveBeenCalledTimes(3);
+    expect(f.state.snapshot().status).toBe("free");
+    expect(submit).not.toHaveBeenCalled();
+    expect(readdirSync(f.config.journalDir)).toEqual([]);
+  });
+
+  it("keeps the slot until process cleanup finishes and goes offline if cleanup fails", async () => {
+    const f = fixture();
+    f.config.freeCalls = true;
+    const runtime = await f.create();
+    let finishCleanup!: () => void;
+    f.session.close.mockImplementationOnce(() => new Promise<void>((resolve) => { finishCleanup = resolve; }));
+    f.session.execute.mockRejectedValueOnce(new Error("tool failed"));
+    const pending = runtime.call(body);
+    await vi.waitFor(() => expect(f.session.close).toHaveBeenCalled());
+    expect(f.state.snapshot().status).toBe("working");
+    finishCleanup();
+    await expect(pending).rejects.toMatchObject({ status: 502, reason: "tool_execution_failed" });
+    expect(f.state.snapshot().status).toBe("free");
+
+    f.session.close.mockRejectedValue(new Error("process termination unknown"));
+    await expect(runtime.call(body)).rejects.toMatchObject({ status: 502, reason: "tool_execution_failed" });
+    expect(f.state.snapshot().status).toBe("offline");
+    await expect(runtime.call(body)).rejects.toMatchObject({ status: 503, reason: "supplier_draining" });
+  });
+
+  it("refuses new calls while draining and close waits for an in-flight call", async () => {
+    const f = fixture();
+    f.config.freeCalls = true;
+    const runtime = await f.create();
+    const finish = heldExecution(f.session.execute);
+    const inFlight = runtime.call(body);
+    await vi.waitFor(() => expect(f.session.execute).toHaveBeenCalled());
+    let stopped = false;
+    const stopping = runtime.close().then(() => { stopped = true; });
+    const refused = await request(f.serve(runtime)).post("/v1/paper2agent/call").send(body);
+    expect([refused.status, refused.body]).toEqual([503, { reason: "supplier_draining", message: "supplier_draining" }]);
+    await vi.waitFor(() => expect(f.session.close).toHaveBeenCalled());
+    expect(stopped).toBe(false);
+    finish();
+    await stopping;
+    await expect(inFlight).resolves.toMatchObject({ result: input });
+    expect(f.state.snapshot().status).toBe("free");
+    expect(f.factory).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("unpaid registration and publication", () => {
   it("writes discovered schemas and actual package hash with explicit limits", async () => {
     const f = fixture();
@@ -430,7 +591,9 @@ describe("unpaid registration and publication", () => {
       PAPER2AGENT_EXECUTABLE: f.config.executable, PAPER2AGENT_ARGV_JSON: "[]", PAPER2AGENT_CWD: f.config.cwd,
       PAPER2AGENT_PACKAGE: f.config.packagePath, PAPER2AGENT_MANIFEST: f.config.manifestPath,
       PAPER2AGENT_JOURNAL_DIR: f.config.journalDir };
-    expect(loadConfig(env).paper2agent).toEqual(f.config);
+    expect(loadConfig(env).paper2agent).toEqual({ ...f.config, freeCalls: false });
+    expect(loadConfig({ ...env, PAPER2AGENT_FREE_CALLS: "1" }).paper2agent?.freeCalls).toBe(true);
+    expect(loadConfig({ ...env, PAPER2AGENT_FREE_CALLS: "true" }).paper2agent?.freeCalls).toBe(false);
     expect(() => loadConfig({ ...env, PAPER2AGENT_ARGV_JSON: '"shell command"' })).toThrow(/ARGV/);
   });
 });

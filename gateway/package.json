@@ -9,7 +9,6 @@
     "dev": "tsx src/index.ts",
     "rotate-master-key": "tsx src/cli/rotate-master-key.ts",
     "create-demo-key": "tsx src/cli/create-demo-key.ts",
-    "paper2agent-approval": "tsx src/cli/paper2agent-approval.ts",
     "reseller-demo": "tsx src/cli/reseller-demo.ts"
   },
   "dependencies": {

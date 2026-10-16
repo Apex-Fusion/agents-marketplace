@@ -21,6 +21,7 @@ import { PaperPublisherService, createPaperPublisherApp, type PaperPublisherDeps
 import { PaperPublisherStore, type AdvertTransaction } from "../src/publisher-store.js";
 
 const TOKEN = "publisher-token-".repeat(3);
+const TOOL_TOKEN = "tool-call-token-".repeat(3);
 const BASE_IMAGE = `sha256:${"b".repeat(64)}`;
 const RUNTIME_IMAGE = `sha256:${"c".repeat(64)}`;
 const PUBLIC_URL = "https://publisher.example";
@@ -117,12 +118,16 @@ interface Launch {
   statusPolls: number;
   admissions: number;
   activeSessions: number;
+  /** Unpaid calls the child received, with the headers the proxy sent. */
+  calls: Array<{ headers: Record<string, string | string[] | undefined>; body: string }>;
+  /** While set, the child holds each unpaid call until it resolves. */
+  callGate?: Promise<void>;
 }
 
 /** A local stand-in for the supplier child that answers from its trusted launch environment. */
 function supplierLauncher(launches: Launch[], price: string): SupplierLauncher {
   return ({ port, env }) => {
-    const launch: Launch = { env, signals: [], statusPolls: 0, admissions: 0, activeSessions: 0 };
+    const launch: Launch = { env, signals: [], statusPolls: 0, admissions: 0, activeSessions: 0, calls: [] };
     launches.push(launch);
     const key = deriveSupplierKey(env.SUPPLIER_PRIV_KEY_HEX, env.NETWORK_ID === "1" ? 1 : 0);
     const manifest = JSON.parse(readFileSync(env.PAPER2AGENT_MANIFEST, "utf8")) as Paper2AgentManifest;
@@ -140,6 +145,15 @@ function supplierLauncher(launches: Launch[], price: string): SupplierLauncher {
         launch.admissions++;
         res.statusCode = 202;
         res.end(JSON.stringify({ job_id: "6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b", status: "accepted" }));
+      } else if (req.method === "POST" && req.url === "/v1/paper2agent/call") {
+        const chunks: Buffer[] = [];
+        req.on("data", (chunk: Buffer) => { chunks.push(chunk); });
+        req.on("end", () => {
+          launch.calls.push({ headers: req.headers, body: Buffer.concat(chunks).toString("utf8") });
+          void (launch.callGate ?? Promise.resolve()).then(() => {
+            res.end(JSON.stringify({ manifest_hash: paper2AgentManifestHash(manifest), result: { value: "x" }, wallclock_ms: 5 }));
+          });
+        });
       } else {
         res.statusCode = 404;
         res.end("{}");
@@ -166,12 +180,13 @@ function supplierLauncher(launches: Launch[], price: string): SupplierLauncher {
 }
 
 async function publisher(options: { dataDir?: string; targets?: PublisherTarget[]; chain?: MockChainProvider; images?: RuntimeImages;
-  postAdvert?: PaperPublisherDeps["postAdvert"]; price?: string } = {}) {
+  postAdvert?: PaperPublisherDeps["postAdvert"]; price?: string; toolCallToken?: string } = {}) {
   const dataDir = options.dataDir ?? temporary();
   const chain = options.chain ?? new MockChainProvider();
   const images = options.images ?? fakeImages();
   const launches: Launch[] = [];
-  const publisherConfig: PaperPublisherConfig = { dataDir, port: 8096, host: "127.0.0.1", token: TOKEN, publicUrl: PUBLIC_URL,
+  const publisherConfig: PaperPublisherConfig = { dataDir, port: 8096, host: "127.0.0.1", token: TOKEN,
+    toolCallToken: options.toolCallToken ?? null, publicUrl: PUBLIC_URL,
     runtimeImage: BASE_IMAGE, dockerPath: "/usr/bin/docker", dockerHost: null, repoRoot: process.cwd(),
     supplierEntry: join(process.cwd(), "supplier/src/index.ts"), targets: options.targets ?? [target("slot-a", KEY_A)] };
   const service = await PaperPublisherService.open(publisherConfig, {
@@ -390,6 +405,12 @@ describe("supplier supervision", () => {
     expect((await request(app).get("/tools/slot-a/capability")).body.capability_id).toBe(PAPER2AGENT_CAPABILITY_ID);
     expect((await request(app).get("/tools/slot-a/admin")).status).toBe(404);
     expect((await request(app).get("/tools/slot-b/capability")).status).toBe(404);
+    // Without a configured tool-call token the unpaid route does not exist.
+    expect(launches[0].env.PAPER2AGENT_FREE_CALLS).toBeUndefined();
+    const unconfigured = await request(app).post("/tools/slot-a/v1/paper2agent/call").set(AUTH)
+      .send({ manifest_hash: pkg.artifact.manifest_hash, input: { value: "x" } });
+    expect([unconfigured.status, unconfigured.body]).toEqual([404, { reason: "not_found", message: "not_found" }]);
+    expect(launches[0].calls).toEqual([]);
     const admitted = await request(app).post("/tools/slot-a/v1/paper2agent/run")
       .set("X-Escrow-Ref", `${"e".repeat(64)}#0`).send({ manifest_hash: pkg.artifact.manifest_hash, input: { value: "x" } });
     expect(admitted.status).toBe(202);
@@ -408,6 +429,57 @@ describe("supplier supervision", () => {
     await closing;
     expect(launches[0].signals).toEqual(["SIGTERM"]);
     expect(launches[0].admissions).toBe(1);
+  });
+
+  it("forwards unpaid tool calls only with the tool-call token and drains them like admissions", async () => {
+    const { app, service, launches } = await publisher({ toolCallToken: TOOL_TOKEN });
+    const pkg = await reviewedPackage();
+    await request(app).post("/publications").set(AUTH).send(preparation(pkg, terms(pkg.artifact)));
+    const published = await request(app).post(`/publications/${JOB_ID}/publish`).set(AUTH)
+      .send({ artifact_sha256: pkg.artifact.sha256, confirm: true, max_debit_lovelace: "5000000" });
+    expect(published.body.state).toBe("published");
+    expect(launches[0].env.PAPER2AGENT_FREE_CALLS).toBe("1");
+    const payload = { manifest_hash: pkg.artifact.manifest_hash, input: { value: "x" } };
+    const call = (authorization?: string, targetId = "slot-a") => {
+      const pending = request(app).post(`/tools/${targetId}/v1/paper2agent/call`);
+      return (authorization === undefined ? pending : pending.set("Authorization", authorization)).send(payload);
+    };
+
+    for (const authorization of [undefined, "", "Bearer ", TOOL_TOKEN, `Basic ${TOOL_TOKEN}`, `Bearer ${TOKEN}`, `Bearer ${TOOL_TOKEN}x`]) {
+      const refused = await call(authorization);
+      expect([refused.status, refused.body]).toEqual([401, { reason: "unauthorized", message: "unauthorized" }]);
+    }
+    expect((await call(`Bearer ${TOOL_TOKEN}`, "slot-b")).status).toBe(404);
+    expect(launches[0].calls).toEqual([]);
+
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    const answered = await call(`Bearer ${TOOL_TOKEN}`);
+    expect(answered.status).toBe(200);
+    expect(answered.headers["cache-control"]).toBe("no-store");
+    expect(answered.body).toEqual({ manifest_hash: pkg.artifact.manifest_hash, result: { value: "x" }, wallclock_ms: 5 });
+    expect(timeout).toHaveBeenCalledWith(180_000);
+    expect(launches[0].calls).toHaveLength(1);
+    expect(launches[0].calls[0].headers.authorization).toBeUndefined();
+    expect(JSON.parse(launches[0].calls[0].body)).toEqual(payload);
+
+    // The child reports no session, but the in-flight call still holds the drain.
+    let release!: () => void;
+    launches[0].callGate = new Promise<void>((resolve) => { release = resolve; });
+    const inFlight = call(`Bearer ${TOOL_TOKEN}`).then((reply) => reply);
+    await until(() => launches[0].calls.length === 2);
+    const closing = service.close();
+    const draining = await call(`Bearer ${TOOL_TOKEN}`);
+    expect([draining.status, draining.body.reason]).toEqual([503, "supplier_draining"]);
+    expect((await call(`Bearer ${TOKEN}`)).status).toBe(401);
+    for (let turn = 0; turn < 100; turn++) await tick();
+    expect(launches[0].signals).toEqual([]);
+
+    release();
+    expect((await inFlight).status).toBe(200);
+    await closing;
+    expect(launches[0].signals).toEqual(["SIGTERM"]);
+    expect(launches[0].calls).toHaveLength(2);
+    expect(launches[0].calls[1].headers.authorization).toBeUndefined();
   });
 });
 
@@ -449,11 +521,11 @@ describe("publisher configuration", () => {
     const slot = (id: string, key: string, extra: Record<string, string> = {}) => ({ id, label: `Slot ${id}`,
       env: { SUPPLIER_PRIV_KEY_HEX: key, NETWORK_ID: "1", OGMIOS_URL: "https://ogmios.example", LIVE_CHAIN: "1",
         VECTOR_ZERO_TIME_MS: zeroTime, ...extra } });
-    const load = (targets: unknown[]) => {
+    const load = (targets: unknown[], extra: Record<string, string> = {}) => {
       writeFileSync(file, JSON.stringify(targets));
       return loadPaperPublisherConfig({ PATH: join(directory, "bin"), PAPER2AGENT_PUBLISHER_TOKEN: TOKEN,
         PAPER2AGENT_PUBLISHER_TARGETS_FILE: file, PAPER2AGENT_PUBLISHER_PUBLIC_URL: PUBLIC_URL, VECTOR_ZERO_TIME_MS: zeroTime,
-        PAPER2AGENT_RUNTIME_IMAGE: BASE_IMAGE, PAPER2AGENT_PUBLISHER_DATA_DIR: join(directory, "data") });
+        PAPER2AGENT_RUNTIME_IMAGE: BASE_IMAGE, PAPER2AGENT_PUBLISHER_DATA_DIR: join(directory, "data"), ...extra });
     };
 
     writeFileSync(file, "[]");
@@ -468,6 +540,12 @@ describe("publisher configuration", () => {
     const loaded = load([slot("slot-a", KEY_A), slot("slot-b", KEY_B)]);
     expect(loaded.targets.map((entry) => entry.endpointUrl)).toEqual([`${PUBLIC_URL}/tools/slot-a`, `${PUBLIC_URL}/tools/slot-b`]);
     expect(loaded.dockerPath).toBe(join(directory, "bin", "docker"));
+    expect(loaded.toolCallToken).toBeNull();
+    expect(load([slot("slot-a", KEY_A)], { PAPER2AGENT_TOOL_CALL_TOKEN: "" }).toolCallToken).toBeNull();
+    expect(load([slot("slot-a", KEY_A)], { PAPER2AGENT_TOOL_CALL_TOKEN: TOOL_TOKEN }).toolCallToken).toBe(TOOL_TOKEN);
+    expect(() => load([slot("slot-a", KEY_A)], { PAPER2AGENT_TOOL_CALL_TOKEN: "short" })).toThrow(/PAPER2AGENT_TOOL_CALL_TOKEN must be/);
+    expect(() => load([slot("slot-a", KEY_A)], { PAPER2AGENT_TOOL_CALL_TOKEN: `${"t".repeat(32)} x` })).toThrow(/without whitespace/);
+    expect(() => load([slot("slot-a", KEY_A)], { PAPER2AGENT_TOOL_CALL_TOKEN: TOKEN })).toThrow(/must differ/);
     for (const text of [JSON.stringify(loaded.targets), inspect(loaded.targets)]) {
       expect(text).not.toContain(KEY_A);
       expect(text).not.toContain(KEY_B);

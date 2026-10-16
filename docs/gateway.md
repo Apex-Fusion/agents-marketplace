@@ -16,126 +16,132 @@ Use `client.responses.create(...)` with `input`, or `client.chat.completions.cre
 
 Optional `x_vector` receipt and supplier-routing fields and `public_preview` remain available for marketplace proof tools. Standard OpenAI clients do not need them.
 
-The OpenAI model list includes Active inference models: `llm.text.generate.v1` for normal keys and `llm.chat.v1` for demo keys. Dedicated Paper2Agent keys cannot spend through these APIs.
+The OpenAI model list includes Active inference models: `llm.text.generate.v1` for normal keys and `llm.chat.v1` for demo keys.
 
 ## Paper2Agent tools
 
-`/mcp` exposes reviewed supplier-configured JSON tools through MCP.
+`/mcp` gives free access to reviewed, supplier-configured JSON tools through MCP.
 This route is separate from `/openai/v1`.
-It requires `Authorization: Bearer <gateway-api-key>` on every exchange.
-Browser Origins must also be in the gateway's CORS allowlist.
-Initialization and tool discovery do not spend funds.
-Demo keys cannot execute paid tools.
+It needs no API key, no wallet, and no payment.
+The gateway ignores an `Authorization` header on this route.
+Browser Origins must be in the gateway's CORS allowlist.
+
+Connect an MCP client with the Streamable HTTP transport to `https://api.marketplace.vector.apexfusion.org/mcp`.
+Do not set a header.
 
 The supplier capability is `mcp.tool.execute.v1`.
 Its advert model is `paper2agent:<full-manifest-hash>`.
 MCP names have the form `p2a_<tool-name>_<first-16-hash-characters>`.
 Discovery returns validated input and output schemas with an explicit JSON Schema 2020-12 dialect.
-An approved call uses the full hash and supplier identity, not the short name alone.
+Discovery omits ambiguous short-name collisions.
 
-### Operator approval
+### Discovery
 
-Create an unused, non-demo key through `/signup`.
-Use its database ID from the operator key inventory.
-Do not pass its raw bearer token to the approval command.
-Set `GATEWAY_DB_DIR` to the running gateway's database directory.
-Set `TOOL_KEY_ID`, `TOOL_MANIFEST_HASH`, and `TOOL_SUPPLIER_PKH` to the reviewed values.
+`tools/list` reads the indexer, each advert UTxO on chain, and each supplier's `/capability`.
+The gateway caches the result for 30 seconds and loads it once for concurrent requests.
+A tool that runs a call (indexer status `working`) stays in the list.
+A tool that the indexer did not check yet (`unknown`) is also in the list.
+An `offline` tool is not in the list.
+The list contains only tools whose advert endpoint starts with `<PAPER2AGENT_PUBLISHER_PUBLIC_URL>/tools/`.
+Anyone can publish an advert with any endpoint, and a call sends the call token to that endpoint.
 
-This example permits one attempt with a 2,000,000-lovelace service-price ceiling:
+### Calls
 
-```bash
-pnpm exec tsx gateway/src/cli/paper2agent-approval.ts approve \
-  --db "$GATEWAY_DB_DIR" \
-  --key-id "$TOOL_KEY_ID" \
-  --manifest-hash "$TOOL_MANIFEST_HASH" \
-  --supplier-pkh "$TOOL_SUPPLIER_PKH" \
-  --max-price-lovelace 2000000 \
-  --max-total-spend-lovelace 14000000 \
-  --max-calls 1
-```
+`tools/call` finds the tool by name in the cached list.
+The gateway validates the arguments against the manifest input schema.
+Then it sends `POST <advert endpoint>/v1/paper2agent/call` with the shared `PAPER2AGENT_TOOL_CALL_TOKEN`.
+The publisher checks the token.
+The tool supplier runs the tool in a new offline container.
+The gateway validates the result against the manifest output schema.
 
-Approval values are immutable.
-The key must have no prior job, session, usage, pending transaction, or transaction outcome.
-Fund its wallet separately after approval.
-Use a new key for a different approval.
-Tool arguments cannot create or enlarge an approval.
+A successful result contains:
 
-`max-price-lovelace` limits the advertised service price only.
-The buyer also funds both bonds.
-Normal Accept pays the supplier the service price plus the supplier bond.
-The total exposure limit covers these funds, signed transaction fees, and collateral at risk.
-The Post check also keeps a 7,000,000-lovelace settlement allowance.
-A wallet balance alone is not a spending limit.
+- `structuredContent`: the JSON result of the tool.
+- `content`: one text item with the same JSON.
+- `_meta.vector`: `manifest_hash`, `supplier_pkh`, and `wallclock_ms`.
 
-Only one unresolved liability can use a dedicated key at a time.
-An admitted attempt consumes the call allowance even if it fails before payment.
-Known costs reduce the remaining total budget.
-Unknown costs remain `null` and keep the budget reserved.
+A free call has no receipt, escrow, or financial record.
+The gateway does not store the input or the result.
+It writes one log line for each call (`evt: "paper2agent_call"`) with the tool name, the status, and the duration.
 
-To stop new funding:
+A failed call is an MCP tool result with `isError: true`.
+`_meta.vector.code` identifies the failure:
 
-```bash
-pnpm exec tsx gateway/src/cli/paper2agent-approval.ts revoke \
-  --db "$GATEWAY_DB_DIR" --key-id "$TOOL_KEY_ID"
-```
-
-Revocation preserves result reads and financial recovery.
-It does not restore access to Responses, Chat Completions, OCR, or withdrawal.
-A missing approval makes revoke fail.
-
-### Results and interrupted calls
-
-Successful MCP calls return the scientific JSON in `structuredContent`.
-The text content contains the same JSON.
-`_meta.vector` contains the job ID, signed receipt, public key, escrow references, and financial outcome.
-The normal MCP response waits for confirmed Accept.
-
-The transport returns JSON rather than progress events.
-Set the MCP client's request timeout for the full operation, including chain confirmation.
-A client timeout does not prove that no payment occurs.
-Do not retry `tools/call` automatically.
-
-The same bearer key can read:
-
-| Route | Result |
+| Code | Meaning |
 |---|---|
-| `GET /v1/paper2agent/jobs` | Newest own jobs; at most 20 per page |
-| `GET /v1/paper2agent/jobs?cursor=<next_cursor>` | The next page of own jobs |
-| `GET /v1/paper2agent/jobs/:id` | One own job, its signed result, and its financial record |
+| `paper2agent_tool_not_found` | The name is not in the current tool list |
+| `paper2agent_invalid_input` | The arguments do not match the input schema |
+| `paper2agent_input_too_large` | The arguments are too large for the tool supplier |
+| `paper2agent_tool_busy` | The tool runs another call, or no slot opened during the queue wait |
+| `paper2agent_client_busy` | Another call from the same address is in progress |
+| `rate_limit_exceeded` | The address sent too many calls; the message gives the wait time |
+| `paper2agent_tool_failed` | The tool failed while it ran |
+| `paper2agent_invalid_output` | The result does not match the output schema |
+| `paper2agent_timeout` | The tool did not finish in time |
+| `paper2agent_tool_unavailable` | The tool supplier is stopping, is not available, or does not accept free calls |
+| `paper2agent_supplier_unavailable` | The tool supplier did not respond |
+| `paper2agent_supplier_error` | The tool supplier sent an invalid response |
+| `paper2agent_calls_unavailable` | The gateway or the publisher has no matching call token |
 
-The list response is `{jobs, next_cursor}`.
-The cursor is `null` on the last page.
-These responses use `Cache-Control: no-store`.
-Unknown and foreign cursors have the same error response.
-Another key cannot read a job.
+A retry costs nothing.
+Retry after a busy, rate-limit, or temporary error.
+Set the MCP client's request timeout to at least 4 minutes.
+A call can wait 60 seconds in the queue, and a tool can run for up to 120 seconds.
 
-Each job has `state`, `result_status`, `error`, escrow references, `result`, and `financial`.
-`result` is `null` until verified evidence exists.
-When present, it contains the scientific object at `result.result`, plus the receipt and signature.
-Verified evidence can be available before settlement.
-Always inspect `financial.status` and `financial.actual_cost_lovelace`.
-Do not treat a valid signature as a settled payment.
+### Limits
 
-Recovery retains the confirmed original Post snapshot.
-It can retrieve an existing supplier job after a lost admission response.
-It uses a read-only lookup with the original request preimage.
-It does not start the tool or post another escrow.
-The gateway verifies the receipt and exact live Submitted lineage before Accept.
-The supplier journal and the indexer's `/escrows/:ref/lineage` endpoint must remain available.
-Missing or corrupt evidence fails closed.
+Free calls share the capacity of the tool suppliers.
+The gateway applies these limits:
 
-### Storage and trust
+| Setting | Default | Meaning |
+|---|---:|---|
+| `MCP_IP_RATE_MAX`, `MCP_IP_RATE_WINDOW_MS` | `120`, `60000` | All `/mcp` requests for each client IP; then HTTP 429 |
+| `MCP_CALL_IP_RATE_MAX`, `MCP_CALL_IP_RATE_WINDOW_MS` | `20`, `60000` | `tools/call` requests for each client IP |
+| `MCP_CALL_IP_CONCURRENCY` | `1` | Calls in progress for each client IP |
+| `MCP_CALL_CONCURRENCY` | `2` | Calls in progress for the gateway; at most one for each tool supplier |
+| `MCP_CALL_QUEUE_TIMEOUT_MS` | `60000` | Maximum wait for a free slot |
+| `MCP_CATALOG_TTL_MS` | `30000` | Cache time of the tool list |
+| `PAPER2AGENT_TOOL_CALL_TOKEN` | unset | Secret shared with the publisher; at least 32 characters |
+| `PAPER2AGENT_PUBLISHER_PUBLIC_URL` | unset | The publisher's public URL; required with the token |
 
-Paper2Agent stores the manifest, input, Post snapshot, and signed result in plaintext in SQLite.
-The supplier also keeps plaintext job files.
-There is no `store:false` or automatic tool-result retention policy.
-Restrict access to the database, journal, and backups.
-Use non-sensitive data unless a separate policy permits this storage.
+The gateway trusts its proxy, so the client IP comes from `X-Forwarded-For`.
+The proxy must replace a value that the client sends.
 
-The supplier sees the input.
-A receipt proves a signed statement, not correct computation.
-There is no wrong-result refund after Submitted.
-Release can also transfer the buyer bond to the supplier.
+Queued calls wait in order.
+At most 64 calls can wait.
+A full queue or the end of the queue wait gives `paper2agent_tool_busy`.
+A client disconnect removes a waiting call.
+A started call continues until the tool supplier answers, so the slot count stays correct.
+
+Without `PAPER2AGENT_TOOL_CALL_TOKEN`, `tools/list` works and `tools/call` gives `paper2agent_calls_unavailable`.
+Set the same token in the publisher.
+Set `PAPER2AGENT_PUBLISHER_PUBLIC_URL` to the same value as in the publisher.
+
+### Publication and paid calls
+
+Publication does not change.
+The publisher posts each tool advert on chain from its wallet slot.
+The advert, `/capability`, and the paid escrow route `POST /v1/paper2agent/run` stay available.
+A direct on-chain buyer can still pay the tool supplier with the Node SDK (`@marketplace/buyer/sdk/paper2agent`): `prepare`, `post`, `execute`, and `recover`.
+The gateway does not make paid tool calls.
+
+A free call and a paid admission share the single slot of the tool supplier.
+A paid admission during a free call gets HTTP 409 `supplier_busy`.
+The SDK's default discovery returns only tools that the indexer reports as `free`.
+Check this status immediately before you post an escrow.
+
+The gateway no longer uses the `paper2agent_approvals`, `paper2agent_calls`, and `paper2agent_transactions` tables.
+It does not delete them.
+They can contain plaintext inputs and results of earlier paid calls.
+Before you deploy this version, make sure that no `paper2agent_calls` row has `accounted = 0`.
+The one-shot recovery settles an earlier interrupted Paper2Agent job like any other one-shot job.
+
+### Trust
+
+The tool supplier sees the input.
+A free result has no signature; the gateway trusts the publisher on the same host.
+A valid result does not prove correct computation.
+Use non-sensitive data.
 See [supplier setup](DEPLOY_NEW_SUPPLIER.md#9-paper2agent-tools) and the
 [implementation and verification record](PAPER2AGENT_PLAN.md).
 
@@ -576,7 +582,7 @@ Input-cap and cost accounting use the complete transmitted execution request JSO
 ## Privacy and key rotation
 
 The gateway stores only a hash of each raw API key. Each custodial wallet private key uses a per-row AES-256-GCM nonce under `GATEWAY_MASTER_KEY`. Stored Responses and active session transcripts use the same sealed-row scheme.
-Paper2Agent tool records are a separate plaintext journal, as described above.
+The gateway does not store free Paper2Agent tool inputs or results.
 
 Back up the gateway database and master key together. Losing the master key strands custodial wallets and encrypted response data. The rotation command decrypts and reseals all wallet keys, all stored request/response payloads, and every active session transcript in one database transaction. Restart the gateway with the new key after rotation.
 
@@ -615,7 +621,7 @@ before rolling out this API change.
 - `POST /account/withdraw` sends available funds to the requested address.
 - `GET /` serves the self-service key and account UI.
 
-Raw API keys are returned once. Withdrawal is the custodial exit path for ordinary keys. Dedicated Paper2Agent keys cannot use this route, including after revoke.
+Raw API keys are returned once. Withdrawal is the custodial exit path for keys.
 
 ### Operator key inventory
 

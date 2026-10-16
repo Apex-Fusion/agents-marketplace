@@ -22,7 +22,7 @@
 
 import type { ChainProvider, OutputReference } from "@marketplace/shared/chain";
 import { decodeEscrowDatum } from "@marketplace/shared/cbor";
-import type { WalletKey, BuildResult } from "@marketplace/shared/tx";
+import type { WalletKey } from "@marketplace/shared/tx";
 import { buildAcceptTx, buildReclaimTx } from "@marketplace/shared/tx";
 import { submitBudgetMs } from "@marketplace/buyer/sdk";
 import { parseRef } from "../routing/selectSupplier.js";
@@ -312,9 +312,8 @@ export async function acceptAndConfirm(
   walletKey: WalletKey,
   escrowRef: OutputReference,
   awaitTimeoutMs = ACCEPT_CONFIRM_TIMEOUT_MS,
-  beforeSubmit?: (built: BuildResult) => Promise<void>,
 ): Promise<string> {
-  const built = await buildAcceptTx({ chain, buyerKey: walletKey, escrowRef, beforeSubmit });
+  const built = await buildAcceptTx({ chain, buyerKey: walletKey, escrowRef });
   await chain.awaitTx(built.expectedTxHash, awaitTimeoutMs);
   return built.expectedTxHash;
 }
@@ -325,9 +324,8 @@ export async function reclaimAndConfirm(
   walletKey: WalletKey,
   escrowRef: OutputReference,
   awaitTimeoutMs = ACCEPT_CONFIRM_TIMEOUT_MS,
-  beforeSubmit?: (built: BuildResult) => Promise<void>,
 ): Promise<string> {
-  const built = await buildReclaimTx({ chain, buyerKey: walletKey, escrowRef, beforeSubmit });
+  const built = await buildReclaimTx({ chain, buyerKey: walletKey, escrowRef });
   await chain.awaitTx(built.expectedTxHash, awaitTimeoutMs);
   return built.expectedTxHash;
 }

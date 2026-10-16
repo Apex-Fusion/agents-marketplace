@@ -32,6 +32,20 @@ export function paper2AgentRoutes(runtime: Paper2AgentRuntime): Router {
         } else res.status(503).json({ reason: "tool_admission_unavailable" });
       }
     });
+  // Unpaid call behind the publisher's authenticated route: no escrow, journal, or receipt.
+  router.post("/v1/paper2agent/call", (_req, res, next) => {
+    // Answer a disabled route before reading the body.
+    if (runtime.freeCalls) next();
+    else res.status(404).json({ reason: "not_found", message: "not_found" });
+  }, toolRequest, async (req, res) => {
+    try {
+      res.json(await runtime.call(req.body));
+    } catch (error) {
+      const status = error instanceof ToolAdmissionError ? error.status : 503;
+      const reason = error instanceof ToolAdmissionError ? error.reason : "supplier_unavailable";
+      res.status(status).json({ reason, message: reason });
+    }
+  });
   // Recovery of a lost admission reply: read-only, never a second paid admission.
   router.post("/v1/paper2agent/lookup", toolRequest, (req, res) => {
     let job: ToolJob | undefined;
@@ -56,10 +70,13 @@ export function paper2AgentRoutes(runtime: Paper2AgentRuntime): Router {
       res.status(202).json({ status: job.status, escrow_ref: job.escrow_ref });
     } else res.status(job.status === "done" ? 200 : 502).json(publicJob(job));
   });
-  router.use((error: unknown, _req: Request, res: Response, next: NextFunction) => {
+  router.use((error: unknown, req: Request, res: Response, next: NextFunction) => {
     if (!error) { next(); return; }
     const status = typeof error === "object" && "status" in error ? error.status : undefined;
-    res.status(status === 413 ? 413 : 400).json({ reason: "invalid_tool_request" });
+    if (req.path === "/v1/paper2agent/call") {
+      const reason = status === 413 ? "request_too_large" : "invalid_tool_request";
+      res.status(status === 413 ? 413 : 400).json({ reason, message: reason });
+    } else res.status(status === 413 ? 413 : 400).json({ reason: "invalid_tool_request" });
   });
   return router;
 }
