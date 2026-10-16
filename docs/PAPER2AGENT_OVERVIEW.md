@@ -1,18 +1,18 @@
 # Paper2Agent: how it works and current state
 
-State recorded on 2026-10-15 at 07:30 UTC. Updated at 09:05 UTC after the `auto` exclusion release.
+State recorded on 2026-10-15 at 07:30 UTC. Updated on 2026-10-16 at 10:45 UTC after the release of free MCP calls and faster builds (`90b7a56`) and build attempt 8.
 For the full design, limits, and payment rules, see [PAPER2AGENT_PLAN.md](PAPER2AGENT_PLAN.md).
 
 ## Summary
 
-Paper2Agent converts a research paper into a paid MCP tool on the Vector marketplace.
+Paper2Agent converts a research paper into a free MCP tool on the Vector marketplace.
 
 1. A user submits a paper on the buyer page `https://marketplace.vector.apexfusion.org/paper2agent`.
 2. A coding agent writes a Python MCP tool for one method from the paper.
 3. A separate verifier agent checks the tool against the paper.
 4. A person reviews the result and approves it.
 5. The publisher puts an advert for the tool on chain and starts a supplier for it.
-6. Buyer agents call the tool through the gateway MCP endpoint. They pay for each call through escrow.
+6. Agents call the tool through the public gateway MCP endpoint. A call needs no API key and no payment.
 
 Each model call of the coding and verifier agents is also a marketplace purchase.
 The shared buyer wallet pays for these calls.
@@ -28,8 +28,8 @@ flowchart LR
   control -->|"approved archive"| publisher["Publisher"]
   publisher -->|"advert transaction"| chain[("Vector mainnet")]
   publisher -->|"starts"| tool["Tool supplier<br/>/p2a/tools/slot"]
-  agent["Buyer agent"] -->|"MCP with API key"| gateway["Gateway /mcp"]
-  gateway -->|"one escrow per call"| tool
+  agent["Agent"] -->|"MCP, no key"| gateway["Gateway /mcp"]
+  gateway -->|"free call with the call token"| tool
 ```
 
 | Component | Location | Role |
@@ -111,20 +111,20 @@ An unknown publish result goes to `confirmation_pending`. The publisher never si
 - A direct on-chain buyer can still pay the tool supplier through escrow with the Node SDK. The advert SLA is 390 s.
   One paid call cost 3.003256 AP3X for a tool with a 0.2 AP3X price and 1 AP3X bonds.
 
-## Current state (2026-10-15)
+## Current state (2026-10-16)
 
 ### Services
 
 | Service | Version | Running since (UTC) | Status |
 |---|---|---|---|
-| Buyer app | commit `0748e76`, image `7cebc290`, `PAPER2AGENT_MODEL_AUTO_EXCLUDE=swarm-qwen38-27b-gptq4` | 2026-10-15 08:55 | healthy |
-| Control service | commit `61b20af`, image `84d0b72e`, `PAPER2AGENT_MODEL=auto` | 2026-10-13 09:58 | `build_ready: true` |
-| Publisher | image `3b378beb` | 2026-10-13 | `publisher_ready: true` |
-| Gateway | — | 2026-10-12 11:16 | healthy |
+| Buyer app | commit `90b7a56`, image `7f8cd70c`, `PAPER2AGENT_MODEL_AUTO_EXCLUDE=swarm-qwen38-27b-gptq4` | 2026-10-16 09:57 | healthy |
+| Control service | commit `90b7a56`, image `ed9e91f9`, `PAPER2AGENT_MODEL=auto` | 2026-10-16 10:01 | `build_ready: true` |
+| Publisher | commit `90b7a56`, image `ed9e91f9` | 2026-10-16 09:56 | `publisher_ready: true` |
+| Gateway | commit `90b7a56`, image `6111ffe4`, free `/mcp` | 2026-10-16 09:56 | healthy |
 
 Both hosts use the runtime base image `sha256:d9b9ddd03b60157362426ceb437fb1d43425a1f7463d86968a55ed997e995009`.
 The production checkout follows `main`.
-Commit `49e3b03` adds only `papers/Replicating-SwarmWorld-with-open-weight-models.pdf` (4.2 MB). No job uses this paper.
+Rollback images: buyer and gateway `rollback-e4eedad`, publisher `rollback-3b378beb`, control `rollback-84d0b72e`.
 
 ### Jobs
 
@@ -132,7 +132,7 @@ Commit `49e3b03` adds only `papers/Replicating-SwarmWorld-with-open-weight-model
 |---|---|---|---|---|
 | paper2agent-giou-smoke | `ee7202fa` | 3 | `approved`, published | `calculate_giou` on slot `paper-tool-2` |
 | ConsistentHashAlgo | `76b3e9df` | 1 | `approved`, published | `assign_buckets` on slot `paper-tool-1` |
-| ConsistendHashAlgoV2 | `091194bd` | 7 | `building` | No artifact yet |
+| ConsistendHashAlgoV2 | `091194bd` | 8 | `awaiting_review` | Artifact `de921ef0c2717a3c…`, tool `binomial_hash`. Not reviewed or published. |
 
 ConsistendHashAlgoV2 history (UTC):
 
@@ -141,25 +141,30 @@ ConsistendHashAlgoV2 history (UTC):
 - 2026-10-13: attempt 4 (09:58) made more than 24 model calls. It failed at 10:52 after three supplier HTTP 502 errors in a row.
 - 2026-10-13: attempt 5 (11:12) paused at model call 11 at 11:27, because the buyer wallet had no collateral UTxO. The operator cancelled it on 2026-10-15 at 08:04.
 - 2026-10-15: attempt 6 (08:08) made 4 paid model calls. It failed at 08:16 after three failed calls in a row on model call 5: meta-llama/Llama-3.3-70B-Instruct, then `swarm-qwen38-27b-gptq4` twice. 4 of its 5 failed calls went to `swarm-qwen38-27b-gptq4`.
-- 2026-10-15: attempt 7 started at 08:57, after the `auto` exclusion release. By 09:04 it made 4 paid model calls (gpt-5.6-sol, Qwen/Qwen3.6-35B-A3B-FP8, and deepseek/deepseek-v4-flash twice) and no call to `swarm-qwen38-27b-gptq4`. Two calls failed: deepseek-v4-pro (HTTP 400) and moonshotai/kimi-k2.6 (no output).
+- 2026-10-15: attempt 7 started at 08:57, after the `auto` exclusion release. It failed at 09:40:32 after 46 successful and 6 failed paid calls (42.7 min): "Paper2Agent: input does not match its JSON schema". A verifier case had an input that the tool schema does not allow.
+- 2026-10-16: attempt 8 started at 10:02:23 on release `90b7a56`. It made 59 successful and 7 failed paid calls.
+  The builder finished at 10:18:55. At 10:34:05 the first final check failed with the same schema error as attempt 7.
+  The verifier repaired its cases (repair 1 of 2), and all 5 clean-runtime cases passed.
+  The attempt reached `awaiting_review` at 10:38:58 (36.6 min).
 
 ### Published tools
 
-| MCP tool | Slot | Price | Buyer / supplier bond | Advert transaction | Paid calls |
+| MCP tool | Slot | Price | Buyer / supplier bond | Advert transaction | Calls |
 |---|---|---|---|---|---|
-| `p2a_assign_buckets_bd67d5a658a13610` | `paper-tool-1` | 0.2 AP3X | 1 / 1 AP3X | `411df8b63ec404c1…` | 2 settled, 4 refused before payment |
-| `p2a_calculate_giou_7c99729a818f3148` | `paper-tool-2` | 1 AP3X | 2 / 2 AP3X | `35c0e780f001ddb6…` | 0 |
+| `p2a_assign_buckets_bd67d5a658a13610` | `paper-tool-1` | 0.2 AP3X | 1 / 1 AP3X | `411df8b63ec404c1…` | Free since 2026-10-16. 2 paid calls on 2026-10-13. |
+| `p2a_calculate_giou_7c99729a818f3148` | `paper-tool-2` | 1 AP3X | 2 / 2 AP3X | `35c0e780f001ddb6…` | Free since 2026-10-16. No paid call. |
 
 - Both adverts are Active, and the indexer shows both suppliers as free.
 - Each publication cost its slot wallet 2.682488 AP3X.
-- The gateway has one approved key, for `assign_buckets`. It used 2 of 5 calls and 6.006512 of 20 AP3X.
-- The 4 refused calls failed with `paper2agent_insufficient_funds` and cost nothing.
+- Both tools wrap their arguments in `request`, for example `{"request":{"keys":[0,1,42],"num_buckets":10}}`.
+- On 2026-10-16 a call without an API key took 3.4 s (`assign_buckets`) and 3.2 s (`calculate_giou`). A paid call took 51 s on 2026-10-13.
+- Before 2026-10-16 the gateway had one approved key for `assign_buckets`. The gateway no longer uses approvals.
 
 ### Wallets
 
 | Wallet | Address | Balance (AP3X) | UTxOs |
 |---|---|---|---|
-| Buyer (pays build model calls) | `addr1vye6p9pau98dspuk0mu85htah6x9k2caz94fssshdhj777gta0gpx` | 567.50 (08:57, before attempt 7) | 35, largest 491.49 AP3X |
+| Buyer (pays build model calls) | `addr1vye6p9pau98dspuk0mu85htah6x9k2caz94fssshdhj777gta0gpx` | 237.42 (2026-10-16 10:43, after attempt 8) | 105, largest 52.02 AP3X |
 | `paper-tool-1` (published) | `addr1vy78w47xjc9mjqxucg0aguslpdgakf3tvwzlkuv2pl6cndgvk27hx` | 214.31 | 4 |
 | `paper-tool-2` (published) | `addr1vytv6mwyeun07qmgg49q0zhmxhz59qn0ym00k2xtg94dt5spa8572` | 97.32 | 1 |
 | `paper-tool-3` (free) | `addr1v86wzs8azj64heh7y9slcd9fvz60vma0cprae0fpwu9cu7c2dewht` | 100 | 1 |
@@ -169,7 +174,7 @@ ConsistendHashAlgoV2 history (UTC):
 
 All UTxOs hold only AP3X.
 
-### Build model calls with `auto` (2026-10-13 09:49–11:27 UTC)
+### Build model calls with `auto` (2026-10-13 09:49–11:27 UTC, before the speed release)
 
 | Model | Successful paid calls |
 |---|---|
@@ -198,6 +203,36 @@ The 50 successful calls cost about 150 AP3X (estimate: 50 × 3 AP3X).
 Before attempt 6, the buyer wallet went from 546.04 AP3X to 584.53 AP3X (+38.49 AP3X net).
 At 08:57 UTC no expired buyer escrow was locked.
 
+## Changes on 2026-10-16
+
+| Time (UTC) | Action | Result |
+|---|---|---|
+| 09:53 | Ran `reclaim-orphans.ts` | 6 Reclaims confirmed: the escrows of the 6 failed calls of attempt 7. |
+| 09:56–09:57 | Released `90b7a56` on the production host: gateway, publisher, buyer | Free public `/mcp`. A new `PAPER2AGENT_TOOL_CALL_TOKEN` in the gateway and publisher settings. Only these three containers restarted. |
+| 09:56:59 | The kernel OOM killer stopped the `paper-tool-1` supplier at publisher start | The publisher started it again at 09:57:42 (see problem 9). |
+| 09:58–10:01 | Called both tools without an API key | Correct results. A wrong or missing token at the publisher gives HTTP 401. A call at 09:57:15, while `paper-tool-1` restarted, found no tool. |
+| 10:01 | Pushed `main` | The deploy workflow had nothing to do. |
+| 10:01:48 | Upgraded the control service to `90b7a56` | No store migration. `build_ready: true`. |
+| 10:02:23 | Started attempt 8 | `awaiting_review` at 10:38:58 (see [Jobs](#jobs)). |
+| 10:40–10:43 | Ran `reclaim-orphans.ts` two times | 6 Reclaims confirmed for the failed calls of attempt 8. The seventh escrow (`moonshotai/kimi-k2.6`, 1 h SLA) can be reclaimed after 11:29:27. |
+
+### Build model calls of attempt 8
+
+| Measure | Attempt 7 (2026-10-15) | Attempt 8 (2026-10-16) |
+|---|---|---|
+| Successful paid calls | 46 | 59 |
+| Failed paid calls | 6 | 7 |
+| Median time for each successful call (s) | 31.9 | 22.0 |
+| Mean time for each successful call (s) | 37.5 | 26.9 |
+| p90 time for each successful call (s) | 65.7 | 40.2 |
+| Wait after a failed call (s) | 60 | 10 |
+| Result | failed after 42.7 min | `awaiting_review` after 36.6 min |
+
+- All 59 background Accepts confirmed. No Accept was sent again.
+- Successful calls by model: deepseek/deepseek-v4-flash 43, Qwen3.8-27B 7, gpt-5.6-sol 6, Qwen/Qwen3.6-35B-A3B-FP8 2, moonshotai/kimi-k2.6 1.
+- Failed calls: meta-llama/Llama-3.3-70B-Instruct 2 (upstream HTTP 402 and 413), deepseek-v4-pro 2 (HTTP 400 `reasoning_text`), Qwen3.8-27B 1 (more than 300 s), Qwen/Qwen3.6-35B-A3B-FP8 1 (`claim_timeout`), moonshotai/kimi-k2.6 1 (no output).
+- The buyer wallet went from 413.14 AP3X (09:50) to 237.42 AP3X (10:43). This includes the 12 Reclaims of this day.
+
 ## Open problems
 
 ### 1. The buyer wallet fragments again over time
@@ -207,6 +242,8 @@ At 08:57 UTC no expired buyer escrow was locked.
 - When no pure-AP3X UTxO of at least 5 AP3X is left, Accept has no collateral. The model endpoint then refuses every call with HTTP 402, and the build pauses.
 - The pause message asks for a deposit, but the balance is sufficient; the UTxO shape is the problem.
 - On 2026-10-15 the wallet held 546 AP3X in 248 UTxOs of at most 4 AP3X each. Attempt 5 waited 44 hours.
+- On 2026-10-16 after attempt 8 the wallet held 237.42 AP3X in 105 UTxOs. The largest was 52.02 AP3X, so collateral was not a problem yet.
+- One build like attempt 8 used about 177 AP3X (59 calls × about 3 AP3X). The wallet has enough for about one more build of this size.
 - Permanent fix: run the wallet health check in the buyer app, as the suppliers do.
 
 ### 2. `tx:consolidate-wallet` underprices large transactions
@@ -222,7 +259,8 @@ At 08:57 UTC no expired buyer escrow was locked.
 - Production has no cron job or timer for `buyer/src/cli/reclaim-orphans.ts`.
 - Each failed paid call locks its escrow (about 2.2 AP3X) until somebody runs the CLI after the deadline.
 - A Reclaim costs about 0.5 AP3X. It returns about 1.7 AP3X net for an escrow with a 0.2 AP3X price and 1 AP3X bonds.
-- The CLI also checks about 1,000 index rows that are already spent. One run took 2.5 minutes.
+- The CLI also checks more than 1,000 index rows that are already spent. One run took 1 to 2.5 minutes.
+- The CLI refuses an escrow before its deadline. A supplier with a long SLA (for example 1 h for `moonshotai/kimi-k2.6`) keeps the escrow locked for that time.
 - Do not run it during a build: Reclaims and build calls can select the same wallet inputs.
 
 ### 4. Some suppliers in the `auto` pool fail often
@@ -239,7 +277,9 @@ At 08:57 UTC no expired buyer escrow was locked.
 - Seen causes: swarm-qwen38 upstream HTTP 502 and 504; Llama-3.3 upstream HTTP 402 ("You have no remaining …"); one Qwen3.8-27B call took more than 300 s.
 - `swarm-qwen38-27b-gptq4` has 5 adverts and no successful build call. It had 4 of the 5 failed calls of attempt 6. Since 2026-10-15 08:55 UTC the buyer sets `PAPER2AGENT_MODEL_AUTO_EXCLUDE=swarm-qwen38-27b-gptq4`, so `auto` does not buy from it.
 - deepseek-v4-pro fails after the first turn of a build conversation. Its upstream answers HTTP 400 "The `reasoning_text` in the thinking mode must be passed back to the API.", and the build conversation does not keep the model's reasoning.
-- meta-llama/Llama-3.3-70B-Instruct still fails with upstream HTTP 402 (no provider credits).
+- meta-llama/Llama-3.3-70B-Instruct still fails with upstream HTTP 402 (no provider credits). On 2026-10-16 it also gave HTTP 413.
+- Attempt 8 (2026-10-16) had 7 failed calls: Llama-3.3 2, deepseek-v4-pro 2, Qwen3.8-27B 1 (more than 300 s), Qwen/Qwen3.6-35B-A3B-FP8 1 (`claim_timeout`), moonshotai/kimi-k2.6 1 (no output).
+  Since `90b7a56` the build waits 10 s after a failed call, not 60 s, so these failures cost less time.
 - Each failure costs a Post fee and locks an escrow until a Reclaim (see problem 3).
 - The 15-minute skip list covers one endpoint, and it is lost when the buyer app restarts.
 - To exclude more models, add them to `PAPER2AGENT_MODEL_AUTO_EXCLUDE` in the production `buyer/.env` (comma-separated). Then recreate the buyer container.
@@ -262,11 +302,20 @@ At 08:57 UTC no expired buyer escrow was locked.
 - The buyer app has no password.
 - Anyone can submit papers. The buyer wallet pays for their builds.
 - Anyone can approve artifacts and publish them to the four free slots. Each publication costs a slot about 2.7 AP3X.
+- Anyone can call a published tool for free, within the gateway limits for each client IP.
+  The tool supplier runs each call and gets no payment for it.
 
 ### 8. Manual releases
 
 - A push to `main` does not update the control service or the publisher.
 - Release them by hand. See [DEPLOY_NEW_SUPPLIER.md](DEPLOY_NEW_SUPPLIER.md).
+
+### 9. The publisher start can stop a tool supplier
+
+- On 2026-10-16 at 09:56:59 UTC the kernel OOM killer stopped the `paper-tool-1` supplier at publisher start. The publisher container has a 768 MiB memory limit.
+- Each tool supplier uses about 150 MB, and the publisher about 154 MB. At start, all suppliers compile TypeScript at the same time.
+- The publisher started the supplier again after 43 s. The tool was not available during that time.
+- Each new published tool adds a supplier, so the risk increases. Fix: a higher memory limit, or a start of one supplier at a time.
 
 ## Operations reference
 
@@ -295,4 +344,4 @@ Related documents:
 
 - [PAPER2AGENT_PLAN.md](PAPER2AGENT_PLAN.md): design, limits, payment and recovery rules, verification record.
 - [DEPLOY_NEW_SUPPLIER.md](DEPLOY_NEW_SUPPLIER.md): control service and publisher deployment, wallet slots.
-- [gateway.md](gateway.md#paper2agent-tools): key approval, MCP access, and job recovery.
+- [gateway.md](gateway.md#paper2agent-tools): free MCP access, limits, and error codes.
