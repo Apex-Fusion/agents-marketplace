@@ -45,3 +45,4 @@ docs/*.zip
 # .pyc files can embed absolute dev-machine paths via co_filename.
 __pycache__/
 *.pyc
+.omp
