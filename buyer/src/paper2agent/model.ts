@@ -12,7 +12,9 @@
  * for its block.
  * Errors use the gateway's OpenAI shape. A wallet that cannot pay answers 402
  * insufficient_funds with x_vector amounts and the deposit address before any
- * transaction, as the gateway does, so the build waits instead of failing.
+ * transaction, as the gateway does, so the build waits instead of failing. A
+ * chain or indexer outage before the Post is sent answers 503 chain_unavailable,
+ * so the build waits for it too.
  *
  * The build service authenticates with a bearer token; the buyer key never
  * leaves this server. The shared transaction builder does not track pending
@@ -41,7 +43,7 @@ import { findSubmittedEscrowRef } from "../cli/acceptFlow.js";
 import type { ResponseArchive } from "../db/archive.js";
 import { Mutex } from "../mutex.js";
 import type { Marketplace } from "../sdk/Marketplace.js";
-import type { PostedPrompt, PreparedPrompt, SubmitPromptResult } from "../sdk/types.js";
+import { IndexerError, type PostedPrompt, type PreparedPrompt, type SubmitPromptResult } from "../sdk/types.js";
 
 export const PAPER2AGENT_MODEL_PATH = "/v1/paper2agent/model/chat/completions";
 
@@ -72,6 +74,17 @@ const ACCEPT_CONFIRM_TIMEOUT_MS = 120_000;
 const FINAL_ACCEPT_REASONS: Record<string, true> = {
   "escrow ref not on chain": true, "wrong state": true, "accept window expired": true,
 };
+/** Socket and DNS failures of Node's fetch that a later resend can pass. */
+const TRANSPORT_ERROR_CODES: Record<string, true> = {
+  ECONNRESET: true, ECONNREFUSED: true, ETIMEDOUT: true, EAI_AGAIN: true, EPIPE: true, ENOTFOUND: true,
+};
+/** The Ogmios providers' HTTP failure, "Ogmios HTTP error: <status> <statusText>[ :: body]", for 5xx or 429. */
+const OGMIOS_UNAVAILABLE_RE = /^Ogmios HTTP error: (?:5\d\d|429)\b/;
+/** lucid's complete() reports a provider failure as "{ Complete: <name>: <message> }";
+ * the Post builder wraps that text in a TxConstructionError and drops the cause. */
+const LUCID_UNAVAILABLE_RE = /^\{ Complete: (?:Error: Ogmios HTTP error: (?:5\d\d|429)\b|TypeError: fetch failed\b|(?:AbortError|TimeoutError): )/;
+/** Error causes nest one or two deep; the bound only stops a cyclic chain. */
+const CAUSE_CHAIN_LIMIT = 8;
 
 /** One submitted Accept: its hash and every output it spends. */
 export interface SubmittedAccept {
@@ -139,6 +152,34 @@ function sendError(res: Response, error: ModelCallError): void {
     },
     ...error.extra,
   });
+}
+
+/**
+ * A chain or indexer outage that a later resend of the same call can pass:
+ * - Ogmios HTTP 5xx or 429, also as lucid's "{ Complete: Error: Ogmios HTTP error: ... }";
+ * - the indexer client's HTTP 5xx or 429, its timeout, and its "fetch failed" network error;
+ * - Node fetch failures: TypeError "fetch failed" (also lucid-wrapped), or a code in
+ *   TRANSPORT_ERROR_CODES or UND_ERR_* anywhere in the cause chain;
+ * - AbortError or TimeoutError: no fetch before the Post carries the client's signal, so these are timeouts.
+ * Ogmios RPC errors, construction refusals, and bugs are not outages: no resend can pass them.
+ */
+function isChainAvailabilityError(error: unknown): boolean {
+  if (error instanceof IndexerError) {
+    return error.reason === "timeout" || error.message === "network error: fetch failed" ||
+      (error.reason === "indexer_error" && error.status !== undefined &&
+        (error.status === 429 || (error.status >= 500 && error.status <= 599)));
+  }
+  let link: unknown = error;
+  for (let depth = 0; depth < CAUSE_CHAIN_LIMIT && typeof link === "object" && link !== null; depth += 1) {
+    const name = "name" in link ? String(link.name) : "";
+    const message = "message" in link ? String(link.message) : "";
+    const code = "code" in link ? String(link.code) : "";
+    if (name === "AbortError" || name === "TimeoutError" || (name === "TypeError" && message === "fetch failed") ||
+        TRANSPORT_ERROR_CODES[code] === true || code.startsWith("UND_ERR_") ||
+        OGMIOS_UNAVAILABLE_RE.test(message) || LUCID_UNAVAILABLE_RE.test(message)) return true;
+    link = "cause" in link ? link.cause : undefined;
+  }
+  return false;
 }
 
 function record(value: unknown, label: string): Record<string, unknown> {
@@ -423,6 +464,8 @@ export function registerPaper2AgentModelRoute(app: Express, options: Paper2Agent
       const started = Date.now();
       let model = "";
       let busyEndpoint: string | undefined;
+      /** A Post reached its beforeSubmit hook: it may be on chain, so a failure is no longer free to resend. */
+      let postSent = false;
       try {
         const body = record(req.body, "request body");
         const extra = Object.keys(body).find((field) => !REQUEST_FIELDS.includes(field));
@@ -469,7 +512,7 @@ export function registerPaper2AgentModelRoute(app: Express, options: Paper2Agent
           const fundAndPost = async (): Promise<PostedPrompt> => {
             const reserved = reservedInputs();
             await assertFunds(chain!, walletKey!, prepared, reserved);
-            return marketplace!.postPrompt(prepared, undefined, { excludeInputs: reserved });
+            return marketplace!.postPrompt(prepared, async () => { postSent = true; }, { excludeInputs: reserved });
           };
           try {
             return { advert, posted: await fundAndPost() };
@@ -530,6 +573,13 @@ export function registerPaper2AgentModelRoute(app: Express, options: Paper2Agent
         if (error instanceof ModelCallError) {
           if (error.status >= 500) console.error(`[paper2agent-model] ${model} ${error.code}: ${error.message}`);
           sendError(res, error);
+          return;
+        }
+        if (!postSent && isChainAvailabilityError(error)) {
+          const detail = errorMessage(error).slice(0, 4000);
+          console.error(`[paper2agent-model] ${model} chain_unavailable: ${detail}`);
+          sendError(res, new ModelCallError(503, "chain_unavailable",
+            `The chain or indexer is unavailable (${detail}). No payment was made; the call can be retried.`));
           return;
         }
         const reason = error instanceof Error && "reason" in error ? String(error.reason) : "paid_call_failed";

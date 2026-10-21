@@ -16,6 +16,8 @@ export class InsufficientFundsError extends Error {
     super(shortfall.message);
   }
 }
+/** The marketplace cannot reach the chain or its indexer to pay for the next model call. The refused request spent nothing. */
+export class ChainUnavailableError extends Error {}
 /** A finish validation error that ends the run instead of returning to the model. */
 export class FatalFinishError extends Error {}
 export interface AgentTool {
@@ -43,7 +45,7 @@ export interface AgentSessionOptions {
   /** Each error returns to the model as the finish result; a FatalFinishError ends the run. */
   validateFinish: (value: Record<string, unknown>) => void | Promise<void>;
   log: (message: string) => void;
-  /** Wait before resending a model call that the wallet cannot pay for. */
+  /** Wait before resending a model call that the wallet cannot pay for or that the marketplace cannot pay for without chain access. */
   fundsRetryMs: number;
   /** Wait before resending a failed model call, times the number of failures in a row. */
   failureRetryMs: number;
@@ -58,6 +60,16 @@ const MAX_ERROR_BYTES = 64 * 1024;
 const LOVELACE = /^(?:0|[1-9][0-9]{0,19})$/;
 /** Calls may land on different marketplace models; this many failed or tool-less replies in a row end the run. */
 const MAX_MODEL_MISSES = 3;
+/** A larger conversation ends the run; compaction keeps long runs below it. */
+const MAX_CONTEXT_BYTES = 220_000;
+/** Older turns are shortened once the conversation passes this size, well before MAX_CONTEXT_BYTES. */
+const COMPACT_TRIGGER_BYTES = 160_000;
+/** Compaction stops at this size, so the next turn's tool results (up to 16 KB each) fit below MAX_CONTEXT_BYTES. */
+const COMPACT_TARGET_BYTES = 120_000;
+/** Older tool results and tool-call arguments up to this length cost little and stay unchanged. */
+const COMPACT_MIN_CHARS = 600;
+/** The start of an older tool result that stays after shortening. */
+const COMPACT_HEAD_CHARS = 200;
 const ADDRESS = /^addr(?:_test)?1[02-9ac-hj-np-z]{20,200}$/;
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -103,7 +115,10 @@ function fundsShortfall(text: string): FundsShortfall | null {
   };
 }
 
-/** One paid model request. Throws InsufficientFundsError when the wallet cannot pay for it. */
+/**
+ * One paid model request. Throws InsufficientFundsError when the wallet cannot pay for it and
+ * ChainUnavailableError when the marketplace refused it before payment because it cannot reach the chain.
+ */
 async function requestModel(model: BuildModelConfig, messages: AgentMessage[], tools: ToolSpec[], signal: AbortSignal): Promise<ModelResponse> {
   const response = await fetch(`${model.baseUrl.replace(/\/+$/, "")}/chat/completions`, {
     method: "POST",
@@ -122,7 +137,8 @@ async function requestModel(model: BuildModelConfig, messages: AgentMessage[], t
       const nested = record(body?.error);
       code = nested ? nested.code : body?.error;
     } catch { /* non-JSON error body */ }
-    throw new Error(`Coding model returned HTTP ${response.status}${typeof code === "string" ? ` (${code.slice(0, 100)})` : ""}`);
+    const failure = `Coding model returned HTTP ${response.status}${typeof code === "string" ? ` (${code.slice(0, 100)})` : ""}`;
+    throw response.status === 503 && code === "chain_unavailable" ? new ChainUnavailableError(failure) : new Error(failure);
   }
   return JSON.parse(await boundedBody(response, MAX_RESPONSE_BYTES)) as ModelResponse;
 }
@@ -153,12 +169,55 @@ export function repairableFinishCheck(maxRepairs: number, signal: AbortSignal, l
   };
 }
 
+/** Older tool-call arguments as a JSON object that still names the path the call wrote. */
+function shortenedArguments(arguments_: string): string {
+  let path: unknown;
+  try { path = record(JSON.parse(arguments_))?.path; } catch { /* the call already returned an argument error to the model */ }
+  return JSON.stringify({ ...(typeof path === "string" ? { path } : {}), omitted_chars: arguments_.length, note: "Older arguments removed to save context" });
+}
+
+/**
+ * Shortens long tool results and tool-call arguments of older turns, oldest first from message
+ * `start`, until the conversation of `size` bytes fits COMPACT_TARGET_BYTES. The system and task
+ * messages and the latest turn, whose results the model needs now, stay unchanged, as do message
+ * order, roles and tool-call ids. Returns the number of shortened messages and the first message
+ * not yet looked at; the next compaction starts there, so no entry is shortened twice.
+ */
+function compactContext(messages: AgentMessage[], size: number, start: number): { shortened: number; next: number } {
+  let latest = messages.length - 1;
+  while (latest > 1 && !(messages[latest].role === "assistant" && messages[latest].tool_calls)) latest -= 1;
+  let shortened = 0;
+  let index = Math.max(start, 2);
+  for (; index < latest && size > COMPACT_TARGET_BYTES; index += 1) {
+    const message = messages[index];
+    const before = size;
+    // A string's JSON.stringify form is exactly its part of the serialized conversation;
+    // an entry is replaced only when that saves bytes.
+    if (message.role === "tool" && message.content !== null && message.content.length > COMPACT_MIN_CHARS) {
+      const content = JSON.stringify({ truncated: true, note: "Older output removed to save context; run the tool again to see it",
+        text: message.content.slice(0, COMPACT_HEAD_CHARS) });
+      const change = Buffer.byteLength(JSON.stringify(content)) - Buffer.byteLength(JSON.stringify(message.content));
+      if (change < 0) { message.content = content; size += change; }
+    }
+    for (const call of message.tool_calls ?? []) {
+      if (call.function.arguments.length <= COMPACT_MIN_CHARS) continue;
+      const arguments_ = shortenedArguments(call.function.arguments);
+      const change = Buffer.byteLength(JSON.stringify(arguments_)) - Buffer.byteLength(JSON.stringify(call.function.arguments));
+      if (change < 0) { call.function.arguments = arguments_; size += change; }
+    }
+    if (size < before) shortened += 1;
+  }
+  return { shortened, next: index };
+}
+
 /**
  * Each invocation has a new conversation and run identity; verifier context is never reused.
- * There is no call, token, or time limit. A call the wallet cannot pay for is sent again
- * after `fundsRetryMs` until it succeeds or the build is stopped. A failed call is retried
- * after `failureRetryMs` times the misses in a row, and a reply without a tool call at once;
- * MAX_MODEL_MISSES in a row end the run.
+ * There is no call, token, or time limit. A call the wallet cannot pay for, or that the
+ * marketplace refuses before payment because it cannot reach the chain, is sent again after
+ * `fundsRetryMs` until it succeeds or the build is stopped. A failed call is retried after
+ * `failureRetryMs` times the misses in a row, and a reply without a tool call at once;
+ * MAX_MODEL_MISSES in a row end the run. Older tool results and arguments are shortened as the
+ * conversation grows, so a long run stays below MAX_CONTEXT_BYTES.
  */
 export async function runCodingAgent(options: AgentSessionOptions): Promise<AgentRunResult> {
   const runId = randomUUID();
@@ -168,29 +227,51 @@ export async function runCodingAgent(options: AgentSessionOptions): Promise<Agen
   } }));
   tools.push({ type: "function", function: { name: "finish", description: "Finish only after the requested files and execution evidence exist.", parameters: options.finishSchema } });
   let paused = false;
+  let chainWait = false;
   let misses = 0;
+  let compactFrom = 2;
   while (true) {
     options.signal.throwIfAborted();
-    if (Buffer.byteLength(JSON.stringify(messages)) > 220_000) throw new Error("Coding-agent context exceeds limit");
+    let size = Buffer.byteLength(JSON.stringify(messages));
+    if (size > COMPACT_TRIGGER_BYTES) {
+      const compaction = compactContext(messages, size, compactFrom);
+      compactFrom = compaction.next;
+      if (compaction.shortened > 0) {
+        const compacted = Buffer.byteLength(JSON.stringify(messages));
+        options.log(`Context compacted: ${compaction.shortened} older messages shortened (${size} -> ${compacted} bytes)`);
+        size = compacted;
+      }
+    }
+    if (size > MAX_CONTEXT_BYTES) throw new Error("Coding-agent context exceeds limit");
     const callNumber = options.usage.calls + 1;
-    if (!paused) options.log(`Model call ${callNumber} (${runId})`);
+    if (!paused && !chainWait) options.log(`Model call ${callNumber} (${runId})`);
     let body: ModelResponse;
     try {
       body = await requestModel(options.model, messages, tools, options.signal);
     } catch (error) {
       options.signal.throwIfAborted();
-      if (!(error instanceof InsufficientFundsError)) {
+      if (error instanceof ChainUnavailableError) {
+        // One line per wait; funds refusals in between belong to the same wait.
+        if (!chainWait) options.log(`Model call ${callNumber} waiting: marketplace chain access is unavailable; no payment was made; retrying every ${options.fundsRetryMs / 1000} s`);
+        chainWait = true;
+      } else if (error instanceof InsufficientFundsError) {
+        options.onFundsShortfall(error.shortfall);
+        paused = true;
+      } else {
+        chainWait = false;
         if (++misses >= MAX_MODEL_MISSES) throw error;
         options.log(`Model call ${callNumber} failed: ${error instanceof Error ? error.message.slice(0, 300) : "unknown error"}; retrying`);
         await sleep(options.failureRetryMs * misses, undefined, { signal: options.signal });
         continue;
       }
-      options.onFundsShortfall(error.shortfall);
-      paused = true;
       await sleep(options.fundsRetryMs, undefined, { signal: options.signal });
       continue;
     }
     options.usage.calls = callNumber;
+    if (chainWait) {
+      chainWait = false;
+      options.log(`Model call ${callNumber} resumed: marketplace chain access is available again`);
+    }
     if (paused) {
       paused = false;
       options.onFundsRestored();

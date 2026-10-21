@@ -315,9 +315,11 @@ function chainUtxoToLucidScriptInput(
 }
 
 /** Lucid 0.4.30's default `setCollateral` is 5_000_000n; its collateral
- * selector needs a pure-AP3X UTxO ≥ this threshold. Mirror that floor
- * here so we can fail fast with an actionable hint instead of waiting
- * for lucid's deep "wallet must hold a pure-ADA UTxO ≥ 5 ADA" error. */
+ * selector takes up to 3 wallet inputs that cover this amount (see
+ * reserveScriptSpendCollateral). Our wallets keep one pure-AP3X UTxO ≥ this
+ * threshold as the dedicated candidate. Mirror that floor here so we can fail
+ * fast with an actionable hint instead of waiting for lucid's deep
+ * "wallet must hold a pure-ADA UTxO ≥ 5 ADA" error. */
 const COLLATERAL_MIN_LOVELACE = 5_000_000n;
 
 /** Pre-check: assert the wallet has a UTxO that can serve as collateral.
@@ -394,7 +396,10 @@ function rethrowAsTxError(err: unknown, fallback: string): never {
  *   - no qualifying pure-ADA collateral UTxO, or
  *   - excluding it would underfund the escrow. The large-single-UTxO case is
  *     safe under default selection anyway: the change output is itself a
- *     pure-ADA UTxO well above the collateral floor. */
+ *     pure-ADA UTxO well above the collateral floor.
+ * Dropping the candidate from the list is enough here only because PostEscrow
+ * needs no collateral. Script spends take their collateral from the same list;
+ * Accept/Reclaim use reserveScriptSpendCollateral instead. */
 export function reserveCollateralInputs(
   utxos: LucidUTxO[],
   lockedLovelace: bigint,
@@ -417,6 +422,93 @@ export function reserveCollateralInputs(
   // Cover the locked output + tx fee + a min-change cushion; else fall back.
   if (remainingLovelace < lockedLovelace + 2_000_000n) return null;
   return remaining;
+}
+
+/** Lovelace the wallet inputs of an Accept/Reclaim must supply besides any
+ * outputs that the escrow input does not cover: the 500_000 fee floor that
+ * every script-spend builder sets (`setMinFee`) plus one change output at the
+ * output floor. */
+const SCRIPT_SPEND_WALLET_CUSHION_LOVELACE = 500_000n + MIN_UTXO_LOVELACE;
+
+/** Lovelace lucid must leave in the collateral return output. Lucid adds a
+ * further collateral input until the return reaches its min-UTxO: 969_750 for
+ * a pure-ADA output at lucid's preset coinsPerUtxoByte (4310), slightly more
+ * for a 9-byte coin. A rounded 1 AP3X covers both. */
+const COLLATERAL_RETURN_CUSHION_LOVELACE = 1_000_000n;
+
+/** lucid 0.4.30 `findCollateral` refuses more inputs than this (Vector's
+ * maxCollateralInputs is also 3). */
+const MAX_COLLATERAL_INPUTS = 3;
+
+/** Pure lovelace and no reference script: the only UTxOs whose collateral
+ * return and change this module can bound without the min-UTxO calculation. */
+function isPlainLovelace(utxo: LucidUTxO): boolean {
+  return !utxo.scriptRef && Object.keys(utxo.assets).every((k) => k === "lovelace");
+}
+
+/** lucid's `sortUTxOs` "LargestFirst": most lovelace first; on a tie, fewer assets first. */
+function lucidLargestFirst(a: LucidUTxO, b: LucidUTxO): number {
+  if (a.assets.lovelace === b.assets.lovelace) {
+    return Object.keys(a.assets).length - Object.keys(b.assets).length;
+  }
+  return a.assets.lovelace > b.assets.lovelace ? -1 : 1;
+}
+
+/** True when lucid's collateral selection over `utxos` surely succeeds:
+ * replay its largest-first walk and require that the inputs it can take are
+ * plain lovelace and reach the collateral plus the return cushion within
+ * MAX_COLLATERAL_INPUTS picks. A token-bearing or script-ref pick returns
+ * false: lucid would take it, but its return min-UTxO is not modelled here. */
+function collateralCoveredBy(utxos: LucidUTxO[]): boolean {
+  const picks = [...utxos].sort(lucidLargestFirst).slice(0, MAX_COLLATERAL_INPUTS);
+  let covered = 0n;
+  for (const utxo of picks) {
+    if (!isPlainLovelace(utxo)) return false;
+    covered += utxo.assets.lovelace;
+    if (covered >= COLLATERAL_MIN_LOVELACE + COLLATERAL_RETURN_CUSHION_LOVELACE) return true;
+  }
+  return false;
+}
+
+/** Choose the `presetWalletInputs` for a buyer script spend (Accept/Reclaim)
+ * that keep the dedicated ≥5-AP3X collateral UTxO out of the tx, or null for
+ * lucid's full-wallet behaviour.
+ *
+ * lucid 0.4.30 `complete()` (verified in dist/index.js) passes
+ * `presetWalletInputs` both to coin selection (`doCoinSelection`) and to
+ * `findCollateral`. Both run `recursive(sortUTxOs(list))`: largest lovelace
+ * first (ties: fewer assets first), greedy until the target is covered, then
+ * more inputs until the leftover (change or collateral return) reaches its
+ * min-UTxO; a leftover of 0 also needs that. `selectUTxOs` is called with
+ * includeUTxOsWithScriptRef=true, so despite lucid's error text, token-bearing
+ * and script-ref UTxOs are taken too; tokens go back in the collateral return.
+ * Collateral = max(150% × fee, setCollateral 5 AP3X); script-spend fees stay
+ * far below 3.33 AP3X, so it is 5 AP3X; more than 3 inputs fails.
+ * With the full wallet, the fee input is the largest UTxO. When that is the
+ * 5-AP3X collateral UTxO, every Accept cut it to 4.5 AP3X, and the wallet
+ * drained into small UTxOs that the buyer preflight refuses.
+ *
+ * Rule: reserve the SMALLEST plain-lovelace UTxO ≥ COLLATERAL_MIN_LOVELACE
+ * and return the other UTxOs only if lucid can still build from them:
+ *   (a) collateralCoveredBy(remaining), and
+ *   (b) their plain lovelace ≥ fee floor + change floor + `outputShortfall`
+ *       (output lovelace that the escrow input does not cover; a token UTxO
+ *       that lucid adds carries at least its own min-UTxO, so it is not counted).
+ * Otherwise null: no candidate, nothing left, or the rest cannot cover the
+ * collateral or the fee. The reservation must never make the tx fail. */
+export function reserveScriptSpendCollateral(
+  utxos: LucidUTxO[],
+  outputShortfall = 0n,
+): LucidUTxO[] | null {
+  const reserved = utxos
+    .filter((u) => isPlainLovelace(u) && u.assets.lovelace >= COLLATERAL_MIN_LOVELACE)
+    .reduce<LucidUTxO | null>((min, u) => (min === null || u.assets.lovelace < min.assets.lovelace ? u : min), null);
+  if (reserved === null) return null;
+  const remaining = utxos.filter((u) => u !== reserved);
+  const plainLovelace = remaining.filter(isPlainLovelace).reduce((s, u) => s + u.assets.lovelace, 0n);
+  const shortfall = outputShortfall > 0n ? outputShortfall : 0n;
+  if (plainLovelace < SCRIPT_SPEND_WALLET_CUSHION_LOVELACE + shortfall) return null;
+  return collateralCoveredBy(remaining) ? remaining : null;
 }
 
 /** Wallet outputs minus the ones that a submitted, unconfirmed transaction already spends. */
@@ -710,7 +802,13 @@ export async function buildLiveTxForAccept(params: LiveAcceptParams): Promise<Bu
   // unknownOutputReferences errors against the real ledger).
   const realWalletUtxos = withoutInputs(await lucid.wallet().getUtxos(), params.excludeInputs);
   assertCollateralCandidate(realWalletUtxos);
-  const presetWalletInputs = realWalletUtxos;
+  // Keep the dedicated collateral UTxO out of the tx so later Accepts and the
+  // buyer preflight still find it. The wallet pays only the fee, the change
+  // and any output lovelace that the escrow input does not cover.
+  const presetWalletInputs = reserveScriptSpendCollateral(
+    realWalletUtxos,
+    supplierLovelace + buyerLovelace - params.escrowUtxo.lovelace,
+  ) ?? realWalletUtxos;
 
   let signed;
   try {
@@ -777,7 +875,11 @@ export async function buildLiveTxForReclaim(params: LiveReclaimParams): Promise<
 
   const realWalletUtxos = await lucid.wallet().getUtxos();
   assertCollateralCandidate(realWalletUtxos);
-  const presetWalletInputs = realWalletUtxos;
+  // Same collateral reservation as Accept.
+  const presetWalletInputs = reserveScriptSpendCollateral(
+    realWalletUtxos,
+    buyerLovelace - params.escrowUtxo.lovelace,
+  ) ?? realWalletUtxos;
   const { zeroTime, slotLength } = SLOT_CONFIG_NETWORK.Mainnet;
   const refundNotBefore = zeroTime +
     Math.ceil((params.datum.deliver_by - zeroTime) / slotLength) * slotLength;

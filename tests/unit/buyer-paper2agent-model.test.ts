@@ -2,7 +2,8 @@
  * buyer-paper2agent-model.test.ts — the buyer's paid model endpoint for the
  * Paper2Agent build service: authentication before spending, the gateway's
  * insufficient-funds contract, advert choice, Chat Completions translation,
- * the background Accept, and wallet outputs that a pending Accept reserves.
+ * the background Accept, wallet outputs that a pending Accept reserves, and
+ * chain or indexer outages before and after the Post is sent.
  */
 
 import express from "express";
@@ -17,7 +18,7 @@ import {
   registerPaper2AgentModelRoute,
   type SubmittedAccept,
 } from "../../buyer/src/paper2agent/model.js";
-import type { Marketplace } from "../../buyer/src/sdk/Marketplace.js";
+import { Marketplace } from "../../buyer/src/sdk/Marketplace.js";
 import type { PostedPrompt, PreparedPrompt, SubmitPromptOptions, SubmitPromptResult, SupplierView } from "../../buyer/src/sdk/types.js";
 
 const TOKEN = "build-model-token-".repeat(3);
@@ -86,7 +87,12 @@ function gate(): { wait: Promise<void>; open: () => void } {
 
 function setup(options: {
   views?: SupplierView[]; walletUtxos?: Utxo[];
-  beforePost?: () => Promise<void>; beforeExecute?: () => Promise<void>;
+  /** Replaces the wallet read of the funds preflight. */
+  queryUtxos?: () => Promise<Utxo[]>;
+  /** Discovery goes through the SDK's indexer client with this fetch instead of returning `views`. */
+  indexerFetch?: typeof globalThis.fetch;
+  /** beforePost runs where the live builder builds and signs; afterSubmit where it submits and waits for the block. */
+  beforePost?: () => Promise<void>; afterSubmit?: () => Promise<void>; beforeExecute?: () => Promise<void>;
   /** Replaces the default Accept builder, which spends `acceptSpends`. */
   submitAccept?: (escrowRef: OutputReference, excludeInputs: readonly OutputReference[]) => Promise<SubmittedAccept>;
   acceptSpends?: OutputReference[];
@@ -100,7 +106,15 @@ function setup(options: {
 } = {}) {
   const events: string[] = [];
   const views = options.views ?? [view("11", {})];
-  const discoverSuppliers = vi.fn(async () => views);
+  const awaitTx = vi.fn(options.awaitTx ?? (async () => undefined));
+  const queryUtxosByAddress = vi.fn(options.queryUtxos ??
+    (async () => options.walletUtxos ?? [utxo(100_000_000n, 0), utxo(6_000_000n, 1)]));
+  const chain = { queryUtxosByAddress, awaitTx } as unknown as ChainProvider;
+  const indexer = options.indexerFetch && new Marketplace({
+    chain, indexerUrl: "http://indexer.invalid", walletKey: WALLET, networkParams: { networkId: 1 }, _fetch: options.indexerFetch,
+  });
+  const discoverSuppliers = vi.fn(async (query?: Parameters<Marketplace["discoverSuppliers"]>[0]) =>
+    indexer ? indexer.discoverSuppliers(query) : views);
   const preparePrompt = vi.fn(async (opts: SubmitPromptOptions): Promise<PreparedPrompt> => {
     const { advertRef, payment_lovelace, public_preview, ...requestOptions } = opts;
     events.push("prepare");
@@ -113,11 +127,15 @@ function setup(options: {
     const endpoint = String(url).replace(/\/status$/, "");
     return new Response(JSON.stringify({ status: options.liveStatus?.[endpoint] ?? "free" }));
   });
-  const postPrompt = vi.fn(async (prepared: PreparedPrompt, _beforeSubmit?: unknown,
+  const postPrompt = vi.fn(async (prepared: PreparedPrompt, beforeSubmit?: Parameters<Marketplace["postPrompt"]>[1],
     _options?: { excludeInputs?: readonly OutputReference[] }): Promise<PostedPrompt> => {
+    const escrowRef = { txHash: "cc".repeat(32), index: 0 };
     await options.beforePost?.();
+    // The live builder calls the hook after signing and right before the submit.
+    await beforeSubmit?.({ txCborHex: "00", expectedTxHash: escrowRef.txHash, escrowOutputRef: escrowRef });
+    await options.afterSubmit?.();
     events.push("post");
-    return { ...prepared, escrowRef: { txHash: "cc".repeat(32), index: 0 }, postedAt: 1, deliverBy: 2 };
+    return { ...prepared, escrowRef, postedAt: 1, deliverBy: 2 };
   });
   const executePrompt = vi.fn(async (posted: PostedPrompt): Promise<SubmitPromptResult> => {
     await options.beforeExecute?.();
@@ -137,14 +155,12 @@ function setup(options: {
     events.push("accept");
     return { txHash: ACCEPT_TX, spentInputs: options.acceptSpends ?? [] };
   }));
-  const awaitTx = vi.fn(options.awaitTx ?? (async () => undefined));
-  const queryUtxosByAddress = vi.fn(async () => options.walletUtxos ?? [utxo(100_000_000n, 0), utxo(6_000_000n, 1)]);
   const backgroundTasks = new Set<Promise<unknown>>();
   const app = express();
   registerPaper2AgentModelRoute(app, {
     token: TOKEN,
     marketplace: { discoverSuppliers, preparePrompt, postPrompt, executePrompt } as unknown as Marketplace,
-    chain: { queryUtxosByAddress, awaitTx } as unknown as ChainProvider,
+    chain,
     walletKey: WALLET,
     indexerUrl: "http://indexer.invalid",
     submitAccept,
@@ -380,5 +396,110 @@ describe("buyer Paper2Agent paid model endpoint", () => {
     expect(auto.body.model).toBe("deepseek");
     expect(explicit.status).toBe(200);
     expect(f.preparePrompt.mock.calls.map(([options]) => options.advertRef.txHash)).toEqual(["62".repeat(32), "61".repeat(32)]);
+  });
+});
+
+describe("buyer Paper2Agent paid model endpoint during chain or indexer outages", () => {
+  const OGMIOS_522 = "Ogmios HTTP error: 522 <none>";
+  const fetchFailed = (code: string): TypeError =>
+    new TypeError("fetch failed", { cause: Object.assign(new Error(`read ${code}`), { code }) });
+  const failWith = (error: unknown) => async (): Promise<never> => { throw error; };
+
+  /** The answer the build service waits on: nothing was paid, so the same call can be sent again. */
+  function expectChainUnavailable(response: request.Response, failure: string): void {
+    expect(response.status).toBe(503);
+    expect(response.body.error).toMatchObject({ type: "server_error", code: "chain_unavailable", param: null });
+    expect(response.body.error.message).toContain(failure);
+    expect(response.body.error.message).toContain("No payment was made");
+  }
+
+  it("answers 503 chain_unavailable without posting when the funds preflight cannot read the wallet", async () => {
+    for (const failure of [
+      new Error(OGMIOS_522),
+      new Error("Ogmios HTTP error: 429 Too Many Requests"),
+      new Error("Ogmios HTTP error: 500 Internal Server Error"),
+      fetchFailed("ECONNRESET"),
+      new DOMException("The operation was aborted due to timeout", "TimeoutError"),
+    ]) {
+      const f = setup({ queryUtxos: failWith(failure) });
+
+      const response = await post(f.app);
+
+      expectChainUnavailable(response, failure.message);
+      expect(f.queryUtxosByAddress).toHaveBeenCalledTimes(1);
+      expect(f.postPrompt).not.toHaveBeenCalled();
+    }
+  });
+
+  it("answers 503 chain_unavailable when discovery cannot reach the indexer", async () => {
+    const cases: Array<{ answer: () => Promise<Response>; failure: string }> = [
+      { answer: async () => new Response("<html>origin unreachable</html>", { status: 522 }), failure: "indexer returned 522" },
+      { answer: async () => new Response("", { status: 429 }), failure: "indexer returned 429" },
+      { answer: failWith(fetchFailed("ECONNRESET")), failure: "network error: fetch failed" },
+      { answer: failWith(fetchFailed("ECONNREFUSED")), failure: "network error: fetch failed" },
+    ];
+    for (const { answer, failure } of cases) {
+      const f = setup({ indexerFetch: vi.fn(answer) as unknown as typeof globalThis.fetch });
+
+      const response = await post(f.app);
+
+      expectChainUnavailable(response, failure);
+      expect(f.preparePrompt).not.toHaveBeenCalled();
+      expect(f.postPrompt).not.toHaveBeenCalled();
+    }
+  });
+
+  it("answers 503 chain_unavailable when lucid wraps an Ogmios failure while building the Post", async () => {
+    // rethrowAsTxError keeps only lucid's text of the provider error.
+    for (const lucidText of ["{ Complete: Error: Ogmios HTTP error: 522 <none> }", "{ Complete: TypeError: fetch failed }"]) {
+      const f = setup({ beforePost: failWith(new TxConstructionError("post-escrow build failed", lucidText)) });
+
+      const response = await post(f.app);
+
+      expectChainUnavailable(response, lucidText);
+      expect(f.events).not.toContain("post");
+    }
+  });
+
+  it("keeps 502 when the chain fails after the Post's submit hook ran", async () => {
+    for (const failure of [new Error(`${OGMIOS_522} :: `), fetchFailed("ECONNRESET")]) {
+      const f = setup({ afterSubmit: failWith(failure) });
+
+      const response = await post(f.app);
+
+      expect(response.status).toBe(502);
+      expect(response.body.error.code).toBe("paid_call_failed");
+      expect(response.body.error.message).toBe(failure.message);
+      expect(f.postPrompt).toHaveBeenCalledTimes(1);
+    }
+    const supplierDown = setup({ beforeExecute: failWith(fetchFailed("ECONNREFUSED")) });
+    const response = await post(supplierDown.app);
+    expect(response.status).toBe(502);
+    expect(response.body.error.code).toBe("paid_call_failed");
+  });
+
+  it("keeps 502 for failures before the Post that no resend can pass", async () => {
+    const insufficient = new TxConstructionError("collateral required: wallet must hold a pure-ADA UTxO ≥ 5 ADA",
+      "{ Complete: Your wallet does not have enough funds to cover the required assets: {\"lovelace\":\"9000000\"} }");
+    const cases: Array<{ options: Parameters<typeof setup>[0]; code: string }> = [
+      { options: { beforePost: failWith(insufficient) }, code: insufficient.reason },
+      { options: { beforePost: failWith(new Error("boom")) }, code: "paid_call_failed" },
+      { options: { queryUtxos: failWith(new Error("Ogmios HTTP error: 400 Bad Request")) }, code: "paid_call_failed" },
+      { options: { queryUtxos: failWith(new Error("Ogmios RPC error (queryLedgerState/utxo): invalid address")) },
+        code: "paid_call_failed" },
+      { options: { indexerFetch: (async () => new Response("<html>not json</html>")) as unknown as typeof globalThis.fetch },
+        code: "malformed_response" },
+      { options: { indexerFetch: (async () => new Response("", { status: 404 })) as unknown as typeof globalThis.fetch },
+        code: "indexer_error" },
+    ];
+    for (const { options, code } of cases) {
+      const f = setup(options);
+
+      const response = await post(f.app);
+
+      expect(response.status).toBe(502);
+      expect(response.body.error).toMatchObject({ type: "server_error", code });
+      expect(f.events).not.toContain("post");
+    }
   });
 });

@@ -233,18 +233,44 @@ At 08:57 UTC no expired buyer escrow was locked.
 - Failed calls: meta-llama/Llama-3.3-70B-Instruct 2 (upstream HTTP 402 and 413), deepseek-v4-pro 2 (HTTP 400 `reasoning_text`), Qwen3.8-27B 1 (more than 300 s), Qwen/Qwen3.6-35B-A3B-FP8 1 (`claim_timeout`), moonshotai/kimi-k2.6 1 (no output).
 - The buyer wallet went from 413.14 AP3X (09:50) to 237.42 AP3X (10:43). This includes the 12 Reclaims of this day.
 
+## Changes on 2026-10-21
+
+The build `pagerank` (`70c355fd`, submitted 2026-10-20 16:23) failed.
+The same paper was built before as job `a71483f8` (76 paid calls in 33.5 min). That tool is published on slot `paper-tool-3`.
+
+| Time (UTC) | Event | Cause |
+|---|---|---|
+| 10-20 16:40:10 | Attempt 1 failed after 31 model calls (32 paid calls, about 96 AP3X) | The conversation passed the 220,000-byte context limit. Older tool results were never shortened. |
+| 10-20 16:47:20 | Attempt 2 paused at model call 2 | The buyer wallet held 191.84 AP3X in 100 UTxOs, all below 3 AP3X. It had no collateral UTxO (see problem 1). |
+| 10-21 10:22:07–10:23:00 | Attempt 2 failed after a 17.5-hour pause | Cloudflare (colo FRA) answered HTTP 522 for Ogmios. The buyer app reported this as HTTP 502 `paid_call_failed` before any escrow, and three such answers ended the attempt (see problem 6). |
+
+- From the production host, IPv4 requests through colo FRA got HTTP 522 for Ogmios and for `marketplace.vector.apexfusion.org` until at least 10:33. IPv6 (colo TXL) and colo CDG worked. At 10:35 all requests went through CDG and worked. The Cloudflare status page showed no incident.
+- The production suppliers use the same Ogmios URL, so they were exposed too.
+
+| Time (UTC) | Action | Result |
+|---|---|---|
+| 10:39:40–10:46:04 | Ran `consolidate-wallet.ts` in the buyer container | The kernel OOM killer stopped it (368 MiB available at start) and root's `systemd --user`. No transaction. No container restarted. |
+| 10:48–10:49 | Consolidated the buyer wallet with `cardano-cli` on the workstation. The buyer container signed only the transaction ID with a plain `node` script (56 MB). | Transaction `f187405743c7fad10a8b0fff9576adab14a920753debefcb7b7b5902329aa986`: 100 inputs, 3,805 bytes, fee 0.329 AP3X. Outputs: 5 AP3X collateral, 186.51 AP3X. |
+| 10:49:26 | Sent 300 AP3X from the treasury (`vm-multisig` records `tx-p2a-buyer-topup-300-20261021-8d78773f7da7.*`) | Transaction `8d78773f7da7c1220d6a6d525dd7be194a21a713e5e21999490947b06925fa84`, confirmed 10:49:35. Buyer wallet: 491.51 AP3X in 3 UTxOs (300, 186.51, 5). |
+
+Code fixes on the same day (control service and buyer app):
+
+- The build agent shortens older tool results and tool-call arguments when the conversation passes 160,000 bytes.
+- The buyer app answers HTTP 503 `chain_unavailable` for a chain or indexer outage before the escrow is sent. The build waits for it like for HTTP 402.
+- Accept and Reclaim keep the 5 AP3X collateral UTxO out of their inputs (see problem 1).
+
 ## Open problems
 
 ### 1. The buyer wallet fragments again over time
 
 - The buyer app has no wallet health check. Suppliers and the gateway run one.
-- Probable cause (not confirmed): each Accept returns the buyer bond as a separate output of about 2 AP3X, and nothing combines the outputs.
-- When no pure-AP3X UTxO of at least 5 AP3X is left, Accept has no collateral. The model endpoint then refuses every call with HTTP 402, and the build pauses.
+- Cause (confirmed 2026-10-21 in lucid 0.4.30): Accept and Reclaim gave lucid all wallet UTxOs, and lucid pays the fee from the largest UTxO. When the 5 AP3X collateral UTxO was the largest, each Accept cut it to 4.5 AP3X. Each Accept also returns the buyer bond as a separate output of about 2 AP3X.
+- When no pure-AP3X UTxO of at least 5 AP3X is left, the model endpoint refuses every call with HTTP 402, and the build pauses.
 - The pause message asks for a deposit, but the balance is sufficient; the UTxO shape is the problem.
 - On 2026-10-15 the wallet held 546 AP3X in 248 UTxOs of at most 4 AP3X each. Attempt 5 waited 44 hours.
-- On 2026-10-16 after attempt 8 the wallet held 237.42 AP3X in 105 UTxOs. The largest was 52.02 AP3X, so collateral was not a problem yet.
-- One build like attempt 8 used about 177 AP3X (59 calls × about 3 AP3X). The wallet has enough for about one more build of this size.
-- Permanent fix: run the wallet health check in the buyer app, as the suppliers do.
+- On 2026-10-21 the wallet held 191.84 AP3X in 100 UTxOs after 109 paid calls since the consolidation of 2026-10-20. Build `70c355fd` paused.
+- Fix (2026-10-21): Accept and Reclaim keep the smallest pure-AP3X UTxO of at least 5 AP3X out of their inputs when the other outputs can pay the fee and give the collateral (`reserveScriptSpendCollateral` in `packages/shared/src/tx/internal/liveCbor.ts`). Small bond outputs still collect, but a Post can combine them.
+- The stock consolidation CLI needs more memory than the production host has free (see [Changes on 2026-10-21](#changes-on-2026-10-21)).
 
 ### 2. `tx:consolidate-wallet` underprices large transactions
 
@@ -294,8 +320,10 @@ At 08:57 UTC no expired buyer escrow was locked.
 ### 6. Network failures during a pause count toward the failure limit
 
 - HTTP 402 refusals do not reset the count of failed calls.
-- A network failure during a long pause still counts. Three failures in a row end the attempt.
 - Attempt 5 had one such failure (2026-10-14 06:06 UTC).
+- On 2026-10-21 three HTTP 522 answers from Cloudflare for Ogmios ended attempt 2 of `70c355fd` after a 17.5-hour pause.
+- Fix (2026-10-21) for chain outages: before the escrow is sent, the buyer app answers HTTP 503 `chain_unavailable`, and the build waits without a count.
+- Still counted: a network failure between the control service and the buyer app, and any failure after the escrow is sent.
 
 ### 7. Open access
 

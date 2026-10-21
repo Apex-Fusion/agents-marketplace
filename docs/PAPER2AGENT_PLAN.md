@@ -120,6 +120,10 @@ Control and publisher tokens stay on the server.
    It sends the same call again every minute and continues after funds arrive. Nothing is spent while it waits.
    The job shows the pause, the wallet balance, and the amount needed. Cancel the build to stop spending.
    A paused build keeps the build slot; queued builds wait. A control service restart interrupts it.
+   When the buyer app cannot reach Ogmios or the indexer before it sends the escrow (HTTP 503 `chain_unavailable`), the build waits the same way. Nothing is paid.
+   The job shows no pause for this wait. The build log shows one waiting line and one resumed line.
+   When the conversation passes 160,000 bytes, the agent shortens older tool results and tool-call arguments, oldest first, to about 120,000 bytes.
+   The latest turn stays complete. The hard limit of 220,000 bytes stays.
    An operator must approve a retry; there is no automatic paid retry.
 3. The control service hashes the exact submitted or fetched paper bytes.
    The coding model implements one useful method from the paper's equations and algorithm steps.
@@ -172,6 +176,8 @@ Each request buys one marketplace call with the buyer wallet:
    A supplier whose paid call fails is skipped for 15 minutes.
 2. It checks the wallet like the gateway preflight: the escrow lock floor, 5 AP3X collateral, and a 2 AP3X fee reserve.
    If the wallet cannot pay, it answers HTTP 402 `insufficient_funds` with the deposit address and builds no transaction.
+   If Ogmios or the indexer fails before the escrow is sent (HTTP 5xx or 429, a network error, or a timeout), it answers HTTP 503 `chain_unavailable`. No payment was made.
+   A failure after the signed escrow goes to Ogmios stays HTTP 502, because the escrow can be on chain.
 3. It posts the escrow and verifies the supplier receipt. It answers after Submit and sends the Accept in the background.
    A failed Accept is sent again up to 3 times, 10 s apart. The buyer app checks for confirmations every 0.5 s.
 
@@ -179,6 +185,9 @@ Each model call therefore creates four transactions: Post, Claim, Submit, and Ac
 The buyer app posts one escrow at a time and never sends a second call to a supplier with an open call.
 The next Post does not spend the inputs or the collateral of an Accept that is not in a block yet.
 If the other wallet outputs cannot pay, the call waits for the pending Accepts.
+Post keeps the smallest pure-AP3X UTxO of at least 5 AP3X out of its inputs when the other outputs can pay the escrow.
+Accept and Reclaim keep it out when the other outputs can pay the fee and give the collateral (at most 3 inputs, together at least 6 AP3X).
+So the wallet keeps its collateral UTxO, and the preflight does not refuse the next call.
 On shutdown the buyer app waits up to 60 s for background Accepts.
 The buyer key stays on the production host. The build host holds only the token.
 The buyer archive keeps each request, result, and signed receipt.
@@ -190,6 +199,7 @@ If all Accept attempts fail, the buyer log shows `accept_failed` with the Submit
 
 The build agent resends the same conversation after a failed model call (wait 10 s × the number of failures in sequence) or a reply without a tool call (no wait).
 Three such results in a row fail the run.
+HTTP 402 `insufficient_funds` and HTTP 503 `chain_unavailable` are waits, not failures. They do not count, and they do not reset the count.
 On 2026-10-13 the build `ConsistendHashAlgoV2` failed for this reason with `gpt-5.6-sol` only: the indexer still listed the single supplier as working 134 ms after its previous call ended, the endpoint answered 503, and the agent failed on the first error.
 
 An unknown publication outcome permits status recovery, not a new advert.
