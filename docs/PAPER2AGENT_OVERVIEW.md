@@ -253,11 +253,23 @@ The same paper was built before as job `a71483f8` (76 paid calls in 33.5 min). T
 | 10:48–10:49 | Consolidated the buyer wallet with `cardano-cli` on the workstation. The buyer container signed only the transaction ID with a plain `node` script (56 MB). | Transaction `f187405743c7fad10a8b0fff9576adab14a920753debefcb7b7b5902329aa986`: 100 inputs, 3,805 bytes, fee 0.329 AP3X. Outputs: 5 AP3X collateral, 186.51 AP3X. |
 | 10:49:26 | Sent 300 AP3X from the treasury (`vm-multisig` records `tx-p2a-buyer-topup-300-20261021-8d78773f7da7.*`) | Transaction `8d78773f7da7c1220d6a6d525dd7be194a21a713e5e21999490947b06925fa84`, confirmed 10:49:35. Buyer wallet: 491.51 AP3X in 3 UTxOs (300, 186.51, 5). |
 
-Code fixes on the same day (control service and buyer app):
+Code fixes on the same day (control service and buyer app, commit `945dd12`):
 
 - The build agent shortens older tool results and tool-call arguments when the conversation passes 160,000 bytes.
 - The buyer app answers HTTP 503 `chain_unavailable` for a chain or indexer outage before the escrow is sent. The build waits for it like for HTTP 402.
 - Accept and Reclaim keep the 5 AP3X collateral UTxO out of their inputs (see problem 1).
+
+Release of `945dd12` (11:14–11:16 UTC):
+
+| Service | Image | Rollback |
+|---|---|---|
+| Buyer app (production) | `8a77d288` | `marketplace-mainnet-buyer-buyer:rollback-36ec227` (`7f8cd70c`) |
+| Control service (build host) | `9f569a43` | `vector-paper2agent-services:rollback-ed9e91f9`, DB backup `control-db-backup-20261021T111544Z` |
+
+- Only these two containers restarted. The publisher, the gateway, and the suppliers kept running.
+- Before the release, the buyer image ran locally with an unreachable indexer. A model call got HTTP 503 `chain_unavailable` ("No payment was made").
+- After the release, one paid call (`Qwen3.8-27B`, 14.9 s) cost 3.003256 AP3X. Its Accept `197d291be9edb4147a8da24fbeacf9eaeda58af6673102a47f0eef9e0cfa5cdf` confirmed 2.9 s later. The 5 AP3X collateral UTxO stayed unspent.
+- Buyer wallet after this call: 488.51 AP3X in 4 UTxOs (295.00, 186.51, 5, 2).
 
 ## Open problems
 
