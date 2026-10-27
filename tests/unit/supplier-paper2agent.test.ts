@@ -597,3 +597,30 @@ describe("unpaid registration and publication", () => {
     expect(() => loadConfig({ ...env, PAPER2AGENT_ARGV_JSON: '"shell command"' })).toThrow(/ARGV/);
   });
 });
+
+describe("supplier Paper2Agent one acceptable job per buyer", () => {
+  const seedEarlier = (f: ReturnType<typeof fixture>) => f.chain.seed({ ref: { txHash: "dd".repeat(32), index: 0 },
+    address: loadBlueprint().escrowScriptAddress(0), lovelace: 4000000n, assets: {},
+    datumHex: encodeEscrowDatum({ ...f.escrow, state: "Submitted", submitted_at: 0, result_receipt_hash: "ee".repeat(32) }),
+    scriptRef: null });
+
+  it("refuses before Claim and before the journal entry while the buyer's earlier job can be accepted", async () => {
+    const f = fixture();
+    seedEarlier(f);
+    const runtime = await f.create();
+    const submit = vi.spyOn(f.chain, "submitTx");
+    await expect(runtime.admit(escrowText, body)).rejects.toMatchObject({ status: 409, reason: "supplier_busy" });
+    expect(submit).not.toHaveBeenCalled();
+    expect(f.state.snapshot().activeSessions).toBe(0);
+    // No journal entry: the buyer can send the same escrow again later.
+    await expect(runtime.admit(escrowText, body)).rejects.toMatchObject({ status: 409, reason: "supplier_busy" });
+  });
+
+  it("admits an exempt buyer", async () => {
+    const f = fixture();
+    seedEarlier(f);
+    const runtime = await Paper2AgentRuntime.create({ ...f.deps, buyerGuardExemptPkhs: [f.escrow.buyer_pkh] });
+    runtimes.push(runtime);
+    await expect(runtime.admit(escrowText, body)).resolves.toMatchObject({ claimed_ref: expect.any(String) });
+  });
+});

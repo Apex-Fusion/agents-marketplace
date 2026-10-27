@@ -35,7 +35,7 @@ import express, { type Application, type Request, type Response, type NextFuncti
 import { createHash } from "crypto";
 import { existsSync } from "node:fs";
 
-import type { ChainProvider, OutputReference } from "@marketplace/shared/chain";
+import type { ChainProvider, OutputReference, Utxo } from "@marketplace/shared/chain";
 import { decodeAdvertDatum, decodeEscrowDatum, canonicalize } from "@marketplace/shared/cbor";
 import type { AdvertDatum, EscrowDatum } from "@marketplace/shared/cbor";
 import type { WalletKey } from "@marketplace/shared/tx";
@@ -72,6 +72,13 @@ import { endChatSession, type EndChatSessionDeps } from "./chatSessionRunner.js"
 import { callResponsesStream } from "./openai.js";
 import { healthzRouter } from "./routes/healthz.js";
 import { triggerOnFailureConsolidate } from "./walletHealth.js";
+import {
+  buyerBusyMessage,
+  escrowScanAddress,
+  findAcceptableJobOfBuyer,
+  retryAfterSeconds,
+  type AcceptableJob,
+} from "./buyerGuard.js";
 import type { ResellerRuntime } from "./reseller/runtime.js";
 import { formatUsdNanos } from "./reseller/money.js";
 import { renderResellerDashboardPage } from "./reseller/dashboardPage.js";
@@ -116,6 +123,32 @@ function parseEscrowRef(ref: string): OutputReference | null {
   if (!ESCROW_REF_RE.test(ref)) return null;
   const idx = ref.indexOf("#");
   return { txHash: ref.slice(0, idx), index: Number(ref.slice(idx + 1)) };
+}
+
+/** Another escrow of this buyer that can still be Accepted (buyerGuard.ts), or null. */
+function acceptableJobOfBuyer(
+  deps: ResolvedDeps,
+  escrowUtxo: Utxo,
+  escrowRef: OutputReference,
+  escrowDatum: EscrowDatum,
+  isLive: boolean,
+  nowMs: number,
+): Promise<AcceptableJob | null> {
+  return findAcceptableJobOfBuyer({
+    chain: deps.chain,
+    escrowAddress: escrowScanAddress(isLive, deps.config.networkId, escrowUtxo),
+    supplierPkh: deps.supplierKey.pubKeyHash,
+    buyerPkh: escrowDatum.buyer_pkh,
+    exclude: escrowRef,
+    nowMs,
+    exemptBuyerPkhs: deps.config.buyerGuardExemptPkhs,
+  });
+}
+
+/** 409 supplier_busy: every buyer already sends again on the same Open escrow. */
+function buyerBusy(res: Response, job: AcceptableJob, nowMs: number) {
+  res.setHeader("Retry-After", String(retryAfterSeconds(job, nowMs)));
+  return jsonError(res, 409, "supplier_busy", buyerBusyMessage(job));
 }
 
 function jsonError(
@@ -473,6 +506,15 @@ function makeChatHandler(deps: ResolvedDeps) {
       acquiredRef = escrowRefStr;
       // From here on, every error path MUST release the slot until the
       // runner takes ownership of it.
+
+      // ── 8b. One acceptable job per buyer (buyerGuard.ts). Checked while this
+      // request holds the only Claim slot (capacity 1), so it cannot race.
+      const blocking = await acceptableJobOfBuyer(deps, escrowUtxo, escrowRef, escrowDatum, isLive, nowMs);
+      if (blocking) {
+        deps.state.release(escrowRefStr);
+        acquiredRef = null;
+        return buyerBusy(res, blocking, nowMs);
+      }
       if (deps.reseller) {
         try {
           await deps.reseller.recordReceived(
@@ -793,6 +835,15 @@ function makeTtsHandler(deps: ResolvedDeps) {
       }
       acquiredRef = escrowRefStr;
 
+      // ── 8b. One acceptable job per buyer (buyerGuard.ts). Checked while this
+      // request holds the only Claim slot (capacity 1), so it cannot race.
+      const blocking = await acceptableJobOfBuyer(deps, escrowUtxo, escrowRef, escrowDatum, isLive, nowMs);
+      if (blocking) {
+        deps.state.release(escrowRefStr);
+        acquiredRef = null;
+        return buyerBusy(res, blocking, nowMs);
+      }
+
       // ── 9. Claim tx: build + confirm as ONE wallet critical section ──
       const claimOutcome = await deps.state.walletMutex.run(async () => {
         let built;
@@ -1087,6 +1138,15 @@ function makeOcrHandler(deps: ResolvedDeps) {
       }
       acquiredRef = escrowRefStr;
 
+      // ── 8b. One acceptable job per buyer (buyerGuard.ts). Checked while this
+      // request holds the only Claim slot (capacity 1), so it cannot race.
+      const blocking = await acceptableJobOfBuyer(deps, escrowUtxo, escrowRef, escrowDatum, isLive, nowMs);
+      if (blocking) {
+        deps.state.release(escrowRefStr);
+        acquiredRef = null;
+        return buyerBusy(res, blocking, nowMs);
+      }
+
       // ── 9. Claim tx: build + confirm as ONE wallet critical section ──
       const claimOutcome = await deps.state.walletMutex.run(async () => {
         let built;
@@ -1372,6 +1432,11 @@ function makeChatSessionHandlers(deps: ResolvedDeps) {
       // ── 9-full. Claim (Open → Claimed): build + confirm as ONE wallet
       // critical section — hold the slot on success through Submit at end.
       const claimOutcome = await deps.state.walletMutex.run(async () => {
+        // One acceptable job per buyer (buyerGuard.ts). Inside the mutex because
+        // several sessions can be admitted at once: claims run one at a time,
+        // each confirmed before the next check scans the chain.
+        const blocking = await acceptableJobOfBuyer(deps, escrowUtxo, escrowRef, escrowDatum, isLive, nowMs);
+        if (blocking) return { kind: "buyer_busy" as const, blocking };
         let built;
         try {
           built = await buildClaimTx({ chain: deps.chain, supplierKey: deps.supplierKey, escrowRef });
@@ -1385,6 +1450,11 @@ function makeChatSessionHandlers(deps: ResolvedDeps) {
         }
         return { kind: "ok" as const, built };
       });
+      if (claimOutcome.kind === "buyer_busy") {
+        deps.state.release(escrowRefStr);
+        acquiredRef = null;
+        return buyerBusy(res, claimOutcome.blocking, nowMs);
+      }
       if (claimOutcome.kind === "build_failed") {
         deps.state.release(escrowRefStr);
         acquiredRef = null;

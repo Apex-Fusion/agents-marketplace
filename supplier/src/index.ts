@@ -64,7 +64,7 @@ async function main(): Promise<void> {
   const jobs = new JobStore();
   const paper2agent = cfg.capabilityKind === "paper2agent"
     ? await Paper2AgentRuntime.create({ chain, state, supplierKey, networkId: cfg.networkId,
-      advertRef: cfg.advertRef, config: cfg.paper2agent! })
+      advertRef: cfg.advertRef, config: cfg.paper2agent!, buyerGuardExemptPkhs: cfg.buyerGuardExemptPkhs })
     : undefined;
   let reseller: ResellerRuntime | undefined;
   if (cfg.reseller) {
