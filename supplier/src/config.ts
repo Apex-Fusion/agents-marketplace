@@ -68,6 +68,7 @@ const TX_HASH_RE = /^[0-9a-fA-F]{64}$/;
 const NON_NEG_INT_RE = /^(?:0|[1-9]\d*)$/;
 const POS_INT_RE = /^[1-9]\d*$/;
 const USD_RE = /^(?:0|[1-9]\d*)(?:\.\d{1,9})?$/;
+const PKH_RE = /^[0-9a-fA-F]{56}$/;
 
 /** Lowercased hostname of a URL, or "" if it doesn't parse. */
 function hostnameOf(url: string): string {
@@ -293,6 +294,12 @@ export interface SupplierConfig {
   /** Optional balance-aware provider resale mode. Null preserves legacy behavior. */
   reseller: ResellerConfig | null;
   paper2agent?: Paper2AgentConfig;
+  /**
+   * Buyer key hashes exempt from the one-acceptable-job-per-buyer guard
+   * (buyerGuard.ts), lowercase. For first-party buyers only, e.g. the gateway.
+   * From BUYER_GUARD_EXEMPT_PKHS (comma-separated). Absent or empty: no exemptions.
+   */
+  buyerGuardExemptPkhs?: string[];
 }
 
 function requireField(env: Record<string, string | undefined>, name: string): string {
@@ -733,6 +740,8 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
   }
 
 
+  const buyerGuardExemptPkhs = parseBuyerGuardExemptPkhs(env.BUYER_GUARD_EXEMPT_PKHS);
+
   return {
     supplierPrivKeyHex,
     ogmiosUrl,
@@ -772,7 +781,19 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
     walletHealthIntervalMs,
     reseller,
     paper2agent,
+    buyerGuardExemptPkhs,
   };
+}
+
+export function parseBuyerGuardExemptPkhs(raw: string | undefined): string[] {
+  if (raw === undefined || raw.trim() === "") return [];
+  const pkhs = raw.split(",").map((s) => s.trim()).filter((s) => s !== "");
+  for (const pkh of pkhs) {
+    if (!PKH_RE.test(pkh)) {
+      throw new Error("loadConfig: BUYER_GUARD_EXEMPT_PKHS must be a comma-separated list of 56-hex key hashes");
+    }
+  }
+  return pkhs.map((pkh) => pkh.toLowerCase());
 }
 
 export function loadPaper2AgentConfig(env: Record<string, string | undefined>): Paper2AgentConfig {

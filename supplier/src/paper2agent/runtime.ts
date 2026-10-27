@@ -10,6 +10,7 @@ import { PAPER2AGENT_CAPABILITY_ID, PAPER2AGENT_SUPPLIER_OVERHEAD_MS, paper2Agen
   parsePaper2AgentRequest, validatePaper2AgentOutput, type JsonObject, type Paper2AgentManifest } from "@marketplace/shared/paper2agent";
 import type { Paper2AgentConfig } from "../config.js";
 import type { SupplierState } from "../state.js";
+import { findAcceptableJobOfBuyer } from "../buyerGuard.js";
 import { checkSupplierKey } from "./identity.js";
 import { ToolJournal, type ToolJob } from "./journal.js";
 import { LocalToolSession, checkTool, readManifest, verifyPackage,
@@ -23,6 +24,8 @@ export interface ToolRuntimeDeps {
   advertRef: OutputReference;
   config: Paper2AgentConfig;
   sessionFactory?: ToolSessionFactory;
+  /** Buyer key hashes exempt from the one-acceptable-job-per-buyer guard. */
+  buyerGuardExemptPkhs?: readonly string[];
 }
 
 /** The free-call reply: the validated tool output and its measured runtime. */
@@ -180,6 +183,15 @@ export class Paper2AgentRuntime {
     try {
       // Recheck after acquiring the slot, including durable duplicate protection.
       if (this.journal.hasEscrow(refText)) throw new ToolAdmissionError(409, "escrow_already_admitted");
+      // One acceptable job per buyer (buyerGuard.ts), before the journal entry so
+      // the buyer can send the same escrow again. Capacity 1: the held slot
+      // keeps this check and the Claim below from racing another admission.
+      const blocking = await findAcceptableJobOfBuyer({
+        chain, escrowAddress: utxo.address, supplierPkh: supplierKey.pubKeyHash,
+        buyerPkh: escrow.buyer_pkh, exclude: escrowRef, nowMs: await this.now(),
+        exemptBuyerPkhs: this.deps.buyerGuardExemptPkhs,
+      });
+      if (blocking) throw new ToolAdmissionError(409, "supplier_busy");
       await verifyPackage(config, this.manifest);
       session = this.deps.sessionFactory?.(config) ?? new LocalToolSession(config);
       this.sessions.add(session);
