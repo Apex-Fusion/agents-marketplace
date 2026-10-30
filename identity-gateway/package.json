@@ -1,0 +1,24 @@
+{
+  "name": "identity-gateway",
+  "version": "0.0.0",
+  "private": true,
+  "description": "did:vector resolver (M0: generation-1 legacy identifiers on Vector mainnet).",
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --root .. identity-gateway/",
+    "start": "tsx src/main.ts"
+  },
+  "dependencies": {
+    "@noble/hashes": "^1.8.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.2"
+  }
+}

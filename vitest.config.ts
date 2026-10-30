@@ -45,6 +45,7 @@ export default defineConfig({
       "supplier/**/*.{test,spec}.ts",
       "paper2agent/**/*.{test,spec}.ts",
       "indexer/**/*.{test,spec}.ts",
+      "identity-gateway/**/*.{test,spec}.ts",
     ],
     exclude: ["**/node_modules/**", "**/dist/**"],
     passWithNoTests: true,
