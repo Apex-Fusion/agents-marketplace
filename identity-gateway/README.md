@@ -67,13 +67,17 @@ with the values that Koios reports (`/genesis`). If one differs, every resolutio
 
 ## HTTPS binding (Part 1 Section 7.4)
 
-- `GET /1.0/identifiers/{did}`. The resolver percent-decodes the path once. Query parameters are the
+- `GET /1.0/identifiers/{did}`, and `HEAD` with the same status and header fields and no body
+  (RFC 9110 Section 9.3.2). The resolver percent-decodes the path once. Query parameters are the
   options `versionId`, `versionTime`, `expandRelativeUrls` and `noCache`. Another parameter is
   `FEATURE_NOT_SUPPORTED`; a bad value, a repeated option or both version options is
   `INVALID_OPTIONS`.
-- `Accept` (RFC 9110, q-values): the resolution result (`application/did-resolution`) or the
-  document only (`application/did`). On a tie, the result wins. Errors and deactivated DIDs always
-  get the result.
+- `Accept` (RFC 9110 Section 12.5.1, q-values): the resolution result (`application/did-resolution`)
+  or the document only (`application/did`). The most specific range that matches a media type gives
+  its weight, so `application/did-resolution;q=0.1, application/*` gives the document. Wildcards
+  weigh only these two media types; the other names of the Part 1 table count when a range names
+  them exactly. Ranges with `q=0` are ignored (Part 1 Section 7.4). On a tie, the result wins.
+  Errors and deactivated DIDs always get the result.
 - The body is the JCS (RFC 8785) serialisation. Every response has `Cache-Control: no-store`.
 - Status: 200 found (also Suspended), 410 `deactivated: true`, 400 `INVALID_DID` /
   `INVALID_OPTIONS`, 404 `NOT_FOUND`, 406 `REPRESENTATION_NOT_SUPPORTED`, 501
@@ -94,7 +98,7 @@ the agent does not qualify, 410 when the DID is deactivated, 500 when the ledger
 |---|---|---|
 | `GET /agents/{id}/did.json` | Active agents (also subagents) | `did:web` alias document, `application/did+json`: `id` = `did:web:<host>:agents:{id}`, `alsoKnownAs` = the `did:vector` DID, then the verified domains; the keys and relationships of the `did:vector` document with absolute DID URLs. |
 | `GET /agents/{id}/jwks.json` | Active agents | `application/jwk-set+json` `{keys}`: each listed key (a P-256 key only with a valid proof) as a JWK with `kid` = `did:vector:{id}#<key hash>`, `alg` `EdDSA` or `ES256`, `use` `sig`. A legacy record shows the key that the legacy key search found. |
-| `GET /agents/{id}/agent-card.json` | Listed A2A agents | A2A v1.0 agent card: on-chain name and description, the interfaces on the endpoint's origin and the default modes from the detected card, the on-chain capabilities as skills, `version` = versionId, `documentationUrl` = the resolution URL of the DID, `provider` = a verified organisation. Signed as A2A Section 8.4 specifies (JWS over the JCS form, `alg` EdDSA, `typ` JOSE, `kid`, `jku` = `/.well-known/jwks.json`). 503 when no signing key is configured. `application/a2a-agent-card+json` when the client asks for it, else `application/json`. |
+| `GET /agents/{id}/agent-card.json` | Listed A2A agents | A2A v1.0 agent card: on-chain name and description, the interfaces on the endpoint's origin and the default modes from the detected card, the on-chain capabilities as skills, `version` = versionId, `documentationUrl` = the resolution URL of the DID, `provider` = a verified organisation. Signed as A2A Section 8.4 specifies (JWS over the JCS form, `alg` EdDSA, `typ` JOSE, `kid`, `jku` = `/.well-known/jwks.json`). 503 when no signing key is configured. `application/a2a-agent-card+json` when the client asks for it, else `application/json`. The gateway signs a card once for each check of the agent and record state, and serves that card again. |
 | `GET /agents/{id}/server-card` | Listed MCP agents | MCP Server Card v1 (SEP-2127): `name` = `<reverse gateway host>/{id}`, description of at most 100 characters, `remotes` = the endpoint with the protocol versions it named, `_meta` with the DID. |
 | `GET /v0/servers`, `GET /v0.1/servers` | Listed MCP agents | MCP Registry list `{servers: [{server, _meta}], metadata: {count, nextCursor?}}` with server.json entries (schema 2025-12-11). Query: `limit` (1-100, default 30), `cursor`, `search` (name substring), `version` (`latest` or exact), `updated_since` (RFC 3339). |
 | `GET /.well-known/ai-catalog.json` | Listed A2A and MCP agents | AI Catalog 1.0, `application/ai-catalog+json`: one entry per agent, `identifier` = `urn:air:<gateway host>:agent:{id}`, `type` and `url` of its agent card or server card, `tags` = capabilities, `updatedAt`. |
@@ -120,18 +124,24 @@ and the status lists are public and cacheable.
 | `POST /token` | Form (RFC 8693): `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`, `subject_token` (JWT, EdDSA by an authentication key of the agent: header `kid` = the key's DID URL; `iss` = `sub` = `did:vector:<id>`; `aud` = `<base>/token`; `iat`, `exp` with `exp - iat <= 300`; single-use `jti`), `subject_token_type=urn:ietf:params:oauth:token-type:jwt`, at least one `audience` or `resource`, optional `requested_token_type`, optional RFC 7523 client assertion, optional `authorization_details` with one `{"type":"https://id.vector.apexfusion.org/ns/delegation","identifier":"<delegation id>","actions"?,"locations"?}` (`actions` and `locations`, when present, are not empty). Header `DPoP` (RFC 9449) is required; for a delegation it must be signed by the leaf's `delegate_key`. | `{access_token, issued_token_type, token_type: "DPoP", expires_in, authorization_details?}`. The token: ES256, `typ` at+jwt, `iss`, `sub`, `aud`, `iat`, `exp` (at most 5 minutes, and not after the delegation period), `jti`, `client_id`, `cnf.jkt`, `status.status_list {idx, uri}` (the entry of the requesting agent). Without a delegation, `sub` = `did:vector:<id>` of the requesting agent, and the token has no `act`. With a delegation (Part 2 Section 5.4, RFC 8693 Section 4.1): `sub` = the root delegator (`did:vector:<id>` for an agent, `<base>/principals/key/<key hash>` for a principal key); `act` = the delegates, with the requesting agent (the current actor) outermost and each earlier delegate nested inside; and `authorization_details`. |
 | `POST /introspect` | Form: `token`, client assertion (required) | RFC 7662: `{active: false}`, or the claims with `active: true` and `token_type`. `sub` and `act` have the same meaning as in the token (RFC 8693 Section 4.1). Only tokens that this process issued. |
 | `POST /revoke` | Form: `token`, client assertion (required) | RFC 7009: 200 with an empty body; 400 `unauthorized_client` when the client is not an agent that the token names in `sub`, `act` or `client_id`. |
-| `POST /spiffe/nonce` | | `{nonce, expires_in: 300}`: single-use, valid for 5 minutes. |
+| `POST /spiffe/nonce` | | `{nonce, expires_in: 300}`: single-use, valid for 5 minutes. The gateway stores nothing when it issues a nonce: the nonce holds its issue time, random bytes and an HMAC tag under a key of the process. It keeps a nonce only after an authenticated request used it. |
 | `POST /spiffe/x509-svid` | JSON `{csr, proof}`: a PKCS #10 request for a P-256 key (PEM or base64url DER) and a JWT by an authentication key (EdDSA or ES256, the agent-JWT rules) with the claims `nonce` and `cnf.jwk` = the request's public key | `{spiffe_id, x509_svid (PEM), bundle (PEM CA), expires_at}`. One URI SAN `spiffe://<host>/agent/<id>`, empty subject, 1 hour, `noRevAvail`. 403 `agent_not_active`. |
 | `POST /spiffe/jwt-svid` | JSON `{subject_token, audience}` (1 to 8 audiences) | `{spiffe_id, svid, expires_at}`: ES256, 5 minutes. |
 | `GET /spiffe/bundle` | | SPIFFE bundle (`https_web`): the CA certificate (`use` x509-svid, `x5c`) and the JWT-SVID key (`use` jwt-svid, `kid`), `spiffe_refresh_hint` 300. |
 | `GET /status/bsl/{n}` | | `application/vc+jwt`: a BitstringStatusListCredential with `statusPurpose` [revocation, suspension]: 2 × 131,072 bits, the revocation bit of position p at p and its suspension bit at 131,072 + p. |
-| `GET /status/tsl/{n}` | | `application/statuslist+jwt`: 2 bits per entry, 0 valid, 1 invalid (Revoked or Retired), 2 suspended. |
+| `GET /status/tsl/{n}` | | `application/statuslist+jwt`: 2 bits per entry, 0 valid, 1 invalid (Revoked or Retired), 2 suspended. An entry also reads 2 while an access token that names it was revoked by a status change and can still be accepted (until its `exp` plus 30 s), also after the agent is Active again; new tokens of that agent read 2 for that time too. |
 | `GET /agents/{id}/credential` | | `application/vc+jwt`: a VC 2.0 credential of the gateway's DID with the subject DID, `created`, `origin` and, for a subagent, `parent`; two `BitstringStatusListEntry` items. 409 when the agent is not Active, 410 when deactivated. |
 
-Index i of `listRecords()` is in list n = floor(i / 131,072) at position i mod 131,072. A status
-other than Active that the gateway sees (at introspection, or in the status watcher every 30 s)
-revokes every token of that agent issued up to then. Replay stores, nonces and issued tokens are in
-memory: a restart makes earlier tokens inactive.
+Index i of `listRecords()` is in list n = floor(i / 131,072) at position i mod 131,072. Lists older
+than `STATUS_LIST_REFRESH_SECONDS` are built again in the background; until the build ends, requests
+get the previous lists, which stay valid for one hour (`exp`, `validUntil`). A build reads only the
+effective status of each record (`currentStatus`, no legacy key search). A status other than Active
+that the gateway sees (at introspection, or in the status watcher every 30 s) revokes every token of
+that agent issued up to then. A token revoked on its own (`/revoke`, or a delegation that no longer
+passes) shows only in introspection. Replay stores, nonces and issued tokens are in memory: a restart
+makes earlier tokens and nonces inactive. A single-use value (the `jti` of a subject token, a client
+assertion or a DPoP proof, a used nonce) goes into the replay store only after the request
+authenticated, and the store keeps a 128-bit digest of each value.
 
 A delegation token needs the whole chain to pass the use checks of Part 2 Section 5.2, as the
 delegation contract applies them: each delegation is authentic, unspent and has 30 confirmations;
@@ -151,13 +161,18 @@ scan; the per-agent renderings read the record at the current tip.
 A scan runs at start and every `FETCH_SCAN_INTERVAL_S`. It reads the current record of every
 identifier and starts a check for each Active record that has no facts yet, that changed (a new base
 or pending version), or whose facts are a day old. Requests never fetch: they read the stored facts,
-and a fact counts only while its inputs still apply (the same endpoint, a domain that the record
-still names, a signing key that is still an assertion key).
+and a fact counts only while its inputs still apply to the view that the answer shows (the same
+endpoint, a domain that the view still names, a signing key that is still an assertion key of the
+view). A result for `versionId` or `versionTime` applies the facts to the view at that version or
+time.
 
 - **Protocol detection:** A2A (`<endpoint origin>/.well-known/agent-card.json` is a valid agent card
   with an interface on that origin), then MCP (`server/discover` of revision 2026-07-28, then
   `initialize` of revision 2025-11-25), then web (a GET of the endpoint answers 2xx). The endpoint is
-  reachable when one check succeeds.
+  reachable when one check succeeds. Detection keeps at most 8 interfaces (URL at most 512 bytes,
+  binding and version at most 64 bytes), 16 input and 16 output modes (at most 255 bytes each) and 16
+  MCP protocol versions (at most 64 bytes each), the first ones in answer order; it leaves out a
+  longer item.
 - **Domain linkage:** the endpoint host and each party organisation that is a domain. A DNS TXT
   record `_did.<domain>` with the DID (or `did=` and the DID), or a Domain Linkage Credential in
   `https://<domain>/.well-known/did-configuration.json` (JWT format, EdDSA or ES256, signed by an
@@ -166,7 +181,8 @@ still names, a signing key that is still an assertion key).
 - **Fetch rules:** `https` only; every address of the host must be public unicast, checked for each
   connection and each redirect, and the connection goes to the checked address; no redirect to
   another host or port; at most 5 redirects, 1 MiB and 10 seconds; at most one fetch per host each
-  minute.
+  minute. The host of that limit is the destination: a trailing dot does not count, and an
+  IPv4-mapped or NAT64 IPv6 literal counts as its IPv4 address.
 - The resolver shows the results in `vectorFetched` (URL, fetch time, SHA-256 of the bytes; a DNS
   check has the URL `dns:_did.<domain>?type=TXT`).
 
@@ -177,8 +193,12 @@ still names, a signing key that is still an assertion key).
 - `new VectorResolver(chain, settings, options?)`;
 - `resolveDid(did, options?)`: the resolution result; it never throws;
 - `currentRecord(vectorId)`: the view and the effective status without options (Part 2 Section 8.4);
+- `currentStatus(vectorId)`: the effective status alone, without the legacy key search (status
+  lists and token checks);
 - `listRecords()`: every identifier that resolves, in the ledger order of its first mint, with its
-  status-list index (Part 2 Section 8.6).
+  status-list index (Part 2 Section 8.6);
+- `options.fetchedFacts(subject, legacyPolicyId)`: the stored facts that apply to the view of a
+  result; `options.legacyKeys`: a `LegacyKeySearch` that several resolvers of one chain source share.
 
 ## Chain data
 
@@ -189,6 +209,17 @@ legacy key search reads blocks through Ogmios chain synchronisation. The resolve
 
 Each resolution reads the tip first and ignores transactions in later blocks. A record history is
 kept while the tip stays the same.
+
+The legacy key search reads the blocks of a record's transactions newest first, in windows of 1, 2,
+4 and so on up to 64 blocks. A window is one Koios read and one Ogmios session; in the session, a
+block that follows the previous one needs no new intersection. The search keeps the witnesses of each
+transaction that it read (by block hash and transaction ID) and, once the last output of the base
+version has 30 confirmations, its result. At most 4 sessions run at the same time. `main.ts` gives
+its three resolvers one search, so they share these caches.
+
+`listRecords()` keeps each first mint with 30 confirmations between builds. It does not read the
+mint of a legacy asset that Koios shows as created at or after the cutoff slot (`creation_time` of
+`policy_asset_mints`), unless the identity registry has the same name.
 
 ## Tests and vectors
 

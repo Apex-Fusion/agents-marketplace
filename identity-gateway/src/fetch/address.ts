@@ -78,6 +78,14 @@ function publicIpv4(bytes: readonly number[]): boolean {
   return !IPV4_REFUSED.some((b) => inBlock(bytes, b, ipv4Bytes));
 }
 
+/** The IPv4 address that an IPv4-mapped (::ffff:0:0/96) or a well-known NAT64 (64:ff9b::/96, RFC 6052) address embeds, in dotted form; null for any other text. */
+export function embeddedIpv4(address: string): string | null {
+  const v6 = ipv6Bytes(address);
+  if (!v6) return null;
+  const mapped = v6.slice(0, 10).every((b) => b === 0) && v6[10] === 0xff && v6[11] === 0xff;
+  return mapped || inBlock(v6, ["64:ff9b::", 96], ipv6Bytes) ? v6.slice(12).join(".") : null;
+}
+
 /**
  * True when `address` (an IPv4 or IPv6 address in text form) is a public unicast address. An
  * IPv4-mapped IPv6 address (::ffff:0:0/96) and an address of the well-known NAT64 prefix
@@ -88,9 +96,8 @@ export function isPublicUnicast(address: string): boolean {
   if (v4) return publicIpv4(v4);
   const v6 = ipv6Bytes(address);
   if (!v6) return false;
-  const embedded = v6.slice(12);
-  if (v6.slice(0, 10).every((b) => b === 0) && v6[10] === 0xff && v6[11] === 0xff) return publicIpv4(embedded);
-  if (inBlock(v6, ["64:ff9b::", 96], ipv6Bytes)) return publicIpv4(embedded);
+  const embedded = embeddedIpv4(address);
+  if (embedded !== null) return publicIpv4(ipv4Bytes(embedded)!);
   if ((v6[0]! & 0xe0) !== 0x20) return false; // not 2000::/3
   return !IPV6_REFUSED.some((b) => inBlock(v6, b, ipv6Bytes));
 }

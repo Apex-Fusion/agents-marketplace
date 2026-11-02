@@ -117,17 +117,45 @@ describe("single-use stores", () => {
     expect(store.use("c", 3000, 1000)).toBe(true);
   });
 
-  test("a nonce is used once and expires after its lifetime", () => {
-    const nonces = new NonceStore(300_000, 2);
+  test("a nonce is used once and expires after its lifetime; issuing stores nothing", () => {
+    const used = new SingleUseStore(2);
+    const nonces = new NonceStore(300_000, used);
     const a = nonces.issue(0);
-    expect(a).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(a).toMatch(/^[A-Za-z0-9_-]{54}$/);
+    for (let i = 0; i < 1000; i++) nonces.issue(i);
+    expect(used.size).toBe(0);
     expect(nonces.consume(a, 300_000)).toBe("ok");
+    expect(used.size).toBe(1);
     expect(nonces.consume(a, 300_000)).toBe("unknown");
     const b = nonces.issue(0);
     expect(nonces.consume(b, 300_001)).toBe("expired");
-    nonces.issue(0);
-    nonces.issue(0);
-    expect(() => nonces.issue(1)).toThrow(CapacityError);
-    expect(typeof nonces.issue(300_001)).toBe("string");
+    expect(nonces.consume(nonces.issue(10), 5)).toBe("unknown"); // issued in the future: the clock went back
+  });
+
+  test("a nonce that this store did not issue is unknown: another key, a changed byte, another text of the same bytes", () => {
+    const nonces = new NonceStore(300_000, new SingleUseStore());
+    const other = new NonceStore(300_000, new SingleUseStore());
+    const a = nonces.issue(1000);
+    expect(nonces.consume(other.issue(1000), 1000)).toBe("unknown");
+    const bytes = Buffer.from(a, "base64url");
+    bytes[9]! ^= 1;
+    expect(nonces.consume(bytes.toString("base64url"), 1000)).toBe("unknown");
+    // The last character carries 4 unused bits: a second text of the same 40 bytes.
+    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const alias = `${a.slice(0, 53)}${alphabet[alphabet.indexOf(a[53]!) ^ 1]}`;
+    expect(Buffer.from(alias, "base64url").equals(Buffer.from(a, "base64url"))).toBe(true);
+    expect(nonces.consume(alias, 1000)).toBe("unknown");
+    expect(nonces.consume(a, 1000)).toBe("ok");
+    expect(nonces.consume("made-up", 1000)).toBe("unknown");
+  });
+
+  test("a single-use entry has a fixed size: the store keeps a digest, not the value", () => {
+    const store = new SingleUseStore();
+    expect(store.use(`dpop\n${"j".repeat(10_000)}`, 1000, 0)).toBe(true);
+    expect(store.use(`dpop\n${"j".repeat(10_000)}`, 1000, 0)).toBe(false);
+    // The test reads the private map, to check what one entry holds.
+    const internals = store as unknown as { readonly entries: ReadonlyMap<string, number> };
+    expect([...internals.entries.keys()]).toHaveLength(1);
+    expect([...internals.entries.keys()].every((k) => k.length === 22)).toBe(true);
   });
 });

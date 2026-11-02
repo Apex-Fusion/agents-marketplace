@@ -1,14 +1,14 @@
-// The facts that background jobs store (Part 2 Sections 8.5 and 8.6) and what they mean for the
-// current record. A fact counts only while its inputs still apply: a detection only for the endpoint
-// that it checked, a domain only while the record still names it (endpoint host or party
+// The facts that background jobs store (Part 2 Sections 8.5 and 8.6) and what they mean for a view
+// of the record. A fact counts only while its inputs still apply to that view: a detection only for
+// the endpoint that it checked, a domain only while the view still names it (endpoint host or party
 // organisation), and a DID configuration check only while the key that signed it is still an
-// assertion key of the DID. Requests read these facts; they never fetch.
+// assertion key of the view. Requests read these facts; they never fetch.
 
 import { keyHash } from "../codec/keys.js";
 import { recordText } from "../codec/text.js";
 import { canonicalDid, legacyDid } from "../resolve/did.js";
 import { PURPOSE } from "../resolve/document.js";
-import type { FetchedFacts, FetchedFactsProvider } from "../resolve/fetched.js";
+import type { FactsSubject, FetchedFacts, FetchedFactsProvider } from "../resolve/fetched.js";
 import type { VectorFetched } from "../resolve/metadata.js";
 import type { CurrentRecord } from "../resolve/resolver.js";
 import type { Detection } from "./detect.js";
@@ -21,7 +21,7 @@ export interface OrganisationDomain {
   readonly domain: string;
 }
 
-/** What the background checks of a record depend on, read from its current view. */
+/** What the background checks of a record depend on, read from a view: the checks use the current view, and readers apply the facts to the view that they show. */
 export interface FactInputs {
   /** The endpoint text, or null when the record has none. */
   readonly endpoint: string | null;
@@ -42,11 +42,11 @@ export interface RecordFacts {
   readonly domains: readonly DomainCheck[];
 }
 
-/** The stored facts that still apply to the record. */
+/** The stored facts that still apply to a view. */
 export interface CurrentFacts {
-  /** The detection of the current endpoint, or null. */
+  /** The detection of the view's endpoint, or null. */
   readonly detection: Detection | null;
-  /** Verified domains that the record still names, in the order of `FactInputs.domains`. */
+  /** Verified domains that the view still names, in the order of `FactInputs.domains`. */
   readonly verifiedDomains: readonly DomainCheck[];
   /** Organisation texts whose domain is verified. */
   readonly verifiedOrganisations: readonly string[];
@@ -69,14 +69,14 @@ export function changeKey(record: CurrentRecord): string {
 }
 
 /** The endpoint text of a view, or null when it is empty or not readable text. */
-export function endpointOf(record: CurrentRecord): string | null {
+export function endpointOf(record: FactsSubject): string | null {
   const { view } = record;
   const bytes = view.kind === "identity" ? view.endpoint : view.profile?.endpoint;
   return (bytes && recordText(bytes)) || null;
 }
 
-/** The assertion keys of the record's current DID document (Part 1 Section 8.1). */
-export function assertionKeys(record: CurrentRecord): Map<string, AssertionKey> {
+/** The assertion keys of the DID document of a view (Part 1 Section 8.1). */
+export function assertionKeys(record: FactsSubject): Map<string, AssertionKey> {
   const keys = new Map<string, AssertionKey>();
   if (record.view.kind === "identity") {
     for (const k of record.view.keys) if (k.popValid && k.purposes & PURPOSE.assertion) keys.set(k.keyHash, { keyType: k.keyType, key: k.key });
@@ -86,7 +86,7 @@ export function assertionKeys(record: CurrentRecord): Map<string, AssertionKey> 
   return keys;
 }
 
-export function factInputs(record: CurrentRecord, legacyPolicyId: string): FactInputs {
+export function factInputs(record: FactsSubject, legacyPolicyId: string): FactInputs {
   const endpoint = endpointOf(record);
   let endpointHost: string | null = null;
   try {
@@ -138,13 +138,9 @@ export function fetchedFacts(current: CurrentFacts): FetchedFacts | undefined {
   };
 }
 
-/**
- * Facts in memory, by identifier. The background scan stores the inputs of each record's current
- * view, so that the resolver's synchronous provider applies the same rules as the renderings.
- */
+/** Facts in memory, by identifier. Each reader applies them to its own view of the record. */
 export class FactsStore {
   private readonly facts = new Map<string, RecordFacts>();
-  private readonly inputs = new Map<string, FactInputs>();
 
   get(vectorId: string): RecordFacts | undefined {
     return this.facts.get(vectorId);
@@ -154,26 +150,20 @@ export class FactsStore {
     this.facts.set(facts.vectorId, facts);
   }
 
-  setInputs(vectorId: string, inputs: FactInputs): void {
-    this.inputs.set(vectorId, inputs);
-  }
-
   /** Forgets an identifier that no longer resolves. */
   delete(vectorId: string): void {
     this.facts.delete(vectorId);
-    this.inputs.delete(vectorId);
   }
 
   ids(): string[] {
-    return [...new Set([...this.facts.keys(), ...this.inputs.keys()])];
+    return [...this.facts.keys()];
   }
 
-  /** The facts that apply to `inputs` (a request's own reading of the record), or to the inputs of the last scan. */
-  current(vectorId: string, inputs?: FactInputs): CurrentFacts {
-    const applied = inputs ?? this.inputs.get(vectorId);
-    return applied ? currentFacts(this.facts.get(vectorId), applied) : NO_FACTS;
+  /** The stored facts that apply to `inputs`, the reader's own view of the record. */
+  current(vectorId: string, inputs: FactInputs): CurrentFacts {
+    return currentFacts(this.facts.get(vectorId), inputs);
   }
 
-  /** The resolver's FetchedFactsProvider: synchronous, it never fetches. */
-  readonly provider: FetchedFactsProvider = (vectorId) => fetchedFacts(this.current(vectorId));
+  /** The resolver's FetchedFactsProvider: synchronous, it never fetches; it applies the facts to the view that the result shows. */
+  readonly provider: FetchedFactsProvider = (subject, legacyPolicyId) => fetchedFacts(this.current(subject.vectorId, factInputs(subject, legacyPolicyId)));
 }

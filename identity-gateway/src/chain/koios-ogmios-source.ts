@@ -12,7 +12,7 @@ import type {
   KoiosTxInfoRow,
   KoiosTxRefRow,
 } from "./koios.js";
-import { fetchBlockAfter } from "./ogmios.js";
+import { fetchBlocksAfter } from "./ogmios.js";
 import type { Asset, BlockWitnesses, ChainSource, ChainTip, GenesisParameters, LedgerTx, PolicyAsset } from "./types.js";
 
 const TX_INFO_BATCH = 50;
@@ -114,29 +114,41 @@ export class KoiosOgmiosChainSource implements ChainSource {
     return found;
   }
 
-  async blockWitnesses(blockHeight: number): Promise<BlockWitnesses> {
-    const rows = await this.koios.get<KoiosBlockRow[]>(
-      `blocks?block_height=in.(${blockHeight - 1},${blockHeight})&select=hash,abs_slot,block_height`,
-    );
-    const previous = rows.find((r) => r.block_height === blockHeight - 1);
-    const target = rows.find((r) => r.block_height === blockHeight);
-    if (!previous || !target) throw new Error("Koios blocks: a requested block height is missing");
-    const block = await fetchBlockAfter(this.options.ogmiosUrl, { slot: previous.abs_slot, id: previous.hash }, this.options.ogmiosTimeoutMs);
-    if (block.id !== target.hash) throw new Error("Ogmios returned another block than Koios lists at the same height");
-    return {
-      blockHash: block.id,
-      transactions: (block.transactions ?? []).map((tx) => ({
-        txHash: tx.id,
-        vkeys: (tx.signatories ?? []).filter((s) => s.chainCode === undefined).map((s) => s.key.toLowerCase()),
-      })),
-    };
+  async blockWitnesses(blockHeights: readonly number[]): Promise<BlockWitnesses[]> {
+    if (blockHeights.length === 0) return [];
+    // One Koios read gives the hash of each block and the point (slot, hash) of the block before it.
+    const heights = [...new Set(blockHeights.flatMap((h) => [h - 1, h]))].sort((a, b) => a - b);
+    const rows = await this.koios.get<KoiosBlockRow[]>(`blocks?block_height=in.(${heights.join(",")})&select=hash,abs_slot,block_height`);
+    const byHeight = new Map(rows.map((r) => [r.block_height, r]));
+    const wanted = blockHeights.map((height) => {
+      const previous = byHeight.get(height - 1);
+      const target = byHeight.get(height);
+      if (!previous || !target) throw new Error("Koios blocks: a requested block height is missing");
+      return { after: { slot: previous.abs_slot, id: previous.hash }, hash: target.hash };
+    });
+    const blocks = await fetchBlocksAfter(this.options.ogmiosUrl, wanted.map((w) => w.after), this.options.ogmiosTimeoutMs);
+    return blocks.map((block, i) => {
+      if (block.id !== wanted[i]!.hash) throw new Error("Ogmios returned another block than Koios lists at the same height");
+      return {
+        blockHash: block.id,
+        transactions: (block.transactions ?? []).map((tx) => ({
+          txHash: tx.id,
+          vkeys: (tx.signatories ?? []).filter((s) => s.chainCode === undefined).map((s) => s.key.toLowerCase()),
+        })),
+      };
+    });
   }
 
   async policyAssets(policyId: string): Promise<PolicyAsset[]> {
     const rows = await this.koios.getAll<KoiosPolicyAssetMintRow>(
-      `policy_asset_mints?_asset_policy=${policyId}&select=asset_name,minting_tx_hash,mint_cnt`,
+      `policy_asset_mints?_asset_policy=${policyId}&select=asset_name,minting_tx_hash,mint_cnt,creation_time`,
       "asset_name.asc",
     );
-    return rows.map((r) => ({ assetName: r.asset_name ?? "", mintCount: r.mint_cnt, lastMintTx: r.minting_tx_hash }));
+    return rows.map((r) => ({
+      assetName: r.asset_name ?? "",
+      mintCount: r.mint_cnt,
+      lastMintTx: r.minting_tx_hash,
+      createdAt: typeof r.creation_time === "number" && Number.isSafeInteger(r.creation_time) ? r.creation_time : null,
+    }));
   }
 }

@@ -77,6 +77,8 @@ export interface PolicyAsset {
   readonly mintCount: number;
   /** The newest transaction that minted the asset (the only one when mintCount is 1). */
   readonly lastMintTx: string;
+  /** Block time of the first mint, POSIX seconds; null when the source does not show it. */
+  readonly createdAt: number | null;
 }
 
 export interface ChainSource {
@@ -89,8 +91,12 @@ export interface ChainSource {
   transactions(txHashes: readonly string[]): Promise<LedgerTx[]>;
   /** Datum CBOR for the hashes that the source knows (from witness sets or inline datums). */
   datums(datumHashes: readonly string[]): Promise<Map<string, string>>;
-  /** The vkey witnesses of every transaction in the block at this height. */
-  blockWitnesses(blockHeight: number): Promise<BlockWitnesses>;
+  /**
+   * The vkey witnesses of every transaction in each block at these heights, in the same order. A
+   * source reads all of them in one session where it can (Part 1 Section 9: the legacy key search
+   * reads few sessions for a long history).
+   */
+  blockWitnesses(blockHeights: readonly number[]): Promise<BlockWitnesses[]>;
   /** Every asset that the policy ever minted. */
   policyAssets(policyId: string): Promise<PolicyAsset[]>;
 }

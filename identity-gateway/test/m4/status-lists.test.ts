@@ -148,6 +148,7 @@ describe("status values", () => {
     expect((await tokenStatusList(h)).values(i)).toBe(STATUS.suspended);
     b.tip(1020);
     h.now += 61_000;
+    await h.services.statusLists.refresh();
     bsl = await bitstringList(h);
     expect([bsl.bit(i), bsl.bit(LIST_SIZE + i)]).toEqual([1, 0]);
     expect((await tokenStatusList(h)).values(i)).toBe(STATUS.invalid);
@@ -172,12 +173,14 @@ describe("GET /status/tsl/{n}", () => {
     expect(Buffer.from(text(at(payload, "status_list", "lst")), "base64url").subarray(0, 2).toString("hex")).toBe("78da");
   });
 
-  test("the lists are built again after the refresh interval; in between the same token is served", async () => {
+  test("after the refresh interval a request gets the previous lists at once and starts a build; later requests get the new lists", async () => {
     const h = await startGateway(ledger());
     const first = (await tokenStatusList(h)).jwt;
     h.now += 30_000;
     expect((await tokenStatusList(h)).jwt).toBe(first);
     h.now += 31_000;
+    expect((await tokenStatusList(h)).jwt).toBe(first);
+    await h.services.statusLists.refresh(); // joins the build that the request started
     const rebuilt = await tokenStatusList(h);
     expect(rebuilt.jwt).not.toBe(first);
     expect(rebuilt.payload.iat).toBe(nowS(h.now));
@@ -210,7 +213,10 @@ describe("GET /status/tsl/{n}", () => {
     b.chain.failing.add("policyAssets");
     h.now += 120_000;
     expect((await tokenStatusList(h)).jwt).toBe(built);
-    expect(h.logs.some((m) => m.includes("status lists not rebuilt"))).toBe(true);
+    await expect.poll(() => h.logs.some((m) => m.includes("status lists not rebuilt"))).toBe(true);
+    // After the lists' hour, a request waits for a build again, and a failed build is 503.
+    h.now += 3_600_000;
+    expect((await fetch(`${h.url}/status/tsl/0`)).status).toBe(503);
   });
 });
 

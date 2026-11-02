@@ -5,7 +5,7 @@
 import type { ChainSource } from "../chain/types.js";
 import type { GatewayKeys } from "../keys/gateway-keys.js";
 import type { RecordList } from "../resolve/records.js";
-import type { CurrentLookup } from "../resolve/resolver.js";
+import type { CurrentLookup, StatusLookup } from "../resolve/resolver.js";
 import type { Registry } from "../resolve/settings.js";
 
 export interface M4Settings {
@@ -24,6 +24,8 @@ export interface M4Settings {
 /** The resolver core functions that the M4 services use. `VectorResolver` implements them. */
 export interface RecordSource {
   currentRecord(vectorId: string): Promise<CurrentLookup>;
+  /** The effective status alone, without the legacy key search (status lists, token checks). */
+  currentStatus(vectorId: string): Promise<StatusLookup>;
   listRecords(): Promise<RecordList>;
 }
 

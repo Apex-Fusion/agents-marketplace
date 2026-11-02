@@ -11,6 +11,11 @@
 // 3. Web: neither check succeeds, and a GET of the endpoint answers 2xx.
 // The endpoint is reachable when one of these checks succeeds. A connection-level failure ends the
 // detection at once: the other checks go to the same host.
+//
+// Detection keeps only small details (DETECTION_LIMITS): the renderings serve and sign them again
+// for each request, so their size bounds the work of a request (Part 1 Section 9). It keeps the
+// first interfaces, modes and versions in answer order and leaves out an item that is too long; a
+// card with no interface or no mode left is not a valid card here.
 
 import { formatTime } from "../resolve/time.js";
 import type { VectorFetched } from "../resolve/metadata.js";
@@ -25,11 +30,31 @@ export interface A2AInterface {
 }
 
 export interface A2ADetails {
-  /** The card's interfaces on the endpoint's origin, in card order. */
+  /** The card's interfaces on the endpoint's origin, in card order (at most DETECTION_LIMITS.interfaces). */
   readonly interfaces: readonly A2AInterface[];
   readonly defaultInputModes: readonly string[];
   readonly defaultOutputModes: readonly string[];
 }
+
+/** The most that detection keeps of an answer. Sizes are UTF-8 bytes. */
+export const DETECTION_LIMITS = {
+  /** Interfaces on the endpoint's origin. */
+  interfaces: 8,
+  /** Size of an interface URL. */
+  urlBytes: 512,
+  /** Size of a protocol binding, a protocol version and an MCP protocol version. */
+  nameBytes: 64,
+  /** Default input modes, and default output modes. */
+  modes: 16,
+  /** Size of a mode: a media type has a type and a subtype name of at most 127 characters each (RFC 6838 Section 4.2). */
+  modeBytes: 255,
+  /** MCP protocol versions. */
+  versions: 16,
+} as const;
+
+const fits = (text: string, maxBytes: number): boolean => Buffer.byteLength(text, "utf8") <= maxBytes;
+/** The first `max` items that fit `maxBytes`. */
+const kept = (items: readonly string[], max: number, maxBytes: number): string[] => items.filter((s) => fits(s, maxBytes)).slice(0, max);
 
 export interface Detection {
   /** The endpoint (record text) that the detection checked. */
@@ -99,15 +124,24 @@ const sameOrigin = (url: string, origin: string): boolean => {
   }
 };
 
-/** A valid agent card with at least one interface on `origin`; null otherwise. */
+/** A valid agent card with at least one interface on `origin`; null otherwise. Only what DETECTION_LIMITS allows is kept. */
 export function a2aDetails(value: Json | undefined, origin: string): A2ADetails | null {
   if (!isObject(value)) return null;
   if (!isText(value.name) || typeof value.description !== "string" || typeof value.version !== "string" || !isObject(value.capabilities)) return null;
   if (!isTextList(value.defaultInputModes) || !value.defaultInputModes.length || !isTextList(value.defaultOutputModes) || !value.defaultOutputModes.length) return null;
   if (!Array.isArray(value.skills) || !value.skills.every((s) => isObject(s) && isText(s.id) && isText(s.name))) return null;
-  const interfaces = cardInterfaces(value)?.filter((i) => sameOrigin(i.url, origin));
-  if (!interfaces?.length) return null;
-  return { interfaces, defaultInputModes: value.defaultInputModes, defaultOutputModes: value.defaultOutputModes };
+  const all = cardInterfaces(value);
+  if (!all) return null;
+  const { interfaces: maxInterfaces, urlBytes, nameBytes, modes, modeBytes } = DETECTION_LIMITS;
+  const interfaces: A2AInterface[] = [];
+  for (const i of all) {
+    if (interfaces.length === maxInterfaces) break;
+    if (fits(i.url, urlBytes) && fits(i.protocolBinding, nameBytes) && fits(i.protocolVersion, nameBytes) && sameOrigin(i.url, origin)) interfaces.push(i);
+  }
+  const defaultInputModes = kept(value.defaultInputModes, modes, modeBytes);
+  const defaultOutputModes = kept(value.defaultOutputModes, modes, modeBytes);
+  if (!interfaces.length || !defaultInputModes.length || !defaultOutputModes.length) return null;
+  return { interfaces, defaultInputModes, defaultOutputModes };
 }
 
 /** The JSON-RPC response with `id` from a JSON or an SSE (text/event-stream) body. */
@@ -147,15 +181,17 @@ const RPC_HEADERS = { "content-type": "application/json", accept: "application/j
 function modernVersions(response: JsonObject | null): string[] | null {
   if (!response) return null;
   const { result, error } = response;
-  if (isObject(result) && isTextList(result.supportedVersions) && result.supportedVersions.length && isObject(result.capabilities)) return result.supportedVersions;
-  if (isObject(error) && error.code === -32022 && isObject(error.data) && isTextList(error.data.supported) && error.data.supported.length) return error.data.supported;
-  return null;
+  let named: string[] | null = null;
+  if (isObject(result) && isTextList(result.supportedVersions) && isObject(result.capabilities)) named = result.supportedVersions;
+  else if (isObject(error) && error.code === -32022 && isObject(error.data) && isTextList(error.data.supported)) named = error.data.supported;
+  const versions = named && kept(named, DETECTION_LIMITS.versions, DETECTION_LIMITS.nameBytes);
+  return versions?.length ? versions : null;
 }
 
 /** Legacy MCP: an InitializeResult. */
 function legacyVersion(response: JsonObject | null): string | null {
   const result = response?.result;
-  if (!isObject(result) || !isText(result.protocolVersion) || !isObject(result.capabilities)) return null;
+  if (!isObject(result) || !isText(result.protocolVersion) || !fits(result.protocolVersion, DETECTION_LIMITS.nameBytes) || !isObject(result.capabilities)) return null;
   const info = result.serverInfo;
   return isObject(info) && typeof info.name === "string" && typeof info.version === "string" ? result.protocolVersion : null;
 }

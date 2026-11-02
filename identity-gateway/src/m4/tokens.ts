@@ -17,7 +17,8 @@
 //   only, with client authentication by an RFC 7523 client assertion. Introspection answers the
 //   token's claims, so `sub` and `act` keep their meaning there (RFC 8693 Section 4.1, last
 //   paragraph). A change that makes the effective status of an agent other than Active revokes
-//   every token that depends on it.
+//   every token that depends on it, and the status entry of each such token reads SUSPENDED until
+//   the token can no longer be accepted, also when the agent is Active again (`heldEntries`).
 
 import { randomBytes } from "node:crypto";
 import { keyHash } from "../codec/keys.js";
@@ -33,7 +34,7 @@ import {
   type DelegationClaims,
   type DelegationSource,
 } from "./delegation.js";
-import { DpopError, verifyDpopProof, type DpopProof } from "./dpop.js";
+import { DpopError, useDpopProof, verifyDpopProof, type DpopProof } from "./dpop.js";
 import { M4Error, NO_STORE, invalidRequest, jsonResponse, parseForm, single, unavailable, type M4Request, type M4Response } from "./http.js";
 import { parseJws, recordKeyObject, signJws, verifyJws } from "./jose.js";
 import type { SingleUseStore } from "./replay.js";
@@ -44,7 +45,7 @@ export const JWT_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:jwt";
 export const ACCESS_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:access_token";
 export const JWT_BEARER_CLIENT_ASSERTION = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
 
-/** A token that this gateway issued, kept until it expires. */
+/** A token that this gateway issued, kept until a relying party can no longer accept it (expiry plus the clock leeway). */
 export interface IssuedToken {
   readonly jti: string;
   readonly kind: "access_token" | "jwt_svid";
@@ -94,13 +95,31 @@ export class TokenRegistry {
   liveAgents(now: number): Set<string> {
     this.prune(now);
     const agents = new Set<string>();
-    for (const token of this.tokens.values()) if (!this.isRevoked(token)) for (const a of token.agents) agents.add(a);
+    for (const token of this.tokens.values()) if (token.expiresAt > now && !this.isRevoked(token)) for (const a of token.agents) agents.add(a);
     return agents;
   }
 
+  /**
+   * Agents whose Token Status List entry must read SUSPENDED, also after their status is Active
+   * again: the entry that the status claim of an access token names (its first agent), while a
+   * status change revoked that token (Part 2 Section 8.6) and a relying party could still accept it
+   * (until expiry plus the clock leeway). The entry belongs to the agent, so it also covers the
+   * agent's other tokens for that time. A token revoked on its own (POST /revoke, or a delegation that
+   * no longer passes) shows only in introspection.
+   */
+  heldEntries(now: number): Set<string> {
+    this.prune(now);
+    const held = new Set<string>();
+    for (const token of this.tokens.values()) {
+      if (token.kind === "access_token" && token.agents.some((a) => (this.revokedUpTo.get(a) ?? -1) >= token.issuedAt)) held.add(token.agents[0]!);
+    }
+    return held;
+  }
+
   private prune(now: number): void {
-    for (const [jti, token] of this.tokens) if (token.expiresAt <= now) this.tokens.delete(jti);
-    // A mark older than the longest token lifetime revokes nothing that is still live.
+    const leeway = CLOCK_LEEWAY_S * 1000;
+    for (const [jti, token] of this.tokens) if (token.expiresAt + leeway <= now) this.tokens.delete(jti);
+    // A mark older than the longest token lifetime plus the leeway revokes no token that is still kept.
     const horizon = now - (MAX_TOKEN_LIFETIME_S + CLOCK_LEEWAY_S) * 1000;
     for (const [agent, at] of this.revokedUpTo) if (at < horizon) this.revokedUpTo.delete(agent);
   }
@@ -171,13 +190,12 @@ function audiencesOf(params: Map<string, string[]>): string[] {
 export const newJti = (): string => randomBytes(16).toString("base64url");
 
 export class TokenService {
-  readonly registry = new TokenRegistry();
-
   constructor(
     private readonly ctx: M4Context,
     private readonly replay: SingleUseStore,
     private readonly statusLists: StatusLists,
     private readonly delegations: DelegationSource | null,
+    readonly registry: TokenRegistry = new TokenRegistry(),
   ) {}
 
   /** RFC 7523 client authentication. `required`: introspection and revocation. */
@@ -242,12 +260,20 @@ export class TokenService {
     const client = await this.authenticateClient(req, params, false);
     let proof: DpopProof;
     try {
-      proof = verifyDpopProof(req.headersDistinct.dpop, { method: "POST", uri: tokenEndpoint(settings), replay: this.replay, now: this.ctx.now() });
+      proof = verifyDpopProof(req.headersDistinct.dpop, { method: "POST", uri: tokenEndpoint(settings), now: this.ctx.now() });
     } catch (e) {
       if (e instanceof DpopError) throw new M4Error(400, "invalid_dpop_proof", e.message);
       throw e;
     }
     const subject = await this.subjectToken(subjectToken);
+    // The proof's jti is used up only now that the subject token verified: a request that does not
+    // authenticate writes nothing to the single-use store (Part 2 Section 8.6).
+    try {
+      useDpopProof(proof, this.replay, this.ctx.now());
+    } catch (e) {
+      if (e instanceof DpopError) throw new M4Error(400, "invalid_dpop_proof", e.message);
+      throw e;
+    }
 
     const now = this.ctx.now();
     const iat = Math.floor(now / 1000);
@@ -336,8 +362,8 @@ export class TokenService {
   private async stillValid(entry: IssuedToken, now: number): Promise<boolean> {
     if (this.registry.isRevoked(entry)) return false;
     for (const agent of entry.agents) {
-      const lookup = await this.ctx.records.currentRecord(agent);
-      if (!lookup.found || lookup.record.effective.status !== "active") {
+      const lookup = await this.ctx.records.currentStatus(agent);
+      if (!lookup.found || lookup.effective.status !== "active") {
         this.registry.revokeAgent(agent, now);
         return false;
       }
@@ -389,8 +415,8 @@ export class TokenService {
   async checkStatuses(): Promise<void> {
     for (const agent of this.registry.liveAgents(this.ctx.now())) {
       try {
-        const lookup = await this.ctx.records.currentRecord(agent);
-        if (!lookup.found || lookup.record.effective.status !== "active") this.registry.revokeAgent(agent, this.ctx.now());
+        const lookup = await this.ctx.records.currentStatus(agent);
+        if (!lookup.found || lookup.effective.status !== "active") this.registry.revokeAgent(agent, this.ctx.now());
       } catch (e) {
         this.ctx.log(`identity-gateway: token status check failed: ${e instanceof Error ? e.message : String(e)}`);
       }

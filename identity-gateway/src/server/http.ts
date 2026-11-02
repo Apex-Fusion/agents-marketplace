@@ -1,6 +1,8 @@
 // HTTPS binding (Part 1 Section 7.4): GET /1.0/identifiers/{did}, as DID Resolution v1.0 defines
-// it, and GET /healthz. Bodies are the JCS (RFC 8785) serialisation. Every response has
-// Cache-Control: no-store. The server writes no request log; it logs errors without the DID.
+// it, and GET /healthz. Both also answer HEAD as RFC 9110 requires (Section 9.1; Section 9.3.2: the
+// status and header fields of GET, without the body). Bodies are the JCS (RFC 8785) serialisation.
+// Every response has Cache-Control: no-store. The server writes no request log; it logs errors
+// without the DID.
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { ResolutionError } from "../resolve/errors.js";
@@ -32,7 +34,7 @@ function send(res: ServerResponse, status: number, contentType: string, body: st
     "cache-control": "no-store",
     ...extra,
   });
-  res.end(body);
+  res.end(res.req.method === "HEAD" ? undefined : body);
 }
 
 async function resolveRequest(resolver: DidResolver, encodedDid: string, query: string): Promise<ResolutionResult> {
@@ -60,7 +62,7 @@ export function createResolverServer(resolver: DidResolver, options: ServerOptio
     }
     for (const route of options.routes ?? []) if (await route(req, res, path, query)) return;
     if (!path.startsWith(PREFIX)) return send(res, 404, "text/plain; charset=utf-8", "not found\n");
-    if (req.method !== "GET") return send(res, 405, "text/plain; charset=utf-8", "method not allowed\n", { allow: "GET" });
+    if (req.method !== "GET" && req.method !== "HEAD") return send(res, 405, "text/plain; charset=utf-8", "method not allowed\n", { allow: "GET, HEAD" });
 
     const representation = negotiate(req.headers.accept);
     const result =

@@ -1,9 +1,14 @@
 // Single-use values: JWT IDs of subject tokens, client assertions and proofs (each kept at least
 // until its token expires), DPoP proof IDs (RFC 9449 Section 11.1), and the gateway nonces of the
-// X.509-SVID endpoint. Both stores fail closed when they are full: they refuse new values instead
-// of dropping values that could then be replayed.
+// X.509-SVID endpoint. The store fails closed when it is full: it refuses new values instead of
+// dropping values that could then be replayed. So that it stays usable (Part 2 Section 8.6):
+// - a value goes into the store only after the request authenticated (a signature by an
+//   authentication key of a registered agent verified), never for a request that failed before;
+// - the store keeps a 128-bit SHA-256 digest of each value, so an entry has the same small size
+//   whatever the length of the value;
+// - the gateway issues nonces without storing them (NonceStore).
 
-import { randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
 /** A store is full; the request can be retried later. */
 export class CapacityError extends Error {
@@ -23,13 +28,14 @@ export class SingleUseStore {
   /** Records `key` until `expiresAt` (POSIX ms). False when the key is already recorded: a replay. */
   use(key: string, expiresAt: number, now: number): boolean {
     this.pruneSometimes(now);
-    const known = this.entries.get(key);
+    const digest = createHash("sha256").update(key, "utf8").digest("base64url").slice(0, 22);
+    const known = this.entries.get(digest);
     if (known !== undefined && known > now) return false;
     if (this.entries.size >= this.max) {
       this.prune(now);
       if (this.entries.size >= this.max) throw new CapacityError("single-use token IDs");
     }
-    this.entries.set(key, expiresAt);
+    this.entries.set(digest, expiresAt);
     return true;
   }
 
@@ -49,30 +55,46 @@ export class SingleUseStore {
 
 export type NonceCheck = "ok" | "unknown" | "expired";
 
-/** Gateway nonces: 256 random bits each, usable once, for at most `lifetimeMs` after issue. */
+/** A nonce: 8 bytes of issue time (POSIX ms), 16 random bytes and a 16-byte tag; 54 base64url characters. */
+const NONCE = /^[A-Za-z0-9_-]{54}$/;
+
+/**
+ * Gateway nonces, usable once, for at most `lifetimeMs` after issue. A nonce carries its issue time,
+ * 128 random bits and an HMAC-SHA-256 tag (RFC 2104, cut to 128 bits as Section 5 allows) under a key
+ * that the process draws at start. Issuing stores nothing, so callers that are not authenticated
+ * cannot exhaust anything; `used` keeps a nonce only after an authenticated request uses it, until
+ * the nonce expires. A restart makes the earlier nonces unknown, as before.
+ */
 export class NonceStore {
-  private readonly issued = new Map<string, number>();
+  private readonly key = randomBytes(32);
 
   constructor(
     readonly lifetimeMs: number,
-    private readonly max = 100_000,
+    private readonly used: SingleUseStore,
   ) {}
 
   issue(now: number): string {
-    if (this.issued.size >= this.max) {
-      for (const [nonce, at] of this.issued) if (at + this.lifetimeMs <= now) this.issued.delete(nonce);
-      if (this.issued.size >= this.max) throw new CapacityError("nonces");
-    }
-    const nonce = randomBytes(32).toString("base64url");
-    this.issued.set(nonce, now);
-    return nonce;
+    const body = Buffer.alloc(24);
+    body.writeBigUInt64BE(BigInt(Math.max(0, Math.floor(now))), 0);
+    randomBytes(16).copy(body, 8);
+    return Buffer.concat([body, this.tag(body)]).toString("base64url");
   }
 
-  /** Uses the nonce up. "unknown": never issued, or already used. "expired": older than the lifetime. */
+  /** Uses the nonce up. "unknown": not issued by this process, or already used. "expired": older than the lifetime. */
   consume(nonce: string, now: number): NonceCheck {
-    const at = this.issued.get(nonce);
-    if (at === undefined) return "unknown";
-    this.issued.delete(nonce);
-    return now - at > this.lifetimeMs ? "expired" : "ok";
+    if (!NONCE.test(nonce)) return "unknown";
+    const bytes = Buffer.from(nonce, "base64url");
+    // Only the canonical text of the bytes counts, so that one nonce has one text.
+    if (bytes.length !== 40 || bytes.toString("base64url") !== nonce) return "unknown";
+    const body = bytes.subarray(0, 24);
+    if (!timingSafeEqual(bytes.subarray(24), this.tag(body))) return "unknown";
+    const issuedAt = Number(body.readBigUInt64BE(0));
+    if (issuedAt > now) return "unknown";
+    if (now - issuedAt > this.lifetimeMs) return "expired";
+    return this.used.use(`nonce\n${nonce}`, issuedAt + this.lifetimeMs + 1, now) ? "ok" : "unknown";
+  }
+
+  private tag(body: Buffer): Buffer {
+    return createHmac("sha256", this.key).update(body).digest().subarray(0, 16);
   }
 }

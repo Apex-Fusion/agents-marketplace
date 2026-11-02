@@ -110,7 +110,7 @@ export class FetchScheduler {
     while (this.jobs.size) await Promise.all(this.jobs.values());
   }
 
-  /** One scan: reads every current record, stores the inputs of each, starts the checks that are due. */
+  /** One scan: reads every current record and starts the checks that are due. */
   async scan(): Promise<{ readonly records: number; readonly started: readonly string[] }> {
     const { entries } = await this.source.listRecords();
     const found: Array<CurrentRecord | null> = new Array<CurrentRecord | null>(entries.length).fill(null);
@@ -135,13 +135,11 @@ export class FetchScheduler {
 
     const started: string[] = [];
     for (const record of records) {
-      const inputs = factInputs(record, this.deps.legacyPolicyId);
-      this.store.setInputs(record.vectorId, inputs);
       if (record.effective.status !== "active" || this.jobs.has(record.vectorId)) continue;
       const facts = this.store.get(record.vectorId);
       if (facts && facts.changeKey === changeKey(record) && now - facts.checkedAt < this.recheckMs) continue;
       started.push(record.vectorId);
-      const job = checkRecord(this.deps, record, inputs)
+      const job = checkRecord(this.deps, record, factInputs(record, this.deps.legacyPolicyId))
         .then((result) => this.store.set(result))
         .catch((e: unknown) => this.log(`identity-gateway: background check failed: ${e instanceof Error ? e.message : String(e)}`))
         .finally(() => this.jobs.delete(record.vectorId));

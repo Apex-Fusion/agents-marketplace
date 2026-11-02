@@ -3,9 +3,14 @@
 // `Access-Control-Allow-Origin: *`: the documents are public and read-only, and the MCP Server Card
 // discovery rules require CORS. A per-agent request reads the record as a resolution does (the view
 // without options at the current tip) and the stored facts; no request fetches anything.
+//
+// A card depends only on the stored facts of the record (one object for each background check) and
+// on the record state that `changeKey` names. So the routes build, sign and render a card once for
+// each pair and serve that body again (Part 1 Section 9: bounded work per request); an entry goes
+// away with its facts object.
 
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { FactsStore, factInputs } from "../fetch/facts.js";
+import { FactsStore, changeKey, factInputs, type RecordFacts } from "../fetch/facts.js";
 import type { ListingSnapshot, RecordSource } from "../fetch/scheduler.js";
 import type { CurrentRecord } from "../resolve/resolver.js";
 import type { ResolverSettings } from "../resolve/settings.js";
@@ -73,11 +78,40 @@ export function renderRoutes(deps: RenderDeps): Route {
     renderedAgent(record, deps.facts.current(record.vectorId, factInputs(record, legacyPolicy)), deps.settings.network);
   const listed = (): RenderedAgent[] => deps.snapshot().records.map(agentOf).filter((agent) => listingFailure(agent) === null);
   const gatewayDid = (): string | null => (deps.signer?.kid.startsWith("did:") ? deps.signer.kid.split("#")[0]! : null);
+  /** Card bodies by facts object, then by file: the record state that the body shows and the body. */
+  const cards = new WeakMap<RecordFacts, Map<string, { readonly change: string; readonly body: string }>>();
+
+  /** The agent card or the server card: the kept body for the same facts and record state, else a new one. */
+  async function cardAnswer(req: IncomingMessage, agent: RenderedAgent, stored: RecordFacts | undefined, file: "agent-card.json" | "server-card"): Promise<Answer> {
+    const type = cardType(req, file === "agent-card.json" ? A2A_CARD_TYPE : MCP_CARD_TYPE);
+    const change = changeKey(agent.record);
+    const known = stored === undefined ? undefined : cards.get(stored)?.get(file);
+    if (known?.change === change) return { status: 200, type, body: known.body };
+    let body: string;
+    if (file === "agent-card.json") {
+      const card = agentCard(agent, baseUrl);
+      if (!card) return failure(404, "the agent is not an A2A agent");
+      if (!deps.signer) return failure(503, "no key to sign agent cards is configured");
+      body = renderJson(await signAgentCard(card, baseUrl, deps.signer));
+    } else {
+      const card = serverCard(agent, baseUrl);
+      if (!card) return failure(404, "the agent is not an MCP agent");
+      body = renderJson(card);
+    }
+    if (stored !== undefined) {
+      const byFile = cards.get(stored) ?? new Map<string, { readonly change: string; readonly body: string }>();
+      byFile.set(file, { change, body });
+      cards.set(stored, byFile);
+    }
+    return { status: 200, type, body };
+  }
 
   async function agentAnswer(req: IncomingMessage, vectorId: string, file: string): Promise<Answer> {
     const lookup = await deps.records.currentRecord(vectorId);
     if (!lookup.found) return failure(404, "the identifier does not resolve");
     if (lookup.record.deactivated) return failure(410, "the DID is deactivated");
+    // The facts object and the facts that the agent shows are read together, before any wait.
+    const stored = deps.facts.get(vectorId);
     const agent = agentOf(lookup.record);
     if (file === "did.json" || file === "jwks.json") {
       // Keys are shown only while a relying party may accept new actions by them (Part 1 Section 7.3).
@@ -87,16 +121,9 @@ export function renderRoutes(deps: RenderDeps): Route {
     const notListed = listingFailure(agent);
     if (notListed) return failure(404, `the agent is not listed (${notListed})`);
     switch (file) {
-      case "agent-card.json": {
-        const card = agentCard(agent, baseUrl);
-        if (!card) return failure(404, "the agent is not an A2A agent");
-        if (!deps.signer) return failure(503, "no key to sign agent cards is configured");
-        return ok(cardType(req, A2A_CARD_TYPE), await signAgentCard(card, baseUrl, deps.signer));
-      }
-      case "server-card": {
-        const card = serverCard(agent, baseUrl);
-        return card ? ok(cardType(req, MCP_CARD_TYPE), card) : failure(404, "the agent is not an MCP agent");
-      }
+      case "agent-card.json":
+      case "server-card":
+        return cardAnswer(req, agent, stored, file);
       case "oasf.json":
         return ok(JSON_TYPE, oasfRecord(agent));
       default:

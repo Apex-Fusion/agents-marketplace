@@ -2,16 +2,16 @@
 // ancestors read as of that tip; view, effective status, document and metadata built from them.
 // A failed or inconsistent ledger read gives INTERNAL_ERROR, never NOT_FOUND or a partial document.
 
-import type { BlockWitnesses, ChainSource, ChainTip } from "../chain/types.js";
+import type { ChainSource, ChainTip } from "../chain/types.js";
 import { parseDid } from "./did.js";
 import { buildDocument, type DidDocument } from "./document.js";
 import { ERROR_HTTP_STATUS, ResolutionError, errorTypeUri } from "./errors.js";
 import { loadHistory, type HistoryLookup, type LedgerSnapshot, type Origin, type RecordHistory, type Version } from "./history.js";
-import { findLegacyKey } from "./legacy-key.js";
+import { LegacyKeySearch } from "./legacy-key.js";
 import { baseLedger, buildMetadata, type DidDocumentMetadata, type VectorLedger, type VectorMetadataError } from "./metadata.js";
 import { parseResolutionOptions, type ResolutionOptionsInput } from "./options.js";
 import type { FetchedFactsProvider } from "./fetched.js";
-import { listRecords, type RecordList } from "./records.js";
+import { listRecords, type FirstMintCache, type RecordList } from "./records.js";
 import { CONFIRMATION_DEPTH, MAX_ANCESTORS, checkRegistrySettings, type ResolverSettings } from "./settings.js";
 import { evaluate, lineageOf, type Effective, type Evaluation, type Selection } from "./status.js";
 import { blockTimeMs } from "./time.js";
@@ -71,13 +71,16 @@ export interface CurrentRecord {
 
 export type CurrentLookup = { readonly found: true; readonly record: CurrentRecord } | { readonly found: false; readonly reason: string };
 
+/** The effective status without options, for callers that need nothing else (status lists, token checks): no legacy key search. */
+export type StatusLookup = { readonly found: true; readonly effective: Effective } | { readonly found: false; readonly reason: string };
+
 export interface VectorResolverOptions {
   /** Error log. Messages never contain the requested DID. */
   readonly log?: (message: string) => void;
   /** Record histories kept for the current tip (Part 1 Section 9, denial of service). */
   readonly historyCacheSize?: number;
-  /** Blocks whose witnesses are kept for the legacy key search. */
-  readonly blockCacheSize?: number;
+  /** The legacy key search and its caches; resolvers of the same chain source may share one. Default: a new one. */
+  readonly legacyKeys?: LegacyKeySearch;
   /** Verified domains, verified organisations and detected protocols that background jobs stored. Default: none. */
   readonly fetchedFacts?: FetchedFactsProvider;
 }
@@ -87,11 +90,12 @@ const VECTOR_ID = /^[0-9a-f]{64}$/;
 export class VectorResolver {
   private readonly log: (message: string) => void;
   private readonly historyCacheSize: number;
-  private readonly blockCacheSize: number;
+  private readonly legacyKeys: LegacyKeySearch;
   private readonly fetchedFacts: FetchedFactsProvider;
   private networkChecked: Promise<void> | null = null;
   private histories: { tipHash: string; entries: Map<string, Promise<HistoryLookup>> } = { tipHash: "", entries: new Map() };
-  private readonly blocks = new Map<string, BlockWitnesses>();
+  /** First mints with 30 confirmations, kept between `listRecords` calls. */
+  private readonly firstMints: FirstMintCache = new Map();
 
   constructor(
     private readonly chain: ChainSource,
@@ -101,7 +105,7 @@ export class VectorResolver {
     checkRegistrySettings(settings.registries);
     this.log = options.log ?? ((message) => console.error(message));
     this.historyCacheSize = options.historyCacheSize ?? 512;
-    this.blockCacheSize = options.blockCacheSize ?? 256;
+    this.legacyKeys = options.legacyKeys ?? new LegacyKeySearch(chain);
     this.fetchedFacts = options.fetchedFacts ?? (() => undefined);
   }
 
@@ -124,24 +128,19 @@ export class VectorResolver {
    * `{ found: false }`. A failed ledger read throws.
    */
   async currentRecord(vectorId: string): Promise<CurrentLookup> {
-    if (!VECTOR_ID.test(vectorId)) throw new Error("an identifier is 64 lowercase hex characters");
-    const snapshot = await this.snapshot();
-    const lookup = await this.history(snapshot, vectorId);
-    if (!lookup.found) return lookup;
-    const chain = await this.lineage(snapshot, lookup.history);
-    const current = this.currentSelection(snapshot);
-    const evaluation = evaluate(chain, current, current, this.settings);
-    if (!evaluation) return { found: false, reason: "the record has no confirmed version" };
+    const now = await this.currentEvaluation(vectorId);
+    if (!now.found) return now;
+    const { snapshot, history, evaluation, selection } = now;
     const { base, pending, view } = evaluation.state;
     const deactivated = isEnded(evaluation.effective);
-    const legacy = view.kind === "legacy" && !deactivated ? await this.legacyKey(lookup.history, base, view, current) : null;
+    const legacy = view.kind === "legacy" && !deactivated ? await this.legacyKey(history, base, view, selection) : null;
     return {
       found: true,
       record: {
         vectorId,
-        origin: lookup.history.origin,
+        origin: history.origin,
         tip: snapshot.tip,
-        created: lookup.history.firstMint.timeMs,
+        created: history.firstMint.timeMs,
         versionId: base.number,
         pending: pending.map((v) => v.made.tx.txHash),
         view,
@@ -149,14 +148,38 @@ export class VectorResolver {
         deactivated,
         invalidFrom: evaluation.invalidFrom,
         legacyControllerKey: legacy?.key ?? null,
-        ledger: baseLedger(base, current.counts),
+        ledger: baseLedger(base, selection.counts),
       },
     };
   }
 
+  /** The effective status without options, as `currentRecord` gives it, without the legacy key search. A failed ledger read throws. */
+  async currentStatus(vectorId: string): Promise<StatusLookup> {
+    const now = await this.currentEvaluation(vectorId);
+    return now.found ? { found: true, effective: now.evaluation.effective } : now;
+  }
+
   /** Every identifier that resolves, with its first mint and status-list index (Part 2 Section 8.6). A failed read throws. */
   async listRecords(): Promise<RecordList> {
-    return listRecords(this.chain, await this.snapshot());
+    return listRecords(this.chain, await this.snapshot(), this.firstMints);
+  }
+
+  /** The record and its ancestors at the current tip, evaluated without options. */
+  private async currentEvaluation(
+    vectorId: string,
+  ): Promise<
+    | { readonly found: true; readonly snapshot: LedgerSnapshot; readonly history: RecordHistory; readonly evaluation: Evaluation; readonly selection: Selection }
+    | { readonly found: false; readonly reason: string }
+  > {
+    if (!VECTOR_ID.test(vectorId)) throw new Error("an identifier is 64 lowercase hex characters");
+    const snapshot = await this.snapshot();
+    const lookup = await this.history(snapshot, vectorId);
+    if (!lookup.found) return lookup;
+    const chain = await this.lineage(snapshot, lookup.history);
+    const selection = this.currentSelection(snapshot);
+    const evaluation = evaluate(chain, selection, selection, this.settings);
+    if (!evaluation) return { found: false, reason: "the record has no confirmed version" };
+    return { found: true, snapshot, history: lookup.history, evaluation, selection };
   }
 
   private async resolveOrThrow(did: string, rawOptions: ResolutionOptionsInput): Promise<ResolutionResult> {
@@ -211,7 +234,9 @@ export class VectorResolver {
       metadataError = legacy?.error ?? null;
     }
 
-    const facts = this.fetchedFacts(parsed.vectorId);
+    // The stored facts count only while their inputs apply to the view that the result shows (its
+    // endpoint, its domains, its assertion keys), also for a view at a requested version or time.
+    const facts = this.fetchedFacts({ vectorId: parsed.vectorId, origin: history.origin, view, legacyControllerKey: legacyKey }, legacyPolicy);
     const didDocument = deactivatedAtT ? null : buildDocument(parsed.did, view, legacyKey, options.expandRelativeUrls, facts?.alsoKnownAs);
     return {
       didDocument,
@@ -244,7 +269,7 @@ export class VectorResolver {
     if (view.datumError) return { key: null, error: view.datumError };
     if (!view.owner) return null;
     if (view.owner.kind === "script") return { key: null, error: "controllerIsScript" };
-    const key = await findLegacyKey(history, base, view.owner.hash, selection.counts, (height, hash) => this.blockWitnesses(height, hash));
+    const key = await this.legacyKeys.find(history, base, view.owner.hash, selection.counts);
     return { key, error: key === null ? "controllerKeyNotFound" : null };
   }
 
@@ -304,15 +329,5 @@ export class VectorResolver {
       if (!parent.found) throw new Error("the parent record of a subagent does not resolve");
       chain.push(parent.history);
     }
-  }
-
-  private async blockWitnesses(height: number, hash: string): Promise<BlockWitnesses> {
-    const known = this.blocks.get(hash);
-    if (known) return known;
-    const block = await this.chain.blockWitnesses(height);
-    if (block.blockHash !== hash) throw new Error("the block at a height changed while the resolver read it");
-    if (this.blocks.size >= this.blockCacheSize) this.blocks.clear();
-    this.blocks.set(hash, block);
-    return block;
   }
 }

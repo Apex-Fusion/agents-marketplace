@@ -462,8 +462,8 @@ describe("values from background fetches", () => {
     });
     const fetched = { url: "https://example.org/.well-known/did-configuration.json", fetchedAt: "2025-08-29T18:00:00Z", sha256: "ab".repeat(32) };
     const resolver = new VectorResolver(b.chain, b.settings, {
-      fetchedFacts: (vectorId) =>
-        vectorId === ID ? { alsoKnownAs: ["https://example.org"], verifiedOrganisations: ["example.org"], protocol: "a2a", fetched: [fetched] } : undefined,
+      fetchedFacts: (subject) =>
+        subject.vectorId === ID ? { alsoKnownAs: ["https://example.org"], verifiedOrganisations: ["example.org"], protocol: "a2a", fetched: [fetched] } : undefined,
     });
     const result = await resolver.resolveDid(DID);
     expect(result.didDocument?.alsoKnownAs).toEqual(["https://example.org"]);

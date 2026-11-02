@@ -3,13 +3,14 @@
 // options (Part 2 Section 8.4): `VectorResolver.currentRecord`.
 
 export { VectorResolver, DID_MEDIA_TYPE, errorResult, httpStatus } from "./resolve/resolver.js";
-export type { CurrentLookup, CurrentRecord, DidResolutionMetadata, ResolutionResult, VectorResolverOptions } from "./resolve/resolver.js";
+export type { CurrentLookup, CurrentRecord, DidResolutionMetadata, ResolutionResult, StatusLookup, VectorResolverOptions } from "./resolve/resolver.js";
+export { LegacyKeySearch, type LegacyKeySearchOptions } from "./resolve/legacy-key.js";
 export type { RecordList, RecordListEntry, FirstMint } from "./resolve/records.js";
 export type { Effective, EffectiveReason, EffectiveStatus } from "./resolve/status.js";
 export type { IdentityView, LegacyProfile, LegacyView, RecordView, ViewKey } from "./resolve/view.js";
 export type { Origin } from "./resolve/history.js";
 export { DID_CONTEXT, PURPOSE, buildDocument, type DidDocument, type VerificationMethod } from "./resolve/document.js";
-export type { FetchedFacts, FetchedFactsProvider } from "./resolve/fetched.js";
+export type { FactsSubject, FetchedFacts, FetchedFactsProvider } from "./resolve/fetched.js";
 export { REASON_NAMES, purposeNames, reasonName, signerName } from "./resolve/metadata.js";
 export type {
   DidDocumentMetadata,

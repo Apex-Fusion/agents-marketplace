@@ -3,7 +3,9 @@
 // https://github.com/spiffe/spiffe/blob/main/standards/X509-SVID.md). Both certificates are signed
 // with ECDSA P-256 / SHA-256 (RFC 5758 Section 3.2) by the gateway's P-256 key.
 // - Signing certificate: self-signed, cA = true, keyCertSign only, URI SAN `spiffe://<trust domain>`
-//   (X509-SVID Sections 3.2, 4.1 and 4.3), no fixed expiry (RFC 5280 Section 4.1.2.5).
+//   (X509-SVID Sections 3.2, 4.1 and 4.3), no fixed expiry (RFC 5280 Section 4.1.2.5). Each build is
+//   a new certificate (a new start time and ECDSA signature), so each build has its own random serial
+//   number: issuer and serial number identify one certificate (RFC 5280 Section 4.1.2.2).
 // - X.509-SVID: P-256 key from the request; empty subject and exactly one URI SAN, marked critical
 //   (X509-SVID Sections 2 and 3.1); cA = false; digitalSignature only; serverAuth and clientAuth
 //   (X509-SVID Section 4.4); lifetime at most 1 hour; `noRevAvail` (RFC 9608 Section 2: OID
@@ -122,14 +124,15 @@ export interface SigningCertificate {
 }
 
 /**
- * The trust domain's signing certificate for the gateway's P-256 key. Its content depends only on
- * the key, the trust domain and `notBeforeMs`; ECDSA makes its signature differ on each build.
+ * The trust domain's signing certificate for the gateway's P-256 key, valid from `notBeforeMs`, with
+ * a random serial number.
  */
 export async function signingCertificate(key: GatewayKey, trustDomain: string, notBeforeMs: number): Promise<SigningCertificate> {
   const spki = Buffer.from(key.spki);
   const keyId = keyIdentifier(spki);
   const subject = organisationName(trustDomain);
-  const serial = createHash("sha256").update(spki).digest().subarray(0, 16);
+  // 16 random bytes; the first byte is made 1 to 127, so the number is positive and its DER form minimal.
+  const serial = randomBytes(16);
   serial[0] = (serial[0]! & 0x7f) | 0x01;
   const tbs = sequence(
     explicit(0, unsignedInteger(Uint8Array.of(2))),

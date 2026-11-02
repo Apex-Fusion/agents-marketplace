@@ -5,6 +5,7 @@ import { FactsStore } from "./fetch/facts.js";
 import { startBackgroundJobs } from "./fetch/jobs.js";
 import { m4ServicesFromEnv } from "./m4/index.js";
 import { loadRenderConfig } from "./render/config.js";
+import { LegacyKeySearch } from "./resolve/legacy-key.js";
 import { VectorResolver } from "./resolve/resolver.js";
 import { createResolverServer } from "./server/http.js";
 import { m4Routes } from "./server/routes-m4.js";
@@ -17,14 +18,17 @@ const chain = new KoiosOgmiosChainSource({
   ogmiosUrl: config.ogmiosUrl,
 });
 const facts = new FactsStore();
-const resolver = new VectorResolver(chain, config.resolver, { fetchedFacts: facts.provider });
+// One legacy key search for every resolver: one cache of witnesses and results, and one limit on
+// concurrent Ogmios sessions.
+const legacyKeys = new LegacyKeySearch(chain);
+const resolver = new VectorResolver(chain, config.resolver, { fetchedFacts: facts.provider, legacyKeys });
 // The scan reads every record; its own resolver keeps the request path's history cache intact.
 const jobs = renderConfig.fetchJobs
-  ? startBackgroundJobs(new VectorResolver(chain, config.resolver), facts, config.resolver, { scanIntervalMs: renderConfig.scanIntervalMs })
+  ? startBackgroundJobs(new VectorResolver(chain, config.resolver, { legacyKeys }), facts, config.resolver, { scanIntervalMs: renderConfig.scanIntervalMs })
   : null;
 // M4 services (Part 2 Section 8.6) start when both gateway key files are set. Status-list builds read
 // every record, so they also get their own resolver.
-const m4 = m4ServicesFromEnv(process.env, { baseUrl: renderConfig.baseUrl, records: new VectorResolver(chain, config.resolver), chain });
+const m4 = m4ServicesFromEnv(process.env, { baseUrl: renderConfig.baseUrl, records: new VectorResolver(chain, config.resolver, { legacyKeys }), chain });
 const server = createResolverServer(resolver, {
   routes: [
     renderRoutes({

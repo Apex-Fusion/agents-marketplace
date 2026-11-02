@@ -1,22 +1,33 @@
 // Content negotiation of the HTTPS binding (Part 1 Section 7.4). The Accept header is read as
-// RFC 9110 specifies: media ranges with parameters and weights. Ranges with q=0, and ranges with a
-// malformed weight, are ignored. The representation with the highest q wins; on a tie, the
-// resolution result wins.
+// RFC 9110 specifies (https://www.rfc-editor.org/rfc/rfc9110#section-12.5.1): media ranges with
+// parameters and weights, where the most specific range that matches a media type gives the weight of
+// that type. As Part 1 Section 7.4 says, ranges with q=0 and ranges with a malformed weight are
+// ignored, and only the parameters q and profile count.
+//
+// The resolver sends one media type for each representation: application/did-resolution for the
+// result and application/did for the document. Wildcard ranges (*/*, application/*) weigh these two
+// types only, so a more specific range for one of them overrides them. The other names of the Part 1
+// table select their representation when a range names them exactly. The weight of a representation
+// is the highest of these; the higher weight wins, and on a tie the resolution result wins.
 
 export type Representation = "result" | "document";
 
 export const RESOLUTION_MEDIA_TYPE = "application/did-resolution";
 const RESOLUTION_PROFILE = "https://w3id.org/did-resolution";
 
-/** The media types offered, with the representation each one selects. */
-const OFFERED: ReadonlyArray<{ type: string; profile?: string; representation: Representation }> = [
-  { type: RESOLUTION_MEDIA_TYPE, representation: "result" },
-  { type: "application/ld+json", profile: RESOLUTION_PROFILE, representation: "result" },
-  { type: "application/did", representation: "document" },
-  { type: "application/did+json", representation: "document" },
-  { type: "application/did+ld+json", representation: "document" },
-  { type: "application/ld+json", representation: "document" },
-  { type: "application/json", representation: "document" },
+interface MediaType {
+  readonly type: string;
+  readonly subtype: string;
+}
+
+/** The media type that each representation is sent as, and its other names (Part 1 Section 7.4 table). */
+const REPRESENTATIONS: ReadonlyArray<{ readonly representation: Representation; readonly sent: MediaType; readonly names: readonly string[] }> = [
+  { representation: "result", sent: { type: "application", subtype: "did-resolution" }, names: [`application/ld+json;profile=${RESOLUTION_PROFILE}`] },
+  {
+    representation: "document",
+    sent: { type: "application", subtype: "did" },
+    names: ["application/did+json", "application/did+ld+json", "application/ld+json", "application/json"],
+  },
 ];
 
 const QVALUE = /^(?:0(?:\.\d{0,3})?|1(?:\.0{0,3})?)$/;
@@ -70,30 +81,40 @@ function parseRange(text: string): MediaRange | null {
   return { type: m[1]!.toLowerCase(), subtype: m[2]!.toLowerCase(), profiles, q };
 }
 
-function matches(range: MediaRange, offered: (typeof OFFERED)[number]): boolean {
-  const [type, subtype] = offered.type.split("/");
-  if (range.type === "*") return range.subtype === "*";
-  if (range.type !== type) return false;
-  if (range.subtype === "*") return true;
-  if (range.subtype !== subtype) return false;
-  // application/ld+json: the resolution profile selects the result, no profile the document.
-  if (offered.type === "application/ld+json") {
-    return offered.profile ? (range.profiles?.includes(offered.profile) ?? false) : range.profiles === null;
-  }
-  return true;
+/** How specifically a range matches a sent media type: 2 exact, 1 `type/*`, 0 `*\/*`; -1 no match. */
+function specificity(range: MediaRange, sent: MediaType): number {
+  if (range.type === "*") return range.subtype === "*" ? 0 : -1;
+  if (range.type !== sent.type) return -1;
+  if (range.subtype === "*") return 1;
+  return range.subtype === sent.subtype ? 2 : -1;
+}
+
+/** A range that names another name of a representation exactly. application/ld+json names the result only with the resolution profile, and the document only without a profile. */
+function names(range: MediaRange, name: string): boolean {
+  const [typeAndSubtype, profile] = name.split(";profile=");
+  if (`${range.type}/${range.subtype}` !== typeAndSubtype) return false;
+  return profile === undefined ? range.profiles === null : (range.profiles?.includes(profile) ?? false);
 }
 
 /** The representation for an Accept header, or null when no supported media range is acceptable. */
 export function negotiate(accept: string | undefined): Representation | null {
   if (accept === undefined || accept.trim() === "") return "result";
-  const best: Record<Representation, number> = { result: 0, document: 0 };
-  for (const text of split(accept, ",")) {
-    const range = parseRange(text.trim());
-    if (!range || range.q === 0) continue;
-    for (const offered of OFFERED) {
-      if (matches(range, offered)) best[offered.representation] = Math.max(best[offered.representation], range.q);
+  const ranges = split(accept, ",")
+    .map((text) => parseRange(text.trim()))
+    .filter((range): range is MediaRange => range !== null && range.q > 0);
+  const weight: Record<Representation, number> = { result: 0, document: 0 };
+  for (const { representation, sent, names: others } of REPRESENTATIONS) {
+    // The sent type: the weight of its most specific range (the highest weight among equally specific ones).
+    let best = -1;
+    let q = 0;
+    for (const range of ranges) {
+      const s = specificity(range, sent);
+      if (s > best) [best, q] = [s, range.q];
+      else if (s === best && s >= 0) q = Math.max(q, range.q);
     }
+    for (const range of ranges) if (others.some((name) => names(range, name))) q = Math.max(q, range.q);
+    weight[representation] = q;
   }
-  if (best.result === 0 && best.document === 0) return null;
-  return best.document > best.result ? "document" : "result";
+  if (weight.result === 0 && weight.document === 0) return null;
+  return weight.document > weight.result ? "document" : "result";
 }

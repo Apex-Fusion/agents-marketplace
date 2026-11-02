@@ -138,4 +138,6 @@ export interface KoiosPolicyAssetMintRow {
   asset_name: string | null;
   minting_tx_hash: string;
   mint_cnt: number;
+  /** Block time of the first mint, POSIX seconds. */
+  creation_time: number | null;
 }

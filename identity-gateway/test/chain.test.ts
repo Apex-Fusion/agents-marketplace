@@ -41,24 +41,52 @@ afterEach(async () => {
   wss = null;
 });
 
-/** A local stand-in for Ogmios chain sync that serves one block after one point. */
-async function fakeOgmios(point: { slot: number; id: string }, block: unknown): Promise<string> {
+interface FakeBlock {
+  readonly id: string;
+  readonly slot: number;
+  readonly height: number;
+  readonly transactions: readonly unknown[];
+}
+
+/**
+ * A local stand-in for Ogmios chain sync over consecutive blocks: findIntersection at a block, then
+ * nextBlock (first the roll back to the intersection, then the following blocks). `sessions` gets the
+ * methods of each connection. `rollBackOnceBefore`: the node switches chains once, just before it
+ * would serve the block at that height without a new intersection.
+ */
+async function fakeOgmios(blocks: readonly FakeBlock[], sessions: string[][] = [], rollBackOnceBefore?: number): Promise<string> {
   wss = new WebSocketServer({ port: 0, host: "127.0.0.1" });
+  const pointOf = (b: FakeBlock) => ({ slot: b.slot, id: b.id });
+  const tip = pointOf(blocks[blocks.length - 1]!);
+  let switched = false;
   wss.on("connection", (socket) => {
-    let rolledBack = false;
+    const methods: string[] = [];
+    sessions.push(methods);
+    let cursor = -1;
+    let rollBack = false;
     socket.on("message", (data) => {
-      const req = JSON.parse(String(data)) as { method: string; params?: { points: Array<{ slot: number; id: string }> }; id: string };
+      const req = JSON.parse(String(data)) as { method: string; params?: { points: Array<{ slot: number; id: string }> }; id: unknown };
+      methods.push(req.method);
       const reply = (result: unknown) => socket.send(JSON.stringify({ jsonrpc: "2.0", method: req.method, result, id: req.id }));
       if (req.method === "findIntersection") {
         const p = req.params!.points[0]!;
-        if (p.id !== point.id) return socket.send(JSON.stringify({ jsonrpc: "2.0", method: req.method, error: { code: 1000, message: "no intersection" }, id: req.id }));
-        return reply({ intersection: point, tip: point });
+        const at = blocks.findIndex((b) => b.id === p.id && b.slot === p.slot);
+        if (at < 0) return socket.send(JSON.stringify({ jsonrpc: "2.0", method: req.method, error: { code: 1000, message: "no intersection" }, id: req.id }));
+        cursor = at;
+        rollBack = true;
+        return reply({ intersection: p, tip });
       }
-      if (!rolledBack) {
-        rolledBack = true;
-        return reply({ direction: "backward", point, tip: point });
+      if (rollBack) {
+        rollBack = false;
+        return reply({ direction: "backward", point: pointOf(blocks[cursor]!), tip });
       }
-      return reply({ direction: "forward", block, tip: point });
+      if (!switched && blocks[cursor + 1]?.height === rollBackOnceBefore) {
+        switched = true;
+        cursor = Math.max(0, cursor - 2);
+        return reply({ direction: "backward", point: pointOf(blocks[cursor]!), tip });
+      }
+      cursor++;
+      return reply({ direction: "forward", block: blocks[cursor], tip });
     });
   });
   await new Promise<void>((done) => wss!.on("listening", done));
@@ -197,7 +225,7 @@ describe("KoiosOgmiosChainSource", () => {
       koios: koiosWith((path) => {
         if (path.startsWith("asset_txs")) return [{ tx_hash: "b1" }, { tx_hash: "a1" }, { tx_hash: "b1" }];
         if (path.startsWith("datum_info")) return [{ datum_hash: DATUM_HASH, bytes: "D87980" }, { datum_hash: "ff".repeat(32), bytes: null }];
-        if (path.startsWith("policy_asset_mints")) return [{ asset_name: ASSET, minting_tx_hash: MINT_TX, mint_cnt: 1 }];
+        if (path.startsWith("policy_asset_mints")) return [{ asset_name: ASSET, minting_tx_hash: MINT_TX, mint_cnt: 1, creation_time: 1776286942 }];
         return [];
       }, calls),
       ogmiosUrl: "ws://unused",
@@ -205,15 +233,15 @@ describe("KoiosOgmiosChainSource", () => {
     expect(await source.assetTxHashes(POLICY, ASSET)).toEqual(["b1", "a1"]);
     expect(calls[0]!.body).toEqual({ _asset_policy: POLICY, _asset_name: ASSET, _history: true });
     expect(await source.datums([DATUM_HASH, "ff".repeat(32)])).toEqual(new Map([[DATUM_HASH, "d87980"]]));
-    expect(await source.policyAssets(POLICY)).toEqual([{ assetName: ASSET, mintCount: 1, lastMintTx: MINT_TX }]);
+    expect(await source.policyAssets(POLICY)).toEqual([{ assetName: ASSET, mintCount: 1, lastMintTx: MINT_TX, createdAt: 1776286942 }]);
     expect(calls[2]!.url).toBe(
-      `https://koios.test/api/v1/policy_asset_mints?_asset_policy=${POLICY}&select=asset_name,minting_tx_hash,mint_cnt&order=asset_name.asc&offset=0&limit=${KOIOS_PAGE}`,
+      `https://koios.test/api/v1/policy_asset_mints?_asset_policy=${POLICY}&select=asset_name,minting_tx_hash,mint_cnt,creation_time&order=asset_name.asc&offset=0&limit=${KOIOS_PAGE}`,
     );
   });
 
   test("blockWitnesses reads the block after the previous one through Ogmios, with its hash, without bootstrap witnesses", async () => {
-    const ogmiosUrl = await fakeOgmios(
-      { slot: PREVIOUS_BLOCK.slot, id: PREVIOUS_BLOCK.hash },
+    const ogmiosUrl = await fakeOgmios([
+      { id: PREVIOUS_BLOCK.hash, height: PREVIOUS_BLOCK.height, slot: PREVIOUS_BLOCK.slot, transactions: [] },
       {
         id: MINT_BLOCK.hash,
         height: MINT_BLOCK.height,
@@ -223,23 +251,63 @@ describe("KoiosOgmiosChainSource", () => {
           { id: "dd".repeat(32), signatories: [{ key: "11".repeat(32), signature: "00", chainCode: "22".repeat(32), addressAttributes: "a0" }] },
         ],
       },
-    );
+    ]);
     const blocks = [
       { hash: PREVIOUS_BLOCK.hash, abs_slot: PREVIOUS_BLOCK.slot, block_height: PREVIOUS_BLOCK.height },
       { hash: MINT_BLOCK.hash, abs_slot: MINT_BLOCK.slot, block_height: MINT_BLOCK.height },
     ];
     const calls: Call[] = [];
     const source = new KoiosOgmiosChainSource({ koios: koiosWith(() => blocks, calls), ogmiosUrl, ogmiosTimeoutMs: 5000 });
-    expect(await source.blockWitnesses(MINT_BLOCK.height)).toEqual({
-      blockHash: MINT_BLOCK.hash,
-      transactions: [
-        { txHash: MINT_TX, vkeys: [OWNER_KEY] },
-        { txHash: "dd".repeat(32), vkeys: [] },
-      ],
-    });
+    expect(await source.blockWitnesses([MINT_BLOCK.height])).toEqual([
+      {
+        blockHash: MINT_BLOCK.hash,
+        transactions: [
+          { txHash: MINT_TX, vkeys: [OWNER_KEY] },
+          { txHash: "dd".repeat(32), vkeys: [] },
+        ],
+      },
+    ]);
     expect(calls[0]!.url).toContain(`blocks?block_height=in.(${PREVIOUS_BLOCK.height},${MINT_BLOCK.height})`);
+    expect(await source.blockWitnesses([])).toEqual([]);
 
     const forked = new KoiosOgmiosChainSource({ koios: koiosWith(() => [blocks[0], { ...blocks[1], hash: "ff".repeat(32) }]), ogmiosUrl, ogmiosTimeoutMs: 5000 });
-    await expect(forked.blockWitnesses(MINT_BLOCK.height)).rejects.toThrow(/Ogmios returned another block/);
+    await expect(forked.blockWitnesses([MINT_BLOCK.height])).rejects.toThrow(/Ogmios returned another block/);
+  });
+
+  describe("a window of blocks: one Koios read and one Ogmios session", () => {
+    const hex64 = (n: number): string => n.toString(16).padStart(4, "0").repeat(16);
+    const chainBlocks: FakeBlock[] = Array.from({ length: 8 }, (_, i) => ({
+      id: hex64(100 + i),
+      height: 100 + i,
+      slot: 1000 + 7 * i,
+      transactions: [{ id: hex64(200 + i), signatories: [{ key: OWNER_KEY, signature: "00" }] }],
+    }));
+    const rows = chainBlocks.map((b) => ({ hash: b.id, abs_slot: b.slot, block_height: b.height }));
+
+    test("the block after each point; a block that follows the last one read needs no new intersection", async () => {
+      const sessions: string[][] = [];
+      const ogmiosUrl = await fakeOgmios(chainBlocks, sessions);
+      const calls: Call[] = [];
+      const source = new KoiosOgmiosChainSource({ koios: koiosWith(() => rows, calls), ogmiosUrl, ogmiosTimeoutMs: 5000 });
+      const read = await source.blockWitnesses([101, 102, 104]);
+      expect(read.map((b) => b.blockHash)).toEqual([chainBlocks[1]!.id, chainBlocks[2]!.id, chainBlocks[4]!.id]);
+      expect(read[2]!.transactions).toEqual([{ txHash: hex64(204), vkeys: [OWNER_KEY] }]);
+      expect(calls.map((c) => c.url)).toEqual(["https://koios.test/api/v1/blocks?block_height=in.(100,101,102,103,104)&select=hash,abs_slot,block_height"]);
+      expect(sessions).toEqual([["findIntersection", "nextBlock", "nextBlock", "nextBlock", "findIntersection", "nextBlock", "nextBlock"]]);
+    });
+
+    test("a roll back in the middle of the session: the read starts again from the point", async () => {
+      const sessions: string[][] = [];
+      const ogmiosUrl = await fakeOgmios(chainBlocks, sessions, 103);
+      const source = new KoiosOgmiosChainSource({ koios: koiosWith(() => rows), ogmiosUrl, ogmiosTimeoutMs: 5000 });
+      const read = await source.blockWitnesses([101, 102, 103]);
+      expect(read.map((b) => b.blockHash)).toEqual([chainBlocks[1]!.id, chainBlocks[2]!.id, chainBlocks[3]!.id]);
+      expect(sessions).toEqual([["findIntersection", "nextBlock", "nextBlock", "nextBlock", "nextBlock", "findIntersection", "nextBlock", "nextBlock"]]);
+    });
+
+    test("a height that Koios does not list is a failed read", async () => {
+      const source = new KoiosOgmiosChainSource({ koios: koiosWith(() => rows), ogmiosUrl: "ws://unused", ogmiosTimeoutMs: 5000 });
+      await expect(source.blockWitnesses([101, 120])).rejects.toThrow(/a requested block height is missing/);
+    });
   });
 });

@@ -1,10 +1,16 @@
 // Status lists (Part 2 Sections 8.4 and 8.6). Each list has 131,072 entries: status-list index i is
 // in list n = floor(i / 131,072) at position p = i mod 131,072. The index comes from the resolver
-// core's `listRecords()`, and the status from the effective status of the view without options:
+// core's `listRecords()`, and the status from the effective status of the view without options
+// (`currentStatus`, which needs no legacy key search):
 // - Revoked or Retired: revocation (Part 1 gives that status only after 30 confirmations, and the
 //   bit is never cleared);
 // - Suspended, also `deactivationPending`: suspension;
 // - Active: neither.
+// In the Token Status List, the entry of an agent also reads SUSPENDED while an access token whose
+// status claim names it was revoked by a status change and can still be accepted (TokenRegistry
+// `heldEntries`): else a revoked token would be valid again once a hold ends.
+// A list older than the refresh interval is built again in the background; until that build ends,
+// requests get the previous lists, which stay valid (`exp`, `validUntil`) for an hour.
 // Two formats, both signed with ES256 by the gateway's P-256 key:
 // - W3C Bitstring Status List v1.0 (W3C Recommendation, 15 May 2025,
 //   https://www.w3.org/TR/2025/REC-vc-bitstring-status-list-20250515/): one list with both purposes
@@ -70,6 +76,8 @@ interface Lists {
   readonly builtAt: number;
   /** Status values of each list, by n. */
   readonly values: readonly Uint8Array[];
+  /** The Token Status List values: `values` with the held entries of revoked tokens. */
+  readonly tokenValues: readonly Uint8Array[];
   readonly signed: Map<string, string>;
 }
 
@@ -85,7 +93,11 @@ export class StatusLists {
   private lists: Lists | null = null;
   private listsBuild: Promise<Lists> | null = null;
 
-  constructor(private readonly ctx: M4Context) {}
+  constructor(
+    private readonly ctx: M4Context,
+    /** Agents whose Token Status List entry must read SUSPENDED (TokenRegistry.heldEntries). */
+    private readonly heldEntries: (now: number) => ReadonlySet<string> = () => new Set(),
+  ) {}
 
   /** The status-list index of an identifier, or null when it has none (yet). A failed read throws. */
   async indexOf(vectorId: string): Promise<number | null> {
@@ -140,15 +152,21 @@ export class StatusLists {
         const worker = async (): Promise<void> => {
           while (next < entries.length) {
             const [vectorId, i] = entries[next++]!;
-            const lookup = await this.ctx.records.currentRecord(vectorId);
+            const lookup = await this.ctx.records.currentStatus(vectorId);
             // An indexed identifier always resolves; if it does not, suspension is the reversible answer.
-            const value = lookup.found ? statusValue(lookup.record.effective.status) : STATUS.suspended;
+            const value = lookup.found ? statusValue(lookup.effective.status) : STATUS.suspended;
             const { n, p } = listPosition(i);
             values[n]![p] = value;
           }
         };
         await Promise.all(Array.from({ length: Math.min(BUILD_CONCURRENCY, entries.length) }, worker));
-        this.lists = { builtAt: this.ctx.now(), values, signed: new Map() };
+        const held = this.heldEntries(this.ctx.now());
+        const tokenValues = held.size === 0 ? values : values.map((v) => v.slice());
+        for (const [vectorId, i] of entries) {
+          const { n, p } = listPosition(i);
+          if (held.has(vectorId) && tokenValues[n]![p] === STATUS.valid) tokenValues[n]![p] = STATUS.suspended;
+        }
+        this.lists = { builtAt: this.ctx.now(), values, tokenValues, signed: new Map() };
         return this.lists;
       } finally {
         this.listsBuild = null;
@@ -157,24 +175,23 @@ export class StatusLists {
     return this.listsBuild;
   }
 
-  private async current(): Promise<Lists> {
+  /** The lists to serve: the previous lists while a build runs and they are valid; else the result of a build. */
+  private current(): Lists | Promise<Lists> {
     const lists = this.lists;
-    if (lists !== null && this.ctx.now() - lists.builtAt < this.ctx.settings.statusListRefreshMs) return lists;
-    try {
-      return await this.buildLists();
-    } catch (e) {
-      // Serve the last lists while they are valid; their `exp` and `validUntil` still bound their use.
-      if (lists !== null && this.ctx.now() - lists.builtAt < LIST_VALIDITY_MS) {
-        this.ctx.log(`identity-gateway: status lists not rebuilt: ${e instanceof Error ? e.message : String(e)}`);
-        return lists;
+    const age = lists === null ? Infinity : this.ctx.now() - lists.builtAt;
+    if (lists !== null && age < this.ctx.settings.statusListRefreshMs) return lists;
+    if (lists !== null && age < LIST_VALIDITY_MS) {
+      if (this.listsBuild === null) {
+        this.buildLists().catch((e: unknown) => this.ctx.log(`identity-gateway: status lists not rebuilt: ${e instanceof Error ? e.message : String(e)}`));
       }
-      throw e;
+      return lists;
     }
+    return this.buildLists();
   }
 
   private async signedList(kind: "tsl" | "bsl", n: number): Promise<string | null> {
     const lists = await this.current();
-    const values = lists.values[n];
+    const values = (kind === "tsl" ? lists.tokenValues : lists.values)[n];
     if (values === undefined) return null;
     const key = `${kind}:${n}`;
     const known = lists.signed.get(key);

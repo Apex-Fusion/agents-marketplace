@@ -190,12 +190,14 @@ describe("legacy key search", () => {
     expect(result.didDocumentMetadata.vectorMetadataError).toBeUndefined();
   });
 
-  test("reads one block for each searched transaction, newest first, and stops at the first match", async () => {
+  test("reads blocks in windows, newest first (1 block, then 2, ...), one ledger read for each window, and stops at the first window with a match", async () => {
     const b = legacyRecord().tip(400);
     b.touch(ID, 3_000_000n, { height: 300, vkeys: [LEGACY_OWNER] });
     b.touch(ID, 4_000_000n, { height: 310 });
-    await resolveIn(b, DID);
+    b.touch(ID, 5_000_000n, { height: 320 });
+    expect((await resolveIn(b, DID)).didDocument?.verificationMethod).toEqual([method(DID, LEGACY_OWNER)]);
     expect(b.chain.calls.filter((c) => c === "blockWitnesses")).toHaveLength(2);
+    expect(b.chain.blocksRead).toEqual([320, 300, 310]);
   });
 
   test("a script owner gives controllerIsScript", async () => {

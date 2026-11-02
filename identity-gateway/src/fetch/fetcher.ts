@@ -4,13 +4,17 @@
 //   each redirect, and the connection goes to the checked address (no second DNS lookup);
 // - no redirect to another host (another host name or port), at most 5 redirects;
 // - at most 1 MiB of body, at most 10 seconds for the whole fetch;
-// - at most one fetch per host each minute (a fetch with its redirects counts once).
+// - at most one fetch per host each minute (a fetch with its redirects counts once). The host is the
+//   destination, not the host text: a trailing dot is removed, and an IPv4-mapped or NAT64 IPv6
+//   literal counts as the IPv4 address that it embeds (the WHATWG URL parser already writes IP
+//   literals in canonical form). Host names that resolve to one address still count apart: hosts
+//   behind a shared CDN address would else wait for each other.
 // DNS and HTTP are injected, so that tests need no network (transport.ts has the real ones).
 
 import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { isIP } from "node:net";
-import { isPublicUnicast } from "./address.js";
+import { embeddedIpv4, isPublicUnicast } from "./address.js";
 import type { Clock } from "./clock.js";
 
 export const FETCH_LIMITS = {
@@ -148,6 +152,12 @@ function httpsUrl(text: string | URL, base?: URL): URL {
 /** Host name without the brackets of an IPv6 literal. */
 const bareHost = (url: URL): string => (url.hostname.startsWith("[") ? url.hostname.slice(1, -1) : url.hostname).toLowerCase();
 
+/** The key of the per-host limit: the destination of `url` (see the rules above). */
+function hostKey(url: URL): string {
+  const host = bareHost(url);
+  return isIP(host) === 6 ? (embeddedIpv4(host) ?? host) : host.replace(/\.+$/, "");
+}
+
 export interface SafeFetcherOptions {
   readonly lookup: Lookup;
   readonly transport: Transport;
@@ -167,7 +177,7 @@ export class SafeFetcher {
   /** Fetches `target` under the rules above; throws FetchError. Any HTTP status is a result. */
   async fetch(target: string, request: FetchRequest = {}): Promise<FetchResult> {
     let url = httpsUrl(target);
-    await this.limiter.take(bareHost(url));
+    await this.limiter.take(hostKey(url));
     const fetchedAt = this.options.clock.now();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.limits.timeoutMs);

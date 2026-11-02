@@ -17,6 +17,8 @@ export class FakeChain implements ChainSource {
   readonly datumStore = new Map<string, string>();
   /** Methods called, in call order. */
   readonly calls: ChainMethod[] = [];
+  /** The block heights that blockWitnesses read, in read order. */
+  readonly blocksRead: number[] = [];
   /** Methods that fail. */
   readonly failing = new Set<ChainMethod>();
   /** Transactions that `transactions()` does not return although the asset history lists them. */
@@ -57,14 +59,17 @@ export class FakeChain implements ChainSource {
     return new Map(datumHashes.flatMap((h) => (this.datumStore.has(h) ? [[h, this.datumStore.get(h)!] as const] : [])));
   }
 
-  async blockWitnesses(blockHeight: number): Promise<BlockWitnesses> {
+  async blockWitnesses(blockHeights: readonly number[]): Promise<BlockWitnesses[]> {
     this.enter("blockWitnesses");
-    const inBlock = this.txs.filter((t) => t.blockHeight === blockHeight).sort((a, b) => a.txIndex - b.txIndex);
-    if (!inBlock.length) throw new Error("no block at this height");
-    return {
-      blockHash: inBlock[0]!.blockHash,
-      transactions: inBlock.map((t) => ({ txHash: t.txHash, vkeys: this.witnesses.get(t.txHash) ?? [] })),
-    };
+    return blockHeights.map((blockHeight) => {
+      this.blocksRead.push(blockHeight);
+      const inBlock = this.txs.filter((t) => t.blockHeight === blockHeight).sort((a, b) => a.txIndex - b.txIndex);
+      if (!inBlock.length) throw new Error("no block at this height");
+      return {
+        blockHash: inBlock[0]!.blockHash,
+        transactions: inBlock.map((t) => ({ txHash: t.txHash, vkeys: this.witnesses.get(t.txHash) ?? [] })),
+      };
+    });
   }
 
   async policyAssets(policyId: string): Promise<PolicyAsset[]> {
@@ -73,6 +78,9 @@ export class FakeChain implements ChainSource {
     for (const t of [...this.txs].sort(ledgerOrder)) {
       for (const a of t.mint) if (a.policyId === policyId && a.quantity > 0n) mints.set(a.assetName, [...(mints.get(a.assetName) ?? []), t]);
     }
-    return [...mints].sort(([a], [b]) => (a < b ? -1 : 1)).map(([assetName, txs]) => ({ assetName, mintCount: txs.length, lastMintTx: txs[txs.length - 1]!.txHash }));
+    const { systemStart, slotLength } = this.genesisInfo;
+    return [...mints]
+      .sort(([a], [b]) => (a < b ? -1 : 1))
+      .map(([assetName, txs]) => ({ assetName, mintCount: txs.length, lastMintTx: txs[txs.length - 1]!.txHash, createdAt: systemStart + txs[0]!.slot * slotLength }));
   }
 }

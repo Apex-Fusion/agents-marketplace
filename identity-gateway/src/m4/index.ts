@@ -10,7 +10,7 @@ import { DelegationSource } from "./delegation.js";
 import { SingleUseStore } from "./replay.js";
 import { SpiffeService } from "./spiffe.js";
 import { StatusLists } from "./status-lists.js";
-import { TokenService } from "./tokens.js";
+import { TokenRegistry, TokenService } from "./tokens.js";
 
 /** How often the status watcher checks the agents of live tokens. */
 export const STATUS_WATCH_INTERVAL_MS = 30_000;
@@ -48,8 +48,9 @@ export function createM4Services(options: M4ServicesOptions): M4Services {
   };
   const replay = new SingleUseStore();
   const delegations = options.settings.delegation ? new DelegationSource(options.chain, options.settings.delegation) : null;
-  const statusLists = new StatusLists(context);
-  const tokens = new TokenService(context, replay, statusLists, delegations);
+  const registry = new TokenRegistry();
+  const statusLists = new StatusLists(context, (now) => registry.heldEntries(now));
+  const tokens = new TokenService(context, replay, statusLists, delegations, registry);
   const spiffe = new SpiffeService(context, replay, tokens);
   let timer: NodeJS.Timeout | undefined;
   return {

@@ -1,6 +1,7 @@
 // SPIFFE service (Part 2 Section 8.6). The trust domain is the gateway host (Part 2 Section 8.1),
 // and an agent's SPIFFE ID is `spiffe://<trust domain>/agent/<id>`.
-// - POST /spiffe/nonce: a single-use gateway nonce, valid for 5 minutes.
+// - POST /spiffe/nonce: a single-use gateway nonce, valid for 5 minutes. The endpoint needs no
+//   authentication, so issuing stores nothing (NonceStore): only a used nonce is kept.
 // - POST /spiffe/x509-svid: a PKCS #10 request for a P-256 key and a proof: a JWT by an
 //   authentication key of the agent (agent JWT rules, EdDSA or ES256) whose claims also hold the
 //   gateway nonce (`nonce`) and the request's public key (`cnf.jwk`, RFC 7800 Section 3.2). So the
@@ -22,15 +23,15 @@ import { CsrError, derFromText, parseCertificationRequest, pem, signingCertifica
 
 export const NONCE_LIFETIME_MS = 300_000;
 export const X509_SVID_LIFETIME_MS = 3_600_000;
-/** Certificates start this much before issue, for clocks that run behind; the lifetime includes it. */
+/** Certificates (the CA and each X.509-SVID) start this much before issue, for clocks that run behind; an SVID's lifetime includes it. */
 const BACKDATE_MS = 60_000;
 export const BUNDLE_REFRESH_HINT_S = 300;
 const MAX_AUDIENCES = 8;
 
 export class SpiffeService {
-  readonly nonces = new NonceStore(NONCE_LIFETIME_MS);
+  readonly nonces: NonceStore;
   private ca: Promise<SigningCertificate> | null = null;
-  /** The bundle content changes only when the process starts with other keys: its start time orders it. */
+  /** The bundle changes only when a process starts (a new CA certificate, maybe other keys): its start time orders it. */
   private readonly sequence: number;
 
   constructor(
@@ -39,11 +40,12 @@ export class SpiffeService {
     private readonly tokens: TokenService,
   ) {
     this.sequence = Math.floor(ctx.now() / 1000);
+    this.nonces = new NonceStore(NONCE_LIFETIME_MS, replay);
   }
 
-  /** The trust domain's signing certificate, built once. */
+  /** The trust domain's signing certificate, built once for each process (with its own serial number). */
   signingCertificate(): Promise<SigningCertificate> {
-    this.ca ??= signingCertificate(this.ctx.keys.p256, this.ctx.settings.trustDomain, this.ctx.now());
+    this.ca ??= signingCertificate(this.ctx.keys.p256, this.ctx.settings.trustDomain, this.ctx.now() - BACKDATE_MS);
     return this.ca;
   }
 
