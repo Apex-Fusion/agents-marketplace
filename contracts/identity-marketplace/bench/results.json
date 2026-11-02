@@ -18,8 +18,8 @@
   "scripts": [
     {
       "name": "identity",
-      "hash": "1a4a52bd048f7947c164d30cd3dac5ce55a7bcb83da5068a6e5f1d33",
-      "bytes": 13699
+      "hash": "361b49c6d209d42a523189143010c688dc483e7f0d9b617f8ec9331c",
+      "bytes": 13707
     },
     {
       "name": "config_holder",
@@ -33,23 +33,23 @@
     },
     {
       "name": "attestation",
-      "hash": "f140ba7edafb20404ddcecf87201c02f9f93eabd26907293568a3453",
+      "hash": "9bbe29a62fb6ed57024550cd80fb043af4a71090af6b2bd9658cc7e6",
       "bytes": 7234
     },
     {
       "name": "delegation",
-      "hash": "76994ebce1243b313c3892bd5e6fd419d6c60df5a57168aa92a3d85d",
+      "hash": "5feb14a533a7456daa5a387152f99b3ede6e6949c38bf3e0f8a805f0",
       "bytes": 7081
     },
     {
       "name": "vault",
-      "hash": "2a5eacbcb2ac448edd607a3e87e564ff2f4f094cdeff6dc62c233356",
+      "hash": "91379f2f9e36b9528a9822890a0a7cd16502cc5e0c969d76896c0b4e",
       "bytes": 6932
     },
     {
       "name": "escrow",
-      "hash": "4f3168b536c0df1bb1dfa64cea8993b6b1bac0d1e97e2a80158f2acb",
-      "bytes": 5915
+      "hash": "6d52d58c0bbf9612b0fa4d172eeef872dad95cdd7d3ea641b71fffb2",
+      "bytes": 6086
     },
     {
       "name": "advert",
@@ -237,8 +237,8 @@
       "name": "Revoke (controller)",
       "group": "identity",
       "description": "Revoke by the controller: reason 1 with invalid_from, and a successor",
-      "mem": 1347844,
-      "cpu": 446720822,
+      "mem": 1348246,
+      "cpu": 446886030,
       "txBytes": 1082,
       "memPercent": 8.4,
       "cpuPercent": 4.5,
@@ -248,8 +248,8 @@
         {
           "purpose": "Spend[0]",
           "label": "identity spend Revoke",
-          "mem": 1347844,
-          "cpu": 446720822
+          "mem": 1348246,
+          "cpu": 446886030
         }
       ]
     },
@@ -449,8 +449,8 @@
       "name": "Claim",
       "group": "escrow",
       "description": "Claim with the largest record (supplier key, Accountable Party and capability last) and a vault refund",
-      "mem": 1229815,
-      "cpu": 411954506,
+      "mem": 1232215,
+      "cpu": 412338506,
       "txBytes": 1056,
       "memPercent": 7.7,
       "cpuPercent": 4.1,
@@ -460,8 +460,8 @@
         {
           "purpose": "Spend[1]",
           "label": "escrow spend Claim",
-          "mem": 1229815,
-          "cpu": 411954506
+          "mem": 1232215,
+          "cpu": 412338506
         }
       ]
     },
@@ -469,8 +469,8 @@
       "name": "Submit",
       "group": "escrow",
       "description": "Submit with the largest record and a vault refund",
-      "mem": 1159720,
-      "cpu": 389418421,
+      "mem": 1146668,
+      "cpu": 385555278,
       "txBytes": 1136,
       "memPercent": 7.2,
       "cpuPercent": 3.9,
@@ -480,8 +480,8 @@
         {
           "purpose": "Spend[1]",
           "label": "escrow spend Submit",
-          "mem": 1159720,
-          "cpu": 389418421
+          "mem": 1146668,
+          "cpu": 385555278
         }
       ]
     },
@@ -490,7 +490,7 @@
       "group": "vault",
       "description": "Pay through a depth-4 delegation chain (4 delegations with 16 actions and 8 resources, 5 agent records of the largest size) into 1 escrow output",
       "mem": 6683804,
-      "cpu": 2141403333,
+      "cpu": 2141411829,
       "txBytes": 1430,
       "memPercent": 41.8,
       "cpuPercent": 21.4,
@@ -501,7 +501,7 @@
           "purpose": "Spend[1]",
           "label": "vault spend Pay",
           "mem": 6683804,
-          "cpu": 2141403333
+          "cpu": 2141411829
         }
       ]
     },
@@ -510,7 +510,7 @@
       "group": "vault",
       "description": "Pay through a depth-4 delegation chain (4 delegations with 16 actions and 8 resources, 5 agent records of the largest size) into 5 escrow outputs",
       "mem": 7370300,
-      "cpu": 2420354317,
+      "cpu": 2420396797,
       "txBytes": 3046,
       "memPercent": 46.1,
       "cpuPercent": 24.2,
@@ -521,7 +521,7 @@
           "purpose": "Spend[1]",
           "label": "vault spend Pay",
           "mem": 7370300,
-          "cpu": 2420354317
+          "cpu": 2420396797
         }
       ]
     },
@@ -530,7 +530,7 @@
       "group": "vault",
       "description": "Pay through a depth-4 delegation chain (4 delegations with 16 actions and 8 resources, 5 agent records of the largest size) into 10 escrow outputs",
       "mem": 8228420,
-      "cpu": 2769043047,
+      "cpu": 2769128007,
       "txBytes": 5066,
       "memPercent": 51.4,
       "cpuPercent": 27.7,
@@ -541,7 +541,7 @@
           "purpose": "Spend[1]",
           "label": "vault spend Pay",
           "mem": 8228420,
-          "cpu": 2769043047
+          "cpu": 2769128007
         }
       ]
     },
@@ -550,7 +550,7 @@
       "group": "vault",
       "description": "Pay through a depth-4 delegation chain (4 delegations with 16 actions and 8 resources, 5 agent records of the largest size) into 25 escrow outputs",
       "mem": 10802780,
-      "cpu": 3815109237,
+      "cpu": 3815321637,
       "txBytes": 11127,
       "memPercent": 67.5,
       "cpuPercent": 38.2,
@@ -561,7 +561,7 @@
           "purpose": "Spend[1]",
           "label": "vault spend Pay",
           "mem": 10802780,
-          "cpu": 3815109237
+          "cpu": 3815321637
         }
       ]
     },
@@ -570,7 +570,7 @@
       "group": "vault",
       "description": "Pay through a depth-4 delegation chain (4 delegations with 16 actions and 8 resources, 5 agent records of the largest size) into 38 escrow outputs",
       "mem": 13033892,
-      "cpu": 4721699935,
+      "cpu": 4722022783,
       "txBytes": 16383,
       "memPercent": 81.5,
       "cpuPercent": 47.2,
@@ -584,20 +584,20 @@
           "purpose": "Spend[1]",
           "label": "vault spend Pay",
           "mem": 13033892,
-          "cpu": 4721699935
+          "cpu": 4722022783
         }
       ]
     },
     {
       "name": "Publish identity",
       "group": "publication",
-      "description": "Publication of the applied identity script (13699 bytes) as a reference script at the zero key hash address",
+      "description": "Publication of the applied identity script (13707 bytes) as a reference script at the zero key hash address",
       "mem": 0,
       "cpu": 0,
-      "txBytes": 13948,
+      "txBytes": 13956,
       "memPercent": 0,
       "cpuPercent": 0,
-      "txBytesPercent": 85.1,
+      "txBytesPercent": 85.2,
       "over70": [
         "txBytes"
       ],
@@ -671,13 +671,13 @@
     {
       "name": "Publish escrow",
       "group": "publication",
-      "description": "Publication of the applied escrow script (5915 bytes) as a reference script at the zero key hash address",
+      "description": "Publication of the applied escrow script (6086 bytes) as a reference script at the zero key hash address",
       "mem": 0,
       "cpu": 0,
-      "txBytes": 6164,
+      "txBytes": 6335,
       "memPercent": 0,
       "cpuPercent": 0,
-      "txBytesPercent": 37.6,
+      "txBytesPercent": 38.7,
       "over70": [],
       "redeemers": []
     },
