@@ -311,6 +311,26 @@ describe("delegation tokens: refused chains", () => {
       {},
       /not a listed Ed25519 key of the delegate with the delegation purpose/,
     ],
+    [
+      "the delegate key of the parent link is not listed",
+      { owner: { keys: [{ keyType: "Ed25519", key: OWNER_AUTH.publicKey, purposes: 1, pop: null }] } },
+      {},
+      new RegExp(`^the delegate_key of delegation ${ROOT} is not a listed Ed25519 key of its delegate with the delegation purpose$`),
+    ],
+    [
+      "the delegate key of the parent link without the delegation purpose",
+      {
+        owner: {
+          keys: [
+            { keyType: "Ed25519", key: OWNER_AUTH.publicKey, purposes: 1, pop: null },
+            { keyType: "Ed25519", key: OWNER_DELEGATION_KEY.publicKey, purposes: 2, pop: null },
+          ],
+        },
+      },
+      {},
+      new RegExp(`^the delegate_key of delegation ${ROOT} is not a listed Ed25519 key of its delegate`),
+    ],
+    ["a leaf with an empty resource list", { leaf: leaf({ resources: [] }) }, {}, new RegExp(`^delegation ${LEAF} has an empty resource list, which covers no resource$`)],
   ])("%s", async (_name, setup, options, message) => {
     const h = await startGateway(ledger(setup));
     const res = await delegatedToken(h, details(), options);
@@ -358,6 +378,25 @@ describe("delegation tokens: refused chains", () => {
     expect((await bodyOf(await delegatedToken(h2))).error_description).toBe(`delegation ${LEAF} has an invalid datum`);
   });
 
+  test("an intermediate link whose delegate key was removed: no new token, and earlier tokens are inactive", async () => {
+    const b = threeHops();
+    const h = await startGateway(b);
+    const token = text((await bodyOf(await delegatedToken(h))).access_token);
+    const introspect = async () => bodyOf(await postForm(h, "/introspect", { token, ...(await clientAuth(OWNER_AUTH, OWNER, h.now)) }));
+    expect((await introspect()).active).toBe(true);
+    // MIDDLE removes the delegate_key of MID, the key that signed LEAF. A removal reduces what the
+    // record allows, so the view without options shows it at once (Part 1 Section 7.2).
+    b.update(MIDDLE, identityDatum({ keys: [{ keyType: "Ed25519", key: MIDDLE_AUTH.publicKey, purposes: 1, pop: null }] }), { height: 1001 });
+    b.tip(1001);
+    expect(await introspect()).toEqual({ active: false });
+    const res = await delegatedToken(h);
+    expect(res.status).toBe(400);
+    expect(await bodyOf(res)).toEqual({
+      error: "invalid_authorization_details",
+      error_description: `the delegate_key of delegation ${MID} is not a listed Ed25519 key of its delegate with the delegation purpose`,
+    });
+  });
+
   test("a chain deeper than 4", async () => {
     const b = ledger();
     const ids = [1, 2, 3, 4, 5].map((i) => delegationIdOf(`deep ${i}`));
@@ -377,6 +416,7 @@ describe("delegation tokens: refused chains", () => {
     ["an action that is not a pattern", JSON.stringify([details({ actions: ["Ocr.*"] })])],
     ["an empty action list", JSON.stringify([details({ actions: [] })])],
     ["a resource that is not a pattern", JSON.stringify([details({ locations: ["ftp://x"] })])],
+    ["an empty resource list", JSON.stringify([details({ locations: [] })])],
   ])("malformed authorization_details: %s", async (_name, raw) => {
     const h = await startGateway(ledger());
     const res = await delegatedToken(h, null, { raw });

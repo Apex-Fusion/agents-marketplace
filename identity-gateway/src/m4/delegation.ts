@@ -1,11 +1,14 @@
 // Delegations off the ledger (Part 2 Sections 5.1, 5.2 and 5.4). The token service issues a token
-// for a delegation only after it checks the whole chain with the use checks of Section 5.2:
+// for a delegation only after it checks the whole chain with the use checks of Section 5.2, as the
+// delegation contract applies them:
 // - the delegation and every ancestor are authentic: an unspent output at the delegation address
 //   that holds exactly one token of the delegation policy, named by the delegation identifier;
 // - each delegator agent and the delegate have effective status Active (the view without options);
-// - active_key(delegate, delegate_key, delegation) holds: the delegate lists an Ed25519 key with the
-//   delegation purpose whose key hash is delegate_key; the request proves possession of that key;
-// - the actions and resources are covered (Section 5.1);
+// - active_key(delegate, delegate_key, delegation) holds for the delegation and for every ancestor
+//   link: the delegate of each link lists an Ed25519 key with the delegation purpose whose key hash
+//   is the delegate_key of that link. Thus the removal of a key ends every sub-delegation that this
+//   key signed. The request proves possession of the leaf's delegate_key;
+// - the actions and resources are covered (Section 5.1); an empty resource list covers nothing;
 // - the token's time range is inside the period of every delegation in the chain.
 // The gateway also checks the links of the chain (delegator = parent's delegate, depth, remaining,
 // narrower patterns and periods), which the contract checked when it created them.
@@ -165,6 +168,12 @@ export interface ChainRequest {
   readonly provenKeyHash?: string | null;
 }
 
+/** active_key(record, keyHash, delegation): the view lists an Ed25519 key with the delegation purpose whose key hash is `keyHash`. */
+function listsDelegationKey(record: CurrentRecord, keyHash: string): boolean {
+  const view = record.view;
+  return view.kind === "identity" && view.keys.some((k) => k.keyType === "Ed25519" && k.keyHash === keyHash && (k.purposes & PURPOSE.delegation) !== 0);
+}
+
 const agentActive = async (records: RecordSource, vectorId: string): Promise<{ ok: true; record: CurrentRecord } | { ok: false; reason: string }> => {
   const lookup = await records.currentRecord(vectorId);
   if (!lookup.found) return { ok: false, reason: `agent ${vectorId} is not registered` };
@@ -214,20 +223,26 @@ export async function checkDelegationChain(source: DelegationSource, records: Re
   // Use checks.
   for (const d of chain) {
     if (request.atMs < d.datum.notBefore || request.atMs >= d.datum.notAfter) return { ok: false, reason: `the time is outside the period of delegation ${d.id}` };
+    if (d.resources.length === 0) return { ok: false, reason: `delegation ${d.id} has an empty resource list, which covers no resource` };
     if (request.actions && !narrower(d.actions, request.actions)) return { ok: false, reason: `delegation ${d.id} does not cover the requested actions` };
     if (request.resources && !narrower(d.resources, request.resources)) return { ok: false, reason: `delegation ${d.id} does not cover the requested resources` };
   }
-  for (const d of chain) {
-    if (d.datum.delegator.type !== "Agent") continue;
-    const status = await agentActive(records, d.datum.delegator.id);
+  // A delegator agent below the root is the delegate of the parent link, so its record must still
+  // list the parent's delegate_key.
+  for (let i = 0; i < chain.length; i++) {
+    const delegator = chain[i]!.datum.delegator;
+    if (delegator.type !== "Agent") continue;
+    const status = await agentActive(records, delegator.id);
     if (!status.ok) return { ok: false, reason: `delegator ${status.reason}` };
+    const parent = chain[i + 1];
+    if (parent !== undefined && !listsDelegationKey(status.record, parent.datum.delegateKey)) {
+      return { ok: false, reason: `the delegate_key of delegation ${parent.id} is not a listed Ed25519 key of its delegate with the delegation purpose` };
+    }
   }
   const leaf = chain[0]!;
   const delegate = await agentActive(records, leaf.datum.delegate);
   if (!delegate.ok) return { ok: false, reason: `delegate ${delegate.reason}` };
-  const view = delegate.record.view;
-  const listed = view.kind === "identity" && view.keys.some((k) => k.keyType === "Ed25519" && k.keyHash === leaf.datum.delegateKey && k.purposes & PURPOSE.delegation);
-  if (!listed) return { ok: false, reason: "the delegate_key is not a listed Ed25519 key of the delegate with the delegation purpose" };
+  if (!listsDelegationKey(delegate.record, leaf.datum.delegateKey)) return { ok: false, reason: "the delegate_key is not a listed Ed25519 key of the delegate with the delegation purpose" };
   if (request.provenKeyHash !== undefined && request.provenKeyHash !== leaf.datum.delegateKey) {
     return { ok: false, reason: "the DPoP proof key is not the delegate_key of the delegation" };
   }

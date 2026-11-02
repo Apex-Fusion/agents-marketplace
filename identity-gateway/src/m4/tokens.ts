@@ -145,6 +145,7 @@ function parseDelegationRequest(text: string | undefined): DelegationRequest | n
   const actions = patternList(detail.actions, "actions", 16, isActionPattern);
   if (actions !== undefined && actions.length === 0) throw invalidDetails("actions must not be empty");
   const locations = patternList(detail.locations, "locations", 8, isResourcePattern);
+  if (locations !== undefined && locations.length === 0) throw invalidDetails("locations must not be empty: an empty resource list covers nothing");
   return { identifier: detail.identifier, ...(actions ? { actions } : {}), ...(locations ? { locations } : {}) };
 }
 
