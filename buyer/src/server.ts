@@ -785,11 +785,13 @@ export function createApp(deps: AppDeps): Express {
   // marketplace.endChat (supplier Submit + buyer Accept = charged).
   //
   // The supplier base URL discovered at start is cached so the per-turn
-  // message route doesn't re-query the chain. In-memory is fine: single
+  // message route doesn't re-query the chain, and the escrow's agent_id so
+  // End can check the receipt's agent_did. In-memory is fine: single
   // operator, single active chat.
   const chatRouteState = new Map<string, {
     supplierBaseUrl: string;
     upstreamApi: "responses" | "chat-completions" | "ollama";
+    agentId: string | null;
   }>();
   const chatFetch = deps.fetchImpl ?? globalThis.fetch;
 
@@ -830,6 +832,7 @@ export function createApp(deps: AppDeps): Express {
       chatRouteState.set(escrowRefStr, {
         supplierBaseUrl: result.supplierBaseUrl,
         upstreamApi: result.upstreamApi,
+        agentId: result.agentId,
       });
       return res.status(200).json({
         escrow_ref: escrowRefStr,
@@ -963,6 +966,7 @@ export function createApp(deps: AppDeps): Express {
         sessionNonce,
         transcript,
         supplierBaseUrl: state.supplierBaseUrl,
+        agentId: state.agentId,
       });
       chatRouteState.delete(rawRef);
       if (result.settleMode === "ticket") {

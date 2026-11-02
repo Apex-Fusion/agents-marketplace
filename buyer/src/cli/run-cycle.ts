@@ -21,6 +21,7 @@ import { LiveOgmiosProvider, type ChainProvider, type OutputReference } from "@m
 import { Marketplace, MemoryTaskHistoryStore } from "../sdk/index.js";
 import { runAccept } from "./acceptFlow.js";
 import { deriveWalletKey } from "../index.js";
+import { parseSwitchSlot } from "../config.js";
 
 ed.etc.sha512Sync = (...messages: Uint8Array[]): Uint8Array => {
   const h = createHash("sha512");
@@ -179,10 +180,20 @@ async function main(argv: string[]): Promise<number> {
     return 1;
   }
   const networkId: 0 | 1 = env.NETWORK_ID === "1" ? 1 : 0;
+  let switchSlot: number | null;
+  try {
+    switchSlot = parseSwitchSlot(env.SWITCH_SLOT);
+  } catch (err) {
+    process.stderr.write(`error: ${(err as Error).message}\n`);
+    return 1;
+  }
   // Inject loaded vars into process.env so downstream tx-building modules
-  // (e.g. lucidContext.ts's VECTOR_ZERO_TIME_MS) see them. The shared tx
-  // builders read these from process.env, not the CLI-local env map.
-  for (const key of ["VECTOR_ZERO_TIME_MS", "OGMIOS_URL", "INDEXER_URL", "NETWORK_ID"]) {
+  // (e.g. lucidContext.ts's VECTOR_ZERO_TIME_MS, the identity blueprint's
+  // IDENTITY_POLICY_ID) see them. The shared tx builders read these from
+  // process.env, not the CLI-local env map.
+  for (const key of [
+    "VECTOR_ZERO_TIME_MS", "OGMIOS_URL", "INDEXER_URL", "NETWORK_ID", "IDENTITY_POLICY_ID", "IDENTITY_ESCROW_REF_UTXO",
+  ]) {
     if (env[key] && !process.env[key]) process.env[key] = env[key];
   }
   const advertRef = parseEscrowRef(env.ADVERT_REF);
@@ -194,6 +205,7 @@ async function main(argv: string[]): Promise<number> {
     walletKey: wk,
     networkParams: { networkId },
     historyStore: new MemoryTaskHistoryStore(),
+    switchSlot,
   });
 
   const ts = (): string => new Date().toISOString();

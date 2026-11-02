@@ -17,6 +17,7 @@ import { LiveOgmiosProvider, type ChainProvider, type OutputReference } from "@m
 import { Marketplace, MemoryTaskHistoryStore } from "../src/sdk/index.js";
 import { runAccept } from "../src/cli/acceptFlow.js";
 import { deriveWalletKey } from "../src/index.js";
+import { parseSwitchSlot } from "../src/config.js";
 
 // Wire ed25519 sha512 hook (idempotent — matches buyer/src/index.ts).
 ed.etc.sha512Sync = (...messages: Uint8Array[]): Uint8Array => {
@@ -41,6 +42,10 @@ function loadDotEnv(path: string): Record<string, string> {
 }
 
 const env = loadDotEnv("/home/david/code/agents-marketplace/buyer/.env");
+// The shared tx builders read the identity blueprint and its reference script from process.env.
+for (const key of ["IDENTITY_POLICY_ID", "IDENTITY_ESCROW_REF_UTXO"]) {
+  if (env[key] && !process.env[key]) process.env[key] = env[key];
+}
 const ADVERT_REF: OutputReference = {
   txHash: "9e9a86098c18cecf544d4c69e16ace850ab8c271a8bbea2facdaafc3be52701c",
   index: 0,
@@ -60,6 +65,7 @@ const marketplace = new Marketplace({
   walletKey: wk,
   networkParams: { networkId: 1 },
   historyStore: new MemoryTaskHistoryStore(),
+  switchSlot: parseSwitchSlot(env.SWITCH_SLOT),
 });
 
 marketplace.on("progress", (evt: unknown) => {

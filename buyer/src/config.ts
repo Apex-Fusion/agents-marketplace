@@ -57,10 +57,30 @@
  *   PAPER2AGENT_MODEL_AUTO_EXCLUDE — Comma-separated advert model names that
  *                         the build's "auto" model never buys from. An explicit
  *                         model request still buys them. Default: none.
+ *   SWITCH_SLOT         — Escrow switch slot (Part 2 §9.6), the same value and
+ *                         meaning as the indexer's SWITCH_SLOT: from this
+ *                         chain slot on, Post creates new escrows only and
+ *                         refuses a legacy advert. Unset: the advert decides.
+ *   IDENTITY_POLICY_ID  — Read by the shared tx builders (not here): the
+ *                         identity hash of the new escrow and advert scripts.
+ *                         Needed once a new advert or escrow appears.
+ *   IDENTITY_ESCROW_REF_UTXO — Read by the shared tx builders: the new
+ *                         escrow's reference script (optional).
  */
 
 const HEX64_RE = /^[0-9a-fA-F]{64}$/;
 const POS_INT_RE = /^[1-9]\d*$/;
+const SLOT_RE = /^(0|[1-9]\d*)$/;
+
+/** SWITCH_SLOT: unset or empty → null; else a non-negative safe integer slot (also read by the CLIs). */
+export function parseSwitchSlot(value: string | undefined): number | null {
+  const text = value?.trim() ?? "";
+  if (text === "") return null;
+  if (!SLOT_RE.test(text) || !Number.isSafeInteger(Number(text))) {
+    throw new Error(`SWITCH_SLOT must be a non-negative integer slot, got ${JSON.stringify(text)}`);
+  }
+  return Number(text);
+}
 
 export interface BuyerConfig {
   privKeyHex: string;
@@ -82,6 +102,8 @@ export interface BuyerConfig {
   paper2agentControlToken: string;
   paper2agentModelToken: string;
   paper2agentModelAutoExclude: string[];
+  /** Escrow switch slot (Part 2 §9.6); null: the advert decides the layout. */
+  switchSlot: number | null;
 }
 
 function requireField(env: Record<string, string | undefined>, name: string): string {
@@ -243,5 +265,6 @@ export function loadConfig(env: Record<string, string | undefined>): BuyerConfig
     paper2agentControlToken,
     paper2agentModelToken,
     paper2agentModelAutoExclude,
+    switchSlot: parseSwitchSlot(env.SWITCH_SLOT),
   };
 }

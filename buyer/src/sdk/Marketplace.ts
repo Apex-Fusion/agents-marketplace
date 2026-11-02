@@ -7,15 +7,23 @@
  *   submitPrompt({advertRef, ...})      → high-level composition of those stages
  *   acceptResult({escrowRef})           → buildAcceptTx
  *   reclaim({escrowRef})                → buildReclaimTx
+ *   refundRevoked({escrowRef})          → buildRefundRevokedTx (new escrow, agent revoked or retired)
  *   getTaskHistory(opts?)               → reads from injected TaskHistoryStore
  *   on/off/close + emitProgress         → EventEmitter helpers
  *
+ * Both escrow layouts (Part 2 §9.6): every decode site reads the legacy and the
+ * new layout. Post on a new advert goes through the listing rule (§6.2) with
+ * the lookups of ./identity.ts; from the switch slot on, Post refuses a legacy
+ * advert. Accept and Reclaim follow the escrow's own layout.
+ *
  * Receipt verification:
  *   The buyer checks the canonical Responses request/result commitments,
- *   supplier identity, model, escrow reference, and signature shape before it
- *   returns a result. Supplier capability metadata is fetched before funds are
- *   locked. Full Ed25519 verification remains outside this browser-safe SDK
- *   path because the shared signing module imports Node crypto.
+ *   supplier identity, model, escrow reference, signature shape, and the
+ *   receipt fields (8 for a legacy escrow; 9 with agent_did naming the
+ *   escrow's agent for a new escrow, Part 2 §6.3) before it returns a result.
+ *   Supplier capability metadata is fetched before funds are locked. Full
+ *   Ed25519 verification remains outside this browser-safe SDK path because
+ *   the shared signing module imports Node crypto.
  */
 
 // Namespace imports — Vite/Rollup resolves these to browser stubs when
@@ -74,10 +82,11 @@ import {
   ocrPromptHash,
   buildAcceptTx,
   buildReclaimTx,
+  buildRefundRevokedTx,
   TxConstructionError,
   BOUNDED_INPUT_DETAIL_MARKER,
 } from "@marketplace/shared/tx";
-import { decodeAdvertDatum, decodeEscrowDatum, canonicalize } from "@marketplace/shared/cbor";
+import { canonicalize } from "@marketplace/shared/cbor";
 import {
   normalizeResponseOutput,
   normalizeResponseRequest,
@@ -92,6 +101,16 @@ import {
   type ResponseRequest,
 } from "@marketplace/shared/responses";
 import type { AdvertDatum } from "@marketplace/shared/cbor";
+import {
+  agentIdOf,
+  assertWithinValueCap,
+  BuyerIdentity,
+  decodeAdvert,
+  decodeEscrow,
+  receiptAgentProblem,
+  type AnyAdvert,
+  type BuyerIdentityOptions,
+} from "./identity.js";
 import type {
   SupplierView,
   DiscoverSuppliersOptions,
@@ -111,6 +130,7 @@ import type {
   EndChatResult,
   AcceptResultOptions,
   ReclaimOptions,
+  RefundRevokedOptions,
   TaskRecord,
   GetTaskHistoryOptions,
   ProgressEvent,
@@ -189,8 +209,12 @@ export interface NetworkParams {
   networkId: 0 | 1;
 }
 
-/** MarketplaceOpts — constructor arguments. */
-export interface MarketplaceOpts {
+/**
+ * MarketplaceOpts — constructor arguments. The identity options
+ * (switchSlot, identityBlueprint, lookupRecord, lookupAdvertSigners) are
+ * optional; see ./identity.ts for their defaults.
+ */
+export interface MarketplaceOpts extends BuyerIdentityOptions {
   chain: ChainProvider;
   indexerUrl: string;
   walletKey: WalletKey;
@@ -270,10 +294,11 @@ function responseDisplayText(output: readonly ResponseItem[]): string {
 
 
 export class Marketplace extends EventEmitterBase {
+  /** Lookups and switch rule of the identity layout (Post, Accept, Reclaim, RefundRevoked). */
+  readonly identity: BuyerIdentity;
   private readonly chain: ChainProvider;
   private readonly indexerUrl: string;
   private readonly walletKey: WalletKey;
-  private readonly networkParams: NetworkParams;
   private readonly historyStore: TaskHistoryStore;
   private readonly fetchImpl: typeof globalThis.fetch;
   private readonly indexerHttp: HttpClient;
@@ -283,14 +308,13 @@ export class Marketplace extends EventEmitterBase {
     this.chain = opts.chain;
     this.indexerUrl = opts.indexerUrl;
     this.walletKey = opts.walletKey;
-    this.networkParams = opts.networkParams;
     this.historyStore = opts.historyStore ?? new MemoryTaskHistoryStore();
     this.fetchImpl = opts._fetch ?? globalThis.fetch.bind(globalThis);
     this.indexerHttp = new HttpClient({
       baseUrl: this.indexerUrl,
       fetch: this.fetchImpl,
     });
-    void this.networkParams;
+    this.identity = new BuyerIdentity(this.chain, opts.networkParams.networkId, opts, () => this.discoverSuppliers());
   }
 
   // ─── discovery ────────────────────────────────────────────────────────
@@ -366,7 +390,7 @@ export class Marketplace extends EventEmitterBase {
       );
     }
 
-    let advert: AdvertDatum | null = null;
+    let advert: AnyAdvert | null = null;
     try {
       const utxo = await this.chain.queryUtxo(advertRef);
       if (utxo === null) {
@@ -381,7 +405,7 @@ export class Marketplace extends EventEmitterBase {
           `UTxO ${advertRef.txHash}#${advertRef.index} has no inline datum`,
         );
       }
-      advert = decodeAdvertDatum(utxo.datumHex);
+      advert = decodeAdvert(utxo.datumHex).datum;
 
       if (advert.status !== "Active") {
         throw new TxConstructionError("advert is retired");
@@ -392,6 +416,9 @@ export class Marketplace extends EventEmitterBase {
       if (this.walletKey.pubKeyHash === advert.supplier_pkh) {
         throw new TxConstructionError("buyer cannot be supplier");
       }
+      // Part 2 §6.5 (value cap) and §9.6 (switch): refuse before any supplier call.
+      assertWithinValueCap(advert);
+      await this.identity.assertAdvertLayout(advert);
 
       const supplierHttp = new HttpClient({
         baseUrl: advert.endpoint_url,
@@ -497,6 +524,7 @@ export class Marketplace extends EventEmitterBase {
         payment_lovelace: prepared.advert.price_lovelace,
         beforeSubmit,
         excludeInputs: options.excludeInputs,
+        ...(await this.identity.postOptions()),
       });
     } catch (error) {
       const reason = error instanceof TxConstructionError
@@ -539,7 +567,7 @@ export class Marketplace extends EventEmitterBase {
     try {
       const escrowUtxo = await this.chain.queryUtxo(escrowRef);
       if (escrowUtxo?.datumHex) {
-        const escrowDatum = decodeEscrowDatum(escrowUtxo.datumHex);
+        const escrowDatum = decodeEscrow(escrowUtxo.datumHex).datum;
         postedAt = escrowDatum.posted_at;
         deliverBy = escrowDatum.deliver_by;
       }
@@ -803,6 +831,12 @@ export class Marketplace extends EventEmitterBase {
       recordFailure("malformed_receipt");
       throw new ReceiptVerificationError("malformed_receipt");
     }
+    // Part 2 §6.3: the escrow copied agent_id from the advert at Post.
+    const agentProblem = receiptAgentProblem(verifiedReceipt, agentIdOf(posted.advert));
+    if (agentProblem !== null) {
+      recordFailure(agentProblem);
+      throw new ReceiptVerificationError(agentProblem);
+    }
 
     this.emitProgress({ type: "receipt_verified", escrow_ref: escrowRefStr });
     this.historyStore.save({
@@ -842,7 +876,7 @@ export class Marketplace extends EventEmitterBase {
     const { advertRef, text, voice, format, speed, payment_lovelace } = opts;
     const request = { text, voice, format, speed };
 
-    let advertDatum: AdvertDatum | null = null;
+    let advertDatum: AnyAdvert | null = null;
     let escrowOutputRef: OutputReference | null = null;
     let escrowRefStr = "";
     let postedAtMs = Date.now();
@@ -866,7 +900,7 @@ export class Marketplace extends EventEmitterBase {
       const utxo = await this.chain.queryUtxo(advertRef);
       if (utxo && utxo.datumHex) {
         try {
-          advertDatum = decodeAdvertDatum(utxo.datumHex);
+          advertDatum = decodeAdvert(utxo.datumHex).datum;
         } catch { /* builder will re-throw structurally */ }
       }
       escrowResult = await buildPostTtsEscrowTx({
@@ -875,6 +909,7 @@ export class Marketplace extends EventEmitterBase {
         advertRef,
         request,
         payment_lovelace,
+        ...(await this.identity.postOptions()),
       });
     } catch (err) {
       if (err instanceof TxConstructionError) {
@@ -900,7 +935,7 @@ export class Marketplace extends EventEmitterBase {
     try {
       const escrowUtxo = await this.chain.queryUtxo(escrowOutputRef);
       if (escrowUtxo && escrowUtxo.datumHex) {
-        const ed = decodeEscrowDatum(escrowUtxo.datumHex);
+        const ed = decodeEscrow(escrowUtxo.datumHex).datum;
         postedAtMs = ed.posted_at;
         deliverByMs = ed.deliver_by;
       }
@@ -1074,6 +1109,12 @@ export class Marketplace extends EventEmitterBase {
       recordFailure("malformed_receipt");
       throw new ReceiptVerificationError("malformed_receipt");
     }
+    // Part 2 §6.3: the escrow copied agent_id from the advert at Post.
+    const agentProblem = receiptAgentProblem(receipt, agentIdOf(advertDatum));
+    if (agentProblem !== null) {
+      recordFailure(agentProblem);
+      throw new ReceiptVerificationError(agentProblem);
+    }
 
     this.emitProgress({ type: "receipt_verified", escrow_ref: escrowRefStr });
 
@@ -1109,7 +1150,7 @@ export class Marketplace extends EventEmitterBase {
     const { advertRef, image_b64, mime, output_format, payment_lovelace } = opts;
     const request = { image_b64, mime, output_format };
 
-    let advertDatum: AdvertDatum | null = null;
+    let advertDatum: AnyAdvert | null = null;
     let escrowOutputRef: OutputReference | null = null;
     let escrowRefStr = "";
     let postedAtMs = Date.now();
@@ -1134,7 +1175,7 @@ export class Marketplace extends EventEmitterBase {
       const utxo = await this.chain.queryUtxo(advertRef);
       if (utxo && utxo.datumHex) {
         try {
-          advertDatum = decodeAdvertDatum(utxo.datumHex);
+          advertDatum = decodeAdvert(utxo.datumHex).datum;
         } catch { /* builder will re-throw structurally */ }
       }
       escrowResult = await buildPostOcrEscrowTx({
@@ -1143,6 +1184,7 @@ export class Marketplace extends EventEmitterBase {
         advertRef,
         request,
         payment_lovelace,
+        ...(await this.identity.postOptions()),
       });
     } catch (err) {
       if (err instanceof TxConstructionError) {
@@ -1168,7 +1210,7 @@ export class Marketplace extends EventEmitterBase {
     try {
       const escrowUtxo = await this.chain.queryUtxo(escrowOutputRef);
       if (escrowUtxo && escrowUtxo.datumHex) {
-        const ed = decodeEscrowDatum(escrowUtxo.datumHex);
+        const ed = decodeEscrow(escrowUtxo.datumHex).datum;
         postedAtMs = ed.posted_at;
         deliverByMs = ed.deliver_by;
       }
@@ -1353,6 +1395,12 @@ export class Marketplace extends EventEmitterBase {
       recordFailure("malformed_receipt");
       throw new ReceiptVerificationError("malformed_receipt");
     }
+    // Part 2 §6.3: the escrow copied agent_id from the advert at Post.
+    const agentProblem = receiptAgentProblem(receipt, agentIdOf(advertDatum));
+    if (agentProblem !== null) {
+      recordFailure(agentProblem);
+      throw new ReceiptVerificationError(agentProblem);
+    }
 
     this.emitProgress({ type: "receipt_verified", escrow_ref: escrowRefStr });
 
@@ -1399,7 +1447,7 @@ export class Marketplace extends EventEmitterBase {
     if (!advertUtxo || !advertUtxo.datumHex) {
       throw new TxConstructionError("advert ref not on chain", `no advert UTxO at ${refToString(advertRef)}`);
     }
-    const advertDatum = decodeAdvertDatum(advertUtxo.datumHex);
+    const advertDatum = decodeAdvert(advertUtxo.datumHex).datum;
     if (advertDatum.status !== "Active") {
       throw new TxConstructionError("advert is retired");
     }
@@ -1409,6 +1457,9 @@ export class Marketplace extends EventEmitterBase {
     if (this.walletKey.pubKeyHash === advertDatum.supplier_pkh) {
       throw new TxConstructionError("buyer cannot be supplier");
     }
+    // Part 2 §6.5 (value cap) and §9.6 (switch): refuse before any supplier call.
+    assertWithinValueCap(advertDatum);
+    await this.identity.assertAdvertLayout(advertDatum);
 
     const supplierHttp = new HttpClient({ baseUrl: advertDatum.endpoint_url, fetch: this.fetchImpl });
 
@@ -1467,6 +1518,7 @@ export class Marketplace extends EventEmitterBase {
         advertRef,
         session_nonce: sessionNonce,
         payment_lovelace,
+        ...(await this.identity.postOptions()),
       });
     } catch (err) {
       if (!(err instanceof TxConstructionError)) {
@@ -1541,6 +1593,8 @@ export class Marketplace extends EventEmitterBase {
       supplierBaseUrl: advertDatum.endpoint_url,
       settleMode,
       upstreamApi: capability.upstream_api,
+      // The builder copies agent_id from the advert into the escrow.
+      agentId: agentIdOf(advertDatum),
     };
   }
 
@@ -1550,7 +1604,7 @@ export class Marketplace extends EventEmitterBase {
    * Submitted escrow — which is when the user is actually charged.
    */
   async endChat(opts: EndChatOptions): Promise<EndChatResult> {
-    const { escrowRef, sessionNonce, transcript, supplierBaseUrl } = opts;
+    const { escrowRef, sessionNonce, transcript, supplierBaseUrl, agentId } = opts;
     const escrowRefStr = refToString(escrowRef);
 
     // The original Open escrow UTxO has ALREADY been spent by the supplier's
@@ -1659,6 +1713,11 @@ export class Marketplace extends EventEmitterBase {
     if (!HEX64_RE.test(receipt.prompt_hash) || !HEX64_RE.test(receipt.response_hash)) {
       throw new ReceiptVerificationError("malformed_receipt");
     }
+    // Part 2 §6.3: agentId is the escrow's agent_id from startChat.
+    const agentProblem = receiptAgentProblem(receipt, agentId);
+    if (agentProblem !== null) {
+      throw new ReceiptVerificationError(agentProblem);
+    }
     // Recompute the full ordered Item transcript hash from the browser mirror.
     const localHash = sha256Hex(canonicalize(transcript));
     if (localHash !== receipt.response_hash) {
@@ -1684,7 +1743,12 @@ export class Marketplace extends EventEmitterBase {
     }
     let acceptBuilt;
     try {
-      acceptBuilt = await buildAcceptTx({ chain: this.chain, buyerKey: this.walletKey, escrowRef: acceptedRef });
+      acceptBuilt = await buildAcceptTx({
+        chain: this.chain,
+        buyerKey: this.walletKey,
+        escrowRef: acceptedRef,
+        identityBlueprint: this.identity.identityBlueprint,
+      });
     } catch (err) {
       if (err instanceof TxConstructionError) throw err;
       this.emitProgress({ type: "chain_submit_failed", detail: (err as Error).message });
@@ -1701,13 +1765,15 @@ export class Marketplace extends EventEmitterBase {
     return { settleMode: "full", receipt, receiptSignature, escrowRef, acceptedRef };
   }
 
-  // ─── acceptResult / reclaim ───────────────────────────────────────────
+  // ─── acceptResult / reclaim / refundRevoked ───────────────────────────
+  // Each follows the layout of the escrow datum (Part 2 §9.6 drain).
 
   async acceptResult(opts: AcceptResultOptions): Promise<void> {
     await buildAcceptTx({
       chain: this.chain,
       buyerKey: this.walletKey,
       escrowRef: opts.escrowRef,
+      identityBlueprint: this.identity.identityBlueprint,
     });
     this.emitProgress({
       type: "accept_submitted",
@@ -1720,14 +1786,46 @@ export class Marketplace extends EventEmitterBase {
     }
   }
 
+  /**
+   * Reclaim at or after deliver_by. A new escrow with `refund` set needs no
+   * buyer key: this wallet only pays the fee, and the whole escrow value goes
+   * to the refund address (Part 2 §6.1).
+   */
   async reclaim(opts: ReclaimOptions): Promise<void> {
     await buildReclaimTx({
       chain: this.chain,
       buyerKey: this.walletKey,
       escrowRef: opts.escrowRef,
+      identityBlueprint: this.identity.identityBlueprint,
     });
     this.emitProgress({
       type: "reclaim_submitted",
+      escrow_ref: refToString(opts.escrowRef),
+    });
+    const escrowRefStr = refToString(opts.escrowRef);
+    const existing = this.historyStore.get(escrowRefStr);
+    if (existing) {
+      this.historyStore.save({ ...existing, status: "reclaimed" });
+    }
+  }
+
+  /**
+   * RefundRevoked (Part 2 §6.1): a new escrow whose agent record is Revoked
+   * or Retired (Open or Claimed), or Revoked with invalid_from ≤ submitted_at
+   * (Submitted), returns its whole value to the buyer before or after
+   * deliver_by. Any wallet can submit it. The builder refuses a legacy escrow
+   * and a live record.
+   */
+  async refundRevoked(opts: RefundRevokedOptions): Promise<void> {
+    await buildRefundRevokedTx({
+      chain: this.chain,
+      walletKey: this.walletKey,
+      escrowRef: opts.escrowRef,
+      lookupRecord: this.identity.lookupRecord,
+      identityBlueprint: this.identity.identityBlueprint,
+    });
+    this.emitProgress({
+      type: "refund_revoked_submitted",
       escrow_ref: refToString(opts.escrowRef),
     });
     const escrowRefStr = refToString(opts.escrowRef);

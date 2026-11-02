@@ -5,7 +5,7 @@
 import type { Receipt } from "@marketplace/shared/receipt";
 import type { SignedReceipt } from "@marketplace/shared/receipt";
 import type { OutputReference } from "@marketplace/shared/chain";
-import type { AdvertDatum } from "@marketplace/shared/cbor";
+import type { AdvertDatum, IdentityAdvertDatum } from "@marketplace/shared/cbor";
 import type {
   ResponseItem,
   ResponseObject,
@@ -67,6 +67,7 @@ export type ProgressEventType =
   | "receipt_verified"
   | "accept_submitted"
   | "reclaim_submitted"
+  | "refund_revoked_submitted"
   | "chain_submit_failed"
   | "chat_started"
   | "chat_ended";
@@ -148,6 +149,8 @@ export interface SupplierView {
   current_escrow_ref: string | null;
   last_seen_iso: string | null;
   created_slot: number;
+  /** Agent of a new advert: 64 lowercase hex (DID `did:vector:<agent_id>`); null for a legacy advert. */
+  agent_id: string | null;
 }
 
 /** Live off-chain capability metadata published by a supplier endpoint. */
@@ -195,7 +198,8 @@ export type SubmitPromptOptions = ResponseRequest & {
 export interface PreparedPrompt {
   request: ResponseRequest;
   advertRef: OutputReference;
-  advert: AdvertDatum;
+  /** The advert in either layout; a new advert carries `agent_id`, which the escrow copies. */
+  advert: AdvertDatum | IdentityAdvertDatum;
   publicPreview: boolean;
 }
 
@@ -296,6 +300,9 @@ export interface StartChatResult {
   settleMode: ChatSettleMode;
   /** Upstream contract declared by the supplier before funds were locked. */
   upstreamApi: SupplierCapabilityView["upstream_api"];
+  /** `agent_id` of the escrow (from a new advert); null for a legacy escrow.
+   * The buyer-app holds it for the receipt check at End. */
+  agentId: string | null;
 }
 
 /**
@@ -309,6 +316,8 @@ export interface EndChatOptions {
    * because the Open escrow UTxO is already spent (Claimed) by End time, so we
    * resolve the supplier via its cached URL + /capability rather than chain. */
   supplierBaseUrl: string;
+  /** `agentId` from startChat: the receipt must name this agent (Part 2 §6.3). */
+  agentId: string | null;
   /** Exact ordered input and terminal output Items mirrored by the browser. */
   transcript: ResponseItem[];
 }
@@ -339,6 +348,14 @@ export interface AcceptResultOptions {
  * ReclaimOptions — arguments to Marketplace.reclaim().
  */
 export interface ReclaimOptions {
+  escrowRef: OutputReference;
+}
+
+/**
+ * RefundRevokedOptions — arguments to Marketplace.refundRevoked(): a new
+ * escrow whose agent is revoked or retired.
+ */
+export interface RefundRevokedOptions {
   escrowRef: OutputReference;
 }
 

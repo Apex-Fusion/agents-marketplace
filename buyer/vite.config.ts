@@ -36,6 +36,7 @@ export default defineConfig({
       // Sub-path aliases first (longest prefixes win on string matching).
       { find: "@marketplace/shared/chain", replacement: resolve(__dirname, "../packages/shared/src/chain/index.ts") },
       { find: "@marketplace/shared/cbor", replacement: resolve(__dirname, "../packages/shared/src/cbor/index.ts") },
+      { find: "@marketplace/shared/identity", replacement: resolve(__dirname, "../packages/shared/src/identity/index.ts") },
       { find: "@marketplace/shared/receipt", replacement: resolve(__dirname, "../packages/shared/src/receipt/index.ts") },
       { find: "@marketplace/shared/tx", replacement: resolve(__dirname, "../packages/shared/src/tx/index.ts") },
       { find: "@marketplace/shared/network", replacement: resolve(__dirname, "../packages/shared/src/network.ts") },

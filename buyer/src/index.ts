@@ -79,6 +79,7 @@ export async function runMain(env: Record<string, string | undefined>): Promise<
     walletKey,
     networkParams: { networkId: config.networkId },
     historyStore: new MemoryTaskHistoryStore(),
+    switchSlot: config.switchSlot,
   });
 
   const distPath = resolve(process.cwd(), "buyer/dist");

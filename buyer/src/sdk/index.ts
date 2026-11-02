@@ -21,6 +21,7 @@ export type {
   SubmitPromptOptions,
   AcceptResultOptions,
   ReclaimOptions,
+  RefundRevokedOptions,
   GetTaskHistoryOptions,
   ChatSettleMode,
   StartChatOptions,
@@ -31,6 +32,8 @@ export type {
 export { ReceiptVerificationError, IndexerError, SupplierError } from "./types.js";
 export type { TaskHistoryStore } from "./history.js";
 export { MemoryTaskHistoryStore, LocalStorageTaskHistoryStore } from "./history.js";
+export { BuyerIdentity, chainRecordLookup, indexerAdvertSigners } from "./identity.js";
+export type { BuyerIdentityOptions } from "./identity.js";
 export {
   ESCROW_CONFIRM_TIMEOUT_MS,
   SUPPLIER_SLACK_MS,

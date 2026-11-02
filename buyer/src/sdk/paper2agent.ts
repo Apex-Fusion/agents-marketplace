@@ -1,7 +1,16 @@
-/** Node-only discovery, free calls, and explicitly staged purchases of supplier-configured JSON MCP tools. */
+/**
+ * Node-only discovery, free calls, and explicitly staged purchases of supplier-configured JSON MCP tools.
+ *
+ * Both escrow layouts (Part 2 §9.6): a legacy advert or escrow sits at a legacy
+ * script, a new one (with agent_id) at the new script. Post on a new advert
+ * passes the listing rule (§6.2) through ./identity.ts; the escrow keeps
+ * agent_id and refund through Claim and Submit (§6.1), and the receipt of a new
+ * escrow names its agent (§6.3).
+ */
 import type { ChainProvider, OutputReference, Utxo } from "@marketplace/shared/chain";
-import { decodeAdvertDatum, decodeEscrowDatum, encodeAdvertDatum, encodeEscrowDatum } from "@marketplace/shared/cbor";
-import type { AdvertDatum, EscrowDatum } from "@marketplace/shared/cbor";
+import {
+  encodePlutusAddress, encodePlutusDataHex, plutusAddressFromBech32, type Refund,
+} from "@marketplace/shared/cbor";
 import {
   buildPostEscrowTx, loadBlueprint, NETWORK_BUFFER_MS, TxConstructionError,
   type PostEscrowBuildResult, type WalletKey,
@@ -17,11 +26,16 @@ import {
 } from "@marketplace/shared/paper2agent";
 import { ESCROW_CONFIRM_TIMEOUT_MS, SUPPLIER_SLACK_MS, supplierBudgetMs } from "./budget.js";
 import { HttpError } from "./httpClient.js";
+import {
+  agentIdOf, assertWithinValueCap, BuyerIdentity, buyerRefund, decodeAdvert, decodeEscrow, encodeAdvert, encodeEscrow,
+  sameRefund, type AnyAdvert, type AnyEscrow, type BuyerIdentityOptions,
+} from "./identity.js";
 import { IndexerError, ReceiptVerificationError, SupplierError } from "./types.js";
 
 export interface Paper2AgentOffer {
   advertRef: OutputReference;
-  advert: AdvertDatum;
+  /** The advert in either layout; a new advert carries agent_id. */
+  advert: AnyAdvert;
   manifest: Paper2AgentManifest;
   manifestHash: string;
   supplierPublicKeyHex: string;
@@ -35,7 +49,8 @@ export interface PostedPaper2Agent extends PreparedPaper2Agent {
   escrowRef: OutputReference;
   postedAt: number;
   deliverBy: number;
-  escrowDatum: EscrowDatum;
+  /** The confirmed Open escrow in either layout; a new escrow carries agent_id and refund. */
+  escrowDatum: AnyEscrow;
   /** Exact confirmed Open output, retained for read-only result recovery. */
   escrowUtxo: Utxo;
 }
@@ -154,15 +169,51 @@ const IMMUTABLE_FIELDS = [
   "buyer_pkh", "supplier_pkh", "capability_id", "request_spec_hash", "prompt_hash",
   "payment_lovelace", "buyer_bond_lovelace", "supplier_bond_lovelace", "deliver_by", "posted_at",
 ] as const;
-function sameImmutable(actual: EscrowDatum, original: EscrowDatum): boolean {
+/** Claim and Submit keep every field above, the layout, agent_id and refund (Part 2 §6.1). */
+function sameImmutable(actual: AnyEscrow, original: AnyEscrow): boolean {
   return refString(actual.advert_ref) === refString(original.advert_ref) &&
-    IMMUTABLE_FIELDS.every((field) => actual[field] === original[field]);
+    IMMUTABLE_FIELDS.every((field) => actual[field] === original[field]) &&
+    agentIdOf(actual) === agentIdOf(original) &&
+    sameRefund("refund" in actual ? actual.refund : null, "refund" in original ? original.refund : null);
 }
-function sameLineageImmutable(row: Record<string, unknown>, original: EscrowDatum): boolean {
-  return row.advert_ref === refString(original.advert_ref) && IMMUTABLE_FIELDS.every((field) => {
+/**
+ * The indexer's refund view of a new escrow (W2-IDX): `address` is bech32, or
+ * the Plutus Data CBOR hex of an address without a bech32 form; `datum` is the
+ * inline datum CBOR hex or null. The network byte of the bech32 form is not compared.
+ */
+function sameRefundView(view: unknown, refund: Refund | null): boolean {
+  if (refund === null || view === null || typeof view !== "object") return refund === null && view === null;
+  const { address, datum } = view as Record<string, unknown>;
+  if (typeof address !== "string") return false;
+  let viewAddress = address;
+  try {
+    viewAddress = encodePlutusAddress(plutusAddressFromBech32(address));
+  } catch {
+    // Not bech32: the view already holds the Plutus Data CBOR hex.
+  }
+  return viewAddress === encodePlutusAddress(refund.address) &&
+    datum === (refund.datum === null ? null : encodePlutusDataHex(refund.datum));
+}
+function sameLineageImmutable(row: Record<string, unknown>, original: AnyEscrow): boolean {
+  const sameFields = row.advert_ref === refString(original.advert_ref) && IMMUTABLE_FIELDS.every((field) => {
     const expected = original[field];
     return row[field] === (typeof expected === "bigint" ? expected.toString() : expected);
   });
+  // An indexer from before identity support sends no layout fields for a legacy escrow.
+  return sameFields && ("refund" in original
+    ? row.layout === "identity" && row.agent_id === original.agent_id && sameRefundView(row.refund, original.refund)
+    : (row.layout ?? "legacy") === "legacy" && (row.agent_id ?? null) === null && (row.refund ?? null) === null);
+}
+
+/** Options of Paper2AgentClient. The identity options and `networkId` matter only for paid Post. */
+export interface Paper2AgentClientOptions extends BuyerIdentityOptions {
+  chain: ChainProvider;
+  /** Necessary only for the paid stages. Discovery and free calls do not sign. */
+  walletKey?: WalletKey;
+  indexerUrl: string;
+  fetchFn?: typeof fetch;
+  /** Network of the identity address for the default record lookup. Default: 1 (Vector mainnet bytes). */
+  networkId?: 0 | 1;
 }
 
 export class Paper2AgentClient {
@@ -171,13 +222,14 @@ export class Paper2AgentClient {
   private readonly indexerUrl: string;
   private readonly fetchFn: typeof fetch;
   private readonly blueprint = loadBlueprint();
+  private readonly identity: BuyerIdentity;
 
-  /** `walletKey` is necessary only for the paid stages. Discovery and free calls do not sign. */
-  constructor(options: { chain: ChainProvider; walletKey?: WalletKey; indexerUrl: string; fetchFn?: typeof fetch }) {
+  constructor(options: Paper2AgentClientOptions) {
     this.chain = options.chain;
     this.walletKey = options.walletKey;
     this.indexerUrl = baseUrl(options.indexerUrl);
     this.fetchFn = options.fetchFn ?? globalThis.fetch.bind(globalThis);
+    this.identity = new BuyerIdentity(this.chain, options.networkId ?? 1, options, () => this.suppliers(Date.now() + REQUEST_MS));
   }
 
   private wallet(): WalletKey {
@@ -185,13 +237,28 @@ export class Paper2AgentClient {
     return this.walletKey;
   }
 
-  private scriptUtxo(utxo: Utxo | null, kind: "advert" | "escrow", ref: OutputReference): Utxo {
-    const address = kind === "advert" ? this.blueprint.advertScriptAddress : this.blueprint.escrowScriptAddress;
-    if (!utxo?.datumHex || refString(utxo.ref) !== refString(ref) ||
-        (utxo.address !== address(0) && utxo.address !== address(1))) {
-      fail(`missing or invalid ${kind} script UTxO`);
-    }
-    return utxo;
+  /**
+   * The advert or escrow output at `ref` and its datum in either layout. A
+   * legacy datum must sit at a legacy script and a new datum at the new script
+   * (Part 2 §9.6), on either network.
+   */
+  private scriptOutput(utxo: Utxo | null, kind: "advert", ref: OutputReference): { utxo: Utxo; datum: AnyAdvert };
+  private scriptOutput(utxo: Utxo | null, kind: "escrow", ref: OutputReference): { utxo: Utxo; datum: AnyEscrow };
+  private scriptOutput(utxo: Utxo | null, kind: "advert" | "escrow", ref: OutputReference): { utxo: Utxo; datum: AnyAdvert | AnyEscrow } {
+    if (!utxo?.datumHex || refString(utxo.ref) !== refString(ref)) fail(`missing or invalid ${kind} script UTxO`);
+    const datum = kind === "advert" ? decodeAdvert(utxo.datumHex).datum : decodeEscrow(utxo.datumHex).datum;
+    const scripts = agentIdOf(datum) === null ? this.blueprint : this.identity.blueprint();
+    const address = kind === "advert" ? scripts.advertScriptAddress : scripts.escrowScriptAddress;
+    if (utxo.address !== address(0) && utxo.address !== address(1)) fail(`missing or invalid ${kind} script UTxO`);
+    return { utxo, datum };
+  }
+
+  /** GET /suppliers: the listed adverts (discovery, and the listing check of Post, Part 2 §6.2). */
+  private async suppliers(deadline: number): Promise<readonly unknown[]> {
+    const response = await this.json(`${this.indexerUrl}/suppliers?capability_id=${encodeURIComponent(PAPER2AGENT_CAPABILITY_ID)}`, MAX_INDEXER_BYTES, deadline);
+    if (response.status !== 200) throw new IndexerError("indexer_error", { status: response.status });
+    if (!Array.isArray(response.body)) throw new IndexerError("malformed_response", { message: "supplier list is not an array" });
+    return response.body;
   }
 
   private async json(url: string, maxBytes: number, deadline: number, init: RequestInit = {}, requestMs = REQUEST_MS): Promise<{ status: number; body: unknown }> {
@@ -248,8 +315,7 @@ export class Paper2AgentClient {
 
   private async offer(advertRef: OutputReference, deadline: number): Promise<Paper2AgentOffer> {
     advertRef = parseRef(refString(advertRef));
-    const utxo = this.scriptUtxo(await bounded(() => this.chain.queryUtxo(advertRef), deadline), "advert", advertRef);
-    const advert = decodeAdvertDatum(utxo.datumHex!);
+    const { datum: advert } = this.scriptOutput(await bounded(() => this.chain.queryUtxo(advertRef), deadline), "advert", advertRef);
     if (advert.status !== "Active" || advert.capability_id !== PAPER2AGENT_CAPABILITY_ID ||
         advert.max_output_tokens !== 0 || advert.price_lovelace < 0n ||
         advert.buyer_bond_lovelace < 0n || advert.supplier_bond_lovelace < 0n ||
@@ -287,12 +353,10 @@ export class Paper2AgentClient {
       fail("invalid discovery identity filter");
     }
     const deadline = Date.now() + DISCOVERY_MS;
-    const response = await this.json(`${this.indexerUrl}/suppliers?capability_id=${encodeURIComponent(PAPER2AGENT_CAPABILITY_ID)}`, MAX_INDEXER_BYTES, deadline);
-    if (response.status !== 200) throw new IndexerError("indexer_error", { status: response.status });
-    if (!Array.isArray(response.body)) throw new IndexerError("malformed_response", { message: "supplier list is not an array" });
+    const rows = await this.suppliers(deadline);
     const refs: OutputReference[] = [];
     const seen = new Set<string>();
-    for (const value of response.body) {
+    for (const value of rows) {
       if (!value || typeof value !== "object" || Array.isArray(value)) continue;
       const row = value as Record<string, unknown>;
       const listed = row.status === "free" || (filters.includeBusy === true && (row.status === "working" || row.status === "unknown"));
@@ -377,6 +441,9 @@ export class Paper2AgentClient {
         offer.advert.price_lovelace > options.maxPriceLovelace || offer.advert.supplier_pkh === this.wallet().pubKeyHash) {
       fail("offer does not match the approved manifest, supplier, or price limit");
     }
+    // Part 2 §6.5 (value cap) and §9.6 (switch): refuse before approval. Post checks both again.
+    assertWithinValueCap(offer.advert);
+    await this.identity.assertAdvertLayout(offer.advert);
     const input = validatePaper2AgentInput(offer.manifest, options.input);
     return { ...offer, input, requestHash: paper2AgentRequestHash(offer.manifestHash, input) };
   }
@@ -406,14 +473,17 @@ export class Paper2AgentClient {
         !Number.isSafeInteger(datum.posted_at) || !Number.isSafeInteger(datum.deliver_by) ||
         datum.posted_at !== posted.postedAt || datum.deliver_by !== posted.deliverBy ||
         datum.deliver_by !== datum.posted_at + posted.advert.max_processing_ms + NETWORK_BUFFER_MS ||
-        datum.submitted_at !== null || datum.result_receipt_hash !== null) {
+        datum.submitted_at !== null || datum.result_receipt_hash !== null ||
+        // A new advert gives a new escrow with its agent_id and the buyer's own refund address (Part 2 §6.5).
+        agentIdOf(datum) !== agentIdOf(posted.advert) ||
+        ("refund" in datum && !sameRefund(datum.refund, buyerRefund(this.wallet().address)))) {
       fail("original Open escrow does not match the prepared purchase");
     }
-    const original = this.scriptUtxo(posted.escrowUtxo, "escrow", posted.escrowRef);
-    if (encodeEscrowDatum(decodeEscrowDatum(original.datumHex!)) !== encodeEscrowDatum(datum) ||
-        typeof original.lovelace !== "bigint" ||
-        original.lovelace < datum.payment_lovelace + datum.buyer_bond_lovelace + datum.supplier_bond_lovelace ||
-        Object.values(object(original.assets)).some((amount) => typeof amount !== "bigint" || amount < 0n)) {
+    const original = this.scriptOutput(posted.escrowUtxo, "escrow", posted.escrowRef);
+    if (encodeEscrow(original.datum) !== encodeEscrow(datum) ||
+        typeof original.utxo.lovelace !== "bigint" ||
+        original.utxo.lovelace < datum.payment_lovelace + datum.buyer_bond_lovelace + datum.supplier_bond_lovelace ||
+        Object.values(object(original.utxo.assets)).some((amount) => typeof amount !== "bigint" || amount < 0n)) {
       fail("original Open escrow snapshot is invalid");
     }
   }
@@ -424,11 +494,12 @@ export class Paper2AgentClient {
       advertRef: prepared.advertRef, manifestHash: prepared.manifestHash, input: prepared.input,
       expectedSupplierPkh: prepared.advert.supplier_pkh, maxPriceLovelace: prepared.advert.price_lovelace,
     });
-    if (encodeAdvertDatum(refreshed.advert) !== encodeAdvertDatum(prepared.advert) ||
+    if (encodeAdvert(refreshed.advert) !== encodeAdvert(prepared.advert) ||
         refreshed.supplierPublicKeyHex !== prepared.supplierPublicKeyHex || refreshed.requestHash !== prepared.requestHash) {
       fail("prepared offer changed before payment");
     }
     const deadline = Date.now() + PREFLIGHT_MS + ESCROW_CONFIRM_TIMEOUT_MS;
+    const layout = await bounded(() => this.identity.postOptions(), deadline);
     const built = await bounded(() => buildPostEscrowTx({
       chain: this.chain, buyerKey: this.wallet(), advertRef: refreshed.advertRef,
       prompt_hash: refreshed.requestHash, payment_lovelace: refreshed.advert.price_lovelace,
@@ -437,11 +508,12 @@ export class Paper2AgentClient {
         await beforeSubmit?.(candidate);
         remaining(deadline);
       },
+      ...layout,
     }), deadline);
     // A timeout is an unresolved financial outcome, never a reason to post again.
     await bounded(() => this.chain.awaitTx(built.expectedTxHash, Math.min(ESCROW_CONFIRM_TIMEOUT_MS, remaining(deadline))), deadline);
-    const utxo = this.scriptUtxo(await bounded(() => this.chain.queryUtxo(built.escrowOutputRef), deadline), "escrow", built.escrowOutputRef);
-    const escrowDatum = decodeEscrowDatum(utxo.datumHex!);
+    const { utxo, datum: escrowDatum } = this.scriptOutput(
+      await bounded(() => this.chain.queryUtxo(built.escrowOutputRef), deadline), "escrow", built.escrowOutputRef);
     const posted: PostedPaper2Agent = {
       ...refreshed, escrowRef: built.escrowOutputRef, escrowDatum, escrowUtxo: utxo,
       postedAt: escrowDatum.posted_at, deliverBy: escrowDatum.deliver_by,
@@ -453,21 +525,18 @@ export class Paper2AgentClient {
   private async verifySubmitted(posted: PostedPaper2Agent, result: Paper2AgentResult, original: Utxo, deadline: number): Promise<void> {
     const ref = parseRef(result.submitted_ref);
     const expectedHash = receiptResultHash({ receipt: result.receipt, signature: result.receipt_signature });
-    let utxo: Utxo;
+    let visible: Utxo | null = null;
     for (;;) {
       try {
-        const visible = await bounded(() => this.chain.queryUtxo(ref), Math.min(deadline, Date.now() + REQUEST_MS));
-        if (visible) {
-          utxo = this.scriptUtxo(visible, "escrow", ref);
-          break;
-        }
+        visible = await bounded(() => this.chain.queryUtxo(ref), Math.min(deadline, Date.now() + REQUEST_MS));
+        if (visible) break;
       } catch (error) {
         if (error instanceof TxConstructionError) throw error;
       }
       // Supplier and buyer nodes can observe Submit at different times.
       await pause(deadline);
     }
-    const datum = decodeEscrowDatum(utxo.datumHex!);
+    const { utxo, datum } = this.scriptOutput(visible, "escrow", ref);
     if (datum.state !== "Submitted" || !sameImmutable(datum, posted.escrowDatum) ||
         datum.result_receipt_hash !== expectedHash || datum.submitted_at === null ||
         datum.submitted_at < datum.posted_at || datum.submitted_at > datum.deliver_by ||
@@ -511,7 +580,7 @@ export class Paper2AgentClient {
         throw new ReceiptVerificationError("escrow_lineage_mismatch");
       }
       // Indexer catch-up can take time. Do not return a stale Submitted snapshot.
-      const current = this.scriptUtxo(await bounded(() => this.chain.queryUtxo(ref), deadline), "escrow", ref);
+      const { utxo: current } = this.scriptOutput(await bounded(() => this.chain.queryUtxo(ref), deadline), "escrow", ref);
       if (current.datumHex !== utxo.datumHex || current.address !== utxo.address ||
           current.lovelace !== utxo.lovelace || Object.keys(current.assets).length !== Object.keys(utxo.assets).length ||
           Object.entries(utxo.assets).some(([key, amount]) => current.assets[key] !== amount)) {
@@ -546,9 +615,10 @@ export class Paper2AgentClient {
           receipt: parseReceipt(body.receipt), receipt_signature: body.receipt_signature,
           pub_key_hex: posted.supplierPublicKeyHex, escrow_ref: escrowRef, submitted_ref: refString(parseRef(body.submitted_ref)),
         };
+        // Part 2 §6.3: a new escrow needs the 9-field receipt that names its agent.
         verifyPaper2AgentReceipt({ manifest: posted.manifest, input: posted.input, result: result.result,
           receipt: result.receipt, signature: result.receipt_signature, publicKeyHex: result.pub_key_hex,
-          supplierPkh: posted.advert.supplier_pkh, escrowRef });
+          supplierPkh: posted.advert.supplier_pkh, escrowRef, agentId: agentIdOf(posted.escrowDatum) });
         if (options.onReceiptVerified) await bounded(() => options.onReceiptVerified!(result), deadline);
         await this.verifySubmitted(posted, result, posted.escrowUtxo, deadline);
         return result;
@@ -568,8 +638,9 @@ export class Paper2AgentClient {
     this.validateOpen(posted);
     if (Date.now() >= posted.deliverBy) fail("escrow delivery deadline has passed");
     const deadline = Date.now() + Math.min(supplierBudgetMs(posted.deliverBy), MAX_EXECUTION_MS);
-    const original = this.scriptUtxo(await bounded(() => this.chain.queryUtxo(posted.escrowRef), deadline), "escrow", posted.escrowRef);
-    if (encodeEscrowDatum(decodeEscrowDatum(original.datumHex!)) !== encodeEscrowDatum(posted.escrowDatum) ||
+    const { utxo: original, datum: current } = this.scriptOutput(
+      await bounded(() => this.chain.queryUtxo(posted.escrowRef), deadline), "escrow", posted.escrowRef);
+    if (encodeEscrow(current) !== encodeEscrow(posted.escrowDatum) ||
         original.address !== posted.escrowUtxo.address || original.lovelace !== posted.escrowUtxo.lovelace ||
         Object.keys(original.assets).length !== Object.keys(posted.escrowUtxo.assets).length ||
         Object.entries(original.assets).some(([asset, amount]) => posted.escrowUtxo.assets[asset] !== amount)) {

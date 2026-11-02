@@ -40,6 +40,9 @@ export interface AcceptFlowResult {
 /**
  * runAccept — build and submit an Accept transaction (Submitted → Accepted, terminal).
  *
+ * Both escrow layouts (Part 2 §9.6): the escrow datum decides. A new escrow
+ * pays the buyer bond to its refund address and needs env IDENTITY_POLICY_ID.
+ *
  * Validates (via buildAcceptTx):
  *   - walletKey.pubKeyHash === datum.buyer_pkh   (TxConstructionError "buyer signature mismatch")
  *   - datum.state === "Submitted"                 (TxConstructionError "wrong state")

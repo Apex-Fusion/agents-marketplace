@@ -26,7 +26,7 @@
 import { createHash, randomInt, timingSafeEqual } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
-import { canonicalize } from "@marketplace/shared/cbor";
+import { canonicalize, type EscrowDatum } from "@marketplace/shared/cbor";
 import type { ChainProvider, OutputReference } from "@marketplace/shared/chain";
 import {
   chatMessagesToResponseInput,
@@ -42,6 +42,7 @@ import { inspectSignedTransactionFinancials } from "@marketplace/shared/tx/serve
 import { findSubmittedEscrowRef } from "../cli/acceptFlow.js";
 import type { ResponseArchive } from "../db/archive.js";
 import { Mutex } from "../mutex.js";
+import { agentIdOf, buyerRefund } from "../sdk/identity.js";
 import type { Marketplace } from "../sdk/Marketplace.js";
 import { IndexerError, type PostedPrompt, type PreparedPrompt, type SubmitPromptResult } from "../sdk/types.js";
 
@@ -70,9 +71,10 @@ const RESULT_POLL_MS = 500;
 const ACCEPT_ATTEMPTS = 3;
 const ACCEPT_RETRY_MS = 10_000;
 const ACCEPT_CONFIRM_TIMEOUT_MS = 120_000;
-/** Accept build refusals that no retry can change. */
+/** Accept build refusals that no retry can change. A 16-field escrow outside the new escrow script
+ * gives "escrow layout mismatch" (Part 2 §9.6). */
 const FINAL_ACCEPT_REASONS: Record<string, true> = {
-  "escrow ref not on chain": true, "wrong state": true, "accept window expired": true,
+  "escrow ref not on chain": true, "wrong state": true, "accept window expired": true, "escrow layout mismatch": true,
 };
 /** Socket and DNS failures of Node's fetch that a later resend can pass. */
 const TRANSPORT_ERROR_CODES: Record<string, true> = {
@@ -317,7 +319,8 @@ async function liveFree(endpointUrl: string, fetchImpl: typeof globalThis.fetch)
 /**
  * The gateway's one-shot preflight: the escrow lock floor plus the collateral and
  * fee reserve, and one pure-AP3X UTxO for Accept collateral. Outputs that a pending
- * Accept spends do not count. Refuses before any transaction is built.
+ * Accept spends do not count. Refuses before any transaction is built. A new advert
+ * gives a new escrow, whose 2 extra fields (agent_id, refund) raise the floor.
  */
 async function assertFunds(chain: ChainProvider, walletKey: WalletKey, prepared: PreparedPrompt,
   reserved: readonly OutputReference[]): Promise<void> {
@@ -327,7 +330,7 @@ async function assertFunds(chain: ChainProvider, walletKey: WalletKey, prepared:
   const collateralOk = utxos.some((utxo) => utxo.lovelace >= COLLATERAL_MIN_LOVELACE && Object.keys(utxo.assets).length === 0);
   const { advert } = prepared;
   const now = Date.now();
-  const floor = escrowLockFloor({
+  const openDatum: EscrowDatum = {
     buyer_pkh: walletKey.pubKeyHash,
     supplier_pkh: advert.supplier_pkh,
     advert_ref: prepared.advertRef,
@@ -342,7 +345,12 @@ async function assertFunds(chain: ChainProvider, walletKey: WalletKey, prepared:
     submitted_at: null,
     result_receipt_hash: null,
     state: "Open",
-  }, advert.price_lovelace + advert.buyer_bond_lovelace + advert.supplier_bond_lovelace);
+  };
+  const agentId = agentIdOf(advert);
+  const floor = escrowLockFloor(
+    agentId === null ? openDatum : { ...openDatum, agent_id: agentId, refund: buyerRefund(walletKey.address) },
+    advert.price_lovelace + advert.buyer_bond_lovelace + advert.supplier_bond_lovelace,
+  );
   const required = floor + COLLATERAL_MIN_LOVELACE + FEE_RESERVE_LOVELACE;
   if (available >= required && collateralOk) return;
   throw new ModelCallError(402, "insufficient_funds",
@@ -400,7 +408,10 @@ export function registerPaper2AgentModelRoute(app: Express, options: Paper2Agent
   const acceptRetryMs = options.acceptRetryMs ?? ACCEPT_RETRY_MS;
   const submitAccept = options.submitAccept ?? (async (escrowRef: OutputReference,
     excludeInputs: readonly OutputReference[]): Promise<SubmittedAccept> => {
-    const built = await buildAcceptTx({ chain: chain!, buyerKey: walletKey!, escrowRef, excludeInputs });
+    // Both layouts (Part 2 §9.6): the escrow datum decides; a new escrow uses the SDK's identity blueprint.
+    const built = await buildAcceptTx({
+      chain: chain!, buyerKey: walletKey!, escrowRef, excludeInputs, identityBlueprint: marketplace!.identity.identityBlueprint,
+    });
     // Collateral must also stay unspent until the Accept is in a block.
     const { inputs, collateralInputs } = inspectSignedTransactionFinancials(built.txCborHex);
     return { txHash: built.expectedTxHash, spentInputs: [...inputs, ...collateralInputs] };

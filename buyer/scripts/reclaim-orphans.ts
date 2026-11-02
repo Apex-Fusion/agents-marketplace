@@ -1,13 +1,16 @@
 /**
- * Reclaim B2 + C2 escrows that were left Open after their post-escrow
- * rejections in run-agent-b's first pass. Throwaway.
+ * Recover B2 + C2 escrows that were left Open after their post-escrow
+ * rejections in run-agent-b's first pass: RefundRevoked for a new escrow of a
+ * revoked or retired agent, else Reclaim after deliver_by (both layouts).
+ * Throwaway.
  */
 import { readFileSync } from "fs";
 import { createHash } from "crypto";
 import * as ed from "@noble/ed25519";
 import { LiveOgmiosProvider } from "@marketplace/shared/chain";
-import { buildReclaimTx } from "@marketplace/shared/tx";
+import { recoverEscrow } from "../src/cli/reclaim-orphans.js";
 import { deriveWalletKey } from "../src/index.js";
+import { Marketplace } from "../src/sdk/Marketplace.js";
 
 ed.etc.sha512Sync = (...m: Uint8Array[]): Uint8Array => {
   const h = createHash("sha512");
@@ -22,9 +25,14 @@ for (const line of readFileSync("/home/david/code/agents-marketplace/buyer/.env"
   if (i === -1) continue;
   env[line.slice(0, i).trim()] = line.slice(i + 1).trim();
 }
+// The shared tx builders read the identity blueprint and its reference script from process.env.
+for (const key of ["IDENTITY_POLICY_ID", "IDENTITY_ESCROW_REF_UTXO"]) {
+  if (env[key] && !process.env[key]) process.env[key] = env[key];
+}
 
 const wk = deriveWalletKey(env.BUYER_PRIV_KEY_HEX, 1);
 const chain = new LiveOgmiosProvider({ ogmiosUrl: env.OGMIOS_URL });
+const { identity } = new Marketplace({ chain, indexerUrl: env.INDEXER_URL, walletKey: wk, networkParams: { networkId: 1 } });
 
 const refs = [
   { txHash: "50c59e7621a05bde5df06e4ded1513f821f56c26e2af0a3aacc05a6448ae690b", index: 0 },
@@ -34,15 +42,15 @@ const refs = [
 async function main(): Promise<void> {
   for (const escrowRef of refs) {
     try {
-      const r = await buildReclaimTx({ chain, buyerKey: wk, escrowRef });
+      const r = await recoverEscrow({ chain, walletKey: wk, escrowRef, identity });
       // eslint-disable-next-line no-console
-      console.log(`reclaim ${escrowRef.txHash}#${escrowRef.index} -> tx ${r.expectedTxHash}`);
-      await chain.awaitTx(r.expectedTxHash, 90000);
+      console.log(`${r.action} ${escrowRef.txHash}#${escrowRef.index} -> tx ${r.txHash}`);
+      await chain.awaitTx(r.txHash, 90000);
       // eslint-disable-next-line no-console
       console.log(`  confirmed`);
     } catch (e) {
       // eslint-disable-next-line no-console
-      console.error(`reclaim ${escrowRef.txHash}#${escrowRef.index} FAILED:`, e instanceof Error ? e.message : String(e));
+      console.error(`recover ${escrowRef.txHash}#${escrowRef.index} FAILED:`, e instanceof Error ? e.message : String(e));
     }
   }
   const utxos = await chain.queryUtxosByAddress(wk.address);

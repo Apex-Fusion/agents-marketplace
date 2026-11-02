@@ -1,6 +1,12 @@
 /**
- * reclaim-orphans.ts — Scan the indexer for this buyer's Open/Claimed escrows
- * and reclaim every one whose deliver_by has passed.
+ * reclaim-orphans.ts — Scan the indexer for this buyer's unfinished escrows
+ * and return their funds to the buyer.
+ *
+ * Both escrow layouts (Part 2 §6.1, §9.6), per escrow (recoverEscrow):
+ *   - a new escrow whose agent record is Revoked or Retired (Open or
+ *     Claimed), or Revoked with invalid_from ≤ submitted_at (Submitted):
+ *     RefundRevoked, before or after deliver_by;
+ *   - else an Open or Claimed escrow whose deliver_by has passed: Reclaim.
  *
  * Cron-friendly: exits 0 even if no orphans; logs each attempt to --log-file.
  * Generalized from buyer/scripts/reclaim-orphans.ts (which hard-coded refs).
@@ -10,8 +16,10 @@ import { appendFileSync, readFileSync } from "fs";
 import { createHash } from "crypto";
 import * as ed from "@noble/ed25519";
 import { LiveOgmiosProvider, type ChainProvider, type OutputReference } from "@marketplace/shared/chain";
-import { buildReclaimTx, TxConstructionError } from "@marketplace/shared/tx";
+import { buildReclaimTx, buildRefundRevokedTx, TxConstructionError, type WalletKey } from "@marketplace/shared/tx";
 import { deriveWalletKey } from "../index.js";
+import { Marketplace } from "../sdk/Marketplace.js";
+import { decodeEscrow, type BuyerIdentity } from "../sdk/identity.js";
 
 ed.etc.sha512Sync = (...m: Uint8Array[]): Uint8Array => {
   const h = createHash("sha512");
@@ -21,6 +29,49 @@ ed.etc.sha512Sync = (...m: Uint8Array[]): Uint8Array => {
 
 const HEX64_RE = /^[0-9a-f]{64}$/;
 const AWAIT_TIMEOUT_MS = 120_000;
+/** Builder refusals that mean "not yet" or "not this way"; the next run tries again. */
+const SKIP_REASONS: Record<string, true> = { "reclaim before deliver_by": true, "refund not allowed": true };
+
+export interface RecoverEscrowParams {
+  chain: ChainProvider;
+  walletKey: WalletKey;
+  escrowRef: OutputReference;
+  identity: BuyerIdentity;
+}
+
+/**
+ * Builds and submits the transaction that returns one escrow to its buyer:
+ * RefundRevoked when the escrow is new and RefundRevoked applies to its agent
+ * record now, else Reclaim. Throws TxConstructionError "refund not allowed"
+ * for a Submitted escrow of a live agent, and the builder's errors (for
+ * example "reclaim before deliver_by").
+ */
+export async function recoverEscrow(
+  params: RecoverEscrowParams,
+): Promise<{ action: "RefundRevoked" | "Reclaim"; txHash: string }> {
+  const { chain, walletKey, escrowRef, identity } = params;
+  const utxo = await chain.queryUtxo(escrowRef);
+  if (!utxo?.datumHex) {
+    throw new TxConstructionError("escrow ref not on chain", `no escrow UTxO at ${escrowRef.txHash}#${escrowRef.index}`);
+  }
+  const escrow = decodeEscrow(utxo.datumHex);
+  if (escrow.layout === "identity" && await identity.refundRevokedAllowed(escrow.datum)) {
+    const built = await buildRefundRevokedTx({
+      chain, walletKey, escrowRef, lookupRecord: identity.lookupRecord, identityBlueprint: identity.identityBlueprint,
+    });
+    return { action: "RefundRevoked", txHash: built.expectedTxHash };
+  }
+  if (escrow.datum.state === "Submitted") {
+    throw new TxConstructionError(
+      "refund not allowed",
+      "a Submitted escrow returns to the buyer only by RefundRevoked, and its agent is not revoked",
+    );
+  }
+  const built = await buildReclaimTx({
+    chain, buyerKey: walletKey, escrowRef, identityBlueprint: identity.identityBlueprint,
+  });
+  return { action: "Reclaim", txHash: built.expectedTxHash };
+}
 
 interface CliArgs {
   envPath: string;
@@ -74,6 +125,8 @@ interface EscrowView {
   utxo_ref: string;
   buyer_pkh: string;
   state: string;
+  /** "legacy" | "identity"; absent from an indexer before identity support. */
+  layout?: string;
 }
 
 function shortHex(hex: string, n = 8): string {
@@ -110,13 +163,17 @@ async function main(argv: string[]): Promise<number> {
   }
   const networkId: 0 | 1 = env.NETWORK_ID === "1" ? 1 : 0;
   // Inject loaded vars into process.env so shared tx builders see them
-  // (e.g. lucidContext.ts's VECTOR_ZERO_TIME_MS). See run-cycle.ts for context.
-  for (const key of ["VECTOR_ZERO_TIME_MS", "OGMIOS_URL", "INDEXER_URL", "NETWORK_ID"]) {
+  // (e.g. lucidContext.ts's VECTOR_ZERO_TIME_MS, the identity blueprint's
+  // IDENTITY_POLICY_ID). See run-cycle.ts for context.
+  for (const key of [
+    "VECTOR_ZERO_TIME_MS", "OGMIOS_URL", "INDEXER_URL", "NETWORK_ID", "IDENTITY_POLICY_ID", "IDENTITY_ESCROW_REF_UTXO",
+  ]) {
     if (env[key] && !process.env[key]) process.env[key] = env[key];
   }
 
   const wk = deriveWalletKey(env.BUYER_PRIV_KEY_HEX, networkId);
   const chain: ChainProvider = new LiveOgmiosProvider({ ogmiosUrl: env.OGMIOS_URL });
+  const { identity } = new Marketplace({ chain, indexerUrl: env.INDEXER_URL, walletKey: wk, networkParams: { networkId } });
 
   const ts = (): string => new Date().toISOString();
   const tagPart = args.tag ? `tag=${args.tag} ` : "";
@@ -127,38 +184,42 @@ async function main(argv: string[]): Promise<number> {
     return 1;
   }
   const rows = (await resp.json()) as EscrowView[];
-  const reclaimable = rows.filter((r) => r.state === "Open" || r.state === "Claimed");
-  process.stderr.write(`found ${reclaimable.length} reclaimable rows (Open|Claimed) of ${rows.length} total\n`);
+  // A Submitted new escrow can still return by RefundRevoked (Part 2 §6.1).
+  const candidates = rows.filter((r) =>
+    r.state === "Open" || r.state === "Claimed" || (r.state === "Submitted" && r.layout === "identity"));
+  process.stderr.write(`found ${candidates.length} candidate rows (Open|Claimed, new Submitted) of ${rows.length} total\n`);
 
   let attempted = 0;
   let succeeded = 0;
   let skipped = 0;
   let failed = 0;
 
-  for (const row of reclaimable) {
+  for (const row of candidates) {
     const [tx, idxStr] = row.utxo_ref.split("#");
     const escrowRef: OutputReference = { txHash: tx, index: parseInt(idxStr, 10) };
     attempted++;
     try {
-      const built = await buildReclaimTx({ chain, buyerKey: wk, escrowRef });
-      process.stderr.write(`reclaim ${row.utxo_ref} -> tx ${built.expectedTxHash} (${row.state})\n`);
-      await chain.awaitTx(built.expectedTxHash, AWAIT_TIMEOUT_MS);
+      const { action, txHash } = await recoverEscrow({ chain, walletKey: wk, escrowRef, identity });
+      process.stderr.write(`${action} ${row.utxo_ref} -> tx ${txHash} (${row.state})\n`);
+      await chain.awaitTx(txHash, AWAIT_TIMEOUT_MS);
       succeeded++;
       if (args.logFile) {
+        const result = action === "Reclaim" ? "RECLAIM_OK" : "REFUND_REVOKED_OK";
+        const txField = action === "Reclaim" ? "reclaim_tx" : "refund_tx";
         appendLog(
           args.logFile,
-          `${ts()} RECLAIM_OK ${tagPart}escrow=${shortHex(escrowRef.txHash)}#${escrowRef.index} state=${row.state} reclaim_tx=${built.expectedTxHash}`,
+          `${ts()} ${result} ${tagPart}escrow=${shortHex(escrowRef.txHash)}#${escrowRef.index} state=${row.state} ${txField}=${txHash}`,
         );
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (err instanceof TxConstructionError && err.message.includes("reclaim before deliver_by")) {
+      if (err instanceof TxConstructionError && SKIP_REASONS[err.reason]) {
         skipped++;
-        process.stderr.write(`skip ${row.utxo_ref}: not yet past deliver_by\n`);
+        process.stderr.write(`skip ${row.utxo_ref}: ${err.reason}\n`);
         // Don't log not-yet-expired skips — they're noise; cron runs hourly.
       } else {
         failed++;
-        process.stderr.write(`reclaim ${row.utxo_ref} FAILED: ${msg}\n`);
+        process.stderr.write(`recover ${row.utxo_ref} FAILED: ${msg}\n`);
         if (args.logFile) {
           appendLog(
             args.logFile,
@@ -173,7 +234,8 @@ async function main(argv: string[]): Promise<number> {
   return 0;
 }
 
-if (process.argv[1]?.endsWith("reclaim-orphans.ts") || process.argv[1]?.endsWith("reclaim-orphans.js")) {
+// Run only as the CLI itself: scripts (also buyer/scripts/reclaim-orphans.ts) import recoverEscrow.
+if (/[\\/]cli[\\/]reclaim-orphans\.(t|j)s$/.test(process.argv[1] ?? "")) {
   main(process.argv.slice(2))
     .then((code) => process.exit(code))
     .catch((err) => {

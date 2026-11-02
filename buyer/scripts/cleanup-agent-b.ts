@@ -1,16 +1,18 @@
 /**
  * cleanup-agent-b.ts — close out Agent B's lingering escrows.
  *   - Accept D3 Submitted (supplier processed, just needs Accept)
- *   - Reclaim A1 + A4 Open (deliver_by passed, recover funds)
+ *   - Recover A1 + A4 Open: RefundRevoked for a new escrow of a revoked or
+ *     retired agent, else Reclaim after deliver_by (both layouts)
  * Throwaway.
  */
 import { readFileSync } from "fs";
 import { createHash } from "crypto";
 import * as ed from "@noble/ed25519";
 import { LiveOgmiosProvider } from "@marketplace/shared/chain";
-import { buildReclaimTx } from "@marketplace/shared/tx";
 import { runAccept } from "../src/cli/acceptFlow.js";
+import { recoverEscrow } from "../src/cli/reclaim-orphans.js";
 import { deriveWalletKey } from "../src/index.js";
+import { Marketplace } from "../src/sdk/Marketplace.js";
 
 ed.etc.sha512Sync = (...m: Uint8Array[]): Uint8Array => {
   const h = createHash("sha512");
@@ -25,9 +27,14 @@ for (const line of readFileSync("/home/david/code/agents-marketplace/buyer/.env"
   if (i === -1) continue;
   env[line.slice(0, i).trim()] = line.slice(i + 1).trim();
 }
+// The shared tx builders read the identity blueprint and its reference script from process.env.
+for (const key of ["IDENTITY_POLICY_ID", "IDENTITY_ESCROW_REF_UTXO"]) {
+  if (env[key] && !process.env[key]) process.env[key] = env[key];
+}
 
 const wk = deriveWalletKey(env.BUYER_PRIV_KEY_HEX, 1);
 const chain = new LiveOgmiosProvider({ ogmiosUrl: env.OGMIOS_URL });
+const { identity } = new Marketplace({ chain, indexerUrl: env.INDEXER_URL, walletKey: wk, networkParams: { networkId: 1 } });
 
 async function main(): Promise<void> {
   // D3's Submitted ref needs Accept.
@@ -42,18 +49,18 @@ async function main(): Promise<void> {
     console.error(`D3 accept FAILED:`, e instanceof Error ? e.message : String(e));
   }
 
-  // A1 + A4 Open escrows need Reclaim.
+  // A1 + A4 Open escrows need RefundRevoked or Reclaim.
   const openRefs = [
     { id: "A1", txHash: "45879f707e7c8521233ee3bd5b024300211b8d8675f2400784f6ac1744848184", index: 0 },
     { id: "A4", txHash: "8f1ec769bd883ed617b4f05143b4997d20bd93d970371c0358a0e395cb676271", index: 0 },
   ];
   for (const { id, txHash, index } of openRefs) {
     try {
-      const r = await buildReclaimTx({ chain, buyerKey: wk, escrowRef: { txHash, index } });
-      await chain.awaitTx(r.expectedTxHash, 90_000);
-      console.log(`${id} reclaim tx ${r.expectedTxHash}`);
+      const r = await recoverEscrow({ chain, walletKey: wk, escrowRef: { txHash, index }, identity });
+      await chain.awaitTx(r.txHash, 90_000);
+      console.log(`${id} ${r.action} tx ${r.txHash}`);
     } catch (e) {
-      console.error(`${id} reclaim FAILED:`, e instanceof Error ? e.message : String(e));
+      console.error(`${id} recover FAILED:`, e instanceof Error ? e.message : String(e));
     }
   }
 

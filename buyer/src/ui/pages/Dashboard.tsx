@@ -62,6 +62,7 @@ const PIPER_DEMO_SUPPLIER: SupplierView = {
   current_escrow_ref: null,
   last_seen_iso: null,
   created_slot: 0,
+  agent_id: null,
 };
 
 // Synthetic free chat demo — same pattern as PIPER_DEMO_SUPPLIER. The
@@ -88,6 +89,7 @@ const KIMI_DEMO_SUPPLIER: SupplierView = {
   current_escrow_ref: null,
   last_seen_iso: null,
   created_slot: 0,
+  agent_id: null,
 };
 
 export default function Dashboard() {

@@ -72,8 +72,11 @@ COPY packages/shared ./packages/shared
 COPY buyer ./buyer
 # loadBlueprint at runtime reads contracts/marketplace/plutus.json to derive
 # the escrow script address + attach the spending validator script in
-# buildLiveTxForAccept. Same as the supplier image.
+# buildLiveTxForAccept. Same as the supplier image. loadIdentityBlueprint reads
+# contracts/identity-marketplace/plutus.json for the new escrow and advert
+# (both layouts during the drain, Part 2 §9.6).
 COPY contracts/marketplace/plutus.json ./contracts/marketplace/plutus.json
+COPY contracts/identity-marketplace/plutus.json ./contracts/identity-marketplace/plutus.json
 
 # Build the static UI into buyer/dist (Vite outDir is buyer/dist;
 # emptyOutDir:true is fine here because we run this exactly once).

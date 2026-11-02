@@ -41,6 +41,7 @@ import {
 import { Marketplace, MemoryTaskHistoryStore } from "../src/sdk/index.js";
 import { runAccept } from "../src/cli/acceptFlow.js";
 import { deriveWalletKey } from "../src/index.js";
+import { parseSwitchSlot } from "../src/config.js";
 
 ed.etc.sha512Sync = (...messages: Uint8Array[]): Uint8Array => {
   const h = createHash("sha512");
@@ -64,6 +65,10 @@ function loadDotEnv(path: string): Record<string, string> {
 }
 
 const env = loadDotEnv("/home/david/code/agents-marketplace/buyer/.env");
+// The shared tx builders read the identity blueprint and its reference script from process.env.
+for (const key of ["IDENTITY_POLICY_ID", "IDENTITY_ESCROW_REF_UTXO"]) {
+  if (env[key] && !process.env[key]) process.env[key] = env[key];
+}
 
 const ADVERT_REF_ACTIVE: OutputReference = {
   txHash: "9e9a86098c18cecf544d4c69e16ace850ab8c271a8bbea2facdaafc3be52701c",
@@ -110,6 +115,7 @@ const marketplace = new Marketplace({
   walletKey: wk,
   networkParams: { networkId: 1 },
   historyStore: new MemoryTaskHistoryStore(),
+  switchSlot: parseSwitchSlot(env.SWITCH_SLOT),
 });
 
 // ─── Hard-cap accounting ────────────────────────────────────────────────
@@ -293,6 +299,7 @@ async function attack_B2(): Promise<AttackResult> {
         advertRef: ADVERT_REF_ACTIVE,
         prompt_hash: promptHash(requestA),
         payment_lovelace: ADVERT_PRICE_LOVELACE,
+        ...(await marketplace.identity.postOptions()),
       });
       escrowRef = escrowResult.escrowOutputRef;
       await chain.awaitTx(escrowResult.expectedTxHash, 120_000);
@@ -349,7 +356,10 @@ async function attack_B5(): Promise<AttackResult> {
   const expected = "TxConstructionError 'payment must equal advertised price' (postEscrow.ts:96) — build-time rejection, no chain spend.";
   try {
     const request = responseRequest("B5 probe");
-    await buildPostEscrowTx({ chain, buyerKey: wk, advertRef: ADVERT_REF_ACTIVE, prompt_hash: promptHash(request), payment_lovelace: 1_000_000n });
+    await buildPostEscrowTx({
+      chain, buyerKey: wk, advertRef: ADVERT_REF_ACTIVE, prompt_hash: promptHash(request), payment_lovelace: 1_000_000n,
+      ...(await marketplace.identity.postOptions()),
+    });
     return { id, category: "B", what, expected, what_happened: "builder accepted underpayment — GAP", verdict: "GAP", evidence: "buildPostEscrowTx succeeded with payment=1_000_000 vs advert.price=5_000_000" };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -390,6 +400,7 @@ async function attack_C2(): Promise<AttackResult> {
       advertRef: ADVERT_REF_ACTIVE,
       prompt_hash: promptHash(request),
       payment_lovelace: ADVERT_PRICE_LOVELACE,
+      ...(await marketplace.identity.postOptions()),
     });
     counters.escrowsPosted += 1;
     await chain.awaitTx(escrowResult.expectedTxHash, 120_000);
@@ -514,6 +525,7 @@ async function attack_D3(): Promise<AttackResult> {
       advertRef: ADVERT_REF_ACTIVE,
       prompt_hash: promptHash(request),
       payment_lovelace: ADVERT_PRICE_LOVELACE,
+      ...(await marketplace.identity.postOptions()),
     });
     counters.escrowsPosted += 1;
     await chain.awaitTx(escrowResult.expectedTxHash, 120_000);
@@ -542,7 +554,10 @@ async function attack_D4(): Promise<AttackResult> {
   const expected = "Builder rejects because advert UTxO is no longer on chain — chain.queryUtxo returns null.";
   try {
     const request = responseRequest("D4 probe");
-    await buildPostEscrowTx({ chain, buyerKey: wk, advertRef: ADVERT_REF_RETIRED, prompt_hash: promptHash(request), payment_lovelace: ADVERT_PRICE_LOVELACE });
+    await buildPostEscrowTx({
+      chain, buyerKey: wk, advertRef: ADVERT_REF_RETIRED, prompt_hash: promptHash(request), payment_lovelace: ADVERT_PRICE_LOVELACE,
+      ...(await marketplace.identity.postOptions()),
+    });
     return { id, category: "D", what, expected, what_happened: "builder accepted post against retired advert", verdict: "GAP", evidence: `retired_advert=${ADVERT_REF_RETIRED.txHash}#${ADVERT_REF_RETIRED.index}` };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
