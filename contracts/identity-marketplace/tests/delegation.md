@@ -57,6 +57,7 @@ Positive controls: `delegate_by_principal_key`, `delegate_by_agent_controller`, 
 | … not at the exact escrow address | `pay_escrow_with_stake_credential`, `pay_escrow_at_other_script` |
 | … above the cap | `pay_escrow_above_cap` (control `pay_escrow_at_cap`) |
 | … not fully funded | `pay_escrow_not_fully_funded`, `pay_escrows_hold_less_than_amount` |
+| … with more AP3X than payment + bonds (decision 11) | `pay_escrow_value_above_job`, `pay_escrow_value_far_above_job` (controls: every passing Pay, whose escrows hold exactly the job) |
 | … with `deliver_by` beyond 7 days | `pay_escrow_deliver_by_beyond_7_days` (control `pay_escrow_deliver_by_at_7_days`) |
 | … without the vault refund | `pay_escrow_without_vault_refund`, `pay_escrow_refund_to_owner_key`, `pay_escrow_refund_for_other_owner`, `pay_escrow_refund_with_live_datum` |
 | … with another buyer key | `pay_escrow_other_buyer_key` |
@@ -84,8 +85,8 @@ A depth-4 delegation chain (root delegator agent 0; 4 delegations and 5 identity
 
 | Test | Traces off (`aiken check -t silent`): memory / CPU | Traces on (default): memory / CPU |
 |---|---|---|
-| `pay_depth_4_chain_three_escrows` | 3,671,038 / 1,228,096,142 | 4,324,662 / 1,400,516,366 |
-| `pay_depth_4_chain_five_escrows` | 4,018,094 / 1,368,744,180 | 4,773,118 / 1,568,244,854 |
+| `pay_depth_4_chain_three_escrows` | 3,671,038 / 1,228,121,630 | 4,324,662 / 1,400,541,854 |
+| `pay_depth_4_chain_five_escrows` | 4,018,094 / 1,368,786,660 | 4,773,118 / 1,568,287,334 |
 | `pay_depth_4_fixture_only` | 573,259 / 164,087,723 | 573,259 / 164,087,723 |
 
 The ledger limits are 16,000,000 memory units and 10,000,000,000 CPU units per transaction (the shared code uses 14,000,000 memory units for Vector). A Pay transaction runs no other script (the vault input is the only script input, and the transaction has no mint).
@@ -102,3 +103,4 @@ The ledger limits are 16,000,000 memory units and 10,000,000,000 CPU units per t
 8. **Close** has no time rule and no status check (§5.3 lists none). An agent owner closes only with its controller key, as §5.3 says; a listed delegation key is not enough (`close_agent_by_delegation_key`).
 9. **Datum limits.** Besides the datum comments of §5.2: times are in `[0, 253,402,300,799,999]`, `0 ≤ per_tx`, `period_ms < 2^63`, `parent` and `purpose` 32 bytes, `delegate` and an `Agent` identifier 32 bytes, `delegate_key` and a `PrincipalKey` hash 28 bytes, an organisation 1..64 bytes. Duplicate patterns are allowed.
 10. **Spend redeemer.** The spend handler of the delegation contract takes `DelegationMint` as its redeemer and accepts only `Undelegate`. It also requires the burn of the token of the spent output, so the mint handler runs with `Undelegate`.
+11. **Exact job (decision of 2026-11-02, review R2 LOW-1).** Each escrow output of a Pay holds exactly payment + buyer bond + supplier bond, not at least that amount. Accept and Release check only the job amounts, so with this rule the whole escrow value follows the escrow rules, and a refund returns all of it to `VA`. Builders put a min-UTxO top-up into the buyer bond. Tests: `pay_escrow_value_above_job`, `pay_escrow_value_far_above_job`; both fail with the earlier rule. `pay_escrow_negative_bond` now uses a job equal to the output's AP3X, so that only the negative bond rejects it.

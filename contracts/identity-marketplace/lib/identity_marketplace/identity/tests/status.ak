@@ -264,14 +264,54 @@ test revoke_reason_1_with_invalid_from() {
   }
 }
 
-test revoke_invalid_from_before_created_at() fail {
-  let d = base()
+/// A record that a Register with the range `[lo - 10 min, lo + 50 min]` made:
+/// `created_at = lo + 50 min`, after the `lo` of a revocation at once after
+/// the creation.
+fn just_created() -> IdentityDatum {
+  IdentityDatum { ..base(), created_at: lo + 3_000_000 }
+}
+
+/// Reason 1 at once after the creation, with `invalid_from = lo` (before
+/// `created_at`): by the controller and by an Accountable Party.
+test revoke_key_compromise_right_after_creation() {
+  let d = just_created()
+  and {
+    spend(
+      Revoke { actor: ByController },
+      to_tombstone(
+        d,
+        revoked(ControllerSet, 1, Some(lo), None),
+        [hash(controller)],
+      ),
+    ),
+    spend(
+      Revoke { actor: ByParty { index: 1 } },
+      to_tombstone(d, revoked(signer(1), 1, Some(lo), None), [pkh(1)]),
+    ),
+  }
+}
+
+/// The lower bound of `invalid_from`: `created_at - max_range_ms`.
+test revoke_invalid_from_one_hour_before_created_at() {
+  let d = just_created()
   spend(
-    Revoke { actor: ByController },
+    Revoke { actor: ByParty { index: 1 } },
     to_tombstone(
       d,
-      revoked(ControllerSet, 1, Some(d.created_at - 1), None),
-      [hash(controller)],
+      revoked(signer(1), 1, Some(d.created_at - max_range_ms), None),
+      [pkh(1)],
+    ),
+  )
+}
+
+test revoke_invalid_from_over_one_hour_before_created_at() fail {
+  let d = just_created()
+  spend(
+    Revoke { actor: ByParty { index: 1 } },
+    to_tombstone(
+      d,
+      revoked(signer(1), 1, Some(d.created_at - max_range_ms - 1), None),
+      [pkh(1)],
     ),
   )
 }

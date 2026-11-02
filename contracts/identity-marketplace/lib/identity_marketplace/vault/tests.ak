@@ -459,6 +459,19 @@ test pay_escrow_not_fully_funded() fail {
   )
 }
 
+/// Decision of 2026-11-02: the escrow output holds exactly payment + buyer
+/// bond + supplier bond. Here the output holds 1 base unit more than the job.
+test pay_escrow_value_above_job() fail {
+  pay1_escrow(
+    escrow1(EscrowDatum { ..job1(), payment_lovelace: 38 * ap3x - 1 }),
+  )
+}
+
+/// The same with a job of 3 AP3X in an output of 40 AP3X.
+test pay_escrow_value_far_above_job() fail {
+  pay1_escrow(escrow1(EscrowDatum { ..job1(), payment_lovelace: ap3x }))
+}
+
 /// §12.1 Vault: pay to an escrow with `deliver_by` beyond 7 days.
 test pay_escrow_deliver_by_beyond_7_days() fail {
   pay1_escrow(escrow1(EscrowDatum { ..job1(), deliver_by: hi + days_7_ms + 1 }))
@@ -535,13 +548,14 @@ test pay_escrow_with_datum_hash() fail {
   )
 }
 
-/// Decision: a negative payment or bond does not count against the cap.
+/// Decision: a negative payment or bond does not count against the cap. The
+/// job equals the output's AP3X, so only the negative bond makes it fail.
 test pay_escrow_negative_bond() fail {
   pay1_escrow(
     escrow1(
       EscrowDatum {
         ..job1(),
-        payment_lovelace: 48 * ap3x,
+        payment_lovelace: 49 * ap3x,
         buyer_bond_lovelace: -10 * ap3x,
       },
     ),

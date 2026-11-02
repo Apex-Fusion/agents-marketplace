@@ -8,7 +8,7 @@ use cardano/address.{Credential}
 use cardano/transaction.{InlineDatum, Input, Output}
 use identity_marketplace/common.{ap3x_and_token, ap3x_of, key_signed}
 use identity_marketplace/identity/datum.{valid_datum}
-use vector_identity.{find_record, right_recover}
+use vector_identity.{find_record, max_range_ms, right_recover}
 use vector_identity/types.{
   Accountable, ControllerSet, Guardian, Hold, IdentityDatum, KeyHash, Party,
   Retired, Revoked, Root, Signer, Status,
@@ -169,7 +169,13 @@ pub fn reason_ok(
 }
 
 /// `invalid_from` of a revocation (Part 2 §3.7): empty or in
-/// `[created_at, lo]`; reason 1 (`keyCompromise`) requires it.
+/// `[created_at - max_range_ms, lo]`; reason 1 (`keyCompromise`) requires it.
+///
+/// `created_at` is the upper bound of the creating transaction's range, so the
+/// block that created the record can be up to `max_range_ms` earlier. The
+/// lower bound `created_at - max_range_ms` is at or before that block. Thus a
+/// key-compromise revocation is possible at once after creation, and it can
+/// cover every signature from the creating block on.
 pub fn invalid_from_ok(
   invalid_from: Option<Int>,
   reason: Int,
@@ -178,7 +184,7 @@ pub fn invalid_from_ok(
 ) -> Bool {
   when invalid_from is {
     None -> reason != reason_key_compromise
-    Some(t) -> created_at <= t && t <= lo
+    Some(t) -> created_at - max_range_ms <= t && t <= lo
   }
 }
 

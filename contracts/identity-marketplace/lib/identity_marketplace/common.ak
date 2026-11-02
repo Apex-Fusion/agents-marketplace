@@ -158,6 +158,24 @@ pub fn value_kept(input: Value, output: Value) -> Bool {
   }
 }
 
+/// True when `outputs` together hold at least the quantity of every asset of
+/// `due`, AP3X included.
+pub fn outputs_hold(outputs: List<Output>, due: Value) -> Bool {
+  assets.reduce(
+    due,
+    True,
+    fn(policy, name, quantity, ok) {
+      ok && list.foldl(
+        outputs,
+        0,
+        fn(output, total) {
+          total + assets.quantity_of(output.value, policy, name)
+        },
+      ) >= quantity
+    },
+  )
+}
+
 /// True when the value holds AP3X and exactly one other token: `(policy, name)`
 /// with quantity 1.
 pub fn ap3x_and_token(value: Value, policy: ByteArray, name: ByteArray) -> Bool {
@@ -173,21 +191,6 @@ pub fn ap3x_paid_to_key(outputs: List<Output>, pkh: VerificationKeyHash) -> Int 
     0,
     fn(output, total) {
       if output.address.payment_credential == VerificationKey(pkh) {
-        total + assets.lovelace_of(output.value)
-      } else {
-        total
-      }
-    },
-  )
-}
-
-/// The AP3X in outputs at exactly `address`, with any datum.
-pub fn ap3x_paid_to_address(outputs: List<Output>, address: Address) -> Int {
-  list.foldl(
-    outputs,
-    0,
-    fn(output, total) {
-      if output.address == address {
         total + assets.lovelace_of(output.value)
       } else {
         total
@@ -659,21 +662,6 @@ test ap3x_paid_to_key_any_stake() {
   ap3x_paid_to_key(outputs, test_pkh) == 3_000_000
 }
 
-test ap3x_paid_to_address_exact() {
-  let target = address.from_verification_key(test_pkh)
-  let outputs =
-    [
-      output_to(target, 1_000_000, transaction.NoDatum),
-      output_to(target, 2_000_000, InlineDatum(1)),
-      output_to(
-        target |> address.with_delegation_key(test_other_pkh),
-        4_000_000,
-        transaction.NoDatum,
-      ),
-    ]
-  ap3x_paid_to_address(outputs, target) == 3_000_000
-}
-
 test ap3x_paid_to_address_with_datum_exact() {
   let target = staked_script_address(test_script_hash)
   let outputs =
@@ -691,6 +679,39 @@ test ap3x_paid_to_address_with_datum_exact() {
   and {
     ap3x_paid_to_address_with_datum(outputs, target, InlineDatum(1)) == 17_000_000,
     ap3x_paid_to_address_with_datum(outputs, target, transaction.NoDatum) == 4_000_000,
+  }
+}
+
+test outputs_hold_cases() {
+  let target = address.from_verification_key(test_pkh)
+  let paid =
+    fn(value) { Output { ..output_to(target, 0, InlineDatum(1)), value } }
+  let due = token_value(10_000_000, 2)
+  and {
+    // One output, or the sum over several outputs.
+    outputs_hold([paid(due)], due),
+    outputs_hold(
+      [paid(token_value(4_000_000, 1)), paid(token_value(6_000_000, 1))],
+      due,
+    ),
+    outputs_hold(
+      [
+        paid(
+          token_value(10_000_001, 3)
+            |> assets.add(test_other_script_hash, #"01", 1),
+        ),
+      ],
+      due,
+    ),
+    // Short of AP3X or of a token.
+    !outputs_hold([paid(token_value(9_999_999, 2))], due),
+    !outputs_hold([paid(token_value(10_000_000, 1))], due),
+    !outputs_hold([paid(assets.from_lovelace(20_000_000))], due),
+    !outputs_hold([], due),
+    // AP3X only.
+    outputs_hold([paid(assets.from_lovelace(5))], assets.from_lovelace(5)),
+    !outputs_hold([paid(assets.from_lovelace(4))], assets.from_lovelace(5)),
+    outputs_hold([], assets.zero),
   }
 }
 

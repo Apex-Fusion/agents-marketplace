@@ -158,7 +158,7 @@ The other verdict rules (verdict mint and burn, `until` = the later of `lo + dur
 | A successor without consent | S `revoke_successor_without_consent`, `retire_successor_without_consent`, `set_successor_without_consent` |
 | A successor that is the record itself, a subagent or a tombstone | S `revoke_successor_is_record_itself`, `revoke_successor_is_subagent`, `revoke_successor_is_tombstone`, `revoke_successor_missing`, `set_successor_is_record_itself`, `set_successor_is_tombstone` |
 | Reason 1 without `invalid_from` | S `revoke_reason_1_without_invalid_from` (passes with it: `revoke_reason_1_with_invalid_from`) |
-| `invalid_from` before `created_at` | S `revoke_invalid_from_before_created_at`, `revoke_invalid_from_after_lo` |
+| `invalid_from` before `created_at` (rule of 2026-11-02: before `created_at − max_range_ms`, see Decision 12) | S `revoke_invalid_from_over_one_hour_before_created_at`, `revoke_invalid_from_after_lo` (passes at the bound: `revoke_invalid_from_one_hour_before_created_at`) |
 | A reason not allowed for the action | S `revoke_reason_not_allowed`, H `suspend_reason_not_allowed` |
 | Must pass: SetSuccessor by the controller after a party revocation | S `set_successor_after_party_revocation` |
 | Tombstone form and other rules | S `revoke_keeps_keys`, `revoke_changes_name`, `revoke_at_not_lo`, `revoke_by_other_than_author`, `retire_at_not_lo`, `retire_not_tombstone`, `reclaim_changes_datum`, `reclaim_back_to_live_status`, `reclaim_of_live_record`, `set_successor_changes_other_status_field`, `set_successor_to_none`, `set_successor_of_live_record`, `tombstone_back_to_live_by_set_successor`, `tombstone_kit_matches_rules` |
@@ -228,7 +228,7 @@ Every action has at least one positive test. These tests also cover the rules of
 | ChangeController | C `change_controller`, `change_controller_cancels_pending_recovery`, `change_controller_keeps_holds` | C `change_controller_lifts_holds`, `change_controller_changes_other_field` |
 | Suspend | H `suspend_by_controller`, `suspend_by_party` | H `suspend_by_party_without_signature` |
 | Unsuspend | H `unsuspend_by_author`, `unsuspend_controller_hold` | see the Holds table |
-| Revoke | S `revoke_by_controller`, `revoke_by_controller_with_successor`, `revoke_by_accountable_party`, `revoke_while_suspended_ends_holds`, `revoke_every_allowed_reason` | S `revoke_by_party_without_revoke_right`, `revoke_by_responsible_party`, `revoke_by_provider`, `revoke_by_party_without_signature` |
+| Revoke | S `revoke_by_controller`, `revoke_by_controller_with_successor`, `revoke_by_accountable_party`, `revoke_while_suspended_ends_holds`, `revoke_every_allowed_reason`, `revoke_key_compromise_right_after_creation` | S `revoke_by_party_without_revoke_right`, `revoke_by_responsible_party`, `revoke_by_provider`, `revoke_by_party_without_signature` |
 | Retire | S `retire_by_controller`, `retire_with_successor` | see the Statuses table |
 | Reclaim | S `reclaim_after_party_revocation`, `reclaim_keeps_whole_deposit` | see the Value table |
 | SetSuccessor | S `set_successor_after_controller_revocation`, `set_successor_after_retire` | see the Statuses table |
@@ -262,7 +262,7 @@ The largest record: 8 keys (5 Ed25519 with every purpose, 3 P-256 with `pop`), 8
 | `bench_suspend_largest` (key party renews its hold) | 4,009,069 | 1,470,339,936 |
 | `bench_suspend_by_module1_largest` | 4,023,033 | 1,480,923,961 |
 | `bench_unsuspend_largest` | 3,820,798 | 1,391,056,424 |
-| `bench_revoke_largest` (controller, reason 1, successor) | 1,740,307 | 567,006,903 |
+| `bench_revoke_largest` (controller, reason 1, successor) | 1,740,709 | 567,172,111 |
 | `bench_revoke_by_module1_largest` | 1,194,735 | 397,780,863 |
 | `bench_retire_largest` (successor) | 1,637,228 | 531,853,629 |
 | `bench_reclaim_largest` | 433,914 | 153,209,931 |
@@ -287,6 +287,7 @@ The highest case uses 39% of the memory limit and 20% of the CPU limit.
 9. **Guardians with distinct signers.** A valid datum has no two parties with the same role and signer, so the guardian bound counts parties, and RecoverInit/RecoverCancel check distinct signers (which also makes the indices distinct).
 10. **Checks for every redeemer come before the redeemer branch.** The window (`lo`, `hi`, at most one hour), the identity input count, the own-policy mint, the record output and `D'.created_at = D.created_at` are evaluated before the action branch, so the optimizer cannot move them into some branches only. Each action has its own over-one-hour test.
 11. **`config_seal` output value.** The output that holds the token must be at the exact holder address with the 28-byte inline datum. The seal does not limit the other assets of that output; the spec does not ask for it.
+12. **Lower bound of `invalid_from` (decision of 2026-11-02, review R1 L-1).** `invalid_from` is empty or in `[created_at − max_range_ms, lo]`, not `[created_at, lo]`. `created_at` is the upper bound of the creating transaction's range, so the creating block can be up to one hour earlier. With the old bound, no key-compromise revocation was possible while `lo < created_at`, and signatures between the creating block and `created_at` stayed valid. Tests: S `revoke_key_compromise_right_after_creation` (reason 1 with `invalid_from = lo` at once after the creation, by the controller and by an Accountable Party) and `revoke_invalid_from_one_hour_before_created_at` pass, and both fail with the old bound; `revoke_invalid_from_over_one_hour_before_created_at` fails (it replaces `revoke_invalid_from_before_created_at`).
 
 ## Requests to other slices
 

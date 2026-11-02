@@ -1228,6 +1228,140 @@ test refund_revoked_rejects_wrong_refund_address_or_datum() {
   }
 }
 
+// ## Full refund: every asset of the escrow input
+//
+// Decision of 2026-11-02: in the two paths that anybody can submit (Reclaim
+// with `refund`, and RefundRevoked), the buyer payouts also carry every
+// non-AP3X asset of the escrow input. The paths that the buyer signs keep the
+// AP3X-only payout rules.
+
+/// AP3X and `quantity` units of a token.
+fn with_token(lovelace: Int, quantity: Int) -> assets.Value {
+  assets.from_lovelace(lovelace)
+    |> assets.add(other_script_hash, "token", quantity)
+}
+
+/// An output of `stranger_pkh` with `quantity` units of the token.
+fn token_to_stranger(quantity: Int) -> Output {
+  output_at(key_address(stranger_pkh), with_token(1_500_000, quantity), NoDatum)
+}
+
+/// An output at the vault refund address with the refund datum.
+fn at_vault_refund(value: assets.Value) -> Output {
+  output_at(vault_refund().address, value, InlineDatum(vault_returned_datum()))
+}
+
+/// An output at the enterprise address of the buyer key, without a datum.
+fn at_buyer_key(value: assets.Value) -> Output {
+  output_at(key_address(buyer_pkh), value, NoDatum)
+}
+
+/// Reclaim with the vault refund; the escrow input holds `locked_ap3x` and
+/// one token.
+fn reclaim_refund_with_token(outputs: List<Output>) -> Case {
+  with_input_value(reclaim_refund_case(), with_token(locked_ap3x, 1))
+    |> with_outputs(outputs)
+}
+
+/// RefundRevoked without `refund`; the escrow input holds `locked_ap3x` and
+/// one token.
+fn refund_revoked_with_token(outputs: List<Output>) -> Case {
+  with_input_value(refund_revoked_case(), with_token(locked_ap3x, 1))
+    |> with_outputs(outputs)
+}
+
+/// RefundRevoked with the vault refund; the escrow input holds `locked_ap3x`
+/// and one token.
+fn refund_revoked_vault_with_token(outputs: List<Output>) -> Case {
+  let datum = with_refund(claimed_datum(), vault_refund())
+  refund_revoked_case_with(datum, tombstone(revoked(None)))
+    |> with_input_value(with_token(locked_ap3x, 1))
+    |> with_outputs(outputs)
+}
+
+test reclaim_with_refund_rejects_token_to_other_output() {
+  // The refund address gets all the AP3X, and another output takes the token.
+  !run(
+    reclaim_refund_with_token(
+      [at_vault_refund(locked_value()), token_to_stranger(1)],
+    ),
+  )
+}
+
+test reclaim_with_refund_returns_token() {
+  run(reclaim_refund_with_token([at_vault_refund(with_token(locked_ap3x, 1))]))
+}
+
+test reclaim_with_refund_token_in_second_refund_output() {
+  // The refund outputs count together.
+  run(
+    reclaim_refund_with_token(
+      [
+        at_vault_refund(assets.from_lovelace(locked_ap3x - 1_500_000)),
+        at_vault_refund(with_token(1_500_000, 1)),
+      ],
+    ),
+  )
+}
+
+test reclaim_with_refund_rejects_token_without_refund_datum() {
+  // At the refund address, only outputs with the refund datum count.
+  !run(
+    reclaim_refund_with_token(
+      [
+        at_vault_refund(locked_value()),
+        output_at(vault_refund().address, with_token(1_500_000, 1), NoDatum),
+      ],
+    ),
+  )
+}
+
+test refund_revoked_rejects_token_to_other_output() {
+  !run(
+    refund_revoked_with_token(
+      [pkh_output(buyer_pkh, locked_ap3x), token_to_stranger(1)],
+    ),
+  )
+}
+
+test refund_revoked_returns_token() {
+  run(refund_revoked_with_token([at_buyer_key(with_token(locked_ap3x, 1))]))
+}
+
+test refund_revoked_with_refund_rejects_token_to_other_output() {
+  !run(
+    refund_revoked_vault_with_token(
+      [at_vault_refund(locked_value()), token_to_stranger(1)],
+    ),
+  )
+}
+
+test refund_revoked_with_refund_returns_token() {
+  run(
+    refund_revoked_vault_with_token(
+      [at_vault_refund(with_token(locked_ap3x, 1))],
+    ),
+  )
+}
+
+test refund_revoked_rejects_part_of_token_quantity() {
+  let case = with_input_value(refund_revoked_case(), with_token(locked_ap3x, 2))
+  and {
+    !run(
+      with_outputs(
+        case,
+        [at_buyer_key(with_token(locked_ap3x, 1)), token_to_stranger(1)],
+      ),
+    ),
+    run(with_outputs(case, [at_buyer_key(with_token(locked_ap3x, 2))])),
+  }
+}
+
+test reclaim_without_refund_counts_ap3x_only() {
+  // The buyer signs this path, so the legacy rule stays: AP3X only.
+  run(with_input_value(reclaim_case(), with_token(locked_ap3x, 1)))
+}
+
 // ## The record condition of RefundRevoked
 
 test refund_allowed_by_state_and_status() {

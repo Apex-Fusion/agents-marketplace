@@ -195,8 +195,13 @@ fn escrow_total(
 /// escrow datum (§6.1) with state Open, `submitted_at = None`,
 /// `result_receipt_hash = None`, `buyer_pkh = buyer` (the delegate key), the
 /// vault refund, `0 <= payment, buyer bond, supplier bond`, payment + buyer
-/// bond + supplier bond at most 10,000 AP3X and at most the output's AP3X, and
+/// bond + supplier bond at most 10,000 AP3X and exactly the output's AP3X, and
 /// `deliver_by <= hi + 7 days`.
+///
+/// The job equals the output's AP3X (decision of 2026-11-02): Accept and
+/// Release check only the job amounts, so with this rule the whole escrow
+/// value follows the escrow rules, and a refund returns all of it to `VA`.
+/// Builders put a min-UTxO top-up into the buyer bond.
 fn valid_escrow_output(
   output: Output,
   buyer: ByteArray,
@@ -219,7 +224,7 @@ fn valid_escrow_output(
     escrow.buyer_bond_lovelace >= 0,
     escrow.supplier_bond_lovelace >= 0,
     job <= max_job_ap3x,
-    job <= ap3x_of(output.value),
+    job == ap3x_of(output.value),
     escrow.deliver_by <= hi + days_7_ms,
   }
 }

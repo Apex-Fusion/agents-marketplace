@@ -20,13 +20,13 @@ use aiken/collection/list
 use aiken/primitive/bytearray
 use cardano/address
 use cardano/transaction.{
-  InlineDatum, NoDatum, Output, OutputReference, Transaction,
+  Datum, InlineDatum, NoDatum, Output, OutputReference, Transaction,
 }
 use identity_marketplace/common.{
-  Window, accept_window_ms, after_or_at, ap3x_of, ap3x_paid_to_address,
+  Window, accept_window_ms, after_or_at, ap3x_of,
   ap3x_paid_to_address_with_datum, ap3x_paid_to_key, before_or_at,
-  count_script_inputs, no_mint_withdrawal_certificate_vote_proposal, signed_by,
-  window,
+  count_script_inputs, no_mint_withdrawal_certificate_vote_proposal, outputs_at,
+  outputs_hold, signed_by, window,
 }
 use identity_marketplace/types.{
   Accept, Claim, Claimed, EscrowDatum, EscrowRedeemer, Open, Reclaim, Refund,
@@ -160,7 +160,7 @@ pub fn accept(datum: EscrowDatum, tx: Transaction) -> Bool {
 /// Reclaim (Open or Claimed to Reclaimed, terminal), at or after
 /// `deliver_by`. Without `refund`, the buyer signs and the buyer payouts are
 /// at least payment + buyer bond + supplier bond. With `refund`, anybody can
-/// submit it, and the buyer payouts are a full refund.
+/// submit it, and the buyer payouts are a full refund (`full_refund`).
 pub fn reclaim(datum: EscrowDatum, own: Output, tx: Transaction) -> Bool {
   and {
     datum.state == Open || datum.state == Claimed,
@@ -170,7 +170,7 @@ pub fn reclaim(datum: EscrowDatum, own: Output, tx: Transaction) -> Bool {
           signed_by(tx.extra_signatories, datum.buyer_pkh),
           buyer_payouts(datum, tx.outputs) >= datum.payment_lovelace + datum.buyer_bond_lovelace + datum.supplier_bond_lovelace,
         }
-      Some(_) -> buyer_payouts(datum, tx.outputs) >= ap3x_of(own.value)
+      Some(_) -> full_refund(datum, own, tx.outputs)
     },
   }
 }
@@ -190,7 +190,8 @@ pub fn release(datum: EscrowDatum, tx: Transaction) -> Bool {
 }
 
 /// RefundRevoked: anybody, before or after `deliver_by`, when the agent's
-/// record allows it (`refund_allowed`). The buyer payouts are a full refund.
+/// record allows it (`refund_allowed`). The buyer payouts are a full refund
+/// (`full_refund`).
 pub fn refund_revoked(
   identity_hash: ByteArray,
   datum: EscrowDatum,
@@ -200,10 +201,41 @@ pub fn refund_revoked(
   when find_record(tx.reference_inputs, identity_hash, datum.agent_id) is {
     Some(record) -> and {
         refund_allowed(datum, record.status),
-        revoked_buyer_payouts(datum, tx.outputs) >= ap3x_of(own.value),
+        full_refund(datum, own, tx.outputs),
       }
     None -> False
   }
+}
+
+/// Rule 6 (full refund) of the two paths that anybody can submit: Reclaim
+/// with `refund`, and RefundRevoked. The buyer payouts hold at least the AP3X
+/// of the escrow input `own` and also every other asset of it (decision of
+/// 2026-11-02), so that every asset of the escrow returns to the buyer side.
+///
+/// The buyer payouts (rule 5): with `refund`, the outputs at exactly
+/// `refund.address` with the refund datum (`refund_datum`); without `refund`
+/// (RefundRevoked only), the outputs at the enterprise address of
+/// `buyer_pkh`, with any datum.
+pub fn full_refund(
+  datum: EscrowDatum,
+  own: Output,
+  outputs: List<Output>,
+) -> Bool {
+  let paid =
+    when datum.refund is {
+      Some(refund) -> {
+        let expected = refund_datum(refund)
+        list.filter(
+          outputs,
+          fn(output) {
+            output.address == refund.address && output.datum == expected
+          },
+        )
+      }
+      None ->
+        outputs_at(outputs, address.from_verification_key(datum.buyer_pkh))
+    }
+  outputs_hold(paid, own.value)
 }
 
 /// The record condition of RefundRevoked, from the status of the agent's
@@ -235,39 +267,28 @@ pub fn supplier_payouts(datum: EscrowDatum, outputs: List<Output>) -> Int {
   ap3x_paid_to_key(outputs, datum.supplier_pkh)
 }
 
-/// Rule 5 for Accept and Reclaim: the AP3X at the refund address with the
-/// refund datum when `refund` is set, else the AP3X in outputs whose payment
-/// credential is `VerificationKey(buyer_pkh)`.
+/// Rule 5 for Accept, and for Reclaim without `refund`: the AP3X at the
+/// refund address with the refund datum when `refund` is set, else the AP3X in
+/// outputs whose payment credential is `VerificationKey(buyer_pkh)`.
 pub fn buyer_payouts(datum: EscrowDatum, outputs: List<Output>) -> Int {
   when datum.refund is {
-    Some(refund) -> refund_payouts(refund, outputs)
+    Some(refund) ->
+      ap3x_paid_to_address_with_datum(
+        outputs,
+        refund.address,
+        refund_datum(refund),
+      )
     None -> ap3x_paid_to_key(outputs, datum.buyer_pkh)
   }
 }
 
-/// Rule 5 for RefundRevoked: as `buyer_payouts`, but without `refund` only
-/// outputs at the enterprise address of `buyer_pkh` count.
-pub fn revoked_buyer_payouts(datum: EscrowDatum, outputs: List<Output>) -> Int {
-  when datum.refund is {
-    Some(refund) -> refund_payouts(refund, outputs)
-    None ->
-      ap3x_paid_to_address(
-        outputs,
-        address.from_verification_key(datum.buyer_pkh),
-      )
+/// The datum of a buyer payout when `refund` is set: no datum when
+/// `refund.datum` is `None`, or the inline datum `d` when it is `Some(d)`.
+fn refund_datum(refund: Refund) -> Datum {
+  when refund.datum is {
+    Some(data) -> InlineDatum(data)
+    None -> NoDatum
   }
-}
-
-/// The AP3X in outputs at exactly `refund.address`: with no datum when
-/// `refund.datum` is `None`, or with the inline datum `d` when it is
-/// `Some(d)`.
-fn refund_payouts(refund: Refund, outputs: List<Output>) -> Int {
-  let datum =
-    when refund.datum is {
-      Some(data) -> InlineDatum(data)
-      None -> NoDatum
-    }
-  ap3x_paid_to_address_with_datum(outputs, refund.address, datum)
 }
 
 /// The value cap of Claim. Each amount must also be at least 0, so that a
