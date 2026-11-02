@@ -208,9 +208,6 @@
           "vectorOrigin": "native",
           "vectorProfile": {
             "createdAt": "2025-08-29T16:56:40Z",
-            "description": "",
-            "endpoint": "",
-            "framework": "",
             "name": "test-agent"
           },
           "vectorStatus": {

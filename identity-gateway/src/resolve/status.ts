@@ -158,7 +158,9 @@ export function evaluate(
     if (ended) return ended;
     if (terminal(i, "allConfirmed")) return { status: "suspended", reason: "deactivationPending" };
     if (i + 1 < chain.length && full(i + 1).status === "suspended") return { status: "suspended", reason: "parentSuspended" };
-    const moves = chain[i]!.tokenMoves.filter((m) => selectionOf(i).counts(m.at));
+    // Rule 6 reads only the counted token moves with a block time at or before t (with versionId,
+    // every transaction counts, but a move after the selected version does not describe it).
+    const moves = chain[i]!.tokenMoves.filter((m) => selectionOf(i).counts(m.at) && m.at.timeMs <= t);
     if (moves[moves.length - 1]?.place === "notAuthentic") return { status: "suspended", reason: "notAuthentic" };
     const { view } = state(i, "actual");
     if (view.kind === "identity") {

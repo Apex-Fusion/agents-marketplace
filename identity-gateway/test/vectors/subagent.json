@@ -209,7 +209,6 @@
             ],
             "createdAt": "2025-08-29T16:56:40Z",
             "description": "An agent for resolver tests.",
-            "endpoint": "",
             "framework": "vector-agent-template",
             "name": "test-agent"
           },

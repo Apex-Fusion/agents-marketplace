@@ -189,8 +189,10 @@ describe("effective status", () => {
       deactivated: true,
       versionId: "1",
       vectorStatus: { status: "revoked", effective: "revoked", by: keyHash(PARTY_KEY), reason: "affiliationChanged", at: formatTime(at) },
-      vectorProfile: { name: "test-agent", description: "", framework: "", endpoint: "", createdAt: formatTime(timeAt(100)) },
+      vectorProfile: { name: "test-agent", createdAt: formatTime(timeAt(100)) },
     });
+    // Part 1 Section 8.2: the empty description, framework and endpoint of a tombstone are left out.
+    expect(result.didDocumentMetadata.vectorProfile).toEqual({ name: "test-agent", createdAt: formatTime(timeAt(100)) });
     expect(result.didDocumentMetadata.vectorKeys).toBeUndefined();
     expect(result.didDocumentMetadata.vectorParties).toBeUndefined();
   });

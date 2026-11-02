@@ -183,6 +183,25 @@ describe("resolution options (Part 1 Section 7.1 step 2)", () => {
     expect(result.didResolutionMetadata).toEqual({ contentType: "application/did" });
     expect(result.didDocumentMetadata).toMatchObject({ deactivated: true, vectorStatus: { effective: "active" }, vectorCurrent: { effective: current } });
   });
+
+  test("versionId: a token move after the version time does not make that version notAuthentic (rule 6)", async () => {
+    const b = record();
+    b.update(ID, identityDatum({ name: new TextEncoder().encode("renamed") }), { height: 200 });
+    b.moveOut(ID, { height: 300 });
+    expect((await resolveIn(b, DID)).didDocumentMetadata.vectorStatus).toEqual({ status: "active", effective: "suspended", effectiveReason: "notAuthentic" });
+    for (const versionId of ["0", "1"]) {
+      const result = await resolveIn(b, DID, { versionId });
+      expect(result.didDocumentMetadata).toMatchObject({
+        versionId,
+        vectorStatus: { status: "active", effective: "active" },
+        vectorCurrent: { effective: "suspended", effectiveReason: "notAuthentic" },
+      });
+      expect(httpStatus(result)).toBe(200);
+    }
+    // versionTime counts only the moves before the requested time.
+    const before = await resolveIn(b, DID, { versionTime: formatTime(timeAt(299)) });
+    expect(before.didDocumentMetadata.vectorStatus).toEqual({ status: "active", effective: "active" });
+  });
 });
 
 describe("failed ledger reads (Part 1 Section 7.1)", () => {

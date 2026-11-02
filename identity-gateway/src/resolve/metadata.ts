@@ -1,6 +1,6 @@
-// DID document metadata (Part 1 Section 8.2). In every object, a member whose value is false, none
-// or an empty list is left out. Times are YYYY-MM-DDThh:mm:ssZ; text that is not valid UTF-8, or
-// that holds a surrogate or a noncharacter, is left out.
+// DID document metadata (Part 1 Section 8.2). In every object, a member whose value is false, none,
+// an empty string or an empty list is left out. Times are YYYY-MM-DDThh:mm:ssZ; text that is not
+// valid UTF-8, or that holds a surrogate or a noncharacter, is left out.
 
 import type { Party, Role, Signer, Status } from "../codec/identity-datum.js";
 import { keyHash } from "../codec/keys.js";
@@ -55,7 +55,7 @@ export interface VectorParty {
   readonly role: RoleName;
   readonly signer: string;
   readonly organisation?: string;
-  /** Set by domain linkage (Part 2 Section 8.6); never true here. */
+  /** From the stored facts: a background domain-linkage job verified the organisation (Part 2 Section 8.6). */
   readonly organisationVerified?: true;
   readonly rights?: readonly RightName[];
   readonly notBefore: string;
@@ -80,7 +80,7 @@ export interface VectorProfile {
   readonly description?: string;
   readonly framework?: string;
   readonly endpoint?: string;
-  /** Set by endpoint detection (Part 2 Section 8.5); not set here. */
+  /** From the stored facts: the protocol that background endpoint detection found (Part 2 Section 8.5). */
   readonly protocol?: "a2a" | "mcp" | "web";
   readonly capabilities?: readonly string[];
   readonly createdAt?: string;
@@ -161,9 +161,11 @@ const RIGHTS: ReadonlyArray<readonly [RightName, number]> = [
   ["recover", 4],
 ];
 
-/** Drops members that are undefined, null, false or an empty list (Part 1 Section 8.2). */
+/** Drops members that are undefined, null, false, an empty string or an empty list (Part 1 Section 8.2). */
 export function compact<T extends object>(value: T): T {
-  const kept = Object.entries(value).filter(([, v]) => v !== undefined && v !== null && v !== false && !(Array.isArray(v) && v.length === 0));
+  const kept = Object.entries(value).filter(
+    ([, v]) => v !== undefined && v !== null && v !== false && v !== "" && !(Array.isArray(v) && v.length === 0),
+  );
   // Same members minus the dropped ones; every dropped member is optional in the metadata types.
   return Object.fromEntries(kept) as T;
 }

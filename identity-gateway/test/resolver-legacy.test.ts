@@ -288,6 +288,31 @@ describe("adopted record", () => {
     expect(result.didDocument?.verificationMethod).toEqual([method(DID, LEGACY_OWNER)]);
   });
 
+  test("an unconfirmed adoption after pending legacy versions: those legacy versions reduce the view; the adoption waits", async () => {
+    const b = new LedgerBuilder();
+    b.legacyRegister(ID, legacyDatum(LEGACY_OWNER, { capabilities: [utf8("document-extraction"), utf8("ocr")] }), { height: 200, vkeys: [LEGACY_OWNER] });
+    const update = b.legacyUpdate(ID, legacyDatum(LEGACY_OWNER_2, { capabilities: [utf8("ocr")] }), { height: 980, vkeys: [LEGACY_OWNER] });
+    const adoption = b.adopt(ID, identityDatum({ createdAt: timeAt(990), capabilities: [utf8("document-extraction"), utf8("ocr")] }), {
+      height: 990,
+      vkeys: [LEGACY_OWNER_2, CONTROLLER],
+    });
+    const result = await resolveIn(b, DID);
+    expect(result.didDocumentMetadata).toMatchObject({
+      versionId: "0",
+      vectorOrigin: "adopted",
+      vectorPending: [update.txHash, adoption.txHash],
+      vectorProfile: { name: "Legacy Agent", capabilities: ["ocr"] },
+      vectorStatus: { status: "active", effective: "suspended", effectiveReason: "unaccountable" },
+    });
+    // The pending owner change removes the controller key; the adoption's controller does not count yet.
+    expect(result.didDocument).toEqual({ "@context": "https://www.w3.org/ns/did/v1.1", id: DID });
+    expect(result.didDocumentMetadata.vectorMetadataError).toBeUndefined();
+    b.tip(1030);
+    const confirmed = await resolveIn(b, DID);
+    expect(confirmed.didDocumentMetadata).toMatchObject({ versionId: "2", vectorStatus: { effective: "active" } });
+    expect(confirmed.didDocument?.capabilityInvocation).toEqual([ref(CONTROLLER)]);
+  });
+
   test("the legacy form of a native identity record is NOT_FOUND; the canonical form has no equivalentId", async () => {
     const b = new LedgerBuilder();
     b.register(ID, identityDatum(), { height: 100 });

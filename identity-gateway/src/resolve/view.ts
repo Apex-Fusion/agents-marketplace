@@ -156,8 +156,12 @@ function legacyView(base: Version, pending: readonly Version[]): LegacyView {
   if (base.content.kind !== "legacy") throw new Error("legacy view of an identity version");
   const { datum, datumError } = base.content;
   if (datum === null) return { kind: "legacy", owner: null, datumError, profile: null, endedAt: null };
-  // Adoption not yet confirmed: the view is the base alone.
-  const later = pending.some((v) => v.content.kind === "identity") ? [] : pending.map((v) => (v.content.kind === "legacy" ? v.content.datum : null));
+  // Adoption not yet confirmed: only the pending legacy versions before the adoption reduce the
+  // view; the adoption and the later versions wait for its confirmation. A pending end of the
+  // record, or a pending version without a readable datum, removes the controller key and every
+  // capability.
+  const adoption = pending.findIndex((v) => v.content.kind === "identity");
+  const later = (adoption < 0 ? pending : pending.slice(0, adoption)).map((v) => (v.content.kind === "legacy" ? v.content.datum : null));
   const sameOwner = later.every((d) => d !== null && d.owner.kind === datum.owner.kind && d.owner.hash === datum.owner.hash);
   return {
     kind: "legacy",
