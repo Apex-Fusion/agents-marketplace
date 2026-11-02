@@ -10,6 +10,8 @@
  */
 
 export { loadEscrowScript, loadAdvertScript } from "./internal/liveCbor.js";
+export type { RefUtxoEnvKey } from "./internal/liveCbor.js";
+export { loadIdentityEscrowScript, loadIdentityAdvertScript } from "./internal/liveIdentityCbor.js";
 export { pkhToEnterpriseAddress } from "./internal/pkhAddress.js";
 export type {
   LivePublishRefScriptsParams,

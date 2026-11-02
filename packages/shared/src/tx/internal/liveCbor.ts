@@ -10,8 +10,20 @@
  * for vkh enterprise). Input UTxOs may carry testnet-prefixed addresses — lucid
  * does not validate address network for inputs (only for outputs).
  *
- * Deferred builders: only updateAdvert remains on the synthetic testTxBody
- * path. postAdvert, retireAdvert, reclaim, and release all have live builders.
+ * Deferred builders: only the legacy updateAdvert remains on the synthetic
+ * testTxBody path. postAdvert, retireAdvert, reclaim, and release all have
+ * live builders.
+ *
+ * Two layouts (Part 2 §6.5, §9.6): the functions here build the legacy
+ * escrow and advert transactions. buildLiveTxForEscrow and
+ * buildLiveTxForAdvert also create the identity layout when the caller passes
+ * `target` (the new script address and the encoded datum). Spends of the
+ * identity layout are in liveIdentityCbor.ts, which reuses the helpers that
+ * this module exports. Its redeemers come from the IdentityEscrowDatum codec,
+ * which appends RefundRevoked (Constr 5) after Release.
+ *
+ * Validity ranges: every escrow transaction has hi − lo ≤ MAX_RANGE_MS
+ * (Part 2 §6.5), also the legacy PostEscrow and Claim.
  *
  * Catherine M1-F-4-green.
  */
@@ -20,7 +32,7 @@ import { readFileSync } from "fs";
 import { dirname, resolve } from "path";
 import { fileURLToPath } from "url";
 
-import { SLOT_CONFIG_NETWORK } from "@lucid-evolution/lucid";
+import { SLOT_CONFIG_NETWORK, validatorToScriptHash } from "@lucid-evolution/lucid";
 import type { LucidEvolution, UTxO as LucidUTxO, Script } from "@lucid-evolution/lucid";
 
 import type { OutputReference, Utxo } from "../../chain/ChainProvider.js";
@@ -43,13 +55,11 @@ import { loadBlueprint } from "../blueprint.js";
 import { pkhToEnterpriseAddress } from "./pkhAddress.js";
 import { OgmiosLucidProvider } from "../../chain/OgmiosLucidProvider.js";
 import { createLucidContext } from "./lucidContext.js";
-import { ACCEPT_WINDOW_MS } from "./constants.js";
+import { ACCEPT_WINDOW_MS, LOWER_BOUND_BACKPAD_MS, MAX_RANGE_MS, MIN_UTXO_LOVELACE } from "./constants.js";
+import { postWindow, vectorSlotClock } from "./window.js";
 
 // Mainnet network id used for all output addresses produced by the live path.
 const MAINNET_ID: 0 | 1 = 1;
-
-// Min UTxO floor for outputs (lovelace). 2 ADA matches the test's expectation.
-const MIN_UTXO_LOVELACE = 2_000_000n;
 
 // Redeemer Constr indices per contracts/marketplace/validators/escrow.ak +
 // lib/marketplace/types.ak EscrowRedeemer:
@@ -85,6 +95,8 @@ export interface LivePostEscrowParams {
   beforeSubmit?: (built: PostEscrowBuildResult) => Promise<void>;
   /** Wallet outputs that a submitted, unconfirmed transaction spends; never selected. */
   excludeInputs?: readonly OutputReference[];
+  /** Identity layout: the new escrow address and the encoded 16-field datum, used instead of the legacy ones. */
+  target?: { address: string; datumHex: string };
 }
 
 export interface LiveClaimParams {
@@ -148,6 +160,8 @@ export interface LivePostAdvertParams {
   advertDatum: AdvertDatum;
   deposit_lovelace: bigint;
   beforeSubmit?: (built: PostAdvertBuildResult) => Promise<void>;
+  /** Identity layout: the new advert address and the encoded 14-field datum, used instead of the legacy ones. */
+  target?: { address: string; datumHex: string };
 }
 
 export interface LiveRetireAdvertParams {
@@ -182,7 +196,7 @@ function encodeNullaryConstrHex(tag: number): string {
 
 /** Construct an OgmiosLucidProvider that shares the chain's Ogmios endpoint
  * and the chain's injected fetch (so test mocks see lucid's traffic). */
-function buildLucidProvider(chain: LiveOgmiosProvider): OgmiosLucidProvider {
+export function buildLucidProvider(chain: LiveOgmiosProvider): OgmiosLucidProvider {
   return new OgmiosLucidProvider({
     ogmiosUrl: chain.url,
     fetch: chain.fetchImpl,
@@ -269,16 +283,29 @@ function parseRefUtxoEnv(envKey: string): { txHash: string; outputIndex: number 
   return { txHash, outputIndex };
 }
 
+/** Env keys of the reference-script UTxOs. A spender holds the keys of both
+ *  escrows during the drain (Part 2 §6.5): ESCROW_REF_UTXO / ADVERT_REF_UTXO
+ *  for the legacy scripts, IDENTITY_ESCROW_REF_UTXO / IDENTITY_ADVERT_REF_UTXO
+ *  for the new ones. */
+export type RefUtxoEnvKey =
+  | "ESCROW_REF_UTXO"
+  | "ADVERT_REF_UTXO"
+  | "IDENTITY_ESCROW_REF_UTXO"
+  | "IDENTITY_ADVERT_REF_UTXO";
+
 /** Resolve script-witness mode for a spending tx.
  *  - If `<envKey>` is set, fetch the referenced UTxO and use CIP-33 reference-script mode.
  *    The caller threads the UTxO into `tx.readFrom([refUtxo])`; lucid-evolution 0.4.30
  *    auto-extracts `refUtxo.scriptRef` and registers it as a witness
  *    (dist/index.js:1903–1913). No `attach.SpendingValidator` call is needed.
+ *    With `expectedHash`, the reference script must hash to it (the identity
+ *    layout passes the hash of its applied script).
  *  - Otherwise, fall back to the inlined script (current behavior). */
-async function resolveSpendCtx(
+export async function resolveSpendCtx(
   lucid: LucidEvolution,
-  envKey: "ESCROW_REF_UTXO" | "ADVERT_REF_UTXO",
+  envKey: RefUtxoEnvKey,
   inlineScript: Script,
+  expectedHash?: string,
 ): Promise<{ kind: "ref"; refUtxo: LucidUTxO } | { kind: "inline"; script: Script }> {
   const refSpec = parseRefUtxoEnv(envKey);
   if (!refSpec) return { kind: "inline", script: inlineScript };
@@ -293,13 +320,19 @@ async function resolveSpendCtx(
       `${envKey} ${refSpec.txHash}#${refSpec.outputIndex} has no scriptRef attached`,
     );
   }
+  if (expectedHash !== undefined && validatorToScriptHash(refUtxo.scriptRef) !== expectedHash) {
+    throw new TxConstructionError(
+      "reference script mismatch",
+      `${envKey} ${refSpec.txHash}#${refSpec.outputIndex} holds script ${validatorToScriptHash(refUtxo.scriptRef)}, expected ${expectedHash}`,
+    );
+  }
   return { kind: "ref", refUtxo };
 }
 
 /** Build a lucid-shaped UTxO from our chain Utxo, swapping in the live
  * blueprint's mainnet-flavoured script address so output validation passes
  * on Mainnet network even when the test fixture used a testnet header. */
-function chainUtxoToLucidScriptInput(
+export function chainUtxoToLucidScriptInput(
   utxo: Utxo,
   scriptAddress: string,
 ): LucidUTxO {
@@ -350,7 +383,7 @@ export function assertCollateralCandidate(utxos: LucidUTxO[]): void {
  * Set LIVECBOR_DEBUG=1 to see the full inner error + WASM stack — useful
  * for diagnosing lucid 0.4.30 / CML edge cases (e.g. the set_exunits
  * panic that affects test fixtures but not production). */
-function rethrowAsTxError(err: unknown, fallback: string): never {
+export function rethrowAsTxError(err: unknown, fallback: string): never {
   const msg = err instanceof Error ? err.message : String(err);
   if (process.env.LIVECBOR_DEBUG) {
     // eslint-disable-next-line no-console
@@ -512,7 +545,7 @@ export function reserveScriptSpendCollateral(
 }
 
 /** Wallet outputs minus the ones that a submitted, unconfirmed transaction already spends. */
-function withoutInputs(utxos: LucidUTxO[], excluded: readonly OutputReference[] | undefined): LucidUTxO[] {
+export function withoutInputs(utxos: LucidUTxO[], excluded: readonly OutputReference[] | undefined): LucidUTxO[] {
   if (!excluded?.length) return utxos;
   const spent = new Set(excluded.map((ref) => `${ref.txHash}#${ref.index}`));
   return utxos.filter((utxo) => !spent.has(`${utxo.txHash}#${utxo.outputIndex}`));
@@ -536,9 +569,10 @@ export async function buildLiveTxForEscrow(
     slotLengthMs: 1000,
   }, { usePresetProtocolParameters: true });
 
-  const blueprint = loadBlueprint();
-  const escrowAddress = blueprint.escrowScriptAddress(MAINNET_ID);
-  const datumHex = encodeEscrowDatum(escrowDatum);
+  const escrowAddress = params.target?.address ?? loadBlueprint().escrowScriptAddress(MAINNET_ID);
+  const datumHex = params.target?.datumHex ?? encodeEscrowDatum(escrowDatum);
+  // hi = min(deliver_by, lo + 1 h): an escrow transaction has hi − lo ≤ MAX_RANGE_MS (Part 2 §6.5).
+  const window = postWindow(postedAt, deliverBy, vectorSlotClock());
 
   const lockedLovelace = totalLocked < MIN_UTXO_LOVELACE ? MIN_UTXO_LOVELACE : totalLocked;
 
@@ -558,13 +592,12 @@ export async function buildLiveTxForEscrow(
         { lovelace: lockedLovelace },
       )
       .addSignerKey(buyerKey.pubKeyHash)
-      // -60s past buffer: lucid's slotFromUnixTime rounds UP, so passing
-      // `Date.now()` produces a slot 1 ahead of the chain's current slot,
-      // and Ogmios rejects the tx with code 3118 ("submitted too early")
-      // until the chain catches up. Same fix as Claim/Submit/Accept paths
-      // below — keep the buffer wide enough to absorb build+propagation.
-      .validFrom(postedAt - 60_000)
-      .validTo(deliverBy)
+      // -60s past buffer (window.lo): the builder's clock can run ahead of
+      // the node's tip, and Ogmios rejects a tx whose validity starts after
+      // the tip with code 3118 ("submitted too early") until the chain catches
+      // up. Same fix as Claim/Submit/Accept paths below.
+      .validFrom(window.lo)
+      .validTo(window.hi)
       // lucid 0.4.30 under-estimates Conway fees by ~1K lovelace on
       // PostEscrow (Ogmios 3122). 500K is a comfortable floor; excess
       // becomes change. Same fix as Claim/Submit/Accept paths.
@@ -715,7 +748,8 @@ export async function buildLiveTxForClaim(params: LiveClaimParams): Promise<Buil
     newDatum: params.newDatum,
     redeemerHex: encodeNullaryConstrHex(REDEEMER_CLAIM),
     validFromMs: params.tipMs,
-    validToMs: params.deliverBy,
+    // buildSpendOpenOrClaimedTx starts the range at tipMs − 60 s; hi − lo ≤ MAX_RANGE_MS (Part 2 §6.5).
+    validToMs: Math.min(params.deliverBy, params.tipMs - LOWER_BOUND_BACKPAD_MS + MAX_RANGE_MS),
     signerPkh: params.supplierKey.pubKeyHash,
     beforeSubmit: params.beforeSubmit,
   });
@@ -743,8 +777,7 @@ export async function buildLiveTxForSubmit(params: LiveSubmitParams): Promise<Bu
   // because no slot in [tip, tip] could hold it. Push stamp forward to give
   // the chain SUBMIT_WINDOW_MS of headroom for inclusion, capped at
   // deliver_by so deadline_ok stays satisfied.
-  const VECTOR_ZERO_TIME = Number(process.env.VECTOR_ZERO_TIME_MS) || 1_752_057_484_000;  // ms (env override for mainnet; default = testnet genesis)
-  const SLOT_LENGTH = 1_000;                   // ms
+  const { zeroTimeMs: VECTOR_ZERO_TIME, slotLengthMs: SLOT_LENGTH } = vectorSlotClock(); // env override for mainnet; default = testnet genesis
   const SUBMIT_WINDOW_MS = 120_000;            // 2-minute inclusion window
   const tipMs = params.tipMs;
   const targetUpperMs = Math.min(tipMs + SUBMIT_WINDOW_MS, params.deliverBy);
@@ -1003,9 +1036,8 @@ export async function buildLiveTxForAdvert(
     slotLengthMs: 1000,
   }, { usePresetProtocolParameters: true });
 
-  const blueprint = loadBlueprint();
-  const advertAddress = blueprint.advertScriptAddress(MAINNET_ID);
-  const datumHex = encodeAdvertDatum(advertDatum);
+  const advertAddress = params.target?.address ?? loadBlueprint().advertScriptAddress(MAINNET_ID);
+  const datumHex = params.target?.datumHex ?? encodeAdvertDatum(advertDatum);
 
   // Pad to protocol min-utxo if the supplier bond is below floor — same
   // pattern as PostEscrow. The validator only checks ≥ supplier_bond_lovelace,
