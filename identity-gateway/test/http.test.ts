@@ -165,6 +165,10 @@ describe("negotiate (RFC 9110 Accept)", () => {
     ["application/did;q=1.0", "document"],
     ["application/did;q=0.001", "document"],
     ["application/did;q=0, */*", "result"],
+    // q=0 on the most specific range makes that type not acceptable (RFC 9110 Section 12.5.1).
+    ["application/did-resolution;q=0, */*", "document"],
+    ["application/did-resolution;q=0, application/did;q=0, */*", null],
+    ["*/*;q=0", null],
     ["application/did;q=1.5", null],
     ["application/did;q=abc", null],
     ["text/plain, image/png", null],

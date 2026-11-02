@@ -1,8 +1,8 @@
 // Content negotiation of the HTTPS binding (Part 1 Section 7.4). The Accept header is read as
 // RFC 9110 specifies (https://www.rfc-editor.org/rfc/rfc9110#section-12.5.1): media ranges with
 // parameters and weights, where the most specific range that matches a media type gives the weight of
-// that type. As Part 1 Section 7.4 says, ranges with q=0 and ranges with a malformed weight are
-// ignored, and only the parameters q and profile count.
+// that type. A weight of 0 makes that type not acceptable. As Part 1 Section 7.4 says, ranges with a
+// malformed weight are ignored, and only the parameters q and profile count.
 //
 // The resolver sends one media type for each representation: application/did-resolution for the
 // result and application/did for the document. Wildcard ranges (*/*, application/*) weigh these two
@@ -101,7 +101,7 @@ export function negotiate(accept: string | undefined): Representation | null {
   if (accept === undefined || accept.trim() === "") return "result";
   const ranges = split(accept, ",")
     .map((text) => parseRange(text.trim()))
-    .filter((range): range is MediaRange => range !== null && range.q > 0);
+    .filter((range): range is MediaRange => range !== null);
   const weight: Record<Representation, number> = { result: 0, document: 0 };
   for (const { representation, sent, names: others } of REPRESENTATIONS) {
     // The sent type: the weight of its most specific range (the highest weight among equally specific ones).

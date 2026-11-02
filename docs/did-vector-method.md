@@ -350,7 +350,7 @@ The DID is deactivated at `t` when the effective status at `t` is Revoked or Ret
 
 ### 7.4 HTTPS binding
 
-`GET /1.0/identifiers/{did}`, as defined by DID Resolution v1.0. Options are query parameters. The resolver percent-decodes the path once. It reads the `Accept` header as RFC 9110 specifies and ignores media ranges with `q=0` or with a malformed `q`. Parameters other than `q` and `profile` are ignored. `application/*` matches both representations. The highest `q` wins. On a tie, the resolution result wins.
+`GET /1.0/identifiers/{did}`, as defined by DID Resolution v1.0. Options are query parameters. The resolver percent-decodes the path once. It reads the `Accept` header as RFC 9110 specifies: the most specific media range that matches a media type gives the weight of that type, and `q=0` makes that type not acceptable. The resolver ignores media ranges with a malformed `q`. Parameters other than `q` and `profile` are ignored. `application/*` matches both representations. The highest `q` wins. On a tie, the resolution result wins.
 
 | `Accept` media range | Response |
 |---|---|
