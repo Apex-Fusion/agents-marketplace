@@ -12,11 +12,10 @@ import { encodeEscrowDatum } from "../../packages/shared/src/cbor/EscrowDatum.js
 import { encodeIdentityAdvertDatum } from "../../packages/shared/src/cbor/IdentityAdvertDatum.js";
 import { encodeIdentityEscrowDatum } from "../../packages/shared/src/cbor/IdentityEscrowDatum.js";
 import type { AdvertDatum, EscrowDatum } from "../../packages/shared/src/cbor/types.js";
-import { AGENT_RECEIPT_FIELDS, RECEIPT_FIELDS } from "../../packages/shared/src/receipt/build.js";
 import { ESCROW_VALUE_CAP_LOVELACE, TxConstructionError } from "../../packages/shared/src/tx/index.js";
 import {
   agentIdOf, assertWithinValueCap, BuyerIdentity, buyerRefund, chainRecordLookup, decodeAdvert, decodeEscrow,
-  encodeAdvert, encodeEscrow, indexerAdvertSigners, RECEIPT_FIELD_NAMES, receiptAgentProblem, sameRefund,
+  encodeAdvert, encodeEscrow, indexerAdvertSigners, receiptAgentProblem, sameRefund,
 } from "../../buyer/src/sdk/identity.js";
 import { parseSwitchSlot } from "../../buyer/src/config.js";
 import {
@@ -97,11 +96,6 @@ describe("both layouts", () => {
 });
 
 describe("receipt fields (Part 2 §6.3)", () => {
-  it("keeps the browser copy of the field list equal to the shared list", () => {
-    expect([...RECEIPT_FIELD_NAMES]).toEqual([...RECEIPT_FIELDS]);
-    expect([...RECEIPT_FIELD_NAMES, "agent_did"]).toEqual([...AGENT_RECEIPT_FIELDS]);
-  });
-
   it("accepts 8 fields for a legacy escrow and 9 with the agent DID for a new escrow", () => {
     expect(receiptAgentProblem(receipt(), null)).toBeNull();
     expect(receiptAgentProblem(receipt(`did:vector:${AGENT_ID}`), AGENT_ID)).toBeNull();

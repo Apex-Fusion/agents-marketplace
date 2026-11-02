@@ -13,7 +13,8 @@
  *   agent (§6.3). A receipt for a legacy escrow keeps the 8 fields.
  *
  * The SPA bundles this module through Marketplace.ts, so its imports stay
- * browser-safe: no Node builtins and no values of @marketplace/shared/receipt
+ * browser-safe: no Node builtins. It takes the receipt field lists from
+ * @marketplace/shared/receipt-fields, not @marketplace/shared/receipt
  * (receipt/sign.ts imports Node crypto). The SPA never calls the lookups.
  */
 
@@ -39,7 +40,7 @@ import {
   type Refund,
 } from "@marketplace/shared/cbor";
 import { vectorDid } from "@marketplace/shared/identity";
-import type { Receipt } from "@marketplace/shared/receipt";
+import { AGENT_RECEIPT_FIELDS, RECEIPT_FIELDS } from "@marketplace/shared/receipt-fields";
 import {
   ESCROW_VALUE_CAP_LOVELACE,
   loadIdentityBlueprint,
@@ -77,15 +78,6 @@ export interface BuyerIdentityOptions {
   /** Default: the indexer listing of the advert (indexerAdvertSigners). */
   lookupAdvertSigners?: AdvertSignersLookup;
 }
-
-/**
- * The 8 receipt fields (Part 2 §6.3), the same list as RECEIPT_FIELDS of
- * @marketplace/shared/receipt. The browser bundle cannot import that module
- * (Node crypto), so it keeps this copy; a unit test pins the two lists together.
- */
-export const RECEIPT_FIELD_NAMES = [
-  "prompt_hash", "response_hash", "model", "prompt_tokens", "completion_tokens", "wallclock_ms", "supplier_pkh", "escrow_ref",
-] as const satisfies readonly (keyof Receipt)[];
 
 /** The advert datum in either layout. A datum that no layout accepts throws the legacy decoder's error. */
 export function decodeAdvert(datumHex: string): AnyAdvertDatum {
@@ -171,7 +163,7 @@ export function receiptAgentProblem(
   const raw = receipt as Record<string, unknown>;
   const agentDidOk = agentId === null ? !Object.hasOwn(raw, "agent_did") : raw.agent_did === vectorDid(agentId);
   if (!agentDidOk) return "agent_did_mismatch";
-  const fields: readonly string[] = agentId === null ? RECEIPT_FIELD_NAMES : [...RECEIPT_FIELD_NAMES, "agent_did"];
+  const fields: readonly string[] = agentId === null ? RECEIPT_FIELDS : AGENT_RECEIPT_FIELDS;
   const exact = Object.keys(raw).length === fields.length && fields.every((field) => Object.hasOwn(raw, field));
   return exact ? null : "malformed_receipt";
 }
