@@ -1,12 +1,14 @@
 // Delegation tokens (Part 2 Sections 5.1, 5.2 and 5.4): the whole chain passes the use checks off
-// the ledger; the token carries the delegators in a nested `act` claim and the granted actions and
-// resources in `authorization_details`.
+// the ledger; the token follows RFC 8693 Section 4.1 (`sub` is the root delegator, `act` names the
+// delegates with the current actor outermost) and carries the granted actions and resources in
+// `authorization_details`.
 
 import { afterEach, describe, expect, test } from "vitest";
-import { DELEGATION_DETAILS_TYPE, covers, isActionPattern, isResourcePattern, narrower, patternCovers } from "../../src/m4/delegation.js";
+import { DELEGATION_DETAILS_TYPE, covers, delegationClaims, isActionPattern, isResourcePattern, narrower, patternCovers, type DelegationRecord } from "../../src/m4/delegation.js";
 import type { DelegationDatum } from "../../src/m4/delegation-datum.js";
 import { LedgerBuilder, WALLET, identityDatum, idOf, timeAt } from "../support/ledger.js";
 import {
+  BASE,
   DELEGATION,
   NOW,
   agentJwt,
@@ -42,6 +44,12 @@ const OTHER = edKey(86);
 const ESCROW = `script:${"ab".repeat(28)}`;
 const ROOT = delegationIdOf("root");
 const LEAF = delegationIdOf("leaf");
+const MIDDLE = idOf("m4 delegation middle");
+const MIDDLE_AUTH = edKey(88);
+const MIDDLE_KEY = edKey(89);
+const MID = delegationIdOf("middle");
+/** The `sub` of a token whose root delegator is PRINCIPAL (Part 2 Section 5.4). */
+const PRINCIPAL_SUB = `${BASE}/principals/key/${PRINCIPAL.keyHash}`;
 
 const hexList = (items: readonly string[]): string[] => items.map(utf8Hex);
 
@@ -118,6 +126,34 @@ function ledger(setup: Setup = {}): LedgerBuilder {
   return b;
 }
 
+/** Three hops: PRINCIPAL gives ROOT to OWNER, OWNER gives MID to MIDDLE, and MIDDLE gives LEAF to DELEGATE. */
+function threeHops(): LedgerBuilder {
+  const b = ledger({ leaf: leaf({ delegator: { type: "Agent", id: MIDDLE }, parent: MID, depth: 3 }) });
+  b.register(
+    MIDDLE,
+    identityDatum({
+      keys: [
+        { keyType: "Ed25519", key: MIDDLE_AUTH.publicKey, purposes: 1, pop: null },
+        { keyType: "Ed25519", key: MIDDLE_KEY.publicKey, purposes: 16, pop: null },
+      ],
+    }),
+    { height: 120 },
+  );
+  const mid = leaf({
+    delegator: { type: "Agent", id: OWNER },
+    parent: ROOT,
+    delegate: MIDDLE,
+    delegateKey: MIDDLE_KEY.keyHash,
+    actions: hexList(["marketplace.*"]),
+    notAfter: NOW + 5_400_000,
+    depth: 2,
+    remaining: 1,
+    value: { perTx: 8_000_000n, total: 80_000_000n, periodMs: 86_400_000 },
+  });
+  mintDelegation(b, MID, mid, 250);
+  return b;
+}
+
 afterEach(stopGateways);
 
 const details = (overrides: Record<string, unknown> = {}) => ({ type: DELEGATION_DETAILS_TYPE, identifier: LEAF, ...overrides });
@@ -132,7 +168,7 @@ async function delegatedToken(
 }
 
 describe("delegation tokens", () => {
-  test("a two-hop chain: act names the delegators, authorization_details the leaf's actions and resources", async () => {
+  test("a two-hop chain: sub is the root delegator, act the delegates with the current actor outermost", async () => {
     const h = await startGateway(ledger());
     const res = await delegatedToken(h);
     expect(res.status).toBe(200);
@@ -140,13 +176,30 @@ describe("delegation tokens", () => {
     const granted = [{ type: DELEGATION_DETAILS_TYPE, identifier: LEAF, actions: ["marketplace.hire.v1"], locations: [ESCROW] }];
     expect(body.authorization_details).toEqual(granted);
     expect(body.expires_in).toBe(300);
-    const { payload } = decodeJwt(text(body.access_token));
-    expect(payload).toMatchObject({
-      sub: didOf(DELEGATE),
+    const entry = (await h.resolver.listRecords()).entries.find((e) => e.vectorId === DELEGATE)!;
+    // The whole claim set: the organisation of the principal key is not a claim.
+    expect(decodeJwt(text(body.access_token)).payload).toEqual({
+      iss: BASE,
+      sub: PRINCIPAL_SUB,
+      aud: "https://rs.example.org",
+      iat: nowS(h.now),
+      exp: nowS(h.now) + 300,
+      jti: expect.any(String),
+      client_id: didOf(DELEGATE),
       cnf: { jkt: thumbprint(DELEGATE_KEY) },
-      act: { sub: didOf(OWNER), act: { sub: PRINCIPAL.keyHash, organisation: "example.org" } },
+      status: { status_list: { idx: entry.statusListIndex, uri: `${BASE}/status/tsl/0` } },
+      act: { sub: didOf(DELEGATE), act: { sub: didOf(OWNER) } },
       authorization_details: granted,
     });
+  });
+
+  test("a three-hop chain: each earlier delegate is a nested act, the least recent one innermost", async () => {
+    const h = await startGateway(threeHops());
+    const res = await delegatedToken(h);
+    expect(res.status).toBe(200);
+    const { payload } = decodeJwt(text((await bodyOf(res)).access_token));
+    expect(payload.sub).toBe(PRINCIPAL_SUB);
+    expect(payload.act).toEqual({ sub: didOf(DELEGATE), act: { sub: didOf(MIDDLE), act: { sub: didOf(OWNER) } } });
   });
 
   test("a one-hop delegation from a principal key, with its purpose", async () => {
@@ -155,7 +208,8 @@ describe("delegation tokens", () => {
     const res = await delegatedToken(h, details({ identifier: ROOT }));
     expect(res.status).toBe(200);
     const { payload } = decodeJwt(text((await bodyOf(res)).access_token));
-    expect(payload.act).toEqual({ sub: PRINCIPAL.keyHash, organisation: "example.org" });
+    expect(payload.sub).toBe(PRINCIPAL_SUB);
+    expect(payload.act).toEqual({ sub: didOf(DELEGATE) });
     expect(payload.authorization_details).toEqual([
       {
         type: DELEGATION_DETAILS_TYPE,
@@ -165,6 +219,16 @@ describe("delegation tokens", () => {
         purpose: "cd".repeat(32),
       },
     ]);
+  });
+
+  test("a delegation from an agent: sub is the agent's DID", async () => {
+    const b = ledger({ root: root({ delegator: { type: "Agent", id: OWNER }, delegate: DELEGATE, delegateKey: DELEGATE_KEY.keyHash }) });
+    const h = await startGateway(b);
+    const res = await delegatedToken(h, details({ identifier: ROOT }));
+    expect(res.status).toBe(200);
+    const { payload } = decodeJwt(text((await bodyOf(res)).access_token));
+    expect(payload.sub).toBe(didOf(OWNER));
+    expect(payload.act).toEqual({ sub: didOf(DELEGATE) });
   });
 
   test("a request can narrow the actions and resources", async () => {
@@ -186,15 +250,38 @@ describe("delegation tokens", () => {
     expect(decodeJwt(text(body.access_token)).payload.exp).toBe(nowS(NOW + 100_000));
   });
 
-  test("a chain that a later Undelegate breaks: introspection answers inactive", async () => {
+  test("introspection answers the delegation claims; a later Undelegate makes the token inactive", async () => {
     const b = ledger();
     const h = await startGateway(b);
     const token = text((await bodyOf(await delegatedToken(h))).access_token);
     const introspect = async () => bodyOf(await postForm(h, "/introspect", { token, ...(await clientAuth(OWNER_AUTH, OWNER, h.now)) }));
-    expect((await introspect()).active).toBe(true);
+    const active = await introspect();
+    expect(active).toEqual({ ...decodeJwt(token).payload, active: true, token_type: "DPoP" });
+    expect(active).toMatchObject({ sub: PRINCIPAL_SUB, act: { sub: didOf(DELEGATE), act: { sub: didOf(OWNER) } } });
     const rootMint = b.chain.txs.find((t) => t.mint.some((a) => a.policyId === DELEGATION.policyId && a.assetName === ROOT && a.quantity > 0n))!;
     undelegate(b, rootMint, ROOT, 1000);
     expect(await introspect()).toEqual({ active: false });
+  });
+
+  test("an earlier delegate that act names may revoke the token", async () => {
+    const h = await startGateway(ledger());
+    const token = text((await bodyOf(await delegatedToken(h))).access_token);
+    const res = await postForm(h, "/revoke", { token, ...(await clientAuth(OWNER_AUTH, OWNER, h.now)) });
+    expect(res.status).toBe(200);
+    const introspection = await postForm(h, "/introspect", { token, ...(await clientAuth(DELEGATE_AUTH, DELEGATE, h.now)) });
+    expect(await bodyOf(introspection)).toEqual({ active: false });
+  });
+});
+
+describe("delegation claims", () => {
+  const record = (id: string, datum: DelegationDatum): DelegationRecord => ({ id, datum, actions: [], resources: [], txHash: "00".repeat(32), outputIndex: 0 });
+
+  test("the principal key identifier starts with the gateway's base URL", () => {
+    const settings = { baseUrl: "https://gateway.example.org", gatewayId: OWNER, trustDomain: "gateway.example.org", delegation: null, statusListRefreshMs: 60_000 };
+    expect(delegationClaims([record(LEAF, leaf()), record(ROOT, root())], settings)).toEqual({
+      sub: `https://gateway.example.org/principals/key/${PRINCIPAL.keyHash}`,
+      act: { sub: didOf(DELEGATE), act: { sub: didOf(OWNER) } },
+    });
   });
 });
 

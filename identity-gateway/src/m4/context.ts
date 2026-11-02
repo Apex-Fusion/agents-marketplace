@@ -41,6 +41,8 @@ export interface M4Context {
 export const tokenEndpoint = (settings: M4Settings): string => `${settings.baseUrl}/token`;
 export const gatewayDid = (settings: M4Settings): string => `did:vector:${settings.gatewayId}`;
 export const spiffeIdOf = (settings: M4Settings, vectorId: string): string => `spiffe://${settings.trustDomain}/agent/${vectorId}`;
+/** Part 2 Section 5.4: the `sub` of a delegation token whose root delegator is a PrincipalKey. */
+export const principalKeyIdOf = (settings: M4Settings, keyHash: string): string => `${settings.baseUrl}/principals/key/${keyHash}`;
 
 /** Lifetime limit of subject tokens, client assertions, issued tokens and JWT-SVIDs (Part 2 Section 8.6). */
 export const MAX_TOKEN_LIFETIME_S = 300;

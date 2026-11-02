@@ -18,9 +18,8 @@ import { isAuthentic, ledgerOrder, tokenQuantity } from "../resolve/history.js";
 import { PURPOSE } from "../resolve/document.js";
 import type { CurrentRecord } from "../resolve/resolver.js";
 import { CONFIRMATION_DEPTH, type Registry } from "../resolve/settings.js";
-import { recordText } from "../codec/text.js";
 import { decodeDelegationDatum, type DelegationDatum } from "./delegation-datum.js";
-import type { RecordSource } from "./context.js";
+import { principalKeyIdOf, type M4Settings, type RecordSource } from "./context.js";
 
 /** RFC 9396 authorization details type of a delegation token (a collision-resistant URI, RFC 9396 Section 2.1). */
 export const DELEGATION_DETAILS_TYPE = "https://id.vector.apexfusion.org/ns/delegation";
@@ -236,22 +235,30 @@ export async function checkDelegationChain(source: DelegationSource, records: Re
   return { ok: true, value: { chain, delegate: delegate.record, notAfter } };
 }
 
-/** The `act` claim (RFC 8693 Section 4.1) of a delegation token: the delegators, the leaf's delegator outermost. */
-export function actClaim(chain: readonly DelegationRecord[]): Record<string, unknown> {
-  let act: Record<string, unknown> | null = null;
-  for (let i = chain.length - 1; i >= 0; i--) {
-    const delegator = chain[i]!.datum.delegator;
-    const actor: Record<string, unknown> =
-      delegator.type === "Agent" ? { sub: `did:vector:${delegator.id}` } : { sub: delegator.hash, ...organisationOf(delegator.organisation) };
-    act = act === null ? actor : { ...actor, act };
-  }
-  return act!;
+/** The `sub` and `act` claims of a delegation token. */
+export interface DelegationClaims {
+  readonly sub: string;
+  readonly act: Record<string, unknown>;
 }
 
-function organisationOf(hex: string | null): { organisation?: string } {
-  if (hex === null) return {};
-  const text = recordText(Buffer.from(hex, "hex"));
-  return text === null || text === "" ? {} : { organisation: text };
+/**
+ * Part 2 Section 5.4, which follows RFC 8693 Section 4.1 (https://www.rfc-editor.org/rfc/rfc8693#section-4.1):
+ * - `sub` is the root delegator, the principal: `did:vector:<id>` for an agent, or
+ *   `<base>/principals/key/<key hash>` for a PrincipalKey;
+ * - `act` is the chain of actors: the leaf's delegate (the current actor) is the outermost
+ *   `act.sub`, and the delegate of each earlier delegation is a nested `act`, so the root's
+ *   delegate (the least recent actor) is the most deeply nested.
+ * `chain` is the leaf first, then each parent up to the root, as `checkDelegationChain` returns it.
+ */
+export function delegationClaims(chain: readonly DelegationRecord[], settings: M4Settings): DelegationClaims {
+  const principal = chain[chain.length - 1]!.datum.delegator;
+  const sub = principal.type === "Agent" ? `did:vector:${principal.id}` : principalKeyIdOf(settings, principal.hash);
+  let act: Record<string, unknown> | null = null;
+  for (let i = chain.length - 1; i >= 0; i--) {
+    const actor = { sub: `did:vector:${chain[i]!.datum.delegate}` };
+    act = act === null ? actor : { ...actor, act };
+  }
+  return { sub, act: act! };
 }
 
 /** RFC 9396 authorization details of a delegation token (Part 2 Section 5.4). */

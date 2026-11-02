@@ -4,15 +4,20 @@
 //   in agent-jwt.ts. Optional client authentication with an RFC 7523 client assertion
 //   (Sections 2.2 and 3) that follows the same rules. Every request carries a DPoP proof
 //   (RFC 9449 Section 5). Issued tokens are JWT access tokens (RFC 9068, `typ: at+jwt`) signed with
-//   ES256, with a lifetime of at most 5 minutes, `sub = did:vector:<id>`, `cnf.jkt` (RFC 9449
-//   Section 6.1) and a Token Status List claim (draft-ietf-oauth-status-list-21 Section 6.2) that
-//   points to the agent's entry. A request that names a delegation in `authorization_details`
-//   (RFC 9396 Section 6) gets a token only after the whole chain passes the Section 5.2 use checks;
-//   the token then carries the delegators in a nested `act` claim (RFC 8693 Section 4.1) and the
-//   granted actions and resources in `authorization_details` (RFC 9396 Section 9.1).
+//   ES256, with a lifetime of at most 5 minutes, `cnf.jkt` (RFC 9449 Section 6.1) and a Token Status
+//   List claim (draft-ietf-oauth-status-list-21 Section 6.2) that points to the entry of the agent
+//   that requested the token. Without a delegation, `sub = did:vector:<id>` of that agent, and the
+//   token has no `act`. A request that names a delegation in `authorization_details` (RFC 9396
+//   Section 6) gets a token only after the whole chain passes the Section 5.2 use checks. The token
+//   then follows RFC 8693 Section 4.1 (https://www.rfc-editor.org/rfc/rfc8693#section-4.1): `sub`
+//   is the root delegator (the principal), `act` names the delegates with the requesting agent (the
+//   current actor) outermost, and `authorization_details` (RFC 9396 Section 9.1) holds the granted
+//   actions and resources.
 // - POST /introspect (RFC 7662) and POST /revoke (RFC 7009): for tokens that this gateway issued
-//   only, with client authentication by an RFC 7523 client assertion. A change that makes the
-//   effective status of an agent other than Active revokes every token that depends on it.
+//   only, with client authentication by an RFC 7523 client assertion. Introspection answers the
+//   token's claims, so `sub` and `act` keep their meaning there (RFC 8693 Section 4.1, last
+//   paragraph). A change that makes the effective status of an agent other than Active revokes
+//   every token that depends on it.
 
 import { randomBytes } from "node:crypto";
 import { keyHash } from "../codec/keys.js";
@@ -20,11 +25,12 @@ import { tokenEndpoint, CLOCK_LEEWAY_S, MAX_TOKEN_LIFETIME_S, type M4Context } f
 import { AgentJwtError, verifyAgentJwt, type VerifiedAgentJwt } from "./agent-jwt.js";
 import {
   DELEGATION_DETAILS_TYPE,
-  actClaim,
   checkDelegationChain,
+  delegationClaims,
   delegationDetails,
   isActionPattern,
   isResourcePattern,
+  type DelegationClaims,
   type DelegationSource,
 } from "./delegation.js";
 import { DpopError, verifyDpopProof, type DpopProof } from "./dpop.js";
@@ -42,9 +48,9 @@ export const JWT_BEARER_CLIENT_ASSERTION = "urn:ietf:params:oauth:client-asserti
 export interface IssuedToken {
   readonly jti: string;
   readonly kind: "access_token" | "jwt_svid";
-  /** Agents whose effective status the token depends on: its subject and every delegator agent. */
+  /** Agents whose effective status the token depends on: first the agent that requested it (for a delegation token, the current actor), then every delegator agent. */
   readonly agents: readonly string[];
-  /** Agents that may revoke it: the subject, the authenticated client and every delegator agent. */
+  /** Agents that may revoke it: its agents and the authenticated client. */
   readonly owners: readonly string[];
   /** The leaf delegation of a delegation token. */
   readonly delegation: string | null;
@@ -245,7 +251,7 @@ export class TokenService {
     const now = this.ctx.now();
     const iat = Math.floor(now / 1000);
     let exp = iat + MAX_TOKEN_LIFETIME_S;
-    let delegated: { act: Record<string, unknown>; details: Record<string, unknown>; agents: string[]; leaf: string } | null = null;
+    let delegated: (DelegationClaims & { details: Record<string, unknown>; agents: string[]; leaf: string }) | null = null;
     if (delegationRequest !== null) {
       const check = await checkDelegationChain(this.delegations!, this.ctx.records, {
         leafId: delegationRequest.identifier,
@@ -261,7 +267,7 @@ export class TokenService {
       if (exp <= iat) throw invalidDetails("the delegation period ends within a second");
       const leaf = chain[0]!;
       delegated = {
-        act: actClaim(chain),
+        ...delegationClaims(chain, settings),
         details: delegationDetails(leaf, delegationRequest.actions ?? leaf.actions, delegationRequest.locations ?? leaf.resources),
         agents: chain.flatMap((d) => (d.datum.delegator.type === "Agent" ? [d.datum.delegator.id] : [])),
         leaf: leaf.id,
@@ -274,7 +280,7 @@ export class TokenService {
     const jti = newJti();
     const claims = {
       iss: settings.baseUrl,
-      sub: subject.did,
+      sub: delegated?.sub ?? subject.did,
       aud: audiences.length === 1 ? audiences[0] : audiences,
       iat,
       exp,
