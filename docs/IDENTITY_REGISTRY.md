@@ -705,7 +705,7 @@ All three modules get new deployments in this phase. They use `vector_identity` 
   - the profile.
 - **Profile copy.** The builder copies each legacy field that obeys the limits. The caller gives a new value for each field that breaks a limit. A record with a script owner, or a datum that does not decode, cannot adopt; the builder says why.
 - **Signers:** the legacy owner key, the controller key, each listed Ed25519 key and each party.
-- **Funding.** The legacy Deregister returns the legacy deposit and requires a minimum amount of change back to the owner (measured in §12.2). The new record gets at least 10 AP3X from an AP3X-only output of the owner.
+- **Funding.** The legacy Deregister requires exactly one output of at least 10 AP3X (10,000,000 base units) whose payment credential is the owner's key hash, with any stake credential. The legacy deposit itself need not return (measured, §12.2). The new record gets at least 10 AP3X from an AP3X-only output of the owner. In an adoption with a 10 AP3X legacy deposit, the owner thus adds 10 AP3X plus the fee.
 - **Our agents first.** Chandra OCR, Agent History, Document Pipeline, Audio Snippets and Advocate adopt first.
 - **Operator advice.** An agent that is the target of an open Module-3 challenge does not adopt until the challenge settles.
 
@@ -728,6 +728,8 @@ The identity tools (§10) are released before we announce the switch date. We an
 ### 9.4 Legacy records after deployment
 
 Un-adopted legacy records resolve as suspended (`unaccountable`) from the cutoff slot. Legacy identifiers minted at or after the cutoff slot resolve as `NOT_FOUND`. Legacy records cannot accept work through the new escrow.
+
+A legacy Register and a legacy Update in one transaction can put two legacy tokens into one output (§12.2). That output is locked for ever: both records resolve as suspended (`notAuthentic`), and they can neither adopt nor deregister.
 
 ### 9.5 Simulation cleanup
 
@@ -871,12 +873,15 @@ Also port the 17 current escrow tests (`contracts/marketplace/validators/escrow.
 
 ### 12.2 Legacy script tests
 
-Run these tests against the deployed legacy script bytes: the blueprint `agent-registry/deploy/agent-registry/plutus.json` in `Apex-Fusion/vector-ai-agents@f6ae4bb` (hash `be1a0a29…`). The Aiken source in `agent-registry/original/contracts/agent-registry/` of the same commit compiles to the test registry `5dd51189…`, not to the deployed script.
+Run these tests against the deployed legacy script bytes: the blueprint `agent-registry/deploy/agent-registry/plutus.json` in `Apex-Fusion/vector-ai-agents@f6ae4bb` (hash `be1a0a29…`). The deployed bytes match the source `agent-registry-audit/compliant/agent-registry/` of the same repository at commit `eb05a62` (stdlib v3.0.0, Aiken v1.1.21, silent traces). The source `agent-registry/compliant/` at `f6ae4bb` compiles to another hash, and `agent-registry/original/contracts/agent-registry/` compiles to the test registry `5dd51189…`.
 
-- **Deployment blockers:** the legacy Register must fail when the seed is not an input, when the quantity is not 1, or when the name is not derived from the seed.
-- The legacy Deregister and Burn pass in an adoption transaction.
-- Measure the minimum change that the legacy Deregister requires, and record it in §9.1.
-- Check whether a legacy Update can move a legacy token to an output that is not authentic: another address (for example with a stake credential), or one output with two legacy tokens. Part 1 §7.3 shows such a record as Suspended (`notAuthentic`), and Adopt needs an authentic input with one legacy token.
+The tests are in `tests/legacy-registry/` (offline, `aiken tx simulate`). Results on 2026-11-02:
+
+- **Deployment blockers:** the legacy Register fails, as required, when the seed is not an input (also when it is only a reference input), when the quantity is not 1, when a second name is minted, or when the name is not derived from the seed.
+- The legacy Deregister and Burn pass in an adoption-shaped transaction. Repeat this test with the identity validator when it is built.
+- The Deregister change rule is recorded in §9.1. One Deregister per transaction is a legacy script rule.
+- A legacy Update cannot move the token to another address, also not to the legacy script address with a stake credential. A Register together with an Update can put two legacy tokens into one output, which is then locked (§9.4).
+- The deployed Register and Update reject script owners and datums that are not legacy datums. The legacy datum limits are wider than the identity limits, so the adoption builder asks for new values (§9.1).
 
 ### 12.3 Property tests
 
