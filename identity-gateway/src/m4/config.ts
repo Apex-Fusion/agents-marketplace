@@ -1,9 +1,10 @@
 // M4 configuration from the environment. The M4 services start only when both key files are set.
+// The public origin is the gateway's one base URL, GATEWAY_BASE_URL (render/config.ts reads it):
+// it is the RFC 8414 issuer, and `<base>/token` is the audience of agent JWTs.
 //
-//   GATEWAY_ED25519_KEY_FILE      PEM private key file of the Ed25519 key (mode 600 or stricter)
-//   GATEWAY_P256_KEY_FILE         PEM private key file of the P-256 key (mode 600 or stricter)
+//   GATEWAY_ED25519_KEY_FILE      PEM private key file of the Ed25519 key (no group or other access)
+//   GATEWAY_P256_KEY_FILE         PEM private key file of the P-256 key (no group or other access)
 //   GATEWAY_VECTOR_ID             the gateway's own identifier (64 hex); required with the key files
-//   GATEWAY_PUBLIC_URL            public origin, default https://id.vector.apexfusion.org
 //   DELEGATION_POLICY_ID          delegation contract policy ID (= script hash); optional
 //   DELEGATION_ADDRESS            its enterprise address; optional, must match the policy
 //   STATUS_LIST_REFRESH_SECONDS   how long built status lists are used, default 60
@@ -11,35 +12,21 @@
 import { registryOf } from "../resolve/settings.js";
 import type { M4Settings } from "./context.js";
 
-export const DEFAULT_PUBLIC_URL = "https://id.vector.apexfusion.org";
-
 export interface M4Config extends M4Settings {
   readonly keyFiles: { readonly ed25519: string; readonly p256: string };
 }
 
-/** The public origin: an https URL without path, query, fragment or user information. */
-export function publicOrigin(text: string): string {
-  let url: URL;
-  try {
-    url = new URL(text);
-  } catch {
-    throw new Error(`GATEWAY_PUBLIC_URL must be an https origin, got "${text}"`);
-  }
-  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash || (url.pathname !== "/" && url.pathname !== "")) {
-    throw new Error(`GATEWAY_PUBLIC_URL must be an https origin without path, query or fragment, got "${text}"`);
-  }
-  return url.origin;
-}
-
-/** Null when M4 is not configured (no key files). Throws on a partial or invalid configuration. */
-export function loadM4Config(env: NodeJS.ProcessEnv): M4Config | null {
+/**
+ * Null when M4 is not configured (no key files). Throws on a partial or invalid configuration.
+ * `baseUrl` is the validated public https origin of the gateway.
+ */
+export function loadM4Config(env: NodeJS.ProcessEnv, baseUrl: string): M4Config | null {
   const ed25519 = env.GATEWAY_ED25519_KEY_FILE || undefined;
   const p256 = env.GATEWAY_P256_KEY_FILE || undefined;
   if (ed25519 === undefined && p256 === undefined) return null;
   if (ed25519 === undefined || p256 === undefined) throw new Error("set both GATEWAY_ED25519_KEY_FILE and GATEWAY_P256_KEY_FILE, or neither");
   const gatewayId = env.GATEWAY_VECTOR_ID ?? "";
   if (!/^[0-9a-f]{64}$/.test(gatewayId)) throw new Error("GATEWAY_VECTOR_ID must be the gateway's identifier: 64 lowercase hex characters");
-  const baseUrl = publicOrigin(env.GATEWAY_PUBLIC_URL || DEFAULT_PUBLIC_URL);
   const delegationPolicy = env.DELEGATION_POLICY_ID || undefined;
   if (!delegationPolicy && env.DELEGATION_ADDRESS) throw new Error("DELEGATION_ADDRESS needs DELEGATION_POLICY_ID");
   const refreshText = env.STATUS_LIST_REFRESH_SECONDS || "60";

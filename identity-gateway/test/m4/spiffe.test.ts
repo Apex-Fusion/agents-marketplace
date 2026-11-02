@@ -4,6 +4,7 @@
 import { X509Certificate, createPublicKey, generateKeyPairSync, sign, verify, type KeyObject } from "node:crypto";
 import { afterEach, describe, expect, test } from "vitest";
 import { bitString, children, decode, decodeOid, oid, sequence, set, unsignedInteger, utf8String } from "../../src/m4/der.js";
+import type { Status } from "../../src/codec/identity-datum.js";
 import { derFromText, pem } from "../../src/m4/x509.js";
 import { LedgerBuilder, identityDatum, idOf, timeAt } from "../support/ledger.js";
 import {
@@ -59,7 +60,7 @@ oppfIjyo40y6os6Rd/ZcgEX/Q6AAMAUGAytlcANBAJCy/CYJUpOO/g9BoDsSwB5H
 DeX3H48F4164J2zOHRtzay4mFMh4/RO5XkAlXopTgUu1AWNzX5xtpZEgu4+nEgw=
 -----END CERTIFICATE REQUEST-----`;
 
-function ledger(status?: Parameters<typeof identityDatum>[0]["status"]): LedgerBuilder {
+function ledger(status?: Status): LedgerBuilder {
   const b = new LedgerBuilder();
   b.register(
     AGENT,

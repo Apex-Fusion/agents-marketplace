@@ -52,10 +52,14 @@ Every variable is optional, except that a deployed identity registry needs both
 | `KOIOS_TOKEN` | none | Optional Koios bearer token. Do not commit it. |
 | `OGMIOS_URL` | `wss://ogmios.vector.mainnet.apexfusion.org` | Ogmios WebSocket, for vkey witnesses (legacy key search). |
 | `HOST` / `PORT` | `127.0.0.1` / `8080` (the image: `0.0.0.0` / `8080`) | Listen address. |
-| `GATEWAY_BASE_URL` | `https://id.vector.apexfusion.org` | Public HTTPS origin of the gateway (no path). It names the `did:web` aliases, the URLs in the catalogs and the MCP server names. |
+| `GATEWAY_BASE_URL` | `https://id.vector.apexfusion.org` | Public HTTPS origin of the gateway (no path); the only base-URL variable. It names the `did:web` aliases, the URLs in the catalogs and the MCP server names. It is also the RFC 8414 issuer, `<base>/token` is the audience of agent JWTs, and its host is the SPIFFE trust domain. |
 | `ACCESS_LOG_RETENTION` | "The operator has not published the retention time of the access log yet." | Text that `/policy` publishes on the retention of the web proxy's access log (Part 2 Section 8.1). |
 | `FETCH_JOBS` | `on` | `off` stops all background fetches. Then no agent is reachable, so the catalogs and the MCP subregistry are empty. |
 | `FETCH_SCAN_INTERVAL_S` | `600` | Seconds between background scans (60 to 86400). A record change starts a new check at the next scan. |
+| `GATEWAY_ED25519_KEY_FILE` / `GATEWAY_P256_KEY_FILE` | none | PEM private key files of the gateway keys (Part 2 Section 8.2): PKCS#8, or SEC1 for P-256. The gateway refuses a file that its group or other users can read or write (use mode 600 or 400, owned by the container user). Set both or neither; without them the M4 services are off and agent cards answer 503. |
+| `GATEWAY_VECTOR_ID` | none | The gateway's own identifier (64 hex), required with the key files. Key IDs are `did:vector:<id>#<key hash>`, and the gateway's DID issues credentials. |
+| `DELEGATION_POLICY_ID` / `DELEGATION_ADDRESS` | none | The delegation contract (policy ID = script hash; the address must be its enterprise address). Without it, delegation tokens are refused. |
+| `STATUS_LIST_REFRESH_SECONDS` | `60` | How long built status lists and the status-list index are used (1 to 3600). It is also the `ttl` of the lists. |
 
 The testnet uses the same network magic as mainnet. So the resolver compares all four genesis values
 with the values that Koios reports (`/genesis`). If one differs, every resolution is
@@ -99,7 +103,36 @@ the agent does not qualify, 410 when the DID is deactivated, 500 when the ledger
 | `GET /agents/{id}/registration.json` | Listed agents | ERC-8004 registration file: `services` (A2A, MCP or web, then OASF and DID), `active`, `registrations [{agentId, agentRegistry}]`. `agentId` is the identifier as a decimal integer (78 digits at most, so read it with a big-integer JSON reader). `agentRegistry` is `vector:mainnet:<identity policy>`, or the legacy policy for a legacy record. |
 | `GET /policy` | | The listing rule, the fetch rules, the confirmation rule, the request-log statement, `ACCESS_LOG_RETENTION` and the limits as numbers. |
 
-The gateway's own JWK set (`GET /.well-known/jwks.json`) belongs to the M4 services.
+The gateway's own JWK set (`GET /.well-known/jwks.json`) belongs to the M4 services. The renderings
+sign agent cards with the M4 Ed25519 key (`main.ts` passes `keys.ed25519` as their signer).
+
+## M4 services (Part 2 Section 8.6)
+
+They run when the two key files are set. Everything that they issue uses the view without options
+(Part 2 Section 8.4). Errors are `{"error", "error_description"}` (RFC 6749 Section 5.2). Token,
+credential and POST responses have `Cache-Control: no-store`; the JWK set, the metadata, the bundle
+and the status lists are public and cacheable.
+
+| Endpoint | Request | Response |
+|---|---|---|
+| `GET /.well-known/jwks.json` | | `{keys}`: the Ed25519 key (`alg` EdDSA) and the P-256 key (`alg` ES256), `use` sig, `kid` = `did:vector:<gateway id>#<key hash>`. |
+| `GET /.well-known/oauth-authorization-server` | | RFC 8414 metadata: issuer, token, introspection and revocation endpoints, `private_key_jwt` with EdDSA, DPoP algorithms, the delegation `authorization_details` type. |
+| `POST /token` | Form (RFC 8693): `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`, `subject_token` (JWT, EdDSA by an authentication key of the agent: header `kid` = the key's DID URL; `iss` = `sub` = `did:vector:<id>`; `aud` = `<base>/token`; `iat`, `exp` with `exp - iat <= 300`; single-use `jti`), `subject_token_type=urn:ietf:params:oauth:token-type:jwt`, at least one `audience` or `resource`, optional `requested_token_type`, optional RFC 7523 client assertion, optional `authorization_details` with one `{"type":"https://id.vector.apexfusion.org/ns/delegation","identifier":"<delegation id>","actions"?,"locations"?}`. Header `DPoP` (RFC 9449) is required; for a delegation it must be signed by the leaf's `delegate_key`. | `{access_token, issued_token_type, token_type: "DPoP", expires_in, authorization_details?}`. The token: ES256, `typ` at+jwt, `iss`, `sub`, `aud`, `iat`, `exp` (at most 5 minutes, and not after the delegation period), `jti`, `client_id`, `cnf.jkt`, `status.status_list {idx, uri}`; for a delegation also `act` (the delegators, the leaf's delegator outermost) and `authorization_details`. |
+| `POST /introspect` | Form: `token`, client assertion (required) | RFC 7662: `{active: false}`, or the claims with `active: true` and `token_type`. Only tokens that this process issued. |
+| `POST /revoke` | Form: `token`, client assertion (required) | RFC 7009: 200 with an empty body; 400 `unauthorized_client` when the client is not the subject, the client or a delegator agent of the token. |
+| `POST /spiffe/nonce` | | `{nonce, expires_in: 300}`: single-use, valid for 5 minutes. |
+| `POST /spiffe/x509-svid` | JSON `{csr, proof}`: a PKCS #10 request for a P-256 key (PEM or base64url DER) and a JWT by an authentication key (EdDSA or ES256, the agent-JWT rules) with the claims `nonce` and `cnf.jwk` = the request's public key | `{spiffe_id, x509_svid (PEM), bundle (PEM CA), expires_at}`. One URI SAN `spiffe://<host>/agent/<id>`, empty subject, 1 hour, `noRevAvail`. 403 `agent_not_active`. |
+| `POST /spiffe/jwt-svid` | JSON `{subject_token, audience}` (1 to 8 audiences) | `{spiffe_id, svid, expires_at}`: ES256, 5 minutes. |
+| `GET /spiffe/bundle` | | SPIFFE bundle (`https_web`): the CA certificate (`use` x509-svid, `x5c`) and the JWT-SVID key (`use` jwt-svid, `kid`), `spiffe_refresh_hint` 300. |
+| `GET /status/bsl/{n}` | | `application/vc+jwt`: a BitstringStatusListCredential with `statusPurpose` [revocation, suspension]: 2 × 131,072 bits, the revocation bit of position p at p and its suspension bit at 131,072 + p. |
+| `GET /status/tsl/{n}` | | `application/statuslist+jwt`: 2 bits per entry, 0 valid, 1 invalid (Revoked or Retired), 2 suspended. |
+| `GET /agents/{id}/credential` | | `application/vc+jwt`: a VC 2.0 credential of the gateway's DID with the subject DID, `created`, `origin` and, for a subagent, `parent`; two `BitstringStatusListEntry` items. 409 when the agent is not Active, 410 when deactivated. |
+
+Index i of `listRecords()` is in list n = floor(i / 131,072) at position i mod 131,072. A status
+other than Active that the gateway sees (at introspection, or in the status watcher every 30 s)
+revokes every token of that agent issued up to then. Replay stores, nonces and issued tokens are in
+memory: a restart makes earlier tokens inactive.
+
 
 **Listing rule (Part 2 Section 8.4).** The catalogs and the MCP subregistry list an agent only when
 it is independent (lineage Root), its effective status without options is Active, and the last
@@ -174,7 +207,8 @@ of `contracts/identity-marketplace/fixtures/`.
 | The process exits at start | A configuration value is invalid; the message names it (for example `IDENTITY_ADDRESS` that is not the address of `IDENTITY_POLICY_ID`). |
 | An agent is not in the catalogs, or its card is 404 "not listed (…)" | The reason names the failed condition of the listing rule (`notIndependent`, `notActive`, `notReachable`). For `notReachable`: the last detection failed, or the endpoint changed and the next scan has not checked it yet. Resolve the DID: `vectorProfile.protocol` and `vectorFetched` show the last successful detection. A host gets at most one fetch each minute, so a check of many agents on one host takes minutes. |
 | A web agent is not in the catalogs | The AI Catalog and ARD formats list A2A agent cards and MCP server cards only. Its other renderings (`did.json`, `oasf.json`, `registration.json`) work. |
-| Agent cards are 503 | No Ed25519 signing key is configured for the renderings. |
+| Agent cards are 503 | No Ed25519 signing key is configured: set `GATEWAY_ED25519_KEY_FILE`, `GATEWAY_P256_KEY_FILE` and `GATEWAY_VECTOR_ID`. |
+| The process exits with "key file … is readable by its group or by other users" | Make the key file readable only by the container user (mode 600 or 400). |
 | A domain stays unverified | The TXT record must be exactly the DID (or `did=` and the DID). A DID configuration needs a JWT Domain Linkage Credential signed by a key with the assertion purpose; the JSON-LD format is not supported. The host must resolve to public addresses only. |
 
 ## Update the image

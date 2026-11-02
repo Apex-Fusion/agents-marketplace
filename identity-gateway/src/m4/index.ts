@@ -70,16 +70,20 @@ export function createM4Services(options: M4ServicesOptions): M4Services {
   };
 }
 
-/** The M4 services from the environment (see config.ts), or null when no key files are configured. */
+/**
+ * The M4 services from the environment (see config.ts), or null when no key files are configured.
+ * `baseUrl` is the gateway's public origin (GATEWAY_BASE_URL).
+ */
 export function m4ServicesFromEnv(
   env: NodeJS.ProcessEnv,
-  dependencies: { readonly records: RecordSource; readonly chain: ChainSource; readonly log?: (message: string) => void },
+  dependencies: { readonly baseUrl: string; readonly records: RecordSource; readonly chain: ChainSource; readonly log?: (message: string) => void },
 ): M4Services | null {
-  const config = loadM4Config(env);
+  const { baseUrl, ...rest } = dependencies;
+  const config = loadM4Config(env, baseUrl);
   if (config === null) return null;
   const keys = loadGatewayKeys(config.keyFiles, config.gatewayId);
-  return createM4Services({ settings: config, keys, ...dependencies });
+  return createM4Services({ settings: config, keys, ...rest });
 }
 
 export type { M4Context, M4Settings, RecordSource } from "./context.js";
-export { loadM4Config, publicOrigin, DEFAULT_PUBLIC_URL, type M4Config } from "./config.js";
+export { loadM4Config, type M4Config } from "./config.js";
