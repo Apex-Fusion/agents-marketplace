@@ -19,6 +19,7 @@ Buyers commission work. Suppliers claim it. Both sides bond AP3X into a non-cust
 | Path | What |
 |---|---|
 | `contracts/advert`, `contracts/escrow`, `contracts/marketplace` | Aiken validators |
+| `contracts/identity-marketplace` | Aiken validators of the identity registry (`did:vector`) and of the new escrow and advert ([README](contracts/identity-marketplace/README.md)) |
 | `docs/ARCHITECTURE.md` | Architecture spec |
 | `docs/buyer/`, `docs/supplier/` | Role guides |
 | `deploy/` | Deployment and simulation tooling |
