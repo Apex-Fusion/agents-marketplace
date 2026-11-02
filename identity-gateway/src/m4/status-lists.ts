@@ -1,0 +1,231 @@
+// Status lists (Part 2 Sections 8.4 and 8.6). Each list has 131,072 entries: status-list index i is
+// in list n = floor(i / 131,072) at position p = i mod 131,072. The index comes from the resolver
+// core's `listRecords()`, and the status from the effective status of the view without options:
+// - Revoked or Retired: revocation (Part 1 gives that status only after 30 confirmations, and the
+//   bit is never cleared);
+// - Suspended, also `deactivationPending`: suspension;
+// - Active: neither.
+// Two formats, both signed with ES256 by the gateway's P-256 key:
+// - W3C Bitstring Status List v1.0 (W3C Recommendation, 15 May 2025,
+//   https://www.w3.org/TR/2025/REC-vc-bitstring-status-list-20250515/): one list with both purposes
+//   (Section 2.2 allows several `statusPurpose` values in one list; Appendix A.4). Its bitstring has
+//   2 × 131,072 bits: bit p is the revocation bit and bit 131,072 + p the suspension bit of position
+//   p. Index 0 is the left-most bit (Section 2.2). GZIP (RFC 1952), then multibase base64url ("u").
+//   The credential is secured with JOSE as `application/vc+jwt` (Securing Verifiable Credentials
+//   using JOSE and COSE, W3C Recommendation, https://www.w3.org/TR/vc-jose-cose/, Section 3.1.1).
+// - IETF Token Status List (draft-ietf-oauth-status-list-21,
+//   https://www.ietf.org/archive/id/draft-ietf-oauth-status-list-21.txt): 2 bits per entry, packed
+//   from the least significant bit (Section 4.1); values 0 VALID, 1 INVALID, 2 SUSPENDED (Section
+//   7.1); DEFLATE with the ZLIB format, base64url; a `statuslist+jwt` token (Section 5.1).
+
+import { deflateSync, gzipSync } from "node:zlib";
+import type { EffectiveStatus } from "../resolve/status.js";
+import { formatTime } from "../resolve/time.js";
+import { gatewayDid, type M4Context } from "./context.js";
+import { b64url, signJws } from "./jose.js";
+
+export const LIST_SIZE = 131_072;
+
+/** Token Status List values (draft-ietf-oauth-status-list-21 Section 7.1). */
+export const STATUS = { valid: 0, invalid: 1, suspended: 2 } as const;
+export type StatusValue = (typeof STATUS)[keyof typeof STATUS];
+
+export const statusValue = (effective: EffectiveStatus): StatusValue =>
+  effective === "active" ? STATUS.valid : effective === "suspended" ? STATUS.suspended : STATUS.invalid;
+
+/** Where an index is: list n, position p. */
+export const listPosition = (index: number): { n: number; p: number } => ({ n: Math.floor(index / LIST_SIZE), p: index % LIST_SIZE });
+
+/** The uncompressed Token Status List byte array: 2 bits per entry, entry 0 in the least significant bits of byte 0. */
+export function tokenStatusBytes(values: Uint8Array): Buffer {
+  const bytes = Buffer.alloc((LIST_SIZE * 2) / 8);
+  values.forEach((v, p) => {
+    if (v !== 0) bytes[p >> 2]! |= (v & 0b11) << ((p & 3) * 2);
+  });
+  return bytes;
+}
+
+/** The uncompressed Bitstring Status List: revocation bits, then suspension bits; index 0 is the most significant bit of byte 0. */
+export function bitstring(values: Uint8Array): Buffer {
+  const bits = Buffer.alloc((2 * LIST_SIZE) / 8);
+  const set = (i: number): void => {
+    bits[i >> 3]! |= 0x80 >> (i & 7);
+  };
+  values.forEach((v, p) => {
+    if (v === STATUS.invalid) set(p);
+    else if (v === STATUS.suspended) set(LIST_SIZE + p);
+  });
+  return bits;
+}
+
+/** The BSL `statusListIndex` values of position p. */
+export const bitstringIndex = (purpose: "revocation" | "suspension", p: number): number => (purpose === "revocation" ? p : LIST_SIZE + p);
+
+interface IndexCache {
+  readonly builtAt: number;
+  readonly indices: ReadonlyMap<string, number>;
+}
+
+interface Lists {
+  readonly builtAt: number;
+  /** Status values of each list, by n. */
+  readonly values: readonly Uint8Array[];
+  readonly signed: Map<string, string>;
+}
+
+/** Only one ledger read at a time builds the index or the lists; concurrent callers share it. */
+const MIN_INDEX_REBUILD_MS = 10_000;
+const BUILD_CONCURRENCY = 8;
+/** Signed lists expire one hour after they are built (TSL `exp`, BSL `validUntil`). */
+export const LIST_VALIDITY_MS = 3_600_000;
+
+export class StatusLists {
+  private index: IndexCache | null = null;
+  private indexBuild: Promise<IndexCache> | null = null;
+  private lists: Lists | null = null;
+  private listsBuild: Promise<Lists> | null = null;
+
+  constructor(private readonly ctx: M4Context) {}
+
+  /** The status-list index of an identifier, or null when it has none (yet). A failed read throws. */
+  async indexOf(vectorId: string): Promise<number | null> {
+    const now = this.ctx.now();
+    let cache = this.index;
+    if (cache === null || now - cache.builtAt >= this.ctx.settings.statusListRefreshMs) cache = await this.buildIndex();
+    const known = cache.indices.get(vectorId);
+    if (known !== undefined) return known;
+    // A mint that reached 30 confirmations after the last build: build again, at most every 10 s.
+    if (now - cache.builtAt >= MIN_INDEX_REBUILD_MS) cache = await this.buildIndex();
+    return cache.indices.get(vectorId) ?? null;
+  }
+
+  /** The signed Token Status List of list n (`application/statuslist+jwt`), or null when the list does not exist. */
+  async tokenStatusList(n: number): Promise<string | null> {
+    return this.signedList("tsl", n);
+  }
+
+  /** The signed Bitstring Status List credential of list n (`application/vc+jwt`), or null when the list does not exist. */
+  async bitstringStatusList(n: number): Promise<string | null> {
+    return this.signedList("bsl", n);
+  }
+
+  /** Builds the lists again now, as the refresh interval would. */
+  async refresh(): Promise<void> {
+    await this.buildLists();
+  }
+
+  private buildIndex(): Promise<IndexCache> {
+    this.indexBuild ??= (async () => {
+      try {
+        const list = await this.ctx.records.listRecords();
+        const indices = new Map<string, number>();
+        for (const e of list.entries) if (e.statusListIndex !== null) indices.set(e.vectorId, e.statusListIndex);
+        this.index = { builtAt: this.ctx.now(), indices };
+        return this.index;
+      } finally {
+        this.indexBuild = null;
+      }
+    })();
+    return this.indexBuild;
+  }
+
+  private buildLists(): Promise<Lists> {
+    this.listsBuild ??= (async () => {
+      try {
+        const index = await this.buildIndex();
+        const entries = [...index.indices];
+        const listCount = entries.reduce((count, [, i]) => Math.max(count, listPosition(i).n + 1), 1);
+        const values = Array.from({ length: listCount }, () => new Uint8Array(LIST_SIZE));
+        let next = 0;
+        const worker = async (): Promise<void> => {
+          while (next < entries.length) {
+            const [vectorId, i] = entries[next++]!;
+            const lookup = await this.ctx.records.currentRecord(vectorId);
+            // An indexed identifier always resolves; if it does not, suspension is the reversible answer.
+            const value = lookup.found ? statusValue(lookup.record.effective.status) : STATUS.suspended;
+            const { n, p } = listPosition(i);
+            values[n]![p] = value;
+          }
+        };
+        await Promise.all(Array.from({ length: Math.min(BUILD_CONCURRENCY, entries.length) }, worker));
+        this.lists = { builtAt: this.ctx.now(), values, signed: new Map() };
+        return this.lists;
+      } finally {
+        this.listsBuild = null;
+      }
+    })();
+    return this.listsBuild;
+  }
+
+  private async current(): Promise<Lists> {
+    const lists = this.lists;
+    if (lists !== null && this.ctx.now() - lists.builtAt < this.ctx.settings.statusListRefreshMs) return lists;
+    try {
+      return await this.buildLists();
+    } catch (e) {
+      // Serve the last lists while they are valid; their `exp` and `validUntil` still bound their use.
+      if (lists !== null && this.ctx.now() - lists.builtAt < LIST_VALIDITY_MS) {
+        this.ctx.log(`identity-gateway: status lists not rebuilt: ${e instanceof Error ? e.message : String(e)}`);
+        return lists;
+      }
+      throw e;
+    }
+  }
+
+  private async signedList(kind: "tsl" | "bsl", n: number): Promise<string | null> {
+    const lists = await this.current();
+    const values = lists.values[n];
+    if (values === undefined) return null;
+    const key = `${kind}:${n}`;
+    const known = lists.signed.get(key);
+    if (known !== undefined) return known;
+    const signed = kind === "tsl" ? await this.signTokenStatusList(n, values, lists.builtAt) : await this.signBitstringList(n, values, lists.builtAt);
+    lists.signed.set(key, signed);
+    return signed;
+  }
+
+  private ttlSeconds(): number {
+    return Math.max(1, Math.round(this.ctx.settings.statusListRefreshMs / 1000));
+  }
+
+  private signTokenStatusList(n: number, values: Uint8Array, builtAt: number): Promise<string> {
+    const { settings, keys } = this.ctx;
+    const iat = Math.floor(builtAt / 1000);
+    return signJws(
+      { alg: "ES256", kid: keys.p256.kid, typ: "statuslist+jwt" },
+      {
+        iss: settings.baseUrl,
+        sub: `${settings.baseUrl}/status/tsl/${n}`,
+        iat,
+        exp: iat + LIST_VALIDITY_MS / 1000,
+        ttl: this.ttlSeconds(),
+        status_list: { bits: 2, lst: b64url(deflateSync(tokenStatusBytes(values), { level: 9 })) },
+      },
+      keys.p256,
+    );
+  }
+
+  private signBitstringList(n: number, values: Uint8Array, builtAt: number): Promise<string> {
+    const { settings, keys } = this.ctx;
+    const url = `${settings.baseUrl}/status/bsl/${n}`;
+    return signJws(
+      { alg: "ES256", kid: keys.p256.kid, typ: "vc+jwt", cty: "vc" },
+      {
+        "@context": ["https://www.w3.org/ns/credentials/v2"],
+        id: url,
+        type: ["VerifiableCredential", "BitstringStatusListCredential"],
+        issuer: gatewayDid(settings),
+        validFrom: formatTime(builtAt),
+        validUntil: formatTime(builtAt + LIST_VALIDITY_MS),
+        credentialSubject: {
+          id: `${url}#list`,
+          type: "BitstringStatusList",
+          statusPurpose: ["revocation", "suspension"],
+          encodedList: `u${b64url(gzipSync(bitstring(values), { level: 9 }))}`,
+          ttl: this.ttlSeconds() * 1000,
+        },
+      },
+      keys.p256,
+    );
+  }
+}
