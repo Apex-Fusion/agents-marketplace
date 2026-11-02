@@ -893,7 +893,7 @@ The tests are in `tests/legacy-registry/` (offline, `aiken tx simulate`). Result
 ### 12.3 Property tests
 
 - The effective status of a child is never better than its parent's.
-- A subagent under an old epoch is Revoked, whatever its own status.
+- A live subagent under an old epoch is Revoked. A subagent tombstone keeps its own status (Part 1 §7.3 rule 1 applies before rule 3).
 - A subagent has the earliest "invalid from" time of its ancestors and itself.
 - No sequence of valid transactions moves a tombstone back to a live status.
 - No sequence changes `created_at` or the token name.
