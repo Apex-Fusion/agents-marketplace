@@ -418,7 +418,7 @@ pub type DelegationMint { Delegate { seed: OutputReference }  Undelegate }
 - **Use by a dependent contract.** These checks must all pass:
   - the delegation and every ancestor are authentic reference inputs;
   - each delegator agent and the delegate have effective status Active;
-  - `active_key(delegate, delegate_key, delegation)` still holds, and `delegate_key` signed;
+  - `active_key(delegate, delegate_key, delegation)` still holds, and `delegate_key` signed. The same `active_key` check holds for the delegate key of every ancestor link, so the removal of a key ends every sub-delegation that this key signed (decision of 2026-11-02, stricter than the first text);
   - the action and the resource are covered;
   - `[lo, hi]` is inside the period.
 - **Fresh keys.** The gateway and the SDKs refuse a `delegate_key` that another live delegation uses. Thus one agent can hold at most 8 live delegations, one for each listed key.
