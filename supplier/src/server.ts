@@ -29,6 +29,11 @@
  * references (`ollama.callOllama` via the imported namespace; `deps.chain`
  * via the closure) rather than top-level destructuring. That keeps
  * vi.stubGlobal("fetch") and vi.spyOn(chain, "submitTx") effective.
+ *
+ * Both escrow layouts (Part 2 §9.6): a new (16-field) escrow must name this
+ * supplier's agent (identity/agent.ts). Claim and Submit of a new escrow read
+ * the agent's record, and its receipt carries agent_did. GET /capability
+ * shows the agent (agent_id, agent_did) for receipt verifiers (§6.3).
  */
 
 import express, { type Application, type Request, type Response, type NextFunction } from "express";
@@ -36,8 +41,8 @@ import { createHash } from "crypto";
 import { existsSync } from "node:fs";
 
 import type { ChainProvider, OutputReference } from "@marketplace/shared/chain";
-import { decodeAdvertDatum, decodeEscrowDatum, canonicalize } from "@marketplace/shared/cbor";
-import type { AdvertDatum, EscrowDatum } from "@marketplace/shared/cbor";
+import { canonicalize, type AdvertDatum, type EscrowDatum, type IdentityAdvertDatum } from "@marketplace/shared/cbor";
+import { vectorDid } from "@marketplace/shared/identity";
 import type { WalletKey } from "@marketplace/shared/tx";
 import {
   buildClaimTx,
@@ -77,6 +82,10 @@ import { formatUsdNanos } from "./reseller/money.js";
 import { renderResellerDashboardPage } from "./reseller/dashboardPage.js";
 import type { Paper2AgentRuntime } from "./paper2agent/runtime.js";
 import { paper2AgentRoutes } from "./paper2agent/routes.js";
+import {
+  decodeAdvert, decodeEscrow, identityOptions, identityRefusal, newEscrowRefusal, ownAgentId, supplierIdentity,
+  type SupplierIdentity,
+} from "./identity/agent.js";
 
 export interface SupplierDeps {
   chain: ChainProvider;
@@ -90,6 +99,8 @@ export interface SupplierDeps {
   /** Optional balance-aware resale runtime. Absent for every legacy supplier. */
   reseller?: ResellerRuntime;
   paper2agent?: Paper2AgentRuntime;
+  /** Optional: defaults to the chain record lookup and the env identity blueprint. */
+  identity?: SupplierIdentity;
 }
 
 const ESCROW_REF_RE = /^[0-9a-fA-F]{64}#(?:0|[1-9]\d*)$/;
@@ -142,6 +153,7 @@ interface ResolvedDeps {
   chatSessions: ChatSessionStore;
   reseller?: ResellerRuntime;
   paper2agent?: Paper2AgentRuntime;
+  identity: SupplierIdentity;
 }
 
 function makeCapabilityHandler(deps: ResolvedDeps) {
@@ -157,9 +169,9 @@ function makeCapabilityHandler(deps: ResolvedDeps) {
         return jsonError(res, 503, "advert_unavailable", "advert UTxO not found on chain");
       }
 
-      let datum: AdvertDatum;
+      let datum: AdvertDatum | IdentityAdvertDatum;
       try {
-        datum = decodeAdvertDatum(utxo.datumHex);
+        datum = decodeAdvert(utxo.datumHex).datum;
       } catch (err) {
         return jsonError(res, 503, "advert_decode_failed",
           `unable to decode advert datum: ${(err as Error).message}`);
@@ -171,6 +183,12 @@ function makeCapabilityHandler(deps: ResolvedDeps) {
       }
 
       if (deps.paper2agent) datum = await deps.paper2agent.advert();
+      let agentId: string | null;
+      try {
+        agentId = ownAgentId(deps.config.agentId, datum);
+      } catch (err) {
+        return jsonError(res, 503, "agent_mismatch", (err as Error).message);
+      }
       const advertRefStr = `${deps.config.advertRef.txHash}#${deps.config.advertRef.index}`;
       const llmCapability =
         deps.config.capabilityKind === "chat" ||
@@ -184,6 +202,8 @@ function makeCapabilityHandler(deps: ResolvedDeps) {
         advert_ref: advertRefStr,
         supplier_pkh: datum.supplier_pkh,
         pub_key_hex: deps.supplierKey.pubKeyHex,
+        agent_id: agentId,
+        agent_did: agentId === null ? null : vectorDid(agentId),
         ...(deps.paper2agent ? { paper2agent: {
           manifest: deps.paper2agent.manifest, manifest_hash: deps.paper2agent.manifestHash,
         } } : {}),
@@ -245,24 +265,29 @@ interface ResponsesBody extends Partial<ResponseRequest> {
 }
 
 type AdvertResult =
-  | { datum: AdvertDatum }
+  | { datum: AdvertDatum | IdentityAdvertDatum; agentId: string | null }
   | { error: { status: number; reason: string; message: string } };
 
+/** The configured advert (either layout) and the supplier's own agent. */
 async function fetchActiveAdvert(deps: ResolvedDeps): Promise<AdvertResult> {
   const utxo = await deps.chain.queryUtxo(deps.config.advertRef);
   if (utxo === null || !utxo.datumHex) {
     return { error: { status: 503, reason: "advert_unavailable", message: "advert UTxO missing on chain" } };
   }
-  let datum: AdvertDatum;
+  let datum: AdvertDatum | IdentityAdvertDatum;
   try {
-    datum = decodeAdvertDatum(utxo.datumHex);
+    datum = decodeAdvert(utxo.datumHex).datum;
   } catch (err) {
     return { error: { status: 503, reason: "advert_decode_failed", message: (err as Error).message } };
   }
   if (datum.status !== "Active") {
     return { error: { status: 503, reason: "advert_not_active", message: `advert status=${datum.status}` } };
   }
-  return { datum };
+  try {
+    return { datum, agentId: ownAgentId(deps.config.agentId, datum) };
+  } catch (err) {
+    return { error: { status: 503, reason: "agent_mismatch", message: (err as Error).message } };
+  }
 }
 
 function makeChatHandler(deps: ResolvedDeps) {
@@ -396,7 +421,7 @@ function makeChatHandler(deps: ResolvedDeps) {
       }
       let escrowDatum: EscrowDatum;
       try {
-        escrowDatum = decodeEscrowDatum(escrowUtxo.datumHex);
+        escrowDatum = decodeEscrow(escrowUtxo.datumHex).datum;
       } catch (err) {
         return jsonError(res, 404, "escrow_decode_failed", (err as Error).message);
       }
@@ -414,6 +439,8 @@ function makeChatHandler(deps: ResolvedDeps) {
         return jsonError(res, 409, "capability_mismatch",
           `escrow capability ${escrowDatum.capability_id} != advert ${advert.capability_id}`);
       }
+      const agentRefusal = newEscrowRefusal(escrowDatum, escrowUtxo.lovelace, advertResult.agentId, deps.identity);
+      if (agentRefusal) return jsonError(res, agentRefusal.status, agentRefusal.reason, agentRefusal.message);
 
       // ── 6. Hash checks ───────────────────────────────────────────────
       const expectedRequestSpecHash = sha256Hex(canonicalize({
@@ -503,6 +530,7 @@ function makeChatHandler(deps: ResolvedDeps) {
             chain: deps.chain,
             supplierKey: deps.supplierKey,
             escrowRef,
+            ...identityOptions(escrowDatum, deps.identity),
           });
         } catch (err) {
           return { kind: "build_failed" as const, err };
@@ -519,9 +547,11 @@ function makeChatHandler(deps: ResolvedDeps) {
         await deps.reseller.recordFailed(escrowRefStr, reason).catch(() => undefined);
       };
       if (claimOutcome.kind === "build_failed") {
-        await failEvidence("claim_submit_failed");
+        const refusal = identityRefusal(claimOutcome.err);
+        await failEvidence(refusal?.reason ?? "claim_submit_failed");
         deps.state.release(escrowRefStr);
         acquiredRef = null;
+        if (refusal) return jsonError(res, refusal.status, refusal.reason, refusal.message);
         // Backstop the periodic wallet-health ticker: most Claim build failures
         // we see in practice are wallet-shape problems (fragmentation, dust).
         // Fire-and-forget a debounced consolidate so the NEXT buyer retry
@@ -586,6 +616,7 @@ function makeChatHandler(deps: ResolvedDeps) {
           supplierKey: deps.supplierKey,
           jobs: deps.jobs,
           reseller: deps.reseller,
+          identity: deps.identity,
         },
         jobId,
         escrowRef: escrowRefStr,
@@ -736,7 +767,7 @@ function makeTtsHandler(deps: ResolvedDeps) {
       }
       let escrowDatum: EscrowDatum;
       try {
-        escrowDatum = decodeEscrowDatum(escrowUtxo.datumHex);
+        escrowDatum = decodeEscrow(escrowUtxo.datumHex).datum;
       } catch (err) {
         return jsonError(res, 404, "escrow_decode_failed", (err as Error).message);
       }
@@ -754,6 +785,8 @@ function makeTtsHandler(deps: ResolvedDeps) {
         return jsonError(res, 409, "capability_mismatch",
           `escrow capability ${escrowDatum.capability_id} != advert ${advert.capability_id}`);
       }
+      const agentRefusal = newEscrowRefusal(escrowDatum, escrowUtxo.lovelace, advertResult.agentId, deps.identity);
+      if (agentRefusal) return jsonError(res, agentRefusal.status, agentRefusal.reason, agentRefusal.message);
 
       // ── 6. Hash checks ──────────────────────────────────────────────
       const expectedRequestSpecHash = sha256Hex(canonicalize({
@@ -801,6 +834,7 @@ function makeTtsHandler(deps: ResolvedDeps) {
             chain: deps.chain,
             supplierKey: deps.supplierKey,
             escrowRef,
+            ...identityOptions(escrowDatum, deps.identity),
           });
         } catch (err) {
           return { kind: "build_failed" as const, err };
@@ -815,6 +849,8 @@ function makeTtsHandler(deps: ResolvedDeps) {
       if (claimOutcome.kind === "build_failed") {
         deps.state.release(escrowRefStr);
         acquiredRef = null;
+        const refusal = identityRefusal(claimOutcome.err);
+        if (refusal) return jsonError(res, refusal.status, refusal.reason, refusal.message);
         return jsonError(res, 503, "chain_submit_failed",
           `Claim tx submit failed: ${(claimOutcome.err as Error).message}`);
       }
@@ -841,6 +877,7 @@ function makeTtsHandler(deps: ResolvedDeps) {
           config: deps.config,
           supplierKey: deps.supplierKey,
           jobs: deps.jobs,
+          identity: deps.identity,
         },
         jobId,
         escrowRef: escrowRefStr,
@@ -988,7 +1025,7 @@ function makeOcrHandler(deps: ResolvedDeps) {
       }
       let escrowDatum: EscrowDatum;
       try {
-        escrowDatum = decodeEscrowDatum(escrowUtxo.datumHex);
+        escrowDatum = decodeEscrow(escrowUtxo.datumHex).datum;
       } catch (err) {
         return jsonError(res, 404, "escrow_decode_failed", (err as Error).message);
       }
@@ -1006,6 +1043,8 @@ function makeOcrHandler(deps: ResolvedDeps) {
         return jsonError(res, 409, "capability_mismatch",
           `escrow capability ${escrowDatum.capability_id} != advert ${advert.capability_id}`);
       }
+      const agentRefusal = newEscrowRefusal(escrowDatum, escrowUtxo.lovelace, advertResult.agentId, deps.identity);
+      if (agentRefusal) return jsonError(res, agentRefusal.status, agentRefusal.reason, agentRefusal.message);
 
       // ── 6. Hash checks ──────────────────────────────────────────────
       const expectedRequestSpecHash = sha256Hex(canonicalize({
@@ -1095,6 +1134,7 @@ function makeOcrHandler(deps: ResolvedDeps) {
             chain: deps.chain,
             supplierKey: deps.supplierKey,
             escrowRef,
+            ...identityOptions(escrowDatum, deps.identity),
           });
         } catch (err) {
           return { kind: "build_failed" as const, err };
@@ -1109,6 +1149,8 @@ function makeOcrHandler(deps: ResolvedDeps) {
       if (claimOutcome.kind === "build_failed") {
         deps.state.release(escrowRefStr);
         acquiredRef = null;
+        const refusal = identityRefusal(claimOutcome.err);
+        if (refusal) return jsonError(res, refusal.status, refusal.reason, refusal.message);
         triggerOnFailureConsolidate({
           chain: deps.chain,
           state: deps.state,
@@ -1140,6 +1182,7 @@ function makeOcrHandler(deps: ResolvedDeps) {
           config: deps.config,
           supplierKey: deps.supplierKey,
           jobs: deps.jobs,
+          identity: deps.identity,
         },
         jobId,
         escrowRef: escrowRefStr,
@@ -1235,6 +1278,7 @@ function makeChatSessionHandlers(deps: ResolvedDeps) {
     supplierKey: deps.supplierKey,
     jobs: deps.jobs,
     sessions: deps.chatSessions,
+    identity: deps.identity,
   };
 
   function armIdleTimer(record: ChatSessionRecord): void {
@@ -1306,7 +1350,7 @@ function makeChatSessionHandlers(deps: ResolvedDeps) {
       }
       let escrowDatum: EscrowDatum;
       try {
-        escrowDatum = decodeEscrowDatum(escrowUtxo.datumHex);
+        escrowDatum = decodeEscrow(escrowUtxo.datumHex).datum;
       } catch (err) {
         return jsonError(res, 404, "escrow_decode_failed", (err as Error).message);
       }
@@ -1322,6 +1366,8 @@ function makeChatSessionHandlers(deps: ResolvedDeps) {
         return jsonError(res, 409, "capability_mismatch",
           `escrow capability ${escrowDatum.capability_id} != advert ${advert.capability_id}`);
       }
+      const agentRefusal = newEscrowRefusal(escrowDatum, escrowUtxo.lovelace, advertResult.agentId, deps.identity);
+      if (agentRefusal) return jsonError(res, agentRefusal.status, agentRefusal.reason, agentRefusal.message);
 
       // ── 6. Hash checks (request spec + session-init prompt) ──────────
       const expectedRequestSpecHash = sha256Hex(canonicalize({
@@ -1374,7 +1420,9 @@ function makeChatSessionHandlers(deps: ResolvedDeps) {
       const claimOutcome = await deps.state.walletMutex.run(async () => {
         let built;
         try {
-          built = await buildClaimTx({ chain: deps.chain, supplierKey: deps.supplierKey, escrowRef });
+          built = await buildClaimTx({
+            chain: deps.chain, supplierKey: deps.supplierKey, escrowRef, ...identityOptions(escrowDatum, deps.identity),
+          });
         } catch (err) {
           return { kind: "build_failed" as const, err };
         }
@@ -1388,6 +1436,8 @@ function makeChatSessionHandlers(deps: ResolvedDeps) {
       if (claimOutcome.kind === "build_failed") {
         deps.state.release(escrowRefStr);
         acquiredRef = null;
+        const refusal = identityRefusal(claimOutcome.err);
+        if (refusal) return jsonError(res, refusal.status, refusal.reason, refusal.message);
         triggerOnFailureConsolidate({ chain: deps.chain, state: deps.state, supplierKey: deps.supplierKey });
         return jsonError(res, 503, "chain_submit_failed", `Claim tx submit failed: ${(claimOutcome.err as Error).message}`);
       }
@@ -1623,6 +1673,7 @@ export function createApp(deps: SupplierDeps): Application {
     chatSessions: deps.chatSessions ?? new ChatSessionStore(),
     reseller: deps.reseller,
     paper2agent: deps.paper2agent,
+    identity: deps.identity ?? supplierIdentity(deps.chain, deps.config.networkId),
   };
   if (resolved.config.capabilityKind === "paper2agent" && !resolved.paper2agent) {
     throw new Error("Paper2Agent runtime must be initialized before serving requests");

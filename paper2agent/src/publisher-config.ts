@@ -9,6 +9,11 @@
  *                                        NETWORK_ID,OGMIOS_URL,...}}]. One wallet per slot.
  *                                        LIVE_CHAIN=1 requires NETWORK_ID=1 (Vector mainnet) and
  *                                        VECTOR_ZERO_TIME_MS equal to this process's value.
+ *                                        IDENTITY_POLICY_ID makes the slot post a new advert
+ *                                        (Part 2 §6.2, §9.2) for its agent: AGENT_ID, or the
+ *                                        record that the publisher registers for the slot key
+ *                                        (POST /targets/<id>/record). AGENT_ID and the
+ *                                        IDENTITY_*_REF_UTXO settings need IDENTITY_POLICY_ID.
  *   PAPER2AGENT_PUBLISHER_PUBLIC_URL   — public base URL; each advert endpoint is
  *                                        <base>/tools/<target id>.
  *   PAPER2AGENT_RUNTIME_IMAGE          — exact local base image ID (sha256:<64 hex>), the
@@ -24,6 +29,12 @@
  *                                        value as the gateway's. Unset: the route answers 404.
  *   DOCKER_HOST                        — unix:// socket for docker builds and for the
  *                                        supplier's fixed tool command.
+ *   IDENTITY_CONTROLLER_PUB_KEY_HEX    — the Foundation operator key (64 hex), the controller
+ *                                        of each slot record (§9.2). Its private key stays
+ *                                        offline: it signs the registration outside the
+ *                                        publisher. Unset: the publisher registers no record.
+ *   IDENTITY_ACCOUNTABLE_PARTY         — "controller" (default, ControllerSet) or a 56-hex
+ *                                        key hash that also signs each registration.
  *
  * Wallet keys stay inside PublisherTarget private fields. They are passed only
  * to the in-process advert builder and to the supplier child's environment.
@@ -33,8 +44,10 @@ import { isIP } from "node:net";
 import { delimiter, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { inspect } from "node:util";
+import type { Signer } from "@marketplace/shared/cbor";
 import type { WalletKey } from "@marketplace/shared/tx";
 import { deriveSupplierKey } from "../../supplier/src/paper2agent/identity.js";
+import { parseAccountableParty, parseControllerKey } from "../../supplier/src/identity/register.js";
 
 const TOKEN_RE = /^[\x21-\x7e]{32,}$/;
 const PORT_RE = /^[1-9]\d{0,4}$/;
@@ -43,6 +56,8 @@ const TARGET_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/;
 const HEX64_RE = /^[0-9a-fA-F]{64}$/;
 const POSITIVE_INT_RE = /^[1-9]\d{0,15}$/;
 const OUTPUT_REF_RE = /^[0-9a-fA-F]{64}#(?:0|[1-9]\d{0,4})$/;
+const AGENT_ID_RE = /^[0-9a-f]{64}$/;
+const HASH28_RE = /^[0-9a-f]{56}$/;
 const CONTROL_RE = /[\x00-\x1f\x7f]/;
 const MAX_TARGETS_FILE_BYTES = 1024 * 1024;
 const MAX_TARGETS = 64;
@@ -78,6 +93,11 @@ const TARGET_ENV: Record<string, TargetEnvRule> = {
   SUPPLIER_PUB_KEY_HEX: { required: false, valid: (v) => HEX64_RE.test(v), expected: "64 hex characters" },
   SUPPLIER_PKH: { required: false, valid: (v) => /^[0-9a-f]{56}$/.test(v), expected: "56 lowercase hex characters" },
   SUPPLIER_ADDRESS: { required: false, valid: (v) => v.length > 0 && v.length <= 200, expected: "a bech32 address" },
+  AGENT_ID: { required: false, valid: (v) => AGENT_ID_RE.test(v), expected: "64 lowercase hex characters" },
+  IDENTITY_POLICY_ID: { required: false, valid: (v) => HASH28_RE.test(v), expected: "56 lowercase hex characters" },
+  IDENTITY_ESCROW_REF_UTXO: { required: false, valid: (v) => OUTPUT_REF_RE.test(v), expected: "<64 hex>#<index>" },
+  IDENTITY_ADVERT_REF_UTXO: { required: false, valid: (v) => OUTPUT_REF_RE.test(v), expected: "<64 hex>#<index>" },
+  IDENTITY_REF_UTXO: { required: false, valid: (v) => OUTPUT_REF_RE.test(v), expected: "<64 hex>#<index>" },
 };
 
 /** One operator-configured wallet slot. Secrets are private fields and never serialized. */
@@ -88,6 +108,10 @@ export class PublisherTarget {
   readonly supplierPkh: string;
   readonly depositAddress: string;
   readonly endpointUrl: string;
+  /** The identity hash (IDENTITY_POLICY_ID): the slot posts new adverts. Null: legacy adverts. */
+  readonly identityPolicyId: string | null;
+  /** AGENT_ID: the slot's agent when it is configured; else the publisher registers one. */
+  readonly agentId: string | null;
   readonly #env: Readonly<Record<string, string>>;
   readonly #key: WalletKey;
 
@@ -99,6 +123,8 @@ export class PublisherTarget {
     this.supplierPkh = this.#key.pubKeyHash;
     this.depositAddress = this.#key.address;
     this.endpointUrl = `${publicUrl}/tools/${id}`;
+    this.identityPolicyId = env.IDENTITY_POLICY_ID ?? null;
+    this.agentId = env.AGENT_ID ?? null;
     this.#env = Object.freeze({ ...env });
   }
 
@@ -118,7 +144,8 @@ export class PublisherTarget {
 
   toJSON(): Record<string, unknown> {
     return { id: this.id, label: this.label, network_id: this.networkId, supplier_pkh: this.supplierPkh,
-      deposit_address: this.depositAddress, endpoint_url: this.endpointUrl, live_chain: this.liveChain };
+      deposit_address: this.depositAddress, endpoint_url: this.endpointUrl, live_chain: this.liveChain,
+      identity_policy_id: this.identityPolicyId, agent_id: this.agentId };
   }
 
   [inspect.custom](): string {
@@ -146,6 +173,8 @@ export interface PaperPublisherConfig {
   repoRoot: string;
   supplierEntry: string;
   targets: PublisherTarget[];
+  /** Controller and Accountable Party of slot records (§9.2), or null when the publisher registers none. */
+  identityController: { controller: string; accountable: Signer } | null;
 }
 
 function fail(message: string): never {
@@ -232,6 +261,11 @@ function parseTargets(value: unknown, url: string, env: Record<string, string | 
         (supplied.SUPPLIER_ADDRESS !== undefined && supplied.SUPPLIER_ADDRESS !== derived.address)) {
       fail(`target ${id} supplier identity settings do not match its signing key`);
     }
+    for (const name of ["AGENT_ID", "IDENTITY_ESCROW_REF_UTXO", "IDENTITY_ADVERT_REF_UTXO", "IDENTITY_REF_UTXO"]) {
+      if (supplied[name] !== undefined && supplied.IDENTITY_POLICY_ID === undefined) {
+        fail(`target ${id} env ${name} needs IDENTITY_POLICY_ID`);
+      }
+    }
     if (targets.some((other) => other.sameWallet(target))) fail(`target ${id} reuses another target's wallet; each slot needs its own key`);
     // The shared live advert builder signs Vector mainnet transactions only; read-only slots may use testnet.
     if (target.liveChain && target.networkId !== 1) {
@@ -291,6 +325,17 @@ export function loadPaperPublisherConfig(env: Record<string, string | undefined>
   }
   // The gateway holds this token; it must not grant management access.
   if (toolCallToken === managementToken) fail("PAPER2AGENT_TOOL_CALL_TOKEN must differ from PAPER2AGENT_PUBLISHER_TOKEN");
+  let identityController: PaperPublisherConfig["identityController"] = null;
+  if (env.IDENTITY_CONTROLLER_PUB_KEY_HEX) {
+    try {
+      identityController = { controller: parseControllerKey(env.IDENTITY_CONTROLLER_PUB_KEY_HEX),
+        accountable: parseAccountableParty(env.IDENTITY_ACCOUNTABLE_PARTY) };
+    } catch (error) {
+      fail((error as Error).message);
+    }
+  } else if (env.IDENTITY_ACCOUNTABLE_PARTY) {
+    fail("IDENTITY_ACCOUNTABLE_PARTY needs IDENTITY_CONTROLLER_PUB_KEY_HEX");
+  }
   const url = publicUrl(env.PAPER2AGENT_PUBLISHER_PUBLIC_URL);
   const targetsFile = env.PAPER2AGENT_PUBLISHER_TARGETS_FILE ?? "";
   if (targetsFile === "") fail("PAPER2AGENT_PUBLISHER_TARGETS_FILE is required");
@@ -311,5 +356,6 @@ export function loadPaperPublisherConfig(env: Record<string, string | undefined>
     repoRoot,
     supplierEntry,
     targets,
+    identityController,
   };
 }

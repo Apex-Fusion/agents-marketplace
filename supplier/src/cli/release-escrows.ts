@@ -3,8 +3,10 @@
  *   `pnpm --filter @marketplace/supplier tx:release-escrows`.
  *
  * Finds this supplier's Submitted escrows by scanning the escrow script
- * address on chain, verifies each is past the buyer's accept window, then
- * releases them serially (supplier receives payment + both bonds).
+ * addresses on chain, verifies each is past the buyer's accept window, then
+ * releases them serially (supplier receives payment + both bonds). During
+ * the drain (Part 2 §9.6) it scans both escrow addresses: the legacy escrow
+ * and, when IDENTITY_POLICY_ID is set, the new escrow.
  *
  * Discovery deliberately does NOT use the indexer: it misses Submit
  * transitions under load (2026-09: four Submitted strays of the OCR supplier
@@ -18,7 +20,8 @@
  *
  * Required env: SUPPLIER_PRIV_KEY_HEX, NETWORK_ID, OGMIOS_URL (when
  * NETWORK_ID=1). Mainnet live builds also require ESCROW_REF_UTXO and
- * VECTOR_ZERO_TIME_MS through the shared transaction builder.
+ * VECTOR_ZERO_TIME_MS through the shared transaction builder. New escrows
+ * need IDENTITY_POLICY_ID (and IDENTITY_ESCROW_REF_UTXO on mainnet).
  */
 
 import { createHash } from "crypto";
@@ -30,11 +33,12 @@ import {
   type ChainProvider,
   type OutputReference,
 } from "@marketplace/shared/chain";
-import { decodeEscrowDatum } from "@marketplace/shared/cbor";
+import { decodeEscrow } from "../identity/agent.js";
 import {
   ACCEPT_WINDOW_MS,
   buildReleaseTx,
   loadBlueprint,
+  loadIdentityBlueprint,
   TxConstructionError,
   type WalletKey,
 } from "@marketplace/shared/tx";
@@ -58,8 +62,8 @@ export interface CliConfig {
 }
 
 export interface ReleaseEscrowsConfig {
-  /** Escrow script address to scan when no explicit --ref is given. */
-  escrowAddress: string;
+  /** Escrow script addresses to scan when no explicit --ref is given (legacy and new). */
+  escrowAddresses: string[];
   supplierKey: WalletKey;
   refs: OutputReference[];
   limit: number;
@@ -264,7 +268,7 @@ function formatRef(ref: OutputReference): string {
 }
 
 /** Submitted escrows addressed to this supplier, from a full scan of the
- * script address. Explicit --ref values bypass the scan (still verified). */
+ * script addresses. Explicit --ref values bypass the scan (still verified). */
 async function discoverRefs(
   cfg: ReleaseEscrowsConfig,
   chain: ChainProvider,
@@ -272,16 +276,18 @@ async function discoverRefs(
   if (cfg.refs.length > 0) return cfg.refs;
 
   const refs: OutputReference[] = [];
-  for (const utxo of await chain.queryUtxosByAddress(cfg.escrowAddress)) {
-    if (!utxo.datumHex) continue;
-    let datum;
-    try {
-      datum = decodeEscrowDatum(utxo.datumHex);
-    } catch {
-      continue; // foreign or malformed datum at the script address
-    }
-    if (datum.state === "Submitted" && datum.supplier_pkh === cfg.supplierKey.pubKeyHash) {
-      refs.push(utxo.ref);
+  for (const address of cfg.escrowAddresses) {
+    for (const utxo of await chain.queryUtxosByAddress(address)) {
+      if (!utxo.datumHex) continue;
+      let datum;
+      try {
+        datum = decodeEscrow(utxo.datumHex).datum;
+      } catch {
+        continue; // foreign or malformed datum at the script address
+      }
+      if (datum.state === "Submitted" && datum.supplier_pkh === cfg.supplierKey.pubKeyHash) {
+        refs.push(utxo.ref);
+      }
     }
   }
   return refs;
@@ -316,7 +322,7 @@ export async function runReleaseEscrows(
         throw new Error("escrow UTxO has no inline datum");
       }
 
-      const datum = decodeEscrowDatum(utxo.datumHex);
+      const datum = decodeEscrow(utxo.datumHex).datum;
       if (datum.state !== "Submitted") {
         process.stdout.write(`skip ${ref} state=${datum.state}\n`);
         skipped++;
@@ -402,10 +408,16 @@ export async function main(
   }
 
   const chain: ChainProvider = new LiveOgmiosProvider({ ogmiosUrl: cfg.ogmiosUrl });
+  const escrowAddresses = [loadBlueprint().escrowScriptAddress(cfg.networkId)];
+  try {
+    escrowAddresses.push(loadIdentityBlueprint().escrowScriptAddress(cfg.networkId));
+  } catch (err) {
+    process.stderr.write(`note: scanning the legacy escrow address only (${errorMessage(err)})\n`);
+  }
   try {
     const result = await runReleaseEscrows(
       {
-        escrowAddress: loadBlueprint().escrowScriptAddress(cfg.networkId),
+        escrowAddresses,
         supplierKey,
         refs: cfg.refs,
         limit: cfg.limit,

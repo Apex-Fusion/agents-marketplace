@@ -1,8 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import type { ChainProvider, OutputReference } from "@marketplace/shared/chain";
-import { decodeAdvertDatum, decodeEscrowDatum, type AdvertDatum, type EscrowDatum } from "@marketplace/shared/cbor";
-import { buildClaimTx, buildSubmitTx, detectCborBackend, mockSlotToWallclockMs, loadBlueprint,
+import {
+  decodeAdvertDatum, decodeEscrowDatum, decodeIdentityAdvertDatum, decodeIdentityEscrowDatum,
+  type AdvertDatum, type EscrowDatum, type IdentityAdvertDatum, type IdentityEscrowDatum,
+} from "@marketplace/shared/cbor";
+import { buildClaimTx, buildSubmitTx, detectCborBackend, isIdentityAdvertDatum, mockSlotToWallclockMs, loadBlueprint,
   NETWORK_BUFFER_MS, type WalletKey } from "@marketplace/shared/tx";
 import { buildReceipt, signReceipt, receiptResultHash } from "@marketplace/shared/receipt";
 import { PAPER2AGENT_CAPABILITY_ID, PAPER2AGENT_SUPPLIER_OVERHEAD_MS, paper2AgentModel, paper2AgentManifestHash,
@@ -11,6 +14,8 @@ import { PAPER2AGENT_CAPABILITY_ID, PAPER2AGENT_SUPPLIER_OVERHEAD_MS, paper2Agen
 import type { Paper2AgentConfig } from "../config.js";
 import type { SupplierState } from "../state.js";
 import { checkSupplierKey } from "./identity.js";
+import { advertRecordProblem, identityOptions, newEscrowRefusal, receiptAgentDid, supplierIdentity,
+  type SupplierIdentity } from "../identity/agent.js";
 import { ToolJournal, type ToolJob } from "./journal.js";
 import { LocalToolSession, checkTool, readManifest, verifyPackage,
   type ToolSession, type ToolSessionFactory } from "./local.js";
@@ -23,6 +28,10 @@ export interface ToolRuntimeDeps {
   advertRef: OutputReference;
   config: Paper2AgentConfig;
   sessionFactory?: ToolSessionFactory;
+  /** AGENT_ID: when set, a new advert must name this agent. */
+  agentId?: string;
+  /** Default: the chain record lookup and the env identity blueprint (IDENTITY_POLICY_ID). */
+  identity?: SupplierIdentity;
 }
 
 /** The free-call reply: the validated tool output and its measured runtime. */
@@ -54,12 +63,14 @@ export class Paper2AgentRuntime {
   private readonly sessions = new Set<ToolSession>();
   private readonly tasks = new Set<Promise<unknown>>();
   private closing = false;
+  private readonly identity: SupplierIdentity;
 
   private constructor(private readonly deps: ToolRuntimeDeps) {
     checkSupplierKey(deps.supplierKey, deps.networkId);
     this.manifest = readManifest(deps.config.manifestPath);
     this.manifestHash = paper2AgentManifestHash(this.manifest);
     this.journal = new ToolJournal(deps.config.journalDir);
+    this.identity = deps.identity ?? supplierIdentity(deps.chain, deps.networkId);
   }
 
   static async create(deps: ToolRuntimeDeps): Promise<Paper2AgentRuntime> {
@@ -69,19 +80,30 @@ export class Paper2AgentRuntime {
     return runtime;
   }
 
-  async advert(): Promise<AdvertDatum> {
+  /**
+   * The configured advert in either layout (Part 2 §9.6): a legacy advert at
+   * the legacy advert address, or a new advert (with agent_id) at the new
+   * advert address. The advert's layout fixes the layout of its escrows.
+   */
+  async advert(): Promise<AdvertDatum | IdentityAdvertDatum> {
     const { chain, advertRef, networkId, supplierKey } = this.deps;
     const utxo = await chain.queryUtxo(advertRef);
-    if (!utxo?.datumHex || utxo.address !== loadBlueprint().advertScriptAddress(networkId)) {
+    if (!utxo?.datumHex) throw new ToolAdmissionError(503, "advert_unavailable");
+    let advert: AdvertDatum | IdentityAdvertDatum;
+    try {
+      if (utxo.address === loadBlueprint().advertScriptAddress(networkId)) advert = decodeAdvertDatum(utxo.datumHex);
+      else if (utxo.address === this.identity.blueprint().advertScriptAddress(networkId)) advert = decodeIdentityAdvertDatum(utxo.datumHex);
+      else throw new Error("not at an advert address");
+    } catch {
       throw new ToolAdmissionError(503, "advert_unavailable");
     }
-    const advert = decodeAdvertDatum(utxo.datumHex);
     if (advert.status !== "Active" || advert.supplier_pkh !== supplierKey.pubKeyHash ||
         advert.capability_id !== PAPER2AGENT_CAPABILITY_ID || advert.model !== paper2AgentModel(this.manifest) ||
         advert.max_output_tokens !== 0 || advert.price_lovelace < 0n ||
         advert.supplier_bond_lovelace < 0n || advert.buyer_bond_lovelace < 0n ||
         !Number.isSafeInteger(advert.max_processing_ms) ||
-        advert.max_processing_ms < this.manifest.limits.max_runtime_ms + PAPER2AGENT_SUPPLIER_OVERHEAD_MS) {
+        advert.max_processing_ms < this.manifest.limits.max_runtime_ms + PAPER2AGENT_SUPPLIER_OVERHEAD_MS ||
+        (isIdentityAdvertDatum(advert) && this.deps.agentId !== undefined && advert.agent_id !== this.deps.agentId)) {
       throw new ToolAdmissionError(503, "configured_advert_mismatch");
     }
     return advert;
@@ -150,12 +172,17 @@ export class Paper2AgentRuntime {
     const { chain, state, supplierKey, config, networkId, advertRef } = this.deps;
     const advert = await this.advert();
     const utxo = await chain.queryUtxo(escrowRef);
-    if (!utxo?.datumHex || utxo.address !== loadBlueprint().escrowScriptAddress(networkId)) {
+    // A new advert takes new escrows at the new escrow address; a legacy advert, legacy escrows.
+    const escrowAddress = isIdentityAdvertDatum(advert)
+      ? this.identity.blueprint().escrowScriptAddress(networkId)
+      : loadBlueprint().escrowScriptAddress(networkId);
+    if (!utxo?.datumHex || utxo.address !== escrowAddress) {
       throw new ToolAdmissionError(404, "escrow_unavailable");
     }
-    let escrow: EscrowDatum;
-    try { escrow = decodeEscrowDatum(utxo.datumHex); }
-    catch { throw new ToolAdmissionError(400, "invalid_escrow"); }
+    let escrow: EscrowDatum | IdentityEscrowDatum;
+    try {
+      escrow = isIdentityAdvertDatum(advert) ? decodeIdentityEscrowDatum(utxo.datumHex) : decodeEscrowDatum(utxo.datumHex);
+    } catch { throw new ToolAdmissionError(400, "invalid_escrow"); }
     const now = await this.now();
     if (escrow.state !== "Open" || escrow.submitted_at !== null || escrow.result_receipt_hash !== null ||
         escrow.supplier_pkh !== supplierKey.pubKeyHash || escrow.buyer_pkh === supplierKey.pubKeyHash ||
@@ -170,8 +197,14 @@ export class Paper2AgentRuntime {
         !Number.isSafeInteger(escrow.posted_at) || escrow.posted_at > now ||
         !Number.isSafeInteger(escrow.deliver_by) ||
         escrow.deliver_by !== escrow.posted_at + advert.max_processing_ms + NETWORK_BUFFER_MS ||
-        escrow.deliver_by - now < this.manifest.limits.max_runtime_ms + PAPER2AGENT_SUPPLIER_OVERHEAD_MS) {
+        escrow.deliver_by - now < this.manifest.limits.max_runtime_ms + PAPER2AGENT_SUPPLIER_OVERHEAD_MS ||
+        newEscrowRefusal(escrow, utxo.lovelace, isIdentityAdvertDatum(advert) ? advert.agent_id : null, this.identity) !== null) {
       throw new ToolAdmissionError(409, "escrow_commitment_or_economics_mismatch");
+    }
+    // The agent's record must pass the Claim checks now (§6.1), before the job enters the journal.
+    if (isIdentityAdvertDatum(advert) &&
+        await advertRecordProblem(this.identity, advert.agent_id, supplierKey.pubKeyHash, PAPER2AGENT_CAPABILITY_ID, now) !== null) {
+      throw new ToolAdmissionError(503, "agent_not_eligible");
     }
     if (this.closing || !state.tryAcquire(refText)) throw new ToolAdmissionError(409, "supplier_busy");
     let session: ToolSession | undefined;
@@ -192,7 +225,7 @@ export class Paper2AgentRuntime {
       const currentJob = job;
       const claim = await state.walletMutex.run(async () => {
         if (this.closing) throw new Error("Supplier is stopping");
-        const built = await buildClaimTx({ chain, supplierKey, escrowRef,
+        const built = await buildClaimTx({ chain, supplierKey, escrowRef, ...identityOptions(escrow, this.identity),
           beforeSubmit: async (candidate) => {
             currentJob.phase = "claiming";
             currentJob.claimed_ref = `${candidate.expectedTxHash}#0`;
@@ -297,7 +330,7 @@ export class Paper2AgentRuntime {
       const receipt = buildReceipt({ prompt_hash: escrow.prompt_hash,
         response_hash: paper2AgentResultHash(this.manifestHash, escrow.prompt_hash, result),
         model: advert.model, prompt_tokens: 0, completion_tokens: 0, wallclock_ms: wallclockMs,
-        supplier_pkh: supplierKey.pubKeyHash, escrow_ref: job.escrow_ref });
+        supplier_pkh: supplierKey.pubKeyHash, escrow_ref: job.escrow_ref, ...receiptAgentDid(escrow) });
       const signed = signReceipt(receipt, supplierKey.privateKeyHex);
       Object.assign(job, { result, receipt: signed.receipt, receipt_signature: signed.signature,
         pub_key_hex: supplierKey.pubKeyHex, phase: "signed" });
@@ -306,7 +339,7 @@ export class Paper2AgentRuntime {
         if (this.closing) throw new Error("Supplier is stopping");
         const [txHash, index] = job.claimed_ref!.split("#");
         const built = await buildSubmitTx({ chain, supplierKey, escrowRef: { txHash, index: Number(index) },
-          receiptHash: receiptResultHash(signed),
+          receiptHash: receiptResultHash(signed), ...identityOptions(escrow, this.identity),
           beforeSubmit: async (candidate) => {
             job.phase = "submitting";
             job.submitted_ref = `${candidate.expectedTxHash}#0`;

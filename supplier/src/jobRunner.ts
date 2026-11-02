@@ -56,6 +56,7 @@ import type {
 } from "./jobs.js";
 import type { ResellerRuntime } from "./reseller/runtime.js";
 import { parseUsdNumberCeil } from "./reseller/money.js";
+import { identityOptions, receiptAgentDid, type SupplierIdentity } from "./identity/agent.js";
 
 export interface RunChatJobDeps {
   chain: ChainProvider;
@@ -64,6 +65,8 @@ export interface RunChatJobDeps {
   supplierKey: WalletKey;
   jobs: JobStore;
   reseller?: ResellerRuntime;
+  /** Record lookup and identity blueprint for the Submit of a new escrow. */
+  identity?: SupplierIdentity;
 }
 
 export interface RunChatJobParams {
@@ -211,6 +214,7 @@ export async function runChatJob(params: RunChatJobParams): Promise<void> {
       wallclock_ms: inference.wallclock_ms,
       supplier_pkh: deps.supplierKey.pubKeyHash,
       escrow_ref: escrowRef,
+      ...receiptAgentDid(escrowDatum),
     });
     const signed = signReceipt(receipt, deps.supplierKey.privateKeyHex);
     const resultHash = receiptResultHash(signed);
@@ -255,6 +259,7 @@ export async function runChatJob(params: RunChatJobParams): Promise<void> {
           supplierKey: deps.supplierKey,
           escrowRef: claimedRef,
           receiptHash: resultHash,
+          ...identityOptions(escrowDatum, deps.identity),
           beforeSubmit: deps.reseller
             ? async (candidate) => {
                 await deps.reseller!.recordSubmitting(
@@ -424,6 +429,7 @@ export async function runTtsJob(params: RunTtsJobParams): Promise<void> {
       wallclock_ms: inference.wallclock_ms,
       supplier_pkh: deps.supplierKey.pubKeyHash,
       escrow_ref: escrowRef,
+      ...receiptAgentDid(escrowDatum),
     });
     const signed = signReceipt(receipt, deps.supplierKey.privateKeyHex);
     const resultHash = receiptResultHash(signed);
@@ -437,6 +443,7 @@ export async function runTtsJob(params: RunTtsJobParams): Promise<void> {
           supplierKey: deps.supplierKey,
           escrowRef: claimedRef,
           receiptHash: resultHash,
+          ...identityOptions(escrowDatum, deps.identity),
         });
       } catch (err) {
         return { kind: "build_failed" as const, err };
@@ -595,6 +602,7 @@ export async function runOcrJob(params: RunOcrJobParams): Promise<void> {
       wallclock_ms: inference.wallclock_ms,
       supplier_pkh: deps.supplierKey.pubKeyHash,
       escrow_ref: escrowRef,
+      ...receiptAgentDid(escrowDatum),
     });
     const signed = signReceipt(receipt, deps.supplierKey.privateKeyHex);
     const resultHash = receiptResultHash(signed);
@@ -608,6 +616,7 @@ export async function runOcrJob(params: RunOcrJobParams): Promise<void> {
           supplierKey: deps.supplierKey,
           escrowRef: claimedRef,
           receiptHash: resultHash,
+          ...identityOptions(escrowDatum, deps.identity),
         });
       } catch (err) {
         return { kind: "build_failed" as const, err };

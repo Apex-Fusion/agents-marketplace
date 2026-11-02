@@ -8,6 +8,14 @@
  *
  * Argument parsing uses Node stdlib only (no commander / yargs).
  * Unknown flags throw.
+ *
+ * New advert (Part 2 §6.2, §9.2): --agent-id <64 hex> (default env AGENT_ID)
+ * posts the advert with agent_id at the new advert address. The supplier key
+ * needs a record first (tx:register-record); the flow refuses unless that
+ * record lists the key with the transaction purpose and the capability. The
+ * new advert needs IDENTITY_POLICY_ID (and IDENTITY_ADVERT_REF_UTXO on
+ * mainnet). Without an agent id the CLI posts a legacy advert, which only
+ * lists until the switch (§9.6).
  */
 
 import { createHash } from "crypto";
@@ -19,8 +27,9 @@ import {
   MockChainProvider,
   type ChainProvider,
 } from "@marketplace/shared/chain";
-import type { AdvertDatum } from "@marketplace/shared/cbor";
+import type { AdvertDatum, IdentityAdvertDatum } from "@marketplace/shared/cbor";
 import type { WalletKey } from "@marketplace/shared/tx";
+import { parseAgentId, supplierIdentity } from "../identity/agent.js";
 import { runPostAdvert } from "./postAdvertFlow.js";
 import { PAPER2AGENT_CAPABILITY_ID, PAPER2AGENT_DELIVERY_OVERHEAD_MS, PAPER2AGENT_SUPPLIER_OVERHEAD_MS,
   paper2AgentManifestHash, paper2AgentModel } from "@marketplace/shared/paper2agent";
@@ -59,6 +68,8 @@ export interface CliConfig {
   awaitTimeoutMs: number;
   dryRun: boolean;
   useMock: boolean;
+  /** The record's agent for a new advert; undefined posts a legacy advert. */
+  agentId?: string;
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────
@@ -86,6 +97,7 @@ const VALUE_FLAGS = new Set<string>([
   "--detail-uri",
   "--detail-hash",
   "--await-timeout-ms",
+  "--agent-id",
 ]);
 
 // Boolean flags (presence = true; no value follows).
@@ -137,6 +149,7 @@ interface RawFlags {
   detailUri?: string;
   detailHash?: string;
   awaitTimeoutMs?: string;
+  agentId?: string;
   dryRun: boolean;
   useMock: boolean;
 }
@@ -195,6 +208,9 @@ function parseRawArgv(argv: string[]): RawFlags {
           break;
         case "--await-timeout-ms":
           out.awaitTimeoutMs = val;
+          break;
+        case "--agent-id":
+          out.agentId = val;
           break;
       }
       i++; // consume the value
@@ -339,6 +355,9 @@ export function parseCliArgs(
       ? DEFAULT_AWAIT_TIMEOUT_MS
       : parseIntStrict("--await-timeout-ms", flags.awaitTimeoutMs);
 
+  // ── agentId (new advert; flag overrides env AGENT_ID) ──
+  const agentId = parseAgentId(flags.agentId ?? env.AGENT_ID, "--agent-id / AGENT_ID");
+
   return {
     ogmiosUrl,
     privKeyHex,
@@ -354,6 +373,7 @@ export function parseCliArgs(
     detailUri,
     detailHash,
     awaitTimeoutMs,
+    agentId,
     dryRun: flags.dryRun,
     useMock: flags.useMock,
   };
@@ -426,7 +446,7 @@ export async function main(
     return 1;
   }
 
-  const advertDatum: AdvertDatum = {
+  const legacyDatum: AdvertDatum = {
     supplier_pkh: walletKey.pubKeyHash,
     capability_id: cfg.capabilityId,
     model: cfg.model,
@@ -441,6 +461,9 @@ export async function main(
     advertised_at: 0, // overridden by runPostAdvert from chain tip
     status: "Active",
   };
+  const advertDatum: AdvertDatum | IdentityAdvertDatum = cfg.agentId === undefined
+    ? legacyDatum
+    : { ...legacyDatum, agent_id: cfg.agentId };
 
   const chain: ChainProvider = cfg.useMock
     ? new MockChainProvider()
@@ -462,6 +485,7 @@ export async function main(
       advertDatum,
       awaitTimeoutMs: cfg.awaitTimeoutMs,
       log: (line) => process.stderr.write(`${line}\n`),
+      identity: cfg.agentId === undefined ? undefined : supplierIdentity(chain, cfg.networkId),
     });
     process.stdout.write(`${result.formattedRef}\n`);
     return 0;

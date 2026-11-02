@@ -6,6 +6,13 @@
  * The publisher holds no model credentials and never runs bundle code on the
  * host. Docker builds the runtime image with networking disabled; the existing
  * supplier node runs each tool call in a hardened, secret-free container.
+ *
+ * Identity registry (Part 2 §6.2, §9.2): a slot with IDENTITY_POLICY_ID posts
+ * a new advert for its agent. The publisher registers the slot key's record
+ * before the advert: it builds the Register transaction signed by the slot key
+ * (POST /targets/<id>/record); the offline controller signs it; the publisher
+ * journals and broadcasts it (POST /targets/<id>/record/submit). A publication
+ * then needs that record to list the slot key and mcp.tool.execute.v1.
  */
 import { spawn } from "node:child_process";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
@@ -14,8 +21,10 @@ import { createServer } from "node:net";
 import { dirname, join } from "node:path";
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
 import { LiveOgmiosProvider, ReadOnlyOgmiosProvider, type ChainProvider, type OutputReference } from "@marketplace/shared/chain";
-import { canonicalize, decodeAdvertDatum, type AdvertDatum } from "@marketplace/shared/cbor";
-import { loadBlueprint, type PostAdvertBuildResult } from "@marketplace/shared/tx";
+import { canonicalize, decodeAdvertDatum, decodeIdentityAdvertDatum, type AdvertDatum, type IdentityAdvertDatum } from "@marketplace/shared/cbor";
+import { vectorDid } from "@marketplace/shared/identity";
+import { transactionId } from "@marketplace/shared";
+import { isIdentityAdvertDatum, loadBlueprint, loadIdentityBlueprint, type PostAdvertBuildResult } from "@marketplace/shared/tx";
 import { inspectSignedTransaction, inspectSignedTransactionFinancials } from "@marketplace/shared/tx/server";
 import {
   MAX_TOOL_INPUT_BYTES, PAPER2AGENT_CAPABILITY_ID, PAPER2AGENT_DELIVERY_OVERHEAD_MS,
@@ -24,9 +33,13 @@ import {
 import type { PaperPackageArtifact, PaperPublication, PaperPublishTarget, PaperPublishTerms } from "@marketplace/shared/paper2agent/workflow";
 import { runPostAdvert, type PostAdvertFlowParams, type PostAdvertFlowResult } from "../../supplier/src/cli/postAdvertFlow.js";
 import { readManifest } from "../../supplier/src/paper2agent/local.js";
+import { advertRecordProblem, decodeAdvert, supplierIdentity, type SupplierIdentity } from "../../supplier/src/identity/agent.js";
+import { buildRegistration, recordsListingKey, registerWindow, supplierRecord, type RecordRegistrar } from "../../supplier/src/identity/register.js";
+import { chainRegistrar, ogmiosProtocolParameters, vectorSlotConfig } from "../../supplier/src/identity/registrar.js";
 import { MAX_PACKAGE_BYTES, extractPackage, fileSha256, packageRelativePath, verifyPackageFiles } from "./archive.js";
 import type { PaperPublisherConfig, PublisherTarget } from "./publisher-config.js";
-import { PaperPublisherStore, PublicationConflictError, type AdvertTransaction, type PublicationRecord, type WalletInput } from "./publisher-store.js";
+import { PaperPublisherStore, PublicationConflictError, type AdvertTransaction, type PublicationRecord, type SlotRegistration,
+  type WalletInput } from "./publisher-store.js";
 import { dockerCommand } from "./sandbox.js";
 
 const PUBLICATION_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
@@ -40,6 +53,8 @@ const JOB_PATH = /^\/v1\/paper2agent\/run\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-
 
 const MAX_PREPARE_JSON_BYTES = 90 * 1024 * 1024;
 const MAX_APPROVAL_JSON_BYTES = 16 * 1024;
+/** A fully signed Register transaction: below the 16 KiB transaction limit as hex, with JSON framing. */
+const MAX_REGISTRATION_JSON_BYTES = 64 * 1024;
 const MAX_PROXY_BODY_BYTES = MAX_TOOL_INPUT_BYTES + 4096;
 const MAX_CHILD_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_ACTIVE_UPLOADS = 2;
@@ -61,13 +76,40 @@ const STOP_TIMEOUT_MS = 10_000;
  * inputs are still unspent this long after its validity end cannot reappear.
  */
 const EXPIRY_FINALITY_SLOTS = 43_200;
+const EXPIRY_FINALITY_MS = EXPIRY_FINALITY_SLOTS * 1000;
 /** The builder verified wrappers with a writable tmpfs working directory; mirror it. */
 const RUNTIME_START = "mkdir /workspace/output && cp -R /opt/paper2agent/bundle/. /workspace/output/ && " +
   "cd /workspace/output && exec python /workspace/output/server.py";
 
-/** Every advert field the operator approved; advertised_at is set by the shared flow. */
+/** Every advert field the operator approved; advertised_at is set by the shared flow. A new advert also has agent_id. */
 const ADVERT_FIELDS = ["supplier_pkh", "capability_id", "model", "max_output_tokens", "max_processing_ms", "price_lovelace",
   "supplier_bond_lovelace", "buyer_bond_lovelace", "endpoint_url", "detail_uri", "detail_hash", "status"] as const;
+
+/** The agent of a journaled advert: its agent_id for a new advert, else null. */
+function journaledAgent(transaction: AdvertTransaction): string | null {
+  try {
+    const datum = decodeAdvert(transaction.advert_datum_hex).datum;
+    return isIdentityAdvertDatum(datum) ? datum.agent_id : null;
+  } catch {
+    return null;
+  }
+}
+
+/** A slot's identity record registration (Part 2 §9.2) as the management API shows it. */
+export interface SlotRecordView {
+  target_id: string;
+  agent_id: string;
+  agent_did: string;
+  /** configured: AGENT_ID names the agent; else the publisher's registration and its chain state. */
+  state: "configured" | "awaiting_signatures" | "submitted" | "confirmed";
+  tx_hash: string | null;
+  /** The Register transaction signed by the slot key, for the other signers (awaiting_signatures only). */
+  tx_cbor: string | null;
+  required_signers: string[];
+  missing_signers: string[];
+  valid_until_ms: number | null;
+  error: string | null;
+}
 
 interface SupplierRoute {
   timeoutMs: number;
@@ -403,6 +445,10 @@ export interface PaperPublisherDeps {
   /** Poll interval wait for supplier readiness and drain. */
   sleep?: (ms: number) => Promise<void>;
   log?: (line: string) => void;
+  /** The Register builder of a slot. Default: the shared builder over the slot's Ogmios and its IDENTITY_REF_UTXO. */
+  registrar?: (target: PublisherTarget) => RecordRegistrar;
+  /** Record lookup and identity blueprint of a slot. Default: the slot chain and its IDENTITY_POLICY_ID. */
+  identity?: (target: PublisherTarget) => SupplierIdentity;
 }
 
 export class PaperPublisherService {
@@ -420,6 +466,9 @@ export class PaperPublisherService {
   private readonly activations = new Map<string, Promise<void>>();
   private readonly preparations = new Set<AbortController>();
   private readonly restartAttempts = new Map<string, number>();
+  private readonly registrarFor: (target: PublisherTarget) => RecordRegistrar;
+  private readonly identityFor: (target: PublisherTarget) => SupplierIdentity;
+  private readonly identities = new Map<string, SupplierIdentity>();
   private readonly toolCallDigest: Buffer | null;
   private closing = false;
   private closed?: Promise<void>;
@@ -435,6 +484,19 @@ export class PaperPublisherService {
     this.now = deps.now ?? Date.now;
     this.sleep = deps.sleep ?? ((ms) => new Promise<void>((resolve) => { setTimeout(resolve, ms); }));
     this.toolCallDigest = config.toolCallToken ? createHash("sha256").update(config.toolCallToken).digest() : null;
+    this.registrarFor = deps.registrar ?? ((target) => {
+      const env = target.supplierEnv();
+      const ref = /^([0-9a-fA-F]{64})#(\d+)$/.exec(env.IDENTITY_REF_UTXO ?? "");
+      if (!ref || target.identityPolicyId === null) {
+        throw new PublisherError(503, "record_builder_unavailable", `Target ${target.id} needs IDENTITY_POLICY_ID and IDENTITY_REF_UTXO.`);
+      }
+      return chainRegistrar({ chain: this.chain(target), networkId: target.networkId, identityHash: target.identityPolicyId,
+        identityRef: { txHash: ref[1]!.toLowerCase(), index: Number(ref[2]) },
+        protocolParameters: () => ogmiosProtocolParameters(target.ogmiosUrl),
+        slotConfig: vectorSlotConfig(target.networkId, env.VECTOR_ZERO_TIME_MS) });
+    });
+    this.identityFor = deps.identity ?? ((target) => supplierIdentity(this.chain(target), target.networkId,
+      { blueprint: loadIdentityBlueprint({ identityHash: target.identityPolicyId ?? "" }) }));
   }
 
   /** Opens durable state, applies restart recovery, and restarts published suppliers in the background. */
@@ -456,7 +518,7 @@ export class PaperPublisherService {
     return this.config.targets.map((target) => ({
       id: target.id, label: target.label, network_id: target.networkId, supplier_pkh: target.supplierPkh,
       deposit_address: target.depositAddress, endpoint_url: target.endpointUrl, available: !held.has(target.id),
-      live_chain: target.liveChain,
+      live_chain: target.liveChain, agent_id: this.slotAgent(target),
     }));
   }
 
@@ -554,6 +616,8 @@ export class PaperPublisherService {
         throw new PublisherError(409, "live_chain_disabled",
           `Target ${target.id} does not set LIVE_CHAIN=1. The publisher refuses instead of simulating a publication.`);
       }
+      // A new advert needs the slot's record first (Part 2 §9.2): checked before the publication changes phase.
+      const agentId = target.identityPolicyId === null ? null : await this.listedSlotAgent(target);
       try {
         await this.verifyStoredBundle(record);
         await this.runtimeImage(record);
@@ -561,7 +625,137 @@ export class PaperPublisherService {
         throw new PublisherError(409, "publication_not_ready", `The prepared runtime is not usable: ${message(error)}`);
       }
       const publishing = this.store.update(id, ["prepared"], { phase: "publishing", error: null }, this.now());
-      return this.sendAdvert(publishing, target, maxDebit, started);
+      return this.sendAdvert(publishing, target, maxDebit, started, agentId);
+    });
+  }
+
+  /** The slot's record registration and its chain state. Read-only: nothing is built or signed. */
+  async slotRecord(targetId: string): Promise<SlotRecordView> {
+    const target = this.target(targetId);
+    if (target.agentId !== null) return this.configuredRecordView(target, target.agentId);
+    const registration = this.store.slotRegistration(target.id);
+    if (!registration) throw new PublisherError(404, "slot_record_not_found", `Target ${target.id} has no record registration.`);
+    if (registration.submitted_at === null) return this.recordView(target, registration, "awaiting_signatures");
+    try {
+      const record = await this.chainRead(() => this.identity(target).lookupRecord(registration.agent_id));
+      return this.recordView(target, registration, record === null ? "submitted" : "confirmed");
+    } catch (error) {
+      return this.recordView(target, registration, "submitted", bounded(`Chain query failed: ${message(error)}`));
+    }
+  }
+
+  /**
+   * Build the Register transaction of the slot key's record (Part 2 §9.2) and
+   * sign it with the slot key; the controller signs it offline. An open
+   * registration is returned again. A submitted one is rebuilt only when it
+   * expired unconfirmed beyond the stability window.
+   */
+  async registerSlotRecord(targetId: string): Promise<SlotRecordView> {
+    this.admit();
+    const target = this.target(targetId);
+    return this.exclusive(`target:${target.id}`, async () => {
+      this.admit();
+      if (target.identityPolicyId === null) {
+        throw new PublisherError(409, "identity_not_configured", `Target ${target.id} has no IDENTITY_POLICY_ID: it posts legacy adverts.`);
+      }
+      if (target.agentId !== null) {
+        throw new PublisherError(409, "slot_record_configured", `Target ${target.id} names agent ${target.agentId} (AGENT_ID).`);
+      }
+      if (!target.liveChain) {
+        throw new PublisherError(409, "live_chain_disabled", `Target ${target.id} does not set LIVE_CHAIN=1.`);
+      }
+      const controller = this.config.identityController;
+      if (!controller) {
+        throw new PublisherError(503, "record_builder_unavailable",
+          "The publisher has no IDENTITY_CONTROLLER_PUB_KEY_HEX; it cannot register slot records.");
+      }
+      const registrar = this.registrarFor(target);
+      const identity = this.identity(target);
+      const now = this.now();
+      const existing = this.store.slotRegistration(target.id);
+      if (existing?.submitted_at === null && now < existing.valid_until_ms) return this.recordView(target, existing, "awaiting_signatures");
+      const replaceSubmitted = existing !== undefined && existing.submitted_at !== null;
+      if (existing !== undefined && existing.submitted_at !== null) {
+        const record = await this.chainRead(() => identity.lookupRecord(existing.agent_id));
+        if (record !== null) return this.recordView(target, existing, "confirmed");
+        if (now <= existing.valid_until_ms + EXPIRY_FINALITY_MS) {
+          return this.recordView(target, existing, "submitted",
+            "The journaled registration is not confirmed yet; it is rebuilt only after its window and the stability window pass.");
+        }
+      }
+      const listed = await this.chainRead(() =>
+        recordsListingKey(this.chain(target), identity.blueprint(), target.networkId, target.supplierPkh));
+      if (listed.length > 0) {
+        throw new PublisherError(409, "slot_record_exists",
+          `The slot key is already listed in record ${listed.join(", ")}; set AGENT_ID=${listed[0]} for target ${target.id}.`);
+      }
+      const window = registerWindow(now);
+      const wallet = target.walletKey();
+      let built;
+      try {
+        const record = supplierRecord({ controller: controller.controller, accountable: controller.accountable,
+          supplierPubKeyHex: wallet.pubKeyHex, window, profile: { name: `Paper2Agent slot ${target.id}`, description: "",
+            endpoint: target.endpointUrl, capabilities: [PAPER2AGENT_CAPABILITY_ID] } });
+        built = await buildRegistration(registrar, { ...record, wallet, window, networkId: target.networkId });
+      } catch (error) {
+        throw new PublisherError(422, "record_not_built", bounded(`The Register transaction was not built: ${message(error)}`));
+      }
+      const saved = this.store.saveSlotRegistration({ target_id: target.id, supplier_pkh: target.supplierPkh,
+        agent_id: built.agent_id, tx_hash: built.tx_hash, tx_cbor: built.tx_cbor, required_signers: built.required_signers,
+        valid_until_ms: built.valid_until_ms, created_at: now }, replaceSubmitted);
+      return this.recordView(target, saved, "awaiting_signatures");
+    });
+  }
+
+  /**
+   * Journal the fully signed registration, then broadcast it once and wait. The
+   * same journaled bytes may be submitted again; other bytes never replace them.
+   */
+  async submitSlotRecord(targetId: string, body: unknown): Promise<SlotRecordView> {
+    this.admit();
+    const input = fields(body, "submission", ["tx_cbor"]);
+    if (typeof input.tx_cbor !== "string" || input.tx_cbor.length % 2 !== 0 || !/^[0-9a-f]+$/.test(input.tx_cbor)) {
+      throw invalid("tx_cbor must be a lowercase hex transaction");
+    }
+    const txCbor = input.tx_cbor;
+    const target = this.target(targetId);
+    return this.exclusive(`target:${target.id}`, async () => {
+      this.admit();
+      const registration = this.store.slotRegistration(target.id);
+      if (!registration) throw new PublisherError(404, "slot_record_not_found", `Target ${target.id} has no record registration.`);
+      let txId: string;
+      try {
+        txId = transactionId(txCbor);
+      } catch {
+        throw invalid("tx_cbor is not a transaction");
+      }
+      if (txId !== registration.tx_hash) {
+        throw new PublisherError(409, "registration_mismatch", "The transaction is not this slot's registration.");
+      }
+      let journaled: SlotRegistration = registration;
+      if (registration.submitted_at === null) {
+        if (this.now() >= registration.valid_until_ms) {
+          throw new PublisherError(409, "registration_expired", "The Register window has passed; build a new registration.");
+        }
+        journaled = this.store.submitSlotRegistration(target.id, txCbor, this.now());
+      } else if (txCbor !== registration.tx_cbor) {
+        throw new PublisherError(409, "registration_submitted", "Other signed bytes of this registration are already journaled.");
+      }
+      const chain = this.chain(target);
+      let submitError: unknown;
+      try {
+        await chain.submitTx(journaled.tx_cbor);
+      } catch (error) {
+        // It can already be on chain: the wait below decides.
+        submitError = error;
+      }
+      try {
+        await chain.awaitTx(journaled.tx_hash, ADVERT_AWAIT_MS);
+      } catch (error) {
+        return this.recordView(target, journaled, "submitted", bounded(`The Register transaction outcome is unknown ` +
+          `(${message(submitError ?? error)}). Refresh the record; the same signed bytes may be submitted again.`));
+      }
+      return this.recordView(target, journaled, "confirmed");
     });
   }
 
@@ -655,6 +849,66 @@ export class PaperPublisherService {
     return record;
   }
 
+  private target(id: string): PublisherTarget {
+    const target = this.config.targets.find((candidate) => candidate.id === id);
+    if (!target) throw new PublisherError(404, "unknown_target", `Target ${id} is not configured.`);
+    return target;
+  }
+
+  /** The slot's record lookup and identity blueprint; only for a slot with IDENTITY_POLICY_ID. */
+  private identity(target: PublisherTarget): SupplierIdentity {
+    let identity = this.identities.get(target.id);
+    if (!identity) {
+      identity = this.identityFor(target);
+      this.identities.set(target.id, identity);
+    }
+    return identity;
+  }
+
+  /** The slot's agent: AGENT_ID, else the agent of the publisher's registration. */
+  private slotAgent(target: PublisherTarget): string | null {
+    return target.agentId ?? this.store.slotRegistration(target.id)?.agent_id ?? null;
+  }
+
+  /** The slot's agent once its record passes the listing rule's record checks (§6.2); else a PublisherError. */
+  private async listedSlotAgent(target: PublisherTarget): Promise<string> {
+    const agentId = this.slotAgent(target);
+    if (agentId === null) {
+      throw new PublisherError(409, "slot_record_required",
+        `Register the identity record of target ${target.id} first (POST /targets/${target.id}/record), or set its AGENT_ID.`);
+    }
+    let problem: string | null;
+    try {
+      problem = await this.chainRead(() =>
+        advertRecordProblem(this.identity(target), agentId, target.supplierPkh, PAPER2AGENT_CAPABILITY_ID, this.now()));
+    } catch (error) {
+      throw new PublisherError(503, "slot_record_unavailable", bounded(`The slot record could not be read: ${message(error)}`));
+    }
+    if (problem !== null) {
+      throw new PublisherError(409, "slot_record_invalid",
+        `The record of agent ${agentId} does not list this slot's key and ${PAPER2AGENT_CAPABILITY_ID} as an Active, ` +
+        `independent agent (${problem}). Nothing was broadcast.`);
+    }
+    return agentId;
+  }
+
+  private configuredRecordView(target: PublisherTarget, agentId: string): SlotRecordView {
+    return { target_id: target.id, agent_id: agentId, agent_did: vectorDid(agentId), state: "configured", tx_hash: null,
+      tx_cbor: null, required_signers: [], missing_signers: [], valid_until_ms: null, error: null };
+  }
+
+  private recordView(target: PublisherTarget, registration: SlotRegistration, state: SlotRecordView["state"],
+    error: string | null = null): SlotRecordView {
+    const awaiting = state === "awaiting_signatures";
+    return {
+      target_id: target.id, agent_id: registration.agent_id, agent_did: vectorDid(registration.agent_id), state,
+      tx_hash: registration.tx_hash, tx_cbor: awaiting ? registration.tx_cbor : null,
+      required_signers: registration.required_signers,
+      missing_signers: awaiting ? registration.required_signers.filter((signer) => signer !== registration.supplier_pkh) : [],
+      valid_until_ms: registration.valid_until_ms, error,
+    };
+  }
+
   private view(record: PublicationRecord): PaperPublication {
     if (record.phase === "preparing") {
       throw new PublisherError(409, "publication_preparing", "The runtime image for this publication is still being built.");
@@ -739,10 +993,11 @@ export class PaperPublisherService {
     return imageId;
   }
 
-  private async sendAdvert(record: PublicationRecord, target: PublisherTarget, maxDebit: bigint, started: number): Promise<PaperPublication> {
+  private async sendAdvert(record: PublicationRecord, target: PublisherTarget, maxDebit: bigint, started: number,
+    agentId: string | null): Promise<PaperPublication> {
     const manifest = parsePaper2AgentManifest(record.artifact.manifest);
     const chain = this.chain(target);
-    const advert: AdvertDatum = {
+    const legacy: AdvertDatum = {
       supplier_pkh: target.supplierPkh,
       capability_id: PAPER2AGENT_CAPABILITY_ID,
       model: paper2AgentModel(manifest),
@@ -757,9 +1012,11 @@ export class PaperPublisherService {
       advertised_at: 0,
       status: "Active",
     };
+    const advert: AdvertDatum | IdentityAdvertDatum = agentId === null ? legacy : { ...legacy, agent_id: agentId };
     try {
       await this.postAdvert({
         chain, walletKey: target.walletKey(), advertDatum: advert, awaitTimeoutMs: ADVERT_AWAIT_MS, log: () => undefined,
+        identity: agentId === null ? undefined : this.identity(target),
         beforeSubmit: async (built) => {
           const transaction = await this.checkAdvert(record, target, chain, advert, built, maxDebit);
           this.store.journal(transaction, this.now());
@@ -786,8 +1043,8 @@ export class PaperPublisherService {
   }
 
   /** Runs inside beforeSubmit: a rejection here prevents the broadcast. */
-  private async checkAdvert(record: PublicationRecord, target: PublisherTarget, chain: ChainProvider, expected: AdvertDatum,
-    built: PostAdvertBuildResult, maxDebit: bigint): Promise<AdvertTransaction> {
+  private async checkAdvert(record: PublicationRecord, target: PublisherTarget, chain: ChainProvider,
+    expected: AdvertDatum | IdentityAdvertDatum, built: PostAdvertBuildResult, maxDebit: bigint): Promise<AdvertTransaction> {
     const wallet = target.walletKey().address;
     const info = inspectSignedTransaction(built.txCborHex);
     if (info.txHash !== built.expectedTxHash.toLowerCase() || built.advertOutputRef.txHash !== built.expectedTxHash ||
@@ -795,13 +1052,17 @@ export class PaperPublisherService {
       throw new PublisherError(422, "advert_transaction_invalid", "The signed advert transaction hash and advert output disagree. Nothing was broadcast.");
     }
     const facts = inspectSignedTransactionFinancials(built.txCborHex);
-    const advertAddress = loadBlueprint().advertScriptAddress(target.networkId);
+    // A new advert goes to the new advert address (both are watched during the drain, Part 2 §9.6).
+    const advertAddress = isIdentityAdvertDatum(expected)
+      ? this.identity(target).blueprint().advertScriptAddress(target.networkId)
+      : loadBlueprint().advertScriptAddress(target.networkId);
     const [advert, ...change] = facts.outputs;
     let approved = false;
     if (advert?.datumHex && advert.address === advertAddress && advert.lovelace >= expected.supplier_bond_lovelace) {
       try {
-        const datum = decodeAdvertDatum(advert.datumHex);
-        approved = ADVERT_FIELDS.every((field) => datum[field] === expected[field]);
+        const datum = isIdentityAdvertDatum(expected) ? decodeIdentityAdvertDatum(advert.datumHex) : decodeAdvertDatum(advert.datumHex);
+        approved = ADVERT_FIELDS.every((field) => datum[field] === expected[field]) &&
+          (isIdentityAdvertDatum(expected) ? isIdentityAdvertDatum(datum) && datum.agent_id === expected.agent_id : true);
       } catch {
         approved = false;
       }
@@ -963,11 +1224,14 @@ export class PaperPublisherService {
       "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=256m,mode=1777",
       "--tmpfs", "/workspace:rw,nosuid,nodev,size=1g,mode=1777",
       "--log-driver", "none", "--label", `vector.paper2agent.publication=${record.id}`, imageId];
+    const agentId = journaledAgent(transaction);
     const env: Record<string, string> = {
       PATH: "/usr/bin:/bin",
       HOME: cwd,
       NODE_ENV: "production",
       ...target.supplierEnv(),
+      // The journaled advert names the slot's agent; the supplier works new escrows only for it.
+      ...(agentId === null ? {} : { AGENT_ID: agentId }),
       CAPABILITY_KIND: "paper2agent",
       ADVERT_REF: transaction.advert_ref,
       PORT: String(port),
@@ -1020,12 +1284,14 @@ export class PaperPublisherService {
           } catch {
             signer = "";
           }
+          const expectedAgent = journaledAgent(transaction);
           if (body.capability_id !== PAPER2AGENT_CAPABILITY_ID || body.advert_ref !== transaction.advert_ref ||
               body.supplier_pkh !== target.supplierPkh || signer !== target.supplierPkh ||
               body.model !== paper2AgentModel(record.artifact.manifest) || body.price_lovelace !== record.terms.price_lovelace ||
-              tool?.manifest_hash !== record.artifact.manifest_hash) {
+              tool?.manifest_hash !== record.artifact.manifest_hash ||
+              (expectedAgent !== null && body.agent_id !== expectedAgent)) {
             throw new PublisherError(502, "supplier_identity_mismatch",
-              "The started supplier does not serve the published advert, manifest and wallet.");
+              "The started supplier does not serve the published advert, manifest, wallet and agent.");
           }
           return;
         }
@@ -1145,6 +1411,10 @@ export function createPaperPublisherApp(service: PaperPublisherService): Express
     next();
   });
   app.get("/targets", (_req, res) => { res.json({ targets: service.targets() }); });
+  app.get("/targets/:id/record", route((req) => service.slotRecord(req.params.id)));
+  app.post("/targets/:id/record", route((req) => service.registerSlotRecord(req.params.id)));
+  app.post("/targets/:id/record/submit", express.json({ limit: MAX_REGISTRATION_JSON_BYTES, strict: true, inflate: false }),
+    route((req) => service.submitSlotRecord(req.params.id, req.body)));
   app.post("/publications", (_req, res, next) => {
     if (uploads >= MAX_ACTIVE_UPLOADS) {
       res.status(429).json({ error: "publisher_busy", message: "Another bundle upload is in progress. Try again shortly." });

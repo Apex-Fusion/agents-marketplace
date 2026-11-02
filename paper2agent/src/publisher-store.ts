@@ -1,12 +1,13 @@
 /**
- * Durable Paper2Agent publisher state: publication records and the append-only
- * advert transaction journal. SQLite only: an open, schema, or write failure is
- * fatal and never falls back to memory.
+ * Durable Paper2Agent publisher state: publication records, the append-only
+ * advert transaction journal and the slot record registrations. SQLite only:
+ * an open, schema, or write failure is fatal and never falls back to memory.
  *
  * Schema triggers keep the money invariants even if service code is wrong: a
  * journaled transaction never changes or disappears, a publication with a signed
- * transaction never returns to a publishable phase, and one wallet slot holds at
- * most one publication that is unfinished or has signed a transaction.
+ * transaction never returns to a publishable phase, one wallet slot holds at
+ * most one publication that is unfinished or has signed a transaction, and a
+ * submitted slot registration never changes.
  */
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
@@ -76,6 +77,25 @@ export interface AdvertTransaction {
   confirmed_at: number | null;
 }
 
+/**
+ * The Register transaction of a slot key's identity record (Part 2 §9.2).
+ * The publisher stores it signed by the slot key; the controller signs it
+ * offline; the fully signed bytes are journaled before broadcast.
+ */
+export interface SlotRegistration {
+  target_id: string;
+  supplier_pkh: string;
+  agent_id: string;
+  tx_hash: string;
+  tx_cbor: string;
+  required_signers: string[];
+  /** The Register window's upper bound: nobody can submit after it. */
+  valid_until_ms: number;
+  created_at: number;
+  /** Set when the fully signed transaction is journaled for broadcast. */
+  submitted_at: number | null;
+}
+
 /** A guarded write found another publication in the slot or an unexpected phase. */
 export class PublicationConflictError extends Error {}
 
@@ -139,6 +159,20 @@ CREATE TRIGGER IF NOT EXISTS publications_inputs_fixed BEFORE UPDATE ON publicat
 WHEN OLD.phase <> 'failed' AND (NEW.request_hash IS NOT OLD.request_hash OR NEW.target_id IS NOT OLD.target_id
   OR NEW.terms_json IS NOT OLD.terms_json OR NEW.artifact_json IS NOT OLD.artifact_json OR NEW.work_dir IS NOT OLD.work_dir)
 BEGIN SELECT RAISE(ABORT, 'publication inputs change only after a failed preparation'); END;
+CREATE TABLE IF NOT EXISTS slot_records (
+  target_id TEXT PRIMARY KEY,
+  supplier_pkh TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  tx_hash TEXT NOT NULL UNIQUE,
+  tx_cbor TEXT NOT NULL,
+  required_signers_json TEXT NOT NULL,
+  valid_until_ms INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  submitted_at INTEGER
+) WITHOUT ROWID;
+CREATE TRIGGER IF NOT EXISTS slot_records_submitted_immutable BEFORE UPDATE ON slot_records
+WHEN OLD.submitted_at IS NOT NULL
+BEGIN SELECT RAISE(ABORT, 'a submitted slot registration is immutable'); END;
 `;
 
 interface PublicationRow extends Omit<PublicationRecord, "terms" | "artifact"> {
@@ -148,6 +182,10 @@ interface PublicationRow extends Omit<PublicationRecord, "terms" | "artifact"> {
 
 interface TransactionRow extends Omit<AdvertTransaction, "wallet_inputs"> {
   wallet_inputs_json: string;
+}
+
+interface SlotRegistrationRow extends Omit<SlotRegistration, "required_signers"> {
+  required_signers_json: string;
 }
 
 function publication(row: PublicationRow): PublicationRecord {
@@ -291,6 +329,38 @@ export class PaperPublisherStore {
         error = 'The publisher restarted while its advert transaction was unconfirmed. Refresh to read the chain outcome.'
         WHERE phase = 'publishing' AND id IN (SELECT publication_id FROM advert_transactions WHERE confirmed_at IS NULL)`).run(at);
     }).immediate();
+  }
+
+  slotRegistration(targetId: string): SlotRegistration | undefined {
+    const row = this.db.prepare("SELECT * FROM slot_records WHERE target_id = ?").get(targetId) as SlotRegistrationRow | undefined;
+    if (!row) return undefined;
+    const { required_signers_json: signers, ...rest } = row;
+    return { ...rest, required_signers: JSON.parse(signers) as string[] };
+  }
+
+  /**
+   * Store a built registration. It replaces an unsubmitted one; it replaces a
+   * submitted one only when the caller proved that one expired unconfirmed.
+   */
+  saveSlotRegistration(registration: Omit<SlotRegistration, "submitted_at">, replaceSubmitted: boolean): SlotRegistration {
+    const { required_signers: signers, ...columns } = registration;
+    this.db.transaction(() => {
+      this.db.prepare("DELETE FROM slot_records WHERE target_id = ? AND (submitted_at IS NULL OR ?)")
+        .run(registration.target_id, replaceSubmitted ? 1 : 0);
+      this.db.prepare(`INSERT INTO slot_records (target_id, supplier_pkh, agent_id, tx_hash, tx_cbor, required_signers_json,
+        valid_until_ms, created_at, submitted_at)
+        VALUES (@target_id, @supplier_pkh, @agent_id, @tx_hash, @tx_cbor, @required_signers_json, @valid_until_ms, @created_at, NULL)`)
+        .run({ ...columns, required_signers_json: JSON.stringify(signers) });
+    }).immediate();
+    return this.slotRegistration(registration.target_id)!;
+  }
+
+  /** Durable before broadcast: the fully signed registration, once. */
+  submitSlotRegistration(targetId: string, txCbor: string, at: number): SlotRegistration {
+    const changes = this.db.prepare("UPDATE slot_records SET tx_cbor = ?, submitted_at = ? WHERE target_id = ? AND submitted_at IS NULL")
+      .run(txCbor, at, targetId).changes;
+    if (changes !== 1) throw new PublicationConflictError("slot_registration_state_changed");
+    return this.slotRegistration(targetId)!;
   }
 
   close(): void {

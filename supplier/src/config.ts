@@ -56,12 +56,26 @@
  *                          — periodic wallet self-consolidate tick interval
  *                            (default 600_000 = 10 min). "0" disables the
  *                            ticker. Only fires while LIVE_CHAIN=1.
+ *   AGENT_ID               — the supplier's own agent: 64 lowercase hex characters
+ *                            (the identifier that tx:register-record prints). The
+ *                            supplier works a new (16-field) escrow only for its own
+ *                            agent. Unset: the agent of the configured new advert,
+ *                            else none (legacy escrows only). When both are set they
+ *                            must name the same agent.
+ *   IDENTITY_POLICY_ID     — the identity hash (56 hex), read by the shared builders.
+ *                            Required to Claim and Submit new escrows.
+ *   IDENTITY_ESCROW_REF_UTXO / IDENTITY_ADVERT_REF_UTXO
+ *                          — reference scripts of the new escrow and advert
+ *                            (tx:publish-reference-scripts). ESCROW_REF_UTXO and
+ *                            ADVERT_REF_UTXO stay for legacy escrows until the
+ *                            drain ends (Part 2 §9.6).
  *
  * On error: throws Error whose message names the offending field (matches
  * supplier-config.test.ts assertion that error message mentions field name).
  */
 
 import { isIP } from "node:net";
+import { parseAgentId } from "./identity/agent.js";
 
 const HEX64_RE = /^[0-9a-fA-F]{64}$/;
 const TX_HASH_RE = /^[0-9a-fA-F]{64}$/;
@@ -225,6 +239,8 @@ export interface SupplierConfig {
   /** Empty string when capabilityKind="chat". */
   piperUrl: string;
   advertRef: AdvertRef;
+  /** AGENT_ID: the supplier's own agent (64 lowercase hex). Undefined when unset. */
+  agentId?: string;
   networkId: 0 | 1;
   port: number;
   /** IP literal to bind. Undefined keeps the default all-interfaces listener. */
@@ -401,6 +417,7 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
   }
 
   const advertRefStr = requireField(env, "ADVERT_REF");
+  const agentId = parseAgentId(env.AGENT_ID, "loadConfig: AGENT_ID");
   const advertRef = parseAdvertRef(advertRefStr);
 
   const networkIdStr = requireField(env, "NETWORK_ID");
@@ -748,6 +765,7 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
     openaiModelOverride,
     piperUrl,
     advertRef,
+    agentId,
     networkId,
     port,
     bindHost,

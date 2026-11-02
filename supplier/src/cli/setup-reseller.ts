@@ -5,12 +5,15 @@ import { chmod, mkdir, open, rename } from "node:fs/promises";
 import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { LiveOgmiosProvider, type OutputReference } from "@marketplace/shared/chain";
-import { decodeAdvertDatum, type AdvertDatum } from "@marketplace/shared/cbor";
+import type { AdvertDatum, IdentityAdvertDatum } from "@marketplace/shared/cbor";
 import {
   BOUNDED_INPUT_DETAIL_MARKER,
+  isIdentityAdvertDatum,
   loadBlueprint,
+  loadIdentityBlueprint,
   type WalletKey,
 } from "@marketplace/shared/tx";
+import { decodeAdvert, parseAgentId, supplierIdentity } from "../identity/agent.js";
 import { deriveKeypair } from "./gen-keypair.js";
 import { runPostAdvert } from "./postAdvertFlow.js";
 import { callResponses } from "../openai.js";
@@ -39,6 +42,8 @@ interface SetupResult {
   supplierAddress: string;
   supplierPkh: string;
   advertRef: string;
+  /** The agent of a new advert, or null for a legacy advert. */
+  agentId: string | null;
   endpointUrl: string;
   dashboardUrl: string;
   marketplaceModel: string;
@@ -59,6 +64,13 @@ const POSTGRES_STATE_FILE =
 const DEFAULT_STATE_FILE = "/var/lib/agents-marketplace/openrouter-reseller.env";
 const RESELLER_HOSTNAME =
   "mp-suppliers-openrouter-reseller.vector.apexfusion.org";
+/**
+ * Identity settings (Part 2 §9.6), from the environment or the saved state.
+ * They go into the runtime state, and into this process for the in-process
+ * advert builder. AGENT_ID selects a new advert; its record must list the
+ * seller key first (tx:register-record).
+ */
+const IDENTITY_SETTINGS = ["IDENTITY_POLICY_ID", "IDENTITY_ESCROW_REF_UTXO", "IDENTITY_ADVERT_REF_UTXO", "AGENT_ID"] as const;
 
 export function parseSetupArgs(argv: string[]): CliOptions {
   let configPath = "";
@@ -103,6 +115,15 @@ export async function runResellerSetup(
   if (!openRouterKey) {
     throw new Error("OPENROUTER_API_KEY is required on the first setup run");
   }
+  const identitySettings: Record<string, string> = {};
+  for (const name of IDENTITY_SETTINGS) {
+    const value = env[name] || prior[name];
+    if (value) {
+      identitySettings[name] = value;
+      process.env[name] = value;
+    }
+  }
+  const agentId = parseAgentId(identitySettings.AGENT_ID);
 
   const runtimeState = buildRuntimeState(
     config,
@@ -115,6 +136,7 @@ export async function runResellerSetup(
     postgresPassword,
     openRouterKey,
     prior.ADVERT_REF ?? "",
+    identitySettings,
   );
   await writeState(statePath, runtimeState);
   await writeState(POSTGRES_STATE_FILE, {
@@ -164,7 +186,10 @@ export async function runResellerSetup(
     pubKeyHash: derived.pubKeyHash,
     address: derived.address,
   };
-  const advert = buildAdvert(config, walletKey);
+  const advert = buildAdvert(config, walletKey, agentId);
+  if (agentId === undefined && identitySettings.IDENTITY_POLICY_ID !== undefined) {
+    log("warning: no AGENT_ID, so this posts a legacy advert; it lists only until the switch");
+  }
   const advertRef = await findOrPostAdvert(
     chain,
     walletKey,
@@ -188,6 +213,7 @@ export async function runResellerSetup(
     supplierAddress: walletKey.address,
     supplierPkh: walletKey.pubKeyHash,
     advertRef: runtimeState.ADVERT_REF,
+    agentId: agentId ?? null,
     endpointUrl: config.endpointUrl,
     dashboardUrl: `${config.endpointUrl}/reseller`,
     marketplaceModel: config.marketplaceModel,
@@ -202,6 +228,7 @@ function buildRuntimeState(
   postgresPassword: string,
   openRouterKey: string,
   advertRef: string,
+  identitySettings: Record<string, string>,
 ): SetupState {
   const hostname = new URL(config.endpointUrl).hostname;
   return {
@@ -241,11 +268,16 @@ function buildRuntimeState(
     VECTOR_ZERO_TIME_MS: MAINNET_ZERO_TIME_MS,
     ESCROW_REF_UTXO: MAINNET_ESCROW_REF,
     ADVERT_REF_UTXO: MAINNET_ADVERT_REF,
+    ...identitySettings,
   };
 }
 
-function buildAdvert(config: ResellerSetupConfig, wallet: WalletKey): AdvertDatum {
-  return {
+function buildAdvert(
+  config: ResellerSetupConfig,
+  wallet: WalletKey,
+  agentId: string | undefined,
+): AdvertDatum | IdentityAdvertDatum {
+  const advert: AdvertDatum = {
     supplier_pkh: wallet.pubKeyHash,
     capability_id: "llm.text.generate.v1",
     model: config.marketplaceModel,
@@ -260,54 +292,66 @@ function buildAdvert(config: ResellerSetupConfig, wallet: WalletKey): AdvertDatu
     advertised_at: 0,
     status: "Active",
   };
+  return agentId === undefined ? advert : { ...advert, agent_id: agentId };
 }
 
 async function findOrPostAdvert(
   chain: LiveOgmiosProvider,
   walletKey: WalletKey,
-  expected: AdvertDatum,
+  expected: AdvertDatum | IdentityAdvertDatum,
   savedRef: string,
   log: (line: string) => void,
   journal: (ref: OutputReference) => Promise<void>,
 ): Promise<OutputReference> {
   const parsedSaved = parseRef(savedRef);
   if (parsedSaved) {
-    const utxo = await chain.queryUtxo(parsedSaved);
-    if (utxo?.datumHex) {
-      assertAdvertMatches(decodeAdvertDatum(utxo.datumHex), expected);
-      log(`reusing saved advert ${savedRef}`);
-      return parsedSaved;
+    let saved = await chain.queryUtxo(parsedSaved);
+    let pending = false;
+    if (!saved?.datumHex) {
+      try {
+        await chain.awaitTx(parsedSaved.txHash, 120_000);
+        saved = await chain.queryUtxo(parsedSaved);
+        pending = true;
+      } catch {
+        // The pending transaction is no longer viable; authoritative scan follows.
+        saved = null;
+      }
     }
-    try {
-      await chain.awaitTx(parsedSaved.txHash, 120_000);
-      const confirmed = await chain.queryUtxo(parsedSaved);
-      if (confirmed?.datumHex) {
-        assertAdvertMatches(decodeAdvertDatum(confirmed.datumHex), expected);
-        log(`reusing confirmed pending advert ${savedRef}`);
+    if (saved?.datumHex) {
+      const datum = decodeAdvert(saved.datumHex).datum;
+      // A new advert replaces a legacy one (Part 2 §9.2): the saved advert of the other layout stays until retired.
+      if (isIdentityAdvertDatum(datum) === isIdentityAdvertDatum(expected)) {
+        assertAdvertMatches(datum, expected);
+        log(`reusing ${pending ? "confirmed pending" : "saved"} advert ${savedRef}`);
         return parsedSaved;
       }
-    } catch {
-      // The pending transaction is no longer viable; authoritative scan follows.
+      log(`saved advert ${savedRef} has the other layout; it stays until you retire it (tx:retire-advert)`);
     }
   }
 
-  const advertAddress = loadBlueprint().advertScriptAddress(1);
-  const advertUtxos = await chain.queryUtxosByAddress(advertAddress);
-  const sameModel: Array<{ ref: OutputReference; datum: AdvertDatum }> = [];
-  for (const utxo of advertUtxos) {
-    if (!utxo.datumHex) continue;
-    try {
-      const datum = decodeAdvertDatum(utxo.datumHex);
-      if (datum.status === "Active" && datum.model === expected.model) {
-        sameModel.push({ ref: utxo.ref, datum });
+  // Both advert addresses during the drain; only the layout of `expected` counts.
+  const advertAddresses = [loadBlueprint().advertScriptAddress(1)];
+  try {
+    advertAddresses.push(loadIdentityBlueprint().advertScriptAddress(1));
+  } catch (error) {
+    if (isIdentityAdvertDatum(expected)) throw error;
+  }
+  const own: Array<{ ref: OutputReference; datum: AdvertDatum | IdentityAdvertDatum }> = [];
+  for (const address of advertAddresses) {
+    for (const utxo of await chain.queryUtxosByAddress(address)) {
+      if (!utxo.datumHex) continue;
+      try {
+        const datum = decodeAdvert(utxo.datumHex).datum;
+        if (datum.status === "Active" && datum.model === expected.model &&
+            datum.supplier_pkh === expected.supplier_pkh &&
+            isIdentityAdvertDatum(datum) === isIdentityAdvertDatum(expected)) {
+          own.push({ ref: utxo.ref, datum });
+        }
+      } catch {
+        // Ignore unrelated or malformed script outputs.
       }
-    } catch {
-      // Ignore unrelated or malformed script outputs.
     }
   }
-  const own = sameModel.filter(
-    (candidate) => candidate.datum.supplier_pkh === expected.supplier_pkh,
-  );
   if (own.length > 1) {
     throw new Error(`multiple active adverts already exist for ${expected.model}`);
   }
@@ -323,11 +367,15 @@ async function findOrPostAdvert(
     advertDatum: expected,
     log,
     beforeSubmit: async (built) => journal(built.advertOutputRef),
+    identity: isIdentityAdvertDatum(expected) ? supplierIdentity(chain, 1) : undefined,
   });
   return result.advertRef;
 }
 
-function assertAdvertMatches(actual: AdvertDatum, expected: AdvertDatum): void {
+function assertAdvertMatches(
+  actual: AdvertDatum | IdentityAdvertDatum,
+  expected: AdvertDatum | IdentityAdvertDatum,
+): void {
   const fieldsMatch =
     actual.status === "Active" &&
     actual.supplier_pkh === expected.supplier_pkh &&
@@ -340,7 +388,9 @@ function assertAdvertMatches(actual: AdvertDatum, expected: AdvertDatum): void {
     actual.buyer_bond_lovelace === expected.buyer_bond_lovelace &&
     actual.endpoint_url === expected.endpoint_url &&
     actual.detail_uri === expected.detail_uri &&
-    actual.detail_hash === expected.detail_hash;
+    actual.detail_hash === expected.detail_hash &&
+    (isIdentityAdvertDatum(actual) ? actual.agent_id : null) ===
+      (isIdentityAdvertDatum(expected) ? expected.agent_id : null);
   if (!fieldsMatch) {
     throw new Error("saved advert does not match the reseller config");
   }

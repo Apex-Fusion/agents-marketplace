@@ -7,6 +7,7 @@
     "typecheck": "tsc --noEmit",
     "tx:gen-keypair": "tsx src/cli/gen-keypair.ts",
     "tx:post-advert": "tsx src/cli/post-advert.ts",
+    "tx:register-record": "tsx src/cli/register-record.ts",
     "paper2agent:register": "tsx src/cli/register-paper2agent.ts",
     "tx:retire-advert": "tsx src/cli/retire-advert.ts",
     "tx:publish-reference-scripts": "tsx src/cli/publish-reference-scripts.ts",

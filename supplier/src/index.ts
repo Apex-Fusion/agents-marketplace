@@ -22,7 +22,7 @@ import { JobStore } from "./jobs.js";
 import { createApp, type SupplierDeps } from "./server.js";
 import { buildChainProvider } from "./chain.js";
 import { startWalletHealthTicker } from "./walletHealth.js";
-import { decodeAdvertDatum } from "@marketplace/shared/cbor";
+import { decodeAdvert, ownAgentId, supplierIdentity } from "./identity/agent.js";
 import { BOUNDED_INPUT_DETAIL_MARKER } from "@marketplace/shared/tx";
 import { OpenRouterCapacityProvider } from "./reseller/openRouterCapacity.js";
 import { CapacityGate } from "./reseller/capacityGate.js";
@@ -59,12 +59,14 @@ async function main(): Promise<void> {
   // M1-F-2: provider selection is driven by cfg.liveChain (LIVE_CHAIN=1).
   // ReadOnly is the safe default; live mode is explicit opt-in.
   const chain = buildChainProvider(cfg);
+  // Record lookup and identity blueprint for new escrows; the blueprint loads on first use.
+  const identity = supplierIdentity(chain, cfg.networkId);
   // chat-session kind serves N concurrent sessions; one-shot kinds stay 1.
   const state = new SupplierState(cfg.capabilityKind === "chat-session" ? cfg.maxChatSessions : 1);
   const jobs = new JobStore();
   const paper2agent = cfg.capabilityKind === "paper2agent"
     ? await Paper2AgentRuntime.create({ chain, state, supplierKey, networkId: cfg.networkId,
-      advertRef: cfg.advertRef, config: cfg.paper2agent! })
+      advertRef: cfg.advertRef, config: cfg.paper2agent!, agentId: cfg.agentId, identity })
     : undefined;
   let reseller: ResellerRuntime | undefined;
   if (cfg.reseller) {
@@ -72,7 +74,9 @@ async function main(): Promise<void> {
     if (!advertUtxo?.datumHex) {
       throw new Error("reseller boot: configured advert UTxO is unavailable");
     }
-    const advert = decodeAdvertDatum(advertUtxo.datumHex);
+    const advert = decodeAdvert(advertUtxo.datumHex).datum;
+    // Throws when AGENT_ID and a new advert name different agents.
+    ownAgentId(cfg.agentId, advert);
     if (advert.status !== "Active") {
       throw new Error(`reseller boot: advert status is ${advert.status}`);
     }
@@ -134,6 +138,7 @@ async function main(): Promise<void> {
     jobs,
     reseller,
     paper2agent,
+    identity,
   };
   const app = createApp(deps);
 
