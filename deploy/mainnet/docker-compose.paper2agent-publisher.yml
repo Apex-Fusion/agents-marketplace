@@ -34,9 +34,12 @@
 #   release, each slot also sets IDENTITY_POLICY_ID, IDENTITY_ESCROW_REF_UTXO,
 #   IDENTITY_ADVERT_REF_UTXO and, once registered, its AGENT_ID. The publisher
 #   registers a record for each new slot key before it posts the advert
-#   (Part 2 §9.2); paper2agent/.env.publisher then also holds
-#   IDENTITY_CONTROLLER_PUB_KEY_HEX (the Foundation operator public key) and,
-#   optionally, IDENTITY_ACCOUNTABLE_PARTY.
+#   (Part 2 §9.2). A slot that registers its record also sets
+#   IDENTITY_REF_UTXO (the reference UTxO of the identity script).
+#   paper2agent/.env.publisher then also holds IDENTITY_CONTROLLER_PUB_KEY_HEX
+#   (the Foundation operator public key) and, optionally,
+#   IDENTITY_ACCOUNTABLE_PARTY. The controller signs the Register transaction
+#   offline; its private key never goes to this host.
 #
 # The production host has about 8 GiB of RAM and no swap. mem_limit keeps the
 # publisher and its supplier children from starting the global OOM killer.

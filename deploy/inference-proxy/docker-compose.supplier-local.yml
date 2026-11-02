@@ -26,6 +26,9 @@
 #        LIVE_CHAIN=1
 #        Identity release (Part 2 §9.2, §9.6): IDENTITY_POLICY_ID, AGENT_ID,
 #        IDENTITY_ESCROW_REF_UTXO, IDENTITY_ADVERT_REF_UTXO
+#        For tx:register-record (docs/DEPLOY_NEW_SUPPLIER.md §4.8):
+#        IDENTITY_REF_UTXO, IDENTITY_CONTROLLER_PUB_KEY_HEX. Its offline `sign`
+#        step reads SIGNER_PRIV_KEY_HEX; never put that key in this file.
 #      (no OPENAI_API_KEY — vuk's endpoint is unauthenticated)
 #   3. Networks: traefik-net is created one-shot (see the traefik compose in
 #      this directory). No marketplace-mainnet-net here — this box runs no

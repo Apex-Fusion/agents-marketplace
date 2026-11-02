@@ -21,6 +21,9 @@
 #        LIVE_CHAIN=1
 #        Identity release (Part 2 §9.2, §9.6): IDENTITY_POLICY_ID, AGENT_ID,
 #        IDENTITY_ESCROW_REF_UTXO, IDENTITY_ADVERT_REF_UTXO
+#        For tx:register-record (docs/DEPLOY_NEW_SUPPLIER.md §4.8):
+#        IDENTITY_REF_UTXO, IDENTITY_CONTROLLER_PUB_KEY_HEX. Its offline `sign`
+#        step reads SIGNER_PRIV_KEY_HEX; never put that key in this file.
 #      The advert must be posted with --capability-id llm.chat.v1 and a large
 #      --max-processing-ms (~1800000) so Claim+Submit both land before deliver_by.
 #   3. Networks already exist (created by the canonical supplier compose):

@@ -14,6 +14,9 @@
 #        ADVERT_REF, LIVE_CHAIN=1
 #        Identity release (Part 2 §9.2, §9.6): IDENTITY_POLICY_ID, AGENT_ID,
 #        IDENTITY_ESCROW_REF_UTXO, IDENTITY_ADVERT_REF_UTXO
+#        For tx:register-record (docs/DEPLOY_NEW_SUPPLIER.md §4.8):
+#        IDENTITY_REF_UTXO, IDENTITY_CONTROLLER_PUB_KEY_HEX. Its offline `sign`
+#        step reads SIGNER_PRIV_KEY_HEX; never put that key in this file.
 #   3. Networks marketplace-mainnet-net + traefik-net already exist.
 
 name: marketplace-mainnet-supplier-kimi-3

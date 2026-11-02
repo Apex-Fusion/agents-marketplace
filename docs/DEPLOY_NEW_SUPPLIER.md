@@ -55,12 +55,19 @@ ADVERT_REF_UTXO=c8d84c6d67ec67a1efe5e9c6c06d53020e05d1bb96d1c55ecb1eb7d5010c4d54
 IDENTITY_POLICY_ID=<56 hex, the identity registry policy ID>
 IDENTITY_ESCROW_REF_UTXO=<txHash>#0
 IDENTITY_ADVERT_REF_UTXO=<txHash>#1
+# The reference UTxO of the identity script. Only tx:register-record build reads it (§4.8).
+IDENTITY_REF_UTXO=<txHash>#<index>
 ```
 
 During the drain (Part 2 §9.6) a supplier needs both pairs of reference
 scripts: `ESCROW_REF_UTXO` and `ADVERT_REF_UTXO` for legacy escrows and
 adverts, `IDENTITY_ESCROW_REF_UTXO` and `IDENTITY_ADVERT_REF_UTXO` for new
 ones. Nobody can claim an escrow whose payment and bonds exceed 10,000 AP3X.
+
+`VECTOR_ZERO_TIME_MS` above is the Vector mainnet system start. On testnet
+(`NETWORK_ID=0`), set the testnet system start instead (whole seconds, in
+milliseconds). `tx:register-record build` reads `VECTOR_ZERO_TIME_MS` only on
+testnet; on mainnet it uses the mainnet value that is built into the CLI.
 
 `OGMIOS_URL` above is a public endpoint; if you run your own Vector node +
 Ogmios, point at that instead. Never pin `NETWORK_ID` / `OGMIOS_URL` inside
@@ -274,14 +281,23 @@ purpose, and lists the advert's capability id. The supplier key must also
 sign the transaction that posts the advert (`tx:post-advert` does this).
 
 1. Register one native record for the supplier key with
-   `tx:register-record` (`supplier/src/cli/register-record.ts`). `build`
-   writes the transaction (name, endpoint, one `--capability` for each
-   advert capability id), the controller key signs it with `sign`, and
-   `submit` sends it and prints `AGENT_ID=<64 hex>`. The record lists the
-   supplier key with the authentication and transaction purposes, and it
-   names an Accountable Party (by default the controller). The deposit is
-   10 AP3X. For this step, set `IDENTITY_CONTROLLER_PUB_KEY_HEX` (and, if
-   needed, `IDENTITY_ACCOUNTABLE_PARTY`) in the env file.
+   `tx:register-record` (`supplier/src/cli/register-record.ts`). It has three
+   steps:
+   - `build` writes the transaction (name, endpoint, one `--capability` for
+     each advert capability id) and signs it with the supplier key. It reads
+     `IDENTITY_POLICY_ID` and `IDENTITY_REF_UTXO` (§3), and
+     `IDENTITY_CONTROLLER_PUB_KEY_HEX` (and, if needed,
+     `IDENTITY_ACCOUNTABLE_PARTY`) from the env file. On testnet
+     (`NETWORK_ID=0`) it also reads `VECTOR_ZERO_TIME_MS` (§3).
+   - `sign` adds the controller signature on the offline machine. It reads
+     the controller private key from `SIGNER_PRIV_KEY_HEX` and needs no
+     network access. Never put `SIGNER_PRIV_KEY_HEX` into a supplier env
+     file.
+   - `submit` sends the transaction and prints `AGENT_ID=<64 hex>`.
+
+   The record lists the supplier key with the authentication and
+   transaction purposes, and it names an Accountable Party (by default the
+   controller). The deposit is 10 AP3X.
 2. Put `AGENT_ID=<64 hex>` into `supplier/.env.<name>`. `tx:post-advert`
    reads it (or `--agent-id`), checks the record, and posts the new advert
    at the new advert address. Without an agent id it posts a legacy advert,
