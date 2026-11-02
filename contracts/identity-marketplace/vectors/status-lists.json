@@ -1,0 +1,358 @@
+{
+  "name": "status-lists",
+  "description": "Status-list bits of the gateway's DID-document vector set, produced by the gateway's status-list service (identity-gateway/src/m4/status-lists.ts) and decoded from its signed lists. Index i of an identifier comes from the ledger order of its first mint (30 confirmations); it is in list floor(i / 131072) at position i mod 131072. Token Status List (2 bits, entry 0 in the least significant bits of byte 0): 0 valid (Active), 1 invalid (Revoked or Retired), 2 suspended. Bitstring Status List (bit 0 is the most significant bit of byte 0): the revocation bit at position p, the suspension bit at 131072 + p. The *Bytes members are the uncompressed bytes that hold the indexed entries of list 0.",
+  "specification": "docs/IDENTITY_REGISTRY.md §8.4, §8.6; docs/did-vector-method.md §7.3",
+  "vectors": [
+    {
+      "name": "adopted",
+      "source": "identity-gateway/test/vectors/adopted.json",
+      "tip": {
+        "blockHeight": 1000,
+        "slot": 10000
+      },
+      "entries": [
+        {
+          "vectorId": "04ee87eab3b01b3e7bf42307ce78810bf86ef5b59eb0b8a0dee254fd68d3e2c1",
+          "origin": "adopted",
+          "statusListIndex": 0,
+          "effective": "active",
+          "effectiveReason": null,
+          "list": 0,
+          "position": 0,
+          "tokenStatusList": 0,
+          "bitstringStatusList": {
+            "revocationIndex": 0,
+            "revocation": 0,
+            "suspensionIndex": 131072,
+            "suspension": 0
+          }
+        }
+      ],
+      "tokenStatusListBytes": "00",
+      "bitstringRevocationBytes": "00",
+      "bitstringSuspensionBytes": "00"
+    },
+    {
+      "name": "legacy-after-cutoff",
+      "source": "identity-gateway/test/vectors/legacy-after-cutoff.json",
+      "tip": {
+        "blockHeight": 1000,
+        "slot": 10000
+      },
+      "entries": [
+        {
+          "vectorId": "de2766e0536671bfa246c77f5cc0cee1df664e892bce5f988a804176911c72e4",
+          "origin": "legacy",
+          "statusListIndex": 0,
+          "effective": "suspended",
+          "effectiveReason": "unaccountable",
+          "list": 0,
+          "position": 0,
+          "tokenStatusList": 2,
+          "bitstringStatusList": {
+            "revocationIndex": 0,
+            "revocation": 0,
+            "suspensionIndex": 131072,
+            "suspension": 1
+          }
+        }
+      ],
+      "tokenStatusListBytes": "02",
+      "bitstringRevocationBytes": "00",
+      "bitstringSuspensionBytes": "80"
+    },
+    {
+      "name": "legacy-before-cutoff",
+      "source": "identity-gateway/test/vectors/legacy-before-cutoff.json",
+      "tip": {
+        "blockHeight": 450,
+        "slot": 4500
+      },
+      "entries": [
+        {
+          "vectorId": "de2766e0536671bfa246c77f5cc0cee1df664e892bce5f988a804176911c72e4",
+          "origin": "legacy",
+          "statusListIndex": 0,
+          "effective": "active",
+          "effectiveReason": null,
+          "list": 0,
+          "position": 0,
+          "tokenStatusList": 0,
+          "bitstringStatusList": {
+            "revocationIndex": 0,
+            "revocation": 0,
+            "suspensionIndex": 131072,
+            "suspension": 0
+          }
+        }
+      ],
+      "tokenStatusListBytes": "00",
+      "bitstringRevocationBytes": "00",
+      "bitstringSuspensionBytes": "00"
+    },
+    {
+      "name": "legacy-deregistered",
+      "source": "identity-gateway/test/vectors/legacy-deregistered.json",
+      "tip": {
+        "blockHeight": 1000,
+        "slot": 10000
+      },
+      "entries": [
+        {
+          "vectorId": "4753ce19c480f3c071c8148319f2f612000e73dc4ed925e103e5ca1b5df8d014",
+          "origin": "legacy",
+          "statusListIndex": 0,
+          "effective": "retired",
+          "effectiveReason": null,
+          "list": 0,
+          "position": 0,
+          "tokenStatusList": 1,
+          "bitstringStatusList": {
+            "revocationIndex": 0,
+            "revocation": 1,
+            "suspensionIndex": 131072,
+            "suspension": 0
+          }
+        }
+      ],
+      "tokenStatusListBytes": "01",
+      "bitstringRevocationBytes": "80",
+      "bitstringSuspensionBytes": "00"
+    },
+    {
+      "name": "pending-versions",
+      "source": "identity-gateway/test/vectors/pending-versions.json",
+      "tip": {
+        "blockHeight": 1000,
+        "slot": 10000
+      },
+      "entries": [
+        {
+          "vectorId": "a50efbfb28347af9eff101a1b622e2fd8f167b53f2dfebd05c388da9d560c682",
+          "origin": "native",
+          "statusListIndex": 0,
+          "effective": "suspended",
+          "effectiveReason": null,
+          "list": 0,
+          "position": 0,
+          "tokenStatusList": 2,
+          "bitstringStatusList": {
+            "revocationIndex": 0,
+            "revocation": 0,
+            "suspensionIndex": 131072,
+            "suspension": 1
+          }
+        }
+      ],
+      "tokenStatusListBytes": "02",
+      "bitstringRevocationBytes": "00",
+      "bitstringSuspensionBytes": "80"
+    },
+    {
+      "name": "retired-successor",
+      "source": "identity-gateway/test/vectors/retired-successor.json",
+      "tip": {
+        "blockHeight": 1000,
+        "slot": 10000
+      },
+      "entries": [
+        {
+          "vectorId": "5a7daa99bd816214a018ef9fd3448efb05d84cb8406fc63732f0058642b51825",
+          "origin": "native",
+          "statusListIndex": 0,
+          "effective": "retired",
+          "effectiveReason": null,
+          "list": 0,
+          "position": 0,
+          "tokenStatusList": 1,
+          "bitstringStatusList": {
+            "revocationIndex": 0,
+            "revocation": 1,
+            "suspensionIndex": 131072,
+            "suspension": 0
+          }
+        },
+        {
+          "vectorId": "c198a7178c4e56940179b42aaf3ba6f7b10a7e22824cd664515497e74393e010",
+          "origin": "native",
+          "statusListIndex": 1,
+          "effective": "active",
+          "effectiveReason": null,
+          "list": 0,
+          "position": 1,
+          "tokenStatusList": 0,
+          "bitstringStatusList": {
+            "revocationIndex": 1,
+            "revocation": 0,
+            "suspensionIndex": 131073,
+            "suspension": 0
+          }
+        }
+      ],
+      "tokenStatusListBytes": "01",
+      "bitstringRevocationBytes": "80",
+      "bitstringSuspensionBytes": "00"
+    },
+    {
+      "name": "revoked-invalid-from",
+      "source": "identity-gateway/test/vectors/revoked-invalid-from.json",
+      "tip": {
+        "blockHeight": 1000,
+        "slot": 10000
+      },
+      "entries": [
+        {
+          "vectorId": "23199970ad693449bb77cf740d1e57845268237657c1153c6662834eed651ac0",
+          "origin": "native",
+          "statusListIndex": 0,
+          "effective": "revoked",
+          "effectiveReason": null,
+          "list": 0,
+          "position": 0,
+          "tokenStatusList": 1,
+          "bitstringStatusList": {
+            "revocationIndex": 0,
+            "revocation": 1,
+            "suspensionIndex": 131072,
+            "suspension": 0
+          }
+        }
+      ],
+      "tokenStatusListBytes": "01",
+      "bitstringRevocationBytes": "80",
+      "bitstringSuspensionBytes": "00"
+    },
+    {
+      "name": "root-agent",
+      "source": "identity-gateway/test/vectors/root-agent.json",
+      "tip": {
+        "blockHeight": 1000,
+        "slot": 10000
+      },
+      "entries": [
+        {
+          "vectorId": "198d220c7394edb5fc2240306a89f97514783e6a2d39b90d33617e036df5e4d7",
+          "origin": "native",
+          "statusListIndex": 0,
+          "effective": "active",
+          "effectiveReason": null,
+          "list": 0,
+          "position": 0,
+          "tokenStatusList": 0,
+          "bitstringStatusList": {
+            "revocationIndex": 0,
+            "revocation": 0,
+            "suspensionIndex": 131072,
+            "suspension": 0
+          }
+        }
+      ],
+      "tokenStatusListBytes": "00",
+      "bitstringRevocationBytes": "00",
+      "bitstringSuspensionBytes": "00"
+    },
+    {
+      "name": "subagent",
+      "source": "identity-gateway/test/vectors/subagent.json",
+      "tip": {
+        "blockHeight": 1000,
+        "slot": 10000
+      },
+      "entries": [
+        {
+          "vectorId": "5af1bc56d176edc9aa28c80a9cd1fef2575e0ace3eeb1ff5ffbdad14ff1463c5",
+          "origin": "native",
+          "statusListIndex": 0,
+          "effective": "active",
+          "effectiveReason": null,
+          "list": 0,
+          "position": 0,
+          "tokenStatusList": 0,
+          "bitstringStatusList": {
+            "revocationIndex": 0,
+            "revocation": 0,
+            "suspensionIndex": 131072,
+            "suspension": 0
+          }
+        },
+        {
+          "vectorId": "c7c6773e54f8db009400fe713535a8897cb93b55e59c7991ca83eb8b5ef0f95d",
+          "origin": "native",
+          "statusListIndex": 1,
+          "effective": "active",
+          "effectiveReason": null,
+          "list": 0,
+          "position": 1,
+          "tokenStatusList": 0,
+          "bitstringStatusList": {
+            "revocationIndex": 1,
+            "revocation": 0,
+            "suspensionIndex": 131073,
+            "suspension": 0
+          }
+        }
+      ],
+      "tokenStatusListBytes": "00",
+      "bitstringRevocationBytes": "00",
+      "bitstringSuspensionBytes": "00"
+    },
+    {
+      "name": "suspended-two-authors",
+      "source": "identity-gateway/test/vectors/suspended-two-authors.json",
+      "tip": {
+        "blockHeight": 1000,
+        "slot": 10000
+      },
+      "entries": [
+        {
+          "vectorId": "8589e6e354f5f8fd4cf413d961abd35735a2aa9af4d012e2f63f304310e2f4d0",
+          "origin": "native",
+          "statusListIndex": 0,
+          "effective": "suspended",
+          "effectiveReason": null,
+          "list": 0,
+          "position": 0,
+          "tokenStatusList": 2,
+          "bitstringStatusList": {
+            "revocationIndex": 0,
+            "revocation": 0,
+            "suspensionIndex": 131072,
+            "suspension": 1
+          }
+        }
+      ],
+      "tokenStatusListBytes": "02",
+      "bitstringRevocationBytes": "00",
+      "bitstringSuspensionBytes": "80"
+    },
+    {
+      "name": "unaccountable",
+      "source": "identity-gateway/test/vectors/unaccountable.json",
+      "tip": {
+        "blockHeight": 1000,
+        "slot": 10000
+      },
+      "entries": [
+        {
+          "vectorId": "320bcdf957c1f5ce559f0fcbebb376de3b6ee27d1dd4f004be8d243a2153e399",
+          "origin": "native",
+          "statusListIndex": 0,
+          "effective": "suspended",
+          "effectiveReason": "unaccountable",
+          "list": 0,
+          "position": 0,
+          "tokenStatusList": 2,
+          "bitstringStatusList": {
+            "revocationIndex": 0,
+            "revocation": 0,
+            "suspensionIndex": 131072,
+            "suspension": 1
+          }
+        }
+      ],
+      "tokenStatusListBytes": "02",
+      "bitstringRevocationBytes": "00",
+      "bitstringSuspensionBytes": "80"
+    }
+  ]
+}

@@ -1,0 +1,698 @@
+{
+  "name": "identity-marketplace benchmarks",
+  "specification": "docs/IDENTITY_REGISTRY.md §12.4",
+  "evaluator": "aiken v1.1.21+42babe5 tx simulate (built-in Plutus V3 cost model)",
+  "limits": {
+    "mem": 16000000,
+    "cpu": 10000000000,
+    "txBytes": 16384
+  },
+  "flagShare": 0.7,
+  "notes": [
+    "Every case is a complete, signed transaction with the applied scripts of plutus.json (test parameters, see bench/scripts.ts), evaluated offline with `aiken tx simulate`. Scripts run from reference inputs; script transactions have a collateral input.",
+    "aiken tx simulate has no option for protocol parameters: it uses its built-in Plutus V3 cost model and a budget of 14,000,000 memory and 10,000,000,000 CPU units for the whole transaction (Vector allows 16,000,000 memory units).",
+    "mem and cpu are the sums over all redeemers of a transaction. txBytes adds the script data hash, the collateral return and the total collateral, which the harness does not write, and uses the measured execution units in the redeemers.",
+    "Module-1 (identity_party) is in another repository. A stand-in that accepts every purpose takes its withdraw handler's place, so the Module-1 cost is not in the cases that use ok(Script { M1 }) (Register, Adopt, the Module-1 Suspend and Revoke, the subagent Register).",
+    "The verdict applications, the Consent Update and the challenge resolution of §12.4 need the Module-1 scripts and are not in these cases."
+  ],
+  "scripts": [
+    {
+      "name": "identity",
+      "hash": "1a4a52bd048f7947c164d30cd3dac5ce55a7bcb83da5068a6e5f1d33",
+      "bytes": 13699
+    },
+    {
+      "name": "config_holder",
+      "hash": "288fea77a0f674c6080aadd8ed3ca42cd5a920bf1f00c0d3e63306e4",
+      "bytes": 94
+    },
+    {
+      "name": "config_seal",
+      "hash": "c3ed1cd38d33e22982d853a326781e9fad3bc9f4e44b6cedfebcfcae",
+      "bytes": 703
+    },
+    {
+      "name": "attestation",
+      "hash": "f140ba7edafb20404ddcecf87201c02f9f93eabd26907293568a3453",
+      "bytes": 7234
+    },
+    {
+      "name": "delegation",
+      "hash": "76994ebce1243b313c3892bd5e6fd419d6c60df5a57168aa92a3d85d",
+      "bytes": 7081
+    },
+    {
+      "name": "vault",
+      "hash": "2a5eacbcb2ac448edd607a3e87e564ff2f4f094cdeff6dc62c233356",
+      "bytes": 6932
+    },
+    {
+      "name": "escrow",
+      "hash": "4f3168b536c0df1bb1dfa64cea8993b6b1bac0d1e97e2a80158f2acb",
+      "bytes": 5915
+    },
+    {
+      "name": "advert",
+      "hash": "f36e366e06d4480651aa0e1064578f0bfe275af96dfcaaabe5efe26c",
+      "bytes": 1024
+    },
+    {
+      "name": "Module-1 stand-in",
+      "hash": "186e32faa80a26810392fda6d559c7ed4721a65ce1c9d4ef3e1c87b4",
+      "bytes": 6
+    }
+  ],
+  "cases": [
+    {
+      "name": "Register",
+      "group": "identity",
+      "description": "Register of the largest record: 13 required signers (controller, 5 Ed25519 keys, 7 key parties), Module-1 appointed",
+      "mem": 2759304,
+      "cpu": 933675401,
+      "txBytes": 5877,
+      "memPercent": 17.2,
+      "cpuPercent": 9.3,
+      "txBytesPercent": 35.9,
+      "over70": [],
+      "redeemers": [
+        {
+          "purpose": "Mint[0]",
+          "label": "identity mint Register",
+          "mem": 2758804,
+          "cpu": 933611301
+        },
+        {
+          "purpose": "Withdraw[0]",
+          "label": "Module-1 withdraw (stand-in)",
+          "mem": 500,
+          "cpu": 64100
+        }
+      ]
+    },
+    {
+      "name": "Adopt",
+      "group": "identity",
+      "description": "Adopt into the largest record with a 13-node allowlist proof; the legacy Deregister and Burn run in the same transaction",
+      "mem": 3320406,
+      "cpu": 1116616271,
+      "txBytes": 6626,
+      "memPercent": 20.8,
+      "cpuPercent": 11.2,
+      "txBytesPercent": 40.4,
+      "over70": [],
+      "redeemers": [
+        {
+          "purpose": "Spend[1]",
+          "label": "legacy spend Deregister",
+          "mem": 183621,
+          "cpu": 63821476
+        },
+        {
+          "purpose": "Mint[0]",
+          "label": "identity mint Adopt",
+          "mem": 2979601,
+          "cpu": 1002690252
+        },
+        {
+          "purpose": "Mint[1]",
+          "label": "legacy mint Burn",
+          "mem": 156684,
+          "cpu": 50040443
+        },
+        {
+          "purpose": "Withdraw[0]",
+          "label": "Module-1 withdraw (stand-in)",
+          "mem": 500,
+          "cpu": 64100
+        }
+      ]
+    },
+    {
+      "name": "Update",
+      "group": "identity",
+      "description": "Update: a new Ed25519 key replaces one, a removal notice, a new description",
+      "mem": 4740570,
+      "cpu": 1786904769,
+      "txBytes": 4833,
+      "memPercent": 29.6,
+      "cpuPercent": 17.9,
+      "txBytesPercent": 29.5,
+      "over70": [],
+      "redeemers": [
+        {
+          "purpose": "Spend[1]",
+          "label": "identity spend Update",
+          "mem": 4740570,
+          "cpu": 1786904769
+        }
+      ]
+    },
+    {
+      "name": "ChangeController",
+      "group": "identity",
+      "description": "ChangeController: the old and the new controller sign",
+      "mem": 3648038,
+      "cpu": 1300435107,
+      "txBytes": 4823,
+      "memPercent": 22.8,
+      "cpuPercent": 13,
+      "txBytesPercent": 29.4,
+      "over70": [],
+      "redeemers": [
+        {
+          "purpose": "Spend[1]",
+          "label": "identity spend ChangeController",
+          "mem": 3648038,
+          "cpu": 1300435107
+        }
+      ]
+    },
+    {
+      "name": "Suspend (key party)",
+      "group": "identity",
+      "description": "Suspend by key party 1, which renews its hold; the hold of the removed party 8 is dropped",
+      "mem": 4054297,
+      "cpu": 1486483822,
+      "txBytes": 4641,
+      "memPercent": 25.3,
+      "cpuPercent": 14.9,
+      "txBytesPercent": 28.3,
+      "over70": [],
+      "redeemers": [
+        {
+          "purpose": "Spend[0]",
+          "label": "identity spend Suspend",
+          "mem": 4054297,
+          "cpu": 1486483822
+        }
+      ]
+    },
+    {
+      "name": "Suspend (Module-1)",
+      "group": "identity",
+      "description": "Suspend by the Module-1 party (reason 64), with the Module-1 withdrawal",
+      "mem": 4076458,
+      "cpu": 1502027849,
+      "txBytes": 4589,
+      "memPercent": 25.5,
+      "cpuPercent": 15,
+      "txBytesPercent": 28,
+      "over70": [],
+      "redeemers": [
+        {
+          "purpose": "Spend[1]",
+          "label": "identity spend Suspend",
+          "mem": 4075958,
+          "cpu": 1501963749
+        },
+        {
+          "purpose": "Withdraw[0]",
+          "label": "Module-1 withdraw (stand-in)",
+          "mem": 500,
+          "cpu": 64100
+        }
+      ]
+    },
+    {
+      "name": "Unsuspend",
+      "group": "identity",
+      "description": "Unsuspend by key party 1: 8 holds stay",
+      "mem": 3868492,
+      "cpu": 1409380159,
+      "txBytes": 4613,
+      "memPercent": 24.2,
+      "cpuPercent": 14.1,
+      "txBytesPercent": 28.2,
+      "over70": [],
+      "redeemers": [
+        {
+          "purpose": "Spend[1]",
+          "label": "identity spend Unsuspend",
+          "mem": 3868492,
+          "cpu": 1409380159
+        }
+      ]
+    },
+    {
+      "name": "Revoke (controller)",
+      "group": "identity",
+      "description": "Revoke by the controller: reason 1 with invalid_from, and a successor",
+      "mem": 1347844,
+      "cpu": 446720822,
+      "txBytes": 1082,
+      "memPercent": 8.4,
+      "cpuPercent": 4.5,
+      "txBytesPercent": 6.6,
+      "over70": [],
+      "redeemers": [
+        {
+          "purpose": "Spend[0]",
+          "label": "identity spend Revoke",
+          "mem": 1347844,
+          "cpu": 446720822
+        }
+      ]
+    },
+    {
+      "name": "Revoke (Module-1)",
+      "group": "identity",
+      "description": "Revoke by the Module-1 party (reason 64), with the Module-1 withdrawal",
+      "mem": 1246070,
+      "cpu": 416852038,
+      "txBytes": 852,
+      "memPercent": 7.8,
+      "cpuPercent": 4.2,
+      "txBytesPercent": 5.2,
+      "over70": [],
+      "redeemers": [
+        {
+          "purpose": "Spend[0]",
+          "label": "identity spend Revoke",
+          "mem": 1245570,
+          "cpu": 416787938
+        },
+        {
+          "purpose": "Withdraw[0]",
+          "label": "Module-1 withdraw (stand-in)",
+          "mem": 500,
+          "cpu": 64100
+        }
+      ]
+    },
+    {
+      "name": "Retire",
+      "group": "identity",
+      "description": "Retire with a successor",
+      "mem": 1241641,
+      "cpu": 410472678,
+      "txBytes": 1061,
+      "memPercent": 7.8,
+      "cpuPercent": 4.1,
+      "txBytesPercent": 6.5,
+      "over70": [],
+      "redeemers": [
+        {
+          "purpose": "Spend[0]",
+          "label": "identity spend Retire",
+          "mem": 1241641,
+          "cpu": 410472678
+        }
+      ]
+    },
+    {
+      "name": "Reclaim",
+      "group": "identity",
+      "description": "Reclaim of a tombstone: the output keeps 2 AP3X",
+      "mem": 440302,
+      "cpu": 155151769,
+      "txBytes": 861,
+      "memPercent": 2.8,
+      "cpuPercent": 1.6,
+      "txBytesPercent": 5.3,
+      "over70": [],
+      "redeemers": [
+        {
+          "purpose": "Spend[0]",
+          "label": "identity spend Reclaim",
+          "mem": 440302,
+          "cpu": 155151769
+        }
+      ]
+    },
+    {
+      "name": "SetSuccessor",
+      "group": "identity",
+      "description": "SetSuccessor on a tombstone that a key party revoked",
+      "mem": 691153,
+      "cpu": 242276809,
+      "txBytes": 1064,
+      "memPercent": 4.3,
+      "cpuPercent": 2.4,
+      "txBytesPercent": 6.5,
+      "over70": [],
+      "redeemers": [
+        {
+          "purpose": "Spend[1]",
+          "label": "identity spend SetSuccessor",
+          "mem": 691153,
+          "cpu": 242276809
+        }
+      ]
+    },
+    {
+      "name": "BumpEpoch",
+      "group": "identity",
+      "description": "BumpEpoch: the controller ends the subagents",
+      "mem": 3649079,
+      "cpu": 1299067138,
+      "txBytes": 4693,
+      "memPercent": 22.8,
+      "cpuPercent": 13,
+      "txBytesPercent": 28.6,
+      "over70": [],
+      "redeemers": [
+        {
+          "purpose": "Spend[0]",
+          "label": "identity spend BumpEpoch",
+          "mem": 3649079,
+          "cpu": 1299067138
+        }
+      ]
+    },
+    {
+      "name": "RecoverInit",
+      "group": "identity",
+      "description": "RecoverInit by 3 guardians (threshold 3) and the new controller",
+      "mem": 4019490,
+      "cpu": 1421803679,
+      "txBytes": 5150,
+      "memPercent": 25.1,
+      "cpuPercent": 14.2,
+      "txBytesPercent": 31.4,
+      "over70": [],
+      "redeemers": [
+        {
+          "purpose": "Spend[1]",
+          "label": "identity spend RecoverInit",
+          "mem": 4019490,
+          "cpu": 1421803679
+        }
+      ]
+    },
+    {
+      "name": "RecoverCancel",
+      "group": "identity",
+      "description": "RecoverCancel by 3 guardians",
+      "mem": 3985671,
+      "cpu": 1410074290,
+      "txBytes": 4971,
+      "memPercent": 24.9,
+      "cpuPercent": 14.1,
+      "txBytesPercent": 30.3,
+      "over70": [],
+      "redeemers": [
+        {
+          "purpose": "Spend[1]",
+          "label": "identity spend RecoverCancel",
+          "mem": 3985671,
+          "cpu": 1410074290
+        }
+      ]
+    },
+    {
+      "name": "RecoverFinalize",
+      "group": "identity",
+      "description": "RecoverFinalize by anybody after the delay",
+      "mem": 3728007,
+      "cpu": 1321302832,
+      "txBytes": 4567,
+      "memPercent": 23.3,
+      "cpuPercent": 13.2,
+      "txBytesPercent": 27.9,
+      "over70": [],
+      "redeemers": [
+        {
+          "purpose": "Spend[0]",
+          "label": "identity spend RecoverFinalize",
+          "mem": 3728007,
+          "cpu": 1321302832
+        }
+      ]
+    },
+    {
+      "name": "Register depth-4 subagent",
+      "group": "subagent",
+      "description": "Register of a largest-size subagent at depth 4, with its 4 ancestors of the largest size as reference inputs",
+      "mem": 6315960,
+      "cpu": 2060804243,
+      "txBytes": 5924,
+      "memPercent": 39.5,
+      "cpuPercent": 20.6,
+      "txBytesPercent": 36.2,
+      "over70": [],
+      "redeemers": [
+        {
+          "purpose": "Mint[0]",
+          "label": "identity mint Register",
+          "mem": 6315460,
+          "cpu": 2060740143
+        },
+        {
+          "purpose": "Withdraw[0]",
+          "label": "Module-1 withdraw (stand-in)",
+          "mem": 500,
+          "cpu": 64100
+        }
+      ]
+    },
+    {
+      "name": "Claim",
+      "group": "escrow",
+      "description": "Claim with the largest record (supplier key, Accountable Party and capability last) and a vault refund",
+      "mem": 1229815,
+      "cpu": 411954506,
+      "txBytes": 1056,
+      "memPercent": 7.7,
+      "cpuPercent": 4.1,
+      "txBytesPercent": 6.4,
+      "over70": [],
+      "redeemers": [
+        {
+          "purpose": "Spend[1]",
+          "label": "escrow spend Claim",
+          "mem": 1229815,
+          "cpu": 411954506
+        }
+      ]
+    },
+    {
+      "name": "Submit",
+      "group": "escrow",
+      "description": "Submit with the largest record and a vault refund",
+      "mem": 1159720,
+      "cpu": 389418421,
+      "txBytes": 1136,
+      "memPercent": 7.2,
+      "cpuPercent": 3.9,
+      "txBytesPercent": 6.9,
+      "over70": [],
+      "redeemers": [
+        {
+          "purpose": "Spend[1]",
+          "label": "escrow spend Submit",
+          "mem": 1159720,
+          "cpu": 389418421
+        }
+      ]
+    },
+    {
+      "name": "Vault Pay, 1 escrow",
+      "group": "vault",
+      "description": "Pay through a depth-4 delegation chain (4 delegations with 16 actions and 8 resources, 5 agent records of the largest size) into 1 escrow output",
+      "mem": 6683804,
+      "cpu": 2141403333,
+      "txBytes": 1430,
+      "memPercent": 41.8,
+      "cpuPercent": 21.4,
+      "txBytesPercent": 8.7,
+      "over70": [],
+      "redeemers": [
+        {
+          "purpose": "Spend[1]",
+          "label": "vault spend Pay",
+          "mem": 6683804,
+          "cpu": 2141403333
+        }
+      ]
+    },
+    {
+      "name": "Vault Pay, 5 escrows",
+      "group": "vault",
+      "description": "Pay through a depth-4 delegation chain (4 delegations with 16 actions and 8 resources, 5 agent records of the largest size) into 5 escrow outputs",
+      "mem": 7370300,
+      "cpu": 2420354317,
+      "txBytes": 3046,
+      "memPercent": 46.1,
+      "cpuPercent": 24.2,
+      "txBytesPercent": 18.6,
+      "over70": [],
+      "redeemers": [
+        {
+          "purpose": "Spend[1]",
+          "label": "vault spend Pay",
+          "mem": 7370300,
+          "cpu": 2420354317
+        }
+      ]
+    },
+    {
+      "name": "Vault Pay, 10 escrows",
+      "group": "vault",
+      "description": "Pay through a depth-4 delegation chain (4 delegations with 16 actions and 8 resources, 5 agent records of the largest size) into 10 escrow outputs",
+      "mem": 8228420,
+      "cpu": 2769043047,
+      "txBytes": 5066,
+      "memPercent": 51.4,
+      "cpuPercent": 27.7,
+      "txBytesPercent": 30.9,
+      "over70": [],
+      "redeemers": [
+        {
+          "purpose": "Spend[1]",
+          "label": "vault spend Pay",
+          "mem": 8228420,
+          "cpu": 2769043047
+        }
+      ]
+    },
+    {
+      "name": "Vault Pay, 25 escrows",
+      "group": "vault",
+      "description": "Pay through a depth-4 delegation chain (4 delegations with 16 actions and 8 resources, 5 agent records of the largest size) into 25 escrow outputs",
+      "mem": 10802780,
+      "cpu": 3815109237,
+      "txBytes": 11127,
+      "memPercent": 67.5,
+      "cpuPercent": 38.2,
+      "txBytesPercent": 67.9,
+      "over70": [],
+      "redeemers": [
+        {
+          "purpose": "Spend[1]",
+          "label": "vault spend Pay",
+          "mem": 10802780,
+          "cpu": 3815109237
+        }
+      ]
+    },
+    {
+      "name": "Vault Pay, 38 escrows",
+      "group": "vault",
+      "description": "Pay through a depth-4 delegation chain (4 delegations with 16 actions and 8 resources, 5 agent records of the largest size) into 38 escrow outputs",
+      "mem": 13033892,
+      "cpu": 4721699935,
+      "txBytes": 16383,
+      "memPercent": 81.5,
+      "cpuPercent": 47.2,
+      "txBytesPercent": 100,
+      "over70": [
+        "mem",
+        "txBytes"
+      ],
+      "redeemers": [
+        {
+          "purpose": "Spend[1]",
+          "label": "vault spend Pay",
+          "mem": 13033892,
+          "cpu": 4721699935
+        }
+      ]
+    },
+    {
+      "name": "Publish identity",
+      "group": "publication",
+      "description": "Publication of the applied identity script (13699 bytes) as a reference script at the zero key hash address",
+      "mem": 0,
+      "cpu": 0,
+      "txBytes": 13948,
+      "memPercent": 0,
+      "cpuPercent": 0,
+      "txBytesPercent": 85.1,
+      "over70": [
+        "txBytes"
+      ],
+      "redeemers": []
+    },
+    {
+      "name": "Publish config_holder",
+      "group": "publication",
+      "description": "Publication of the applied config_holder script (94 bytes) as a reference script at the zero key hash address",
+      "mem": 0,
+      "cpu": 0,
+      "txBytes": 341,
+      "memPercent": 0,
+      "cpuPercent": 0,
+      "txBytesPercent": 2.1,
+      "over70": [],
+      "redeemers": []
+    },
+    {
+      "name": "Publish config_seal",
+      "group": "publication",
+      "description": "Publication of the applied config_seal script (703 bytes) as a reference script at the zero key hash address",
+      "mem": 0,
+      "cpu": 0,
+      "txBytes": 952,
+      "memPercent": 0,
+      "cpuPercent": 0,
+      "txBytesPercent": 5.8,
+      "over70": [],
+      "redeemers": []
+    },
+    {
+      "name": "Publish attestation",
+      "group": "publication",
+      "description": "Publication of the applied attestation script (7234 bytes) as a reference script at the zero key hash address",
+      "mem": 0,
+      "cpu": 0,
+      "txBytes": 7483,
+      "memPercent": 0,
+      "cpuPercent": 0,
+      "txBytesPercent": 45.7,
+      "over70": [],
+      "redeemers": []
+    },
+    {
+      "name": "Publish delegation",
+      "group": "publication",
+      "description": "Publication of the applied delegation script (7081 bytes) as a reference script at the zero key hash address",
+      "mem": 0,
+      "cpu": 0,
+      "txBytes": 7330,
+      "memPercent": 0,
+      "cpuPercent": 0,
+      "txBytesPercent": 44.7,
+      "over70": [],
+      "redeemers": []
+    },
+    {
+      "name": "Publish vault",
+      "group": "publication",
+      "description": "Publication of the applied vault script (6932 bytes) as a reference script at the zero key hash address",
+      "mem": 0,
+      "cpu": 0,
+      "txBytes": 7181,
+      "memPercent": 0,
+      "cpuPercent": 0,
+      "txBytesPercent": 43.8,
+      "over70": [],
+      "redeemers": []
+    },
+    {
+      "name": "Publish escrow",
+      "group": "publication",
+      "description": "Publication of the applied escrow script (5915 bytes) as a reference script at the zero key hash address",
+      "mem": 0,
+      "cpu": 0,
+      "txBytes": 6164,
+      "memPercent": 0,
+      "cpuPercent": 0,
+      "txBytesPercent": 37.6,
+      "over70": [],
+      "redeemers": []
+    },
+    {
+      "name": "Publish advert",
+      "group": "publication",
+      "description": "Publication of the applied advert script (1024 bytes) as a reference script at the zero key hash address",
+      "mem": 0,
+      "cpu": 0,
+      "txBytes": 1273,
+      "memPercent": 0,
+      "cpuPercent": 0,
+      "txBytesPercent": 7.8,
+      "over70": [],
+      "redeemers": []
+    }
+  ]
+}
