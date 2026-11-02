@@ -295,12 +295,12 @@ All operations are ledger transactions. The identity registry contract checks th
 
 The origin of an identity-registry record is `adopted` when the transaction that minted its token also burned the legacy token, else `native`. A legacy record has origin `legacy`. Every version of a record shows the origin of the record, also a legacy version of an adopted record.
 
-If the resolver cannot read the ledger, it returns `INTERNAL_ERROR`. It never returns `NOT_FOUND` or a partial document for a failed read.
+If the resolver cannot read the ledger, it returns `INTERNAL_ERROR`. It never returns `NOT_FOUND` or a partial document for a failed read. An identity-registry record output whose datum is not inline or does not decode as Section 5, and an identity token that was burned, cannot exist under the contract; a resolver that sees one also returns `INTERNAL_ERROR`.
 
 ### 7.2 Versions and confirmations
 
 - **Versions.** Version 0 is the record output of the first mint. A later transaction adds one version when the datum of the record output that it writes differs, as Plutus Data, from the datum of the record output that it spends. The adoption adds one version. A legacy deregistration adds one version, which ends the record. A transaction that changes only the value, such as a deposit reclaim, adds no version. Only authentic record outputs make versions; a token outside an authentic output is handled by Section 7.3, rule 6.
-- **Owned outputs.** A version owns the record output of its transaction and the record outputs of later transactions that change only the value, up to the next version.
+- **Owned outputs.** A version owns the record output of its transaction and the record outputs of later transactions that change only the value, up to the next version. When a token returns from an output that is not authentic to an authentic record output, the resolver compares the new datum with the datum of the last authentic record output.
 - **Version time.** The block time of the transaction that made the version.
 - **Confirmed version.** A version whose transaction has at least 30 confirmations.
 - **Request time `t`.** Without a version option, `t` is the time of the tip. With `versionTime`, `t` is the requested time or the time of the tip, whichever is earlier. With `versionId`, `t` is the version time of the selected version.
@@ -322,19 +322,20 @@ If the resolver cannot read the ledger, it returns `INTERNAL_ERROR`. It never re
 | Other fields | From the base. |
 
 - **End not yet confirmed.** When a pending version is a tombstone or the end of a legacy record, the effective status is Suspended (Section 7.3, rule 4). The DID becomes deactivated only when that version is confirmed.
-- **Adoption not yet confirmed.** When the base is a legacy version and the adoption is a pending version, the view is the base alone.
+- **Adoption not yet confirmed.** When the base is a legacy version and the adoption is a pending version, the view is computed from the base and the pending legacy versions before the adoption, with the rules above. The adoption and the later versions do not count until the adoption is confirmed.
+- **End of a legacy record.** That version has no datum. As a base, it shows only `createdAt` in the profile. As a pending version, it removes every key, capability and party from the view.
 - **Legacy versions.** The controller key of a legacy version is the key that Section 8.1 finds for the owner hash.
 
 ### 7.3 Effective status
 
-The resolver computes the effective status at time `t` from the view. For a subagent, it computes the view and the effective status of the parent at the same `t`, with the same rules, and so in turn of each ancestor. The first rule that applies gives the result:
+The resolver computes the effective status at time `t` from the view. For a subagent, it computes the view and the effective status of the parent at the same `t`, with the same rules, and so in turn of each ancestor. For an ancestor, the counted transactions are: without an option, all; with `versionTime`, those with a block time before the requested time; with `versionId`, those with a block time at or before `t`. The first rule that applies gives the result:
 
 1. The view has status Revoked or Retired (a tombstone, or the end of a legacy record): that status.
 2. The newest confirmed version of the record, or of an ancestor, has status Revoked with an "invalid from" time at or before `t`, also when that version is later than `t`: Revoked (`invalidated`, or `parentRevoked` for an ancestor).
 3. The effective status of the parent is Revoked or Retired: the same status (`parentRevoked` or `parentRetired`). Also, when the subagent epoch of the parent's base version is greater than the subagent's `parent_epoch`: Revoked (`parentRevoked`).
 4. Rule 1, 2 or 3 would apply if all unconfirmed versions of the record and of its ancestors were confirmed: Suspended (`deactivationPending`).
 5. The effective status of the parent is Suspended: Suspended (`parentSuspended`).
-6. The newest counted transaction of the record's token left the token in an output that is not authentic (Section 4): Suspended (`notAuthentic`). The record continues when the token returns to an authentic output.
+6. The newest counted transaction of the record's token with a block time at or before `t` left the token in an output that is not authentic (Section 4): Suspended (`notAuthentic`). The record continues when the token returns to an authentic output.
 7. A hold of the view has `until` after `t`: Suspended.
 8. No Accountable Party of the view covers `t`: Suspended (`unaccountable`).
 9. Else: Active.
@@ -349,7 +350,7 @@ The DID is deactivated at `t` when the effective status at `t` is Revoked or Ret
 
 ### 7.4 HTTPS binding
 
-`GET /1.0/identifiers/{did}`, as defined by DID Resolution v1.0. Options are query parameters. The resolver percent-decodes the path once. It reads the `Accept` header as RFC 9110 specifies and ignores media ranges with `q=0`. The highest `q` wins. On a tie, the resolution result wins.
+`GET /1.0/identifiers/{did}`, as defined by DID Resolution v1.0. Options are query parameters. The resolver percent-decodes the path once. It reads the `Accept` header as RFC 9110 specifies and ignores media ranges with `q=0` or with a malformed `q`. Parameters other than `q` and `profile` are ignored. `application/*` matches both representations. The highest `q` wins. On a tie, the resolution result wins.
 
 | `Accept` media range | Response |
 |---|---|
@@ -428,10 +429,10 @@ Errors and results with `deactivated: true` always get the resolution result. Th
 | `vectorFetched` | For each value that depends on a fetch (verified domains, `organisationVerified`, `protocol`): the URL, the fetch time and the SHA-256 of the fetched bytes. |
 | `vectorMetadataError` | `controllerKeyNotFound`, `controllerIsScript`, `recordDatumInvalid`, `recordDatumUnavailable` or `keyProofInvalid`. |
 
-- A signer is shown as a key hash, as `script:<script hash>`, or as `controller`. A reason is shown as its name in Appendix A of the implementation plan. Key hashes, script hashes and transaction IDs are lowercase hexadecimal.
+- A signer is shown as a key hash, as `script:<script hash>`, or as `controller`. A reason is shown as its name in Appendix A of the implementation plan; a code without a name there is shown as a decimal string. Key hashes, script hashes and transaction IDs are lowercase hexadecimal.
 - Times use the form `YYYY-MM-DDThh:mm:ssZ` (UTC). Milliseconds are rounded down to whole seconds. The block time is the system start plus the slot number in seconds.
 - A text field or capability item that is not valid UTF-8, or that contains a surrogate code point or a noncharacter (RFC 7493), is left out.
-- In every object of this section, a member whose value is `false`, none or an empty list is left out.
+- In every object of this section, a member whose value is `false`, none, an empty string or an empty list is left out.
 
 The resolution metadata is `{"contentType": "application/did"}` when the result has a document, and `{}` when it has none. On an error it is `{"error": {"type": "https://www.w3.org/ns/did#<NAME>", "title": "<text>"}}`.
 
