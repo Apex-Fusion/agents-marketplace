@@ -307,7 +307,8 @@ export async function acceptIdentity(
  * Reclaim at or after deliver_by. Without `refund` the buyer signs and gets
  * payment + both bonds, as for the legacy escrow. With `refund`, any wallet
  * can submit it, no buyer signature is needed, and the whole escrow value
- * goes to the refund address with exactly the refund datum.
+ * goes to the refund address with exactly the refund datum: the contract
+ * requires the AP3X and every other asset of the escrow input there.
  */
 export async function reclaimIdentity(args: SpendArgs & { walletKey: WalletKey }): Promise<BuildResult> {
   const { chain, escrow, walletKey } = args;
@@ -389,7 +390,8 @@ export async function releaseIdentity(args: SpendArgs & { supplierKey: WalletKey
  * RefundRevoked: any wallet, before or after deliver_by, when the agent's
  * record allows it (refundAllowed). The whole escrow value goes to the refund
  * address with exactly the refund datum, or to the enterprise address of
- * buyer_pkh when `refund` is not set.
+ * buyer_pkh when `refund` is not set: the contract requires the AP3X and
+ * every other asset of the escrow input there.
  */
 export async function refundRevokedIdentity(
   args: SpendArgs & { walletKey: WalletKey; lookupRecord?: RecordLookup; excludeInputs?: readonly OutputReference[] },

@@ -271,4 +271,21 @@ describe.each(MODES)("new escrow, %s", (mode) => {
     // With invalid_from after submitted_at, the delivery stands: RefundRevoked fails.
     rejectsWith(refundedSubmitted, recordUtxo(blueprint, revokedAt(active, submittedAt + 1), compromisedRef));
   });
+
+  it("RefundRevoked returns every asset of the escrow input, not only its AP3X", async () => {
+    const active = agentRecord(controller, supplier);
+    const posted = await post(useRecord(active));
+    // The posted escrow with a token next to its AP3X. The builders lock AP3X only; the script also protects other assets.
+    const unit = `${"7e".repeat(28)}${Buffer.from("token").toString("hex")}`;
+    const escrow: Utxo = { ...posted, ref: { txHash: "e8".repeat(32), index: 0 }, assets: { [unit]: 1n } };
+    ogmios.add(escrow);
+    vi.setSystemTime(NOW_MS + 5_000);
+    const refunded = await passes(mode, "RefundRevoked (escrow with a token)", () =>
+      buildRefundRevokedTx({
+        chain: ogmios.chain(), walletKey: stranger, escrowRef: escrow.ref,
+        lookupRecord: useRecord(revokedAt(active, null), { txHash: "7b".repeat(32), index: 0 }), identityBlueprint: blueprint,
+      }));
+    // When the escrow input holds one more unit than the refund output carries, RefundRevoked fails.
+    rejectsWith(refunded, { ...escrow, assets: { [unit]: 2n } });
+  });
 });

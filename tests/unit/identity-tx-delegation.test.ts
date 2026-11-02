@@ -271,22 +271,30 @@ describe("Vault (§5.3)", () => {
     })).reason).toBe("delegation_ancestor_missing");
   });
 
-  it("raises the buyer bond of a small escrow to the min-UTxO, so the output's AP3X equals payment + bonds", () => {
+  it("puts a min-UTxO top-up into the buyer bond, so each escrow holds exactly payment + both bonds", () => {
     const tx = buildVaultPay(context(wallets.keyC), vaultScripts, {
-      vault: known.find((u) => u.ref.txHash === state.v2!.ref.txHash && u.address === state.v2!.address) === undefined ? state.v2! : known.filter((u) => u.address === state.v2!.address && u.datumHex !== null && decodeVaultDatum(u.datumHex).type === "Live" && u.ref.txHash !== state.v1?.ref.txHash).at(-1)!,
+      vault: state.v2!,
       window,
       delegation: state.d2!,
       ancestors: [state.d1!],
       records: [agentB.record, agentC.record],
-      escrows: [job(100_000n, 0n, 50_000n)],
+      escrows: [job(1n * AP3X), job(3n * AP3X, 1n * AP3X, 1n * AP3X)],
     });
-    const escrow = decodeIdentityEscrowDatum(tx.outputs[0]!.datumHex!);
-    expect(escrow.payment_lovelace).toBe(100_000n);
-    expect(escrow.supplier_bond_lovelace).toBe(50_000n);
-    expect(escrow.buyer_bond_lovelace).toBeGreaterThan(1_000_000n);
-    expect(tx.outputs[0]!.lovelace).toBe(escrow.payment_lovelace + escrow.buyer_bond_lovelace + escrow.supplier_bond_lovelace);
-    expect(tx.outputs[0]!.lovelace).toBe(minUtxo({ address: tx.outputs[0]!.address, coin: tx.outputs[0]!.lovelace, assets: [], datum: identityEscrowDatumToData(escrow), scriptRef: null }, 4310n));
     expectPass(tx, [wallets.keyC], ["vault Pay"]);
+    const [small, large] = tx.escrowOutputs.map((i) => ({
+      coin: tx.outputs[i]!.lovelace,
+      datum: decodeIdentityEscrowDatum(tx.outputs[i]!.datumHex!),
+    }));
+    for (const escrow of [small!, large!]) {
+      expect(escrow.coin).toBe(escrow.datum.payment_lovelace + escrow.datum.buyer_bond_lovelace + escrow.datum.supplier_bond_lovelace);
+    }
+    // 1 AP3X is below the min-UTxO of the escrow output: the difference is in the buyer bond.
+    expect(small!.datum.payment_lovelace).toBe(1n * AP3X);
+    expect(small!.datum.buyer_bond_lovelace).toBeGreaterThan(0n);
+    expect(small!.datum.supplier_bond_lovelace).toBe(0n);
+    // 5 AP3X is above it: no top-up.
+    expect(large!.datum.buyer_bond_lovelace).toBe(1n * AP3X);
+    expect(large!.coin).toBe(5n * AP3X);
   });
 
   it("closes a Live vault and a Returned refund output of two owners in one transaction", () => {

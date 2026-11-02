@@ -114,12 +114,14 @@ function escrowDatum(changes: Partial<IdentityEscrowDatum> = {}): IdentityEscrow
   };
 }
 
-function seedEscrow(chain: MockChainProvider, datum: IdentityEscrowDatum, lovelace = 4_500_000n, address?: string): Utxo {
+function seedEscrow(
+  chain: MockChainProvider, datum: IdentityEscrowDatum, lovelace = 4_500_000n, address?: string, assets: Record<string, bigint> = {},
+): Utxo {
   const utxo: Utxo = {
     ref: ESCROW_REF,
     address: address ?? blueprint.escrowScriptAddress(0),
     lovelace,
-    assets: {},
+    assets,
     datumHex: encodeIdentityEscrowDatum(datum),
     scriptRef: null,
   };
@@ -502,6 +504,31 @@ describe("Reclaim on the new escrow", () => {
     seedEscrow(chain, escrowDatum({ state: "Submitted", submitted_at: NOW_MS, result_receipt_hash: RECEIPT_HASH }));
     expect(await reason(buildReclaimTx({ chain, buyerKey: buyer, escrowRef: ESCROW_REF, identityBlueprint: blueprint })))
       .toBe("wrong state");
+  });
+});
+
+// ─── Full refund with other assets (decision of 2026-11-02) ─────────────
+
+describe("full refund of an escrow that holds other assets", () => {
+  it("Reclaim with refund and RefundRevoked: the refund output carries every asset of the escrow input", async () => {
+    /** Two units of a token next to the AP3X of the escrow input. */
+    const token = { [`${"7e".repeat(28)}${Buffer.from("token").toString("hex")}`]: 2n };
+    const revoked = tombstone(activeRecord(), { type: "Revoked", by: { type: "ControllerSet" }, reason: 5, at: NOW_MS, invalidFrom: null, successor: null });
+    const withDatum = { address: plutusAddressFromBech32(buyer.address), datum: { kind: "constr" as const, index: 1n, fields: [] } };
+    const cases = [
+      { reclaim: true, tipMs: NOW_MS + 100_000, refund: withDatum, address: buyer.address, datumHex: "d87a80" },
+      { reclaim: false, tipMs: NOW_MS + 5_000, refund: withDatum, address: buyer.address, datumHex: "d87a80" },
+      { reclaim: false, tipMs: NOW_MS + 5_000, refund: null, address: pkhToEnterpriseAddress(buyer.pubKeyHash, 0), datumHex: null },
+    ];
+    for (const { reclaim, tipMs, refund, address, datumHex } of cases) {
+      const chain = chainAt(tipMs);
+      const input = seedEscrow(chain, escrowDatum({ refund }), 4_620_000n, undefined, token);
+      const built = reclaim
+        ? await buildReclaimTx({ chain, buyerKey: stranger, escrowRef: ESCROW_REF, identityBlueprint: blueprint })
+        : await buildRefundRevokedTx({ chain, walletKey: stranger, escrowRef: ESCROW_REF, lookupRecord: lookupOf(revoked), identityBlueprint: blueprint });
+      expect(mockBody(built.txCborHex).outputs.map((o) => [o.address, o.lovelace, o.datumHex, o.assets]))
+        .toEqual([[address, input.lovelace, datumHex, token]]);
+    }
   });
 });
 

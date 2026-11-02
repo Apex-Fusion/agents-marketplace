@@ -12,12 +12,13 @@
 import { describe, expect, it } from "vitest";
 import type { Utxo } from "../../packages/shared/src/chain/ChainProvider.js";
 import type { IdentityDatum, Party, Signer } from "../../packages/shared/src/cbor/IdentityDatum.js";
+import type { Actor } from "../../packages/shared/src/cbor/IdentityRedeemer.js";
 import {
   buildBumpEpoch, buildChangeController, buildReclaim, buildRecoverCancel, buildRecoverFinalize, buildRecoverInit,
   buildRegister, buildRetire, buildRevoke, buildSetSuccessor, buildSuspend, buildUnsuspend, buildUpdate, createP256Pop,
   ed25519Key, p256Key, readRecord, TxConstructionError, verifyP256Pop, type UnsignedTx, type ValidityWindow,
 } from "../../packages/shared/src/identity/tx/index.js";
-import { DAYS_7_MS, DAY_MS } from "../../packages/shared/src/identity/constants.js";
+import { DAYS_7_MS, DAY_MS, MAX_RANGE_MS } from "../../packages/shared/src/identity/constants.js";
 import { utf8FromHex } from "../../packages/shared/src/identity/id.js";
 import { p256PopValid } from "../../identity-gateway/src/codec/keys.js";
 import { describeSimulation, type Simulation } from "../legacy-registry/harness/simulate.js";
@@ -465,6 +466,26 @@ describe("Revoke, SetSuccessor, Retire and Reclaim (§3.5, §3.7)", () => {
     expect(datumOf(set.outputs[0]!).status).toMatchObject({ type: "Revoked", successor: readRecord(state.successor!, world.identity.hash).id });
     ({ ctx } = context(controller));
     expect(refusal(() => buildSetSuccessor(ctx, scripts, { record: set.outputs[0]!, window: later, successor: state.successor! })).reason).toBe("successor_set");
+  });
+
+  it("revokes for keyCompromise in the window of the registration: invalid_from in [created_at − 1 h, lo]", () => {
+    const { record, controller } = register("R5 key compromise", [keyParty("Accountable", wallets.accountable, 3)]);
+    const createdAt = datumOf(record).createdAt;
+    // created_at is the hi of the registration window, so lo < created_at here.
+    expect(createdAt).toBe(window.hi);
+    const revoke = (actor: Actor, invalidFrom: number) =>
+      buildRevoke(context(controller).ctx, scripts, { record, window, actor, reason: 1, invalidFrom });
+    const party: Actor = { type: "ByParty", index: 1 };
+    expect(refusal(() => revoke(party, createdAt - MAX_RANGE_MS - 1)).reason).toBe("invalid_from_range");
+    expect(refusal(() => revoke(party, window.lo + 1)).reason).toBe("invalid_from_range");
+    const lowest = revoke(party, createdAt - MAX_RANGE_MS);
+    expectPass(lowest, [controller, wallets.accountable], ["identity Revoke"]);
+    expect(datumOf(lowest.outputs[0]!).status).toMatchObject({
+      type: "Revoked", by: { type: "KeyHash", hash: wallets.accountable.keyHash }, reason: 1, at: window.lo, invalidFrom: createdAt - MAX_RANGE_MS,
+    });
+    const atLo = revoke({ type: "ByController" }, window.lo);
+    expectPass(atLo, [controller], ["identity Revoke"]);
+    expect(datumOf(atLo.outputs[0]!).status).toMatchObject({ type: "Revoked", by: { type: "ControllerSet" }, invalidFrom: window.lo });
   });
 
   it("retires a record with a successor and releases the deposit above the ledger minimum", () => {
