@@ -150,6 +150,7 @@ describe("Marketplace.endChat — ticket branch", () => {
       escrowRef: ESCROW_REF,
       sessionNonce: "nonce-abc",
       supplierBaseUrl: "http://supplier.test",
+      agentId: null,
       transcript: [],
     });
 
@@ -165,6 +166,7 @@ describe("Marketplace.endChat — ticket branch", () => {
         escrowRef: ESCROW_REF,
         sessionNonce: "nonce-abc",
         supplierBaseUrl: "http://supplier.test",
+        agentId: null,
         transcript: [],
       }),
     ).rejects.toMatchObject({ reason: "malformed_response" });
@@ -201,6 +203,7 @@ describe("Marketplace.endChat — ticket branch", () => {
       escrowRef: ESCROW_REF,
       sessionNonce: "nonce-abc",
       supplierBaseUrl: "http://supplier.test",
+      agentId: null,
       transcript,
     })).rejects.toMatchObject({ reason: "response_hash_mismatch" });
     expect(submitSpy).not.toHaveBeenCalled();
