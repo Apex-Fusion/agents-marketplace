@@ -223,5 +223,5 @@ of `contracts/identity-marketplace/fixtures/`.
 1. Build off-host (Part 2 Section 8.1): `docker build -f identity-gateway/Dockerfile -t identity-gateway:<version> .`
    from a clean checkout of the release tag.
 2. Push the version tag to the registry. Do not use a `latest` tag.
-3. On the host, set the new tag in the compose file, pull, and restart the service.
+3. On the host, set `IDENTITY_GATEWAY_VERSION=<version>` in `deploy/mainnet/.env` (git-ignored), then pull and restart the service with `deploy/mainnet/docker-compose.gateway-identity.yml`. Do not edit the compose file on the host: `deploy.sh` refuses to run on a changed checkout.
 4. Check `GET /healthz` and resolve one native and one legacy DID.

@@ -7,8 +7,8 @@
 # tracked in ARCHITECTURE.md §9 #5) is still a separate open follow-up.
 #
 # Identity release (Part 2 §6, §9.6): buyer/.env also holds IDENTITY_POLICY_ID,
-# IDENTITY_ESCROW_REF_UTXO and the escrow switch slot once the identity
-# deployment publishes them. Keep ESCROW_REF_UTXO for the drain.
+# IDENTITY_ESCROW_REF_UTXO and SWITCH_SLOT (the escrow switch slot) once the
+# identity deployment publishes them. Keep ESCROW_REF_UTXO for the drain.
 
 name: marketplace-mainnet-buyer
 
