@@ -1,9 +1,18 @@
-import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, test } from "vitest";
 import { WebSocketServer } from "ws";
 import { KoiosOgmiosChainSource } from "../src/chain/koios-ogmios-source.js";
 import { KOIOS_PAGE, KoiosClient } from "../src/chain/koios.js";
-import { ASSET, MINT_BLOCK, MINT_TX, OWNER_KEY, POLICY, REGISTRY } from "./fixtures.js";
+import { LEGACY_REGISTRY } from "../src/resolve/settings.js";
+
+// Mainnet facts: legacy record 4c2047… was minted in tx e6992139… (block 4821638); its only vkey
+// witness is OWNER_KEY. The record output is #0 at the legacy address with an inline datum.
+const POLICY = LEGACY_REGISTRY.policyId;
+const ASSET = "4c2047697c7aa8b3399c5fecf20f2bd19ff276aaffbd0496acfd7b3e1a52545e";
+const MINT_TX = "e6992139dfb2922a175d3d614899067e6989e79e791f7b9e452af007bbec1611";
+const MINT_BLOCK = { hash: "adfc6ebfb06396231fa21deb352a2ce158af2ed67bbdcf06eadb4f5d4eacbff0", height: 4821638, slot: 19801342 };
+const PREVIOUS_BLOCK = { hash: "3a419d645f96d16afe73a4882fd9eac999a49c7f4567ce980fbdd42ddc8fdda4", height: 4821637, slot: 19801338 };
+const OWNER_KEY = "edca77f5418b21bb7bf540bd056a238e38575fc26c4aa677a36df6bf305d9e9c";
+const DATUM_HASH = "3c579fc003959cd94a3debdd25e67d51f4528acbcb1b20a1e75832ef7134d64d";
 
 interface Call {
   url: string;
@@ -12,16 +21,19 @@ interface Call {
   headers: Record<string, string>;
 }
 
-/** A fetch stub answering from a route table keyed by the path (query included). */
-function stubFetch(routes: (path: string, body: unknown) => unknown, calls: Call[] = []): typeof fetch {
+/** A fetch stub answering from a route function of the path (query included). */
+function stubFetch(routes: (path: string, body: unknown) => unknown, calls: Call[] = [], status = 200): typeof fetch {
   return (async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
-    calls.push({ url, method: init?.method ?? "GET", body, headers: init?.headers as Record<string, string> });
+    calls.push({ url, method: init?.method ?? "GET", body, headers: Object.fromEntries(new Headers(init?.headers).entries()) });
     const path = url.replace("https://koios.test/api/v1/", "");
-    return new Response(JSON.stringify(routes(path, body)), { status: 200, headers: { "content-type": "application/json" } });
+    return new Response(JSON.stringify(routes(path, body)), { status, headers: { "content-type": "application/json" } });
   }) as typeof fetch;
 }
+
+const koiosWith = (routes: (path: string, body: unknown) => unknown, calls: Call[] = []) =>
+  new KoiosClient({ baseUrl: "https://koios.test/api/v1/", fetch: stubFetch(routes, calls) });
 
 let wss: WebSocketServer | null = null;
 afterEach(async () => {
@@ -50,7 +62,9 @@ async function fakeOgmios(point: { slot: number; id: string }, block: unknown): 
     });
   });
   await new Promise<void>((done) => wss!.on("listening", done));
-  return `ws://127.0.0.1:${(wss.address() as AddressInfo).port}`;
+  const address = wss.address();
+  if (address === null || typeof address === "string") throw new Error("the fake Ogmios has no TCP address");
+  return `ws://127.0.0.1:${address.port}`;
 }
 
 describe("KoiosClient", () => {
@@ -58,95 +72,174 @@ describe("KoiosClient", () => {
     const calls: Call[] = [];
     const client = new KoiosClient({
       baseUrl: "https://koios.test/api/v1/",
-      token: "secret-token",
+      token: "test-token",
       fetch: stubFetch((path) => (path.includes("offset=0&") ? Array.from({ length: KOIOS_PAGE }, (_, i) => ({ i })) : [{ i: "last" }]), calls),
     });
-    const rows = await client.postAll("credential_txs", { _payment_credentials: ["x"] }, "tx_hash.asc");
+    const rows = await client.postAll("asset_txs", { _asset_policy: "x" }, "tx_hash.asc");
     expect(rows).toHaveLength(KOIOS_PAGE + 1);
     expect(calls.map((c) => c.url)).toEqual([
-      `https://koios.test/api/v1/credential_txs?order=tx_hash.asc&offset=0&limit=${KOIOS_PAGE}`,
-      `https://koios.test/api/v1/credential_txs?order=tx_hash.asc&offset=${KOIOS_PAGE}&limit=${KOIOS_PAGE}`,
+      `https://koios.test/api/v1/asset_txs?order=tx_hash.asc&offset=0&limit=${KOIOS_PAGE}`,
+      `https://koios.test/api/v1/asset_txs?order=tx_hash.asc&offset=${KOIOS_PAGE}&limit=${KOIOS_PAGE}`,
     ]);
-    expect(calls[0]!.headers.authorization).toBe("Bearer secret-token");
+    expect(calls[0]!.headers.authorization).toBe("Bearer test-token");
+  });
+
+  test("an HTTP error or a body that is not an array throws, naming the endpoint only", async () => {
+    const failing = new KoiosClient({ baseUrl: "https://koios.test/api/v1", fetch: stubFetch(() => ({}), [], 503) });
+    await expect(failing.post("asset_txs?x=1", { _asset_name: "secret" })).rejects.toThrow("Koios POST asset_txs answered HTTP 503");
+    const odd = new KoiosClient({ baseUrl: "https://koios.test/api/v1", fetch: stubFetch(() => ({ not: "an array" })) });
+    await expect(odd.get("tip")).rejects.toThrow(/JSON array/);
   });
 });
 
 describe("KoiosOgmiosChainSource", () => {
-  test("maps Koios rows to ledger transactions and unspent outputs", async () => {
-    const koios = new KoiosClient({
-      baseUrl: "https://koios.test/api/v1",
-      fetch: stubFetch((path) => {
-        if (path.startsWith("tx_info")) {
-          return [
-            {
-              tx_hash: MINT_TX,
-              block_hash: MINT_BLOCK.hash,
-              block_height: MINT_BLOCK.height,
-              absolute_slot: MINT_BLOCK.slot,
-              tx_timestamp: MINT_BLOCK.time,
-              tx_block_index: 0,
-              inputs: [{ tx_hash: "ee".repeat(32), tx_index: 0, payment_addr: { bech32: "addr1wallet" }, asset_list: [] }],
-              outputs: [{ tx_index: 0, payment_addr: { bech32: REGISTRY }, asset_list: [{ policy_id: POLICY, asset_name: ASSET, quantity: "1" }] }],
-              assets_minted: [{ policy_id: POLICY, asset_name: ASSET, quantity: "1" }],
-            },
-          ];
-        }
-        if (path.startsWith("asset_utxos")) {
-          return [{ tx_hash: MINT_TX, tx_index: 0, address: REGISTRY, inline_datum: { bytes: "d87980" }, asset_list: [{ policy_id: POLICY, asset_name: ASSET, quantity: "1" }] }];
-        }
-        return [];
-      }),
+  test("tip and genesis", async () => {
+    const source = new KoiosOgmiosChainSource({
+      koios: koiosWith((path) =>
+        path.startsWith("tip")
+          ? [{ hash: "aa".repeat(32), abs_slot: 37146463, block_height: 9162036 }]
+          : [{ networkmagic: "764824073", systemstart: 1756485600, slotlength: "1", securityparam: "2160", networkid: "Mainnet" }],
+      ),
+      ogmiosUrl: "ws://unused",
     });
-    const source = new KoiosOgmiosChainSource({ koios, ogmiosUrl: "ws://unused" });
+    expect(await source.tip()).toEqual({ blockHeight: 9162036, blockHash: "aa".repeat(32), slot: 37146463 });
+    expect(await source.genesis()).toEqual({ networkMagic: 764824073, systemStart: 1756485600, slotLength: 1, securityParam: 2160 });
+  });
+
+  test("tx_info rows map to ledger transactions with values, inline datum bytes, datum hashes and reference scripts", async () => {
+    const calls: Call[] = [];
+    const source = new KoiosOgmiosChainSource({
+      koios: koiosWith(
+        () => [
+          {
+            tx_hash: MINT_TX,
+            block_hash: MINT_BLOCK.hash,
+            block_height: MINT_BLOCK.height,
+            absolute_slot: MINT_BLOCK.slot,
+            tx_timestamp: 1776286942,
+            tx_block_index: 3,
+            inputs: [{ tx_hash: "ee".repeat(32), tx_index: 0, payment_addr: { bech32: "addr1wallet" }, asset_list: [], value: "50000000" }],
+            outputs: [
+              {
+                tx_index: 1,
+                payment_addr: { bech32: "addr1wallet" },
+                value: "39674537",
+                asset_list: [],
+                datum_hash: null,
+                inline_datum: null,
+                reference_script: null,
+              },
+              {
+                tx_index: 0,
+                payment_addr: { bech32: LEGACY_REGISTRY.address },
+                value: "10000000",
+                asset_list: [{ policy_id: POLICY, asset_name: ASSET, quantity: "1" }],
+                datum_hash: DATUM_HASH.toUpperCase(),
+                inline_datum: { bytes: "D87980", value: { constructor: 0, fields: [] } },
+                reference_script: { hash: "cc".repeat(28) },
+              },
+            ],
+            assets_minted: [{ policy_id: POLICY, asset_name: ASSET, quantity: "1" }],
+          },
+        ],
+        calls,
+      ),
+      ogmiosUrl: "ws://unused",
+    });
     expect(await source.transactions([MINT_TX])).toEqual([
       {
         txHash: MINT_TX,
         blockHash: MINT_BLOCK.hash,
         blockHeight: MINT_BLOCK.height,
-        blockIndex: 0,
+        txIndex: 3,
         slot: MINT_BLOCK.slot,
-        blockTime: MINT_BLOCK.time,
         inputs: [{ txHash: "ee".repeat(32), outputIndex: 0, address: "addr1wallet", assets: [] }],
-        outputs: [{ outputIndex: 0, address: REGISTRY, assets: [{ policyId: POLICY, assetName: ASSET, quantity: 1n }] }],
+        outputs: [
+          { outputIndex: 1, address: "addr1wallet", lovelace: 39674537n, assets: [], inlineDatum: null, datumHash: null, hasReferenceScript: false },
+          {
+            outputIndex: 0,
+            address: LEGACY_REGISTRY.address,
+            lovelace: 10000000n,
+            assets: [{ policyId: POLICY, assetName: ASSET, quantity: 1n }],
+            inlineDatum: "d87980",
+            datumHash: DATUM_HASH,
+            hasReferenceScript: true,
+          },
+        ],
         mint: [{ policyId: POLICY, assetName: ASSET, quantity: 1n }],
       },
     ]);
-    expect(await source.utxosWithAsset(POLICY, ASSET)).toEqual([
-      { txHash: MINT_TX, outputIndex: 0, address: REGISTRY, assets: [{ policyId: POLICY, assetName: ASSET, quantity: 1n }], datumHex: "d87980" },
-    ]);
+    expect(calls[0]!.body).toEqual({ _tx_hashes: [MINT_TX], _inputs: true, _assets: true, _scripts: true, _bytecode: true });
   });
 
-  test("blockWitnesses reads the block after the previous one through Ogmios and drops bootstrap witnesses", async () => {
-    const previous = { slot: 19801338, id: "3a419d645f96d16afe73a4882fd9eac999a49c7f4567ce980fbdd42ddc8fdda4" };
-    const ogmiosUrl = await fakeOgmios(previous, {
-      id: MINT_BLOCK.hash,
-      height: MINT_BLOCK.height,
-      slot: MINT_BLOCK.slot,
-      transactions: [
-        { id: MINT_TX, signatories: [{ key: OWNER_KEY.toUpperCase(), signature: "00" }] },
-        { id: "dd".repeat(32), signatories: [{ key: "11".repeat(32), signature: "00", chainCode: "22".repeat(32), addressAttributes: "a0" }] },
-      ],
+  test("an inline datum without its bytes is a failed read", async () => {
+    const source = new KoiosOgmiosChainSource({
+      koios: koiosWith(() => [
+        {
+          tx_hash: MINT_TX,
+          block_hash: MINT_BLOCK.hash,
+          block_height: 1,
+          absolute_slot: 1,
+          tx_block_index: 0,
+          inputs: [],
+          outputs: [{ tx_index: 0, payment_addr: { bech32: "a" }, value: "1", asset_list: [], datum_hash: "ab", inline_datum: { bytes: null }, reference_script: null }],
+          assets_minted: null,
+        },
+      ]),
+      ogmiosUrl: "ws://unused",
     });
+    await expect(source.transactions([MINT_TX])).rejects.toThrow(/without its bytes/);
+  });
+
+  test("asset_txs, datum_info and policy_asset_mints", async () => {
+    const calls: Call[] = [];
+    const source = new KoiosOgmiosChainSource({
+      koios: koiosWith((path) => {
+        if (path.startsWith("asset_txs")) return [{ tx_hash: "b1" }, { tx_hash: "a1" }, { tx_hash: "b1" }];
+        if (path.startsWith("datum_info")) return [{ datum_hash: DATUM_HASH, bytes: "D87980" }, { datum_hash: "ff".repeat(32), bytes: null }];
+        if (path.startsWith("policy_asset_mints")) return [{ asset_name: ASSET, minting_tx_hash: MINT_TX, mint_cnt: 1 }];
+        return [];
+      }, calls),
+      ogmiosUrl: "ws://unused",
+    });
+    expect(await source.assetTxHashes(POLICY, ASSET)).toEqual(["b1", "a1"]);
+    expect(calls[0]!.body).toEqual({ _asset_policy: POLICY, _asset_name: ASSET, _history: true });
+    expect(await source.datums([DATUM_HASH, "ff".repeat(32)])).toEqual(new Map([[DATUM_HASH, "d87980"]]));
+    expect(await source.policyAssets(POLICY)).toEqual([{ assetName: ASSET, mintCount: 1, lastMintTx: MINT_TX }]);
+    expect(calls[2]!.url).toBe(
+      `https://koios.test/api/v1/policy_asset_mints?_asset_policy=${POLICY}&select=asset_name,minting_tx_hash,mint_cnt&order=asset_name.asc&offset=0&limit=${KOIOS_PAGE}`,
+    );
+  });
+
+  test("blockWitnesses reads the block after the previous one through Ogmios, with its hash, without bootstrap witnesses", async () => {
+    const ogmiosUrl = await fakeOgmios(
+      { slot: PREVIOUS_BLOCK.slot, id: PREVIOUS_BLOCK.hash },
+      {
+        id: MINT_BLOCK.hash,
+        height: MINT_BLOCK.height,
+        slot: MINT_BLOCK.slot,
+        transactions: [
+          { id: MINT_TX, signatories: [{ key: OWNER_KEY.toUpperCase(), signature: "00" }] },
+          { id: "dd".repeat(32), signatories: [{ key: "11".repeat(32), signature: "00", chainCode: "22".repeat(32), addressAttributes: "a0" }] },
+        ],
+      },
+    );
     const blocks = [
-      { hash: previous.id, abs_slot: previous.slot, block_height: MINT_BLOCK.height - 1 },
+      { hash: PREVIOUS_BLOCK.hash, abs_slot: PREVIOUS_BLOCK.slot, block_height: PREVIOUS_BLOCK.height },
       { hash: MINT_BLOCK.hash, abs_slot: MINT_BLOCK.slot, block_height: MINT_BLOCK.height },
     ];
     const calls: Call[] = [];
-    const koios = new KoiosClient({ baseUrl: "https://koios.test/api/v1", fetch: stubFetch(() => blocks, calls) });
-    const source = new KoiosOgmiosChainSource({ koios, ogmiosUrl, ogmiosTimeoutMs: 5000 });
-
-    expect(await source.blockWitnesses(MINT_BLOCK.height)).toEqual([
-      { txHash: MINT_TX, vkeys: [OWNER_KEY] },
-      { txHash: "dd".repeat(32), vkeys: [] },
-    ]);
-    expect(calls[0]!.url).toContain(`blocks?block_height=in.(${MINT_BLOCK.height - 1},${MINT_BLOCK.height})`);
-
-    const forked = new KoiosClient({
-      baseUrl: "https://koios.test/api/v1",
-      fetch: stubFetch(() => [blocks[0], { ...blocks[1], hash: "ff".repeat(32) }]),
+    const source = new KoiosOgmiosChainSource({ koios: koiosWith(() => blocks, calls), ogmiosUrl, ogmiosTimeoutMs: 5000 });
+    expect(await source.blockWitnesses(MINT_BLOCK.height)).toEqual({
+      blockHash: MINT_BLOCK.hash,
+      transactions: [
+        { txHash: MINT_TX, vkeys: [OWNER_KEY] },
+        { txHash: "dd".repeat(32), vkeys: [] },
+      ],
     });
-    await expect(new KoiosOgmiosChainSource({ koios: forked, ogmiosUrl, ogmiosTimeoutMs: 5000 }).blockWitnesses(MINT_BLOCK.height)).rejects.toThrow(
-      /Ogmios returned/,
-    );
+    expect(calls[0]!.url).toContain(`blocks?block_height=in.(${PREVIOUS_BLOCK.height},${MINT_BLOCK.height})`);
+
+    const forked = new KoiosOgmiosChainSource({ koios: koiosWith(() => [blocks[0], { ...blocks[1], hash: "ff".repeat(32) }]), ogmiosUrl, ogmiosTimeoutMs: 5000 });
+    await expect(forked.blockWitnesses(MINT_BLOCK.height)).rejects.toThrow(/Ogmios returned another block/);
   });
 });

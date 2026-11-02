@@ -1,18 +1,23 @@
-import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
 import { afterEach, describe, expect, test } from "vitest";
 import { canonicalize } from "../src/resolve/jcs.js";
-import { DidVectorResolver } from "../src/resolve/resolver.js";
-import { createResolverServer, negotiate, type Resolver } from "../src/server/http.js";
-import { ASSET, CANONICAL_DID, FakeChain, LEGACY_DID, OWNER_KEY, OWNER_MULTIKEY, realMint } from "./fixtures.js";
+import { createResolverServer } from "../src/server/http.js";
+import { negotiate } from "../src/server/accept.js";
+import { LEGACY_OWNER, LedgerBuilder, identityDatum, idOf, legacyDatum, timeAt } from "./support/ledger.js";
+import { didOf, legacyDidOf, resolverFor, tombstoneOf } from "./support/resolve.js";
+
+const ID = idOf("http");
+const DID = didOf(ID);
 
 let server: Server | null = null;
 const logs: string[] = [];
 
-async function start(resolver: Resolver): Promise<string> {
-  server = createResolverServer(resolver, (m) => logs.push(m));
+async function start(builder: LedgerBuilder): Promise<string> {
+  server = createResolverServer(resolverFor(builder, logs), { log: (m) => logs.push(m) });
   await new Promise<void>((done) => server!.listen(0, "127.0.0.1", done));
-  return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const address = server.address();
+  if (address === null || typeof address === "string") throw new Error("the test server has no TCP address");
+  return `http://127.0.0.1:${address.port}`;
 }
 
 afterEach(async () => {
@@ -21,96 +26,152 @@ afterEach(async () => {
   logs.length = 0;
 });
 
-const get = (base: string, did: string, accept?: string) =>
-  fetch(`${base}/1.0/identifiers/${did}`, accept ? { headers: { accept } } : {});
+function record(): LedgerBuilder {
+  const b = new LedgerBuilder();
+  b.register(ID, identityDatum(), { height: 100 });
+  return b;
+}
+
+const get = (base: string, path: string, accept?: string) => fetch(`${base}${path}`, accept === undefined ? {} : { headers: { accept } });
+/** The parsed body; JSON.parse gives `any`, so tests can read members of any result. */
+const bodyOf = async (res: Response) => JSON.parse(await res.text());
 
 describe("GET /1.0/identifiers/{did}", () => {
-  test("200 with the JCS resolution result", async () => {
-    const chain = FakeChain.history([realMint()]);
-    const base = await start(new DidVectorResolver(chain));
-    const res = await get(base, LEGACY_DID);
+  test("200: the JCS resolution result, Content-Type application/did-resolution, Cache-Control no-store", async () => {
+    const b = record();
+    const base = await start(b);
+    const res = await get(base, `/1.0/identifiers/${DID}`);
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toBe("application/did-resolution");
-    const body = await res.text();
-    expect(body).toBe(canonicalize(await new DidVectorResolver(chain).resolve(LEGACY_DID)));
-    expect(JSON.parse(body).didDocument.verificationMethod[0].publicKeyMultibase).toBe(OWNER_MULTIKEY);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(await res.text()).toBe(canonicalize(await resolverFor(b).resolveDid(DID)));
   });
 
-  test("percent-encoded DIDs resolve the same way", async () => {
-    const base = await start(new DidVectorResolver(FakeChain.history([realMint()])));
-    const res = await get(base, encodeURIComponent(CANONICAL_DID));
+  test("the path is percent-decoded once", async () => {
+    const base = await start(record());
+    expect((await get(base, `/1.0/identifiers/${encodeURIComponent(DID)}`)).status).toBe(200);
+    const twice = await get(base, `/1.0/identifiers/${encodeURIComponent(encodeURIComponent(DID))}`);
+    expect(twice.status).toBe(400);
+    expect((await bodyOf(twice)).didResolutionMetadata.error.type).toBe("https://www.w3.org/ns/did#INVALID_DID");
+    expect((await get(base, "/1.0/identifiers/%E0%A4%A")).status).toBe(400);
+  });
+
+  test("query parameters are resolution options", async () => {
+    const base = await start(record());
+    const expanded = await bodyOf(await get(base, `/1.0/identifiers/${DID}?expandRelativeUrls=true`));
+    expect(expanded.didDocument.capabilityInvocation[0]).toMatch(/^did:vector:/);
+    expect((await get(base, `/1.0/identifiers/${DID}?versionId=0&versionId=0`)).status).toBe(400);
+    expect((await get(base, `/1.0/identifiers/${DID}?versionId=0&versionTime=2026-01-01T00:00:00Z`)).status).toBe(400);
+    expect((await get(base, `/1.0/identifiers/${DID}?versionTime=2026-02-30T00:00:00Z`)).status).toBe(400);
+    expect((await get(base, `/1.0/identifiers/${DID}?format=json`)).status).toBe(501);
+    expect((await get(base, `/1.0/identifiers/${DID}?noCache=true`)).status).toBe(200);
+  });
+
+  test.each([
+    ["application/did", "application/did"],
+    ["application/did+json", "application/did"],
+    ["application/did+ld+json", "application/did"],
+    ["application/ld+json", "application/did"],
+    ["application/json", "application/did"],
+    ["*/*", "application/did-resolution"],
+    ["application/did-resolution", "application/did-resolution"],
+    ['application/ld+json;profile="https://w3id.org/did-resolution"', "application/did-resolution"],
+    ["text/html;q=0.9, application/did;q=0.5", "application/did"],
+    ["application/did;q=0.8, application/did-resolution;q=0.9", "application/did-resolution"],
+    ["application/did-resolution;q=0.5, application/did;q=0.6", "application/did"],
+    ["application/did;q=0.5, */*;q=0.5", "application/did-resolution"],
+  ])("Accept %s gives %s", async (accept, contentType) => {
+    const base = await start(record());
+    const res = await get(base, `/1.0/identifiers/${DID}`, accept);
     expect(res.status).toBe(200);
-    expect(JSON.parse(await res.text()).didDocument.id).toBe(CANONICAL_DID);
+    expect(res.headers.get("content-type")).toBe(contentType);
+    const body = await bodyOf(res);
+    if (contentType === "application/did") expect(body.id).toBe(DID);
+    else expect(body.didDocument.id).toBe(DID);
   });
 
-  test("Accept: application/did returns the DID document only", async () => {
-    const base = await start(new DidVectorResolver(FakeChain.history([realMint()])));
-    const res = await get(base, LEGACY_DID, "application/did");
-    expect(res.status).toBe(200);
-    expect(res.headers.get("content-type")).toBe("application/did");
-    const doc = JSON.parse(await res.text());
-    expect(doc.id).toBe(LEGACY_DID);
-    expect(doc.didDocumentMetadata).toBeUndefined();
-  });
-
-  test("410 for a burned token", async () => {
-    const base = await start(new DidVectorResolver(FakeChain.history([realMint(), { kind: "burn", height: 4_900_000, witnesses: [OWNER_KEY] }])));
-    const res = await get(base, LEGACY_DID);
-    expect(res.status).toBe(410);
-    expect(JSON.parse(await res.text()).didDocumentMetadata.deactivated).toBe(true);
-    const doc = await get(base, LEGACY_DID, "application/did");
-    expect(doc.status).toBe(410);
-    expect(JSON.parse(await doc.text())).toEqual({ "@context": expect.any(Array), id: LEGACY_DID });
-  });
-
-  test("404 for a DID that was never minted", async () => {
-    const base = await start(new DidVectorResolver(new FakeChain()));
-    const res = await get(base, `did:vector:${"ab".repeat(32)}`);
-    expect(res.status).toBe(404);
-    expect(JSON.parse(await res.text()).didResolutionMetadata.error.type).toBe("https://www.w3.org/ns/did#NOT_FOUND");
-  });
-
-  test("400 for malformed and uppercase DIDs", async () => {
-    const base = await start(new DidVectorResolver(new FakeChain()));
-    for (const did of [`did:vector:${ASSET.toUpperCase()}`, "did:vector:xyz", "", "%E0%A4%A"]) {
-      const res = await get(base, did);
-      expect(res.status, did).toBe(400);
-      expect(JSON.parse(await res.text()).didResolutionMetadata.error.type).toBe("https://www.w3.org/ns/did#INVALID_DID");
+  test("406 when no supported media range is acceptable; the ledger is not read", async () => {
+    const b = record();
+    const base = await start(b);
+    for (const accept of ["text/html", "application/did;q=0", "application/did-resolution;q=0, application/did;q=0.000"]) {
+      const res = await get(base, `/1.0/identifiers/${DID}`, accept);
+      expect(res.status, accept).toBe(406);
+      expect(res.headers.get("content-type")).toBe("application/did-resolution");
+      expect((await bodyOf(res)).didResolutionMetadata.error.type).toBe("https://www.w3.org/ns/did#REPRESENTATION_NOT_SUPPORTED");
     }
+    expect(b.chain.calls).toEqual([]);
   });
 
-  test("501 for resolution options", async () => {
-    const base = await start(new DidVectorResolver(FakeChain.history([realMint()])));
-    expect((await get(base, `${LEGACY_DID}?versionTime=2026-01-01T00:00:00Z`)).status).toBe(501);
+  test("410 with the resolution result for a deactivated DID, also when the client asks for the document", async () => {
+    const b = record();
+    b.update(ID, tombstoneOf(identityDatum(), { type: "Retired", at: timeAt(300), successor: null }), { height: 300 });
+    const base = await start(b);
+    for (const accept of [undefined, "application/did"]) {
+      const res = await get(base, `/1.0/identifiers/${DID}`, accept);
+      expect(res.status).toBe(410);
+      expect(res.headers.get("content-type")).toBe("application/did-resolution");
+      const body = await bodyOf(res);
+      expect(body.didDocument).toBeNull();
+      expect(body.didDocumentMetadata.deactivated).toBe(true);
+    }
+    const before = await get(base, `/1.0/identifiers/${DID}?versionId=0`, "application/did");
+    expect(before.status).toBe(410);
+    expect((await bodyOf(before)).didDocument.id).toBe(DID);
   });
 
-  test("500 INTERNAL_ERROR when the chain source fails, with the cause logged", async () => {
-    const chain = FakeChain.history([realMint()]);
-    chain.tip = async () => {
-      throw new Error("Koios GET tip answered HTTP 503");
-    };
-    const base = await start(new DidVectorResolver(chain));
-    const res = await get(base, LEGACY_DID);
-    expect(res.status).toBe(500);
-    expect(JSON.parse(await res.text()).didResolutionMetadata.error.type).toBe("https://www.w3.org/ns/did#INTERNAL_ERROR");
-    expect(logs.join("\n")).toContain("HTTP 503");
+  test("error statuses: 404, 400, 501, 500", async () => {
+    const b = new LedgerBuilder();
+    b.legacyRegister(ID, legacyDatum(), { height: 200, vkeys: [LEGACY_OWNER] });
+    const base = await start(b);
+    expect((await get(base, `/1.0/identifiers/${didOf(idOf("none"))}`)).status).toBe(404);
+    expect((await get(base, `/1.0/identifiers/did:vector:${ID.toUpperCase()}`)).status).toBe(400);
+    expect((await get(base, "/1.0/identifiers/did:web:example.com")).status).toBe(501);
+    expect((await get(base, `/1.0/identifiers/did:vector:testnet:${ID}`)).status).toBe(501);
+    expect((await get(base, `/1.0/identifiers/${legacyDidOf(ID)}`)).status).toBe(200);
+    b.chain.failing.add("tip");
+    const failed = await get(base, `/1.0/identifiers/${legacyDidOf(ID)}`, "application/did");
+    expect(failed.status).toBe(500);
+    expect(failed.headers.get("content-type")).toBe("application/did-resolution");
+    expect((await bodyOf(failed)).didResolutionMetadata.error.type).toBe("https://www.w3.org/ns/did#INTERNAL_ERROR");
+    expect(logs.join("\n")).not.toContain(ID);
   });
 
-  test("406 for an unsupported representation; 405 and 404 outside the binding", async () => {
-    const base = await start(new DidVectorResolver(FakeChain.history([realMint()])));
-    expect((await get(base, LEGACY_DID, "text/html")).status).toBe(406);
-    expect((await fetch(`${base}/1.0/identifiers/${LEGACY_DID}`, { method: "POST" })).status).toBe(405);
-    expect((await fetch(`${base}/health`)).status).toBe(404);
+  test("GET /healthz answers 200 without a ledger call; other paths and methods", async () => {
+    const b = record();
+    const base = await start(b);
+    const health = await get(base, "/healthz");
+    expect(health.status).toBe(200);
+    expect(health.headers.get("cache-control")).toBe("no-store");
+    expect(await bodyOf(health)).toEqual({ status: "ok" });
+    expect(b.chain.calls).toEqual([]);
+    expect((await fetch(`${base}/1.0/identifiers/${DID}`, { method: "POST" })).status).toBe(405);
+    expect((await get(base, "/1.0/other")).status).toBe(404);
+    expect((await get(base, "/")).headers.get("cache-control")).toBe("no-store");
   });
 });
 
-describe("negotiate", () => {
-  test("result by default, document for DID media types, null when nothing fits", () => {
-    expect(negotiate(undefined)).toBe("result");
-    expect(negotiate("*/*")).toBe("result");
-    expect(negotiate('application/ld+json;profile="https://w3id.org/did-resolution"')).toBe("result");
-    expect(negotiate("application/did+ld+json")).toBe("document");
-    expect(negotiate("application/did;q=0, application/did-resolution")).toBe("result");
-    expect(negotiate("text/html")).toBeNull();
+describe("negotiate (RFC 9110 Accept)", () => {
+  test.each([
+    [undefined, "result"],
+    ["", "result"],
+    ["*/*", "result"],
+    ["application/*", "result"],
+    ["application/did-resolution", "result"],
+    ['application/ld+json; profile="https://w3id.org/did-resolution"', "result"],
+    ['application/ld+json;profile="https://w3id.org/did-resolution https://www.w3.org/ns/did/v1.1"', "result"],
+    ['application/ld+json;profile="https://example.org/other"', null],
+    ["application/ld+json", "document"],
+    ["APPLICATION/DID", "document"],
+    ["application/did;q=1.0", "document"],
+    ["application/did;q=0.001", "document"],
+    ["application/did;q=0, */*", "result"],
+    ["application/did;q=1.5", null],
+    ["application/did;q=abc", null],
+    ["text/plain, image/png", null],
+    ["application/did;q=0.4, application/json;q=0.6, application/did-resolution;q=0.5", "document"],
+    ["application/did-resolution;q=0.6, application/did;q=0.6", "result"],
+    ["garbage", null],
+  ])("%s → %s", (accept, expected) => {
+    expect(negotiate(accept)).toBe(expected);
   });
 });

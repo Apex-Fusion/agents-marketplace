@@ -1,144 +1,318 @@
-// did:vector resolution (method spec Section 6.1), milestone M0: generation-1 (legacy) records on
-// Vector mainnet, resolved at the current tip. No generation 2 exists yet (see registry.ts).
+// did:vector resolution (Part 1 Section 7.1): one ledger tip for each request; the record and its
+// ancestors read as of that tip; view, effective status, document and metadata built from them.
+// A failed or inconsistent ledger read gives INTERNAL_ERROR, never NOT_FOUND or a partial document.
 
-import type { ChainSource } from "../chain/types.js";
-import { findControllerKey } from "./controller-key.js";
+import type { BlockWitnesses, ChainSource, ChainTip } from "../chain/types.js";
 import { parseDid } from "./did.js";
-import {
-  isoTime,
-  legacyDidDocument,
-  minimalDidDocument,
-  vectorLedger,
-  type DidDocument,
-  type DidDocumentMetadata,
-  type VectorMetadataError,
-} from "./document.js";
-import { ERROR_HTTP_STATUS, ResolutionError, errorTypeUri, type ResolutionErrorType } from "./errors.js";
-import { decodeLegacyOwner, type LegacyOwner } from "./legacy-datum.js";
-import { findLegacyRecord } from "./legacy-record.js";
-import { GENERATION_1 } from "./registry.js";
+import { buildDocument, type DidDocument } from "./document.js";
+import { ERROR_HTTP_STATUS, ResolutionError, errorTypeUri } from "./errors.js";
+import { loadHistory, type HistoryLookup, type LedgerSnapshot, type Origin, type RecordHistory, type Version } from "./history.js";
+import { findLegacyKey } from "./legacy-key.js";
+import { baseLedger, buildMetadata, type DidDocumentMetadata, type VectorLedger, type VectorMetadataError } from "./metadata.js";
+import { parseResolutionOptions, type ResolutionOptionsInput } from "./options.js";
+import type { FetchedFactsProvider } from "./fetched.js";
+import { listRecords, type RecordList } from "./records.js";
+import { CONFIRMATION_DEPTH, MAX_ANCESTORS, checkRegistrySettings, type ResolverSettings } from "./settings.js";
+import { evaluate, lineageOf, type Effective, type Evaluation, type Selection } from "./status.js";
+import { blockTimeMs } from "./time.js";
+import type { RecordView } from "./view.js";
 
-/** Media type of the DID document representation (DID 1.1). */
-export const DID_DOCUMENT_MEDIA_TYPE = "application/did";
+/** Media type of the DID document representation. */
+export const DID_MEDIA_TYPE = "application/did";
+
+export interface DidResolutionMetadata {
+  readonly contentType?: typeof DID_MEDIA_TYPE;
+  readonly error?: { readonly type: string; readonly title: string };
+}
 
 export interface ResolutionResult {
-  didDocument: DidDocument | null;
-  didResolutionMetadata: {
-    contentType?: string;
-    error?: { type: string; title: string; detail?: string };
-  };
-  didDocumentMetadata: DidDocumentMetadata;
+  readonly didDocument: DidDocument | null;
+  readonly didResolutionMetadata: DidResolutionMetadata;
+  readonly didDocumentMetadata: DidDocumentMetadata;
 }
 
 export function errorResult(error: ResolutionError): ResolutionResult {
-  return {
-    didDocument: null,
-    didResolutionMetadata: {
-      error: { type: errorTypeUri(error.type), title: error.title, ...(error.detail ? { detail: error.detail } : {}) },
-    },
-    didDocumentMetadata: {},
-  };
+  return { didDocument: null, didResolutionMetadata: { error: { type: errorTypeUri(error.type), title: error.title } }, didDocumentMetadata: {} };
 }
 
-const STATUS_BY_TYPE_URI = new Map(
-  (Object.entries(ERROR_HTTP_STATUS) as Array<[ResolutionErrorType, number]>).map(([type, status]) => [errorTypeUri(type), status]),
-);
+const STATUS_BY_TYPE_URI = new Map(Object.entries(ERROR_HTTP_STATUS).map(([type, status]): [string, number] => [`https://www.w3.org/ns/did#${type}`, status]));
 
-/** HTTPS binding status (DID Resolution Section 11): 410 for deactivated wins over everything else. */
+/** Part 1 Section 7.4: 410 for `deactivated: true` (with or without a document), else by error type. */
 export function httpStatus(result: ResolutionResult): number {
   if (result.didDocumentMetadata.deactivated) return 410;
   const error = result.didResolutionMetadata.error;
   return error ? (STATUS_BY_TYPE_URI.get(error.type) ?? 500) : 200;
 }
 
-export class DidVectorResolver {
-  constructor(private readonly chain: ChainSource) {}
+const isEnded = (effective: Effective): boolean => effective.status === "revoked" || effective.status === "retired";
+
+/** The record without resolution options, as everything that the gateway issues uses it (Part 2 Section 8.4). */
+export interface CurrentRecord {
+  readonly vectorId: string;
+  readonly origin: Origin;
+  /** The ledger tip that the values describe. */
+  readonly tip: ChainTip;
+  /** Block time of the first mint (POSIX ms). */
+  readonly created: number;
+  /** The base version. */
+  readonly versionId: number;
+  /** Transaction IDs of the pending versions, in ledger order. */
+  readonly pending: readonly string[];
+  readonly view: RecordView;
+  readonly effective: Effective;
+  /** The effective status is Revoked or Retired. */
+  readonly deactivated: boolean;
+  /** The earliest "invalid from" time of the record and its ancestors (POSIX ms). */
+  readonly invalidFrom: number | null;
+  /** Legacy views: the key that the legacy key search found for the owner; else null. */
+  readonly legacyControllerKey: string | null;
+  readonly ledger: VectorLedger;
+}
+
+export type CurrentLookup = { readonly found: true; readonly record: CurrentRecord } | { readonly found: false; readonly reason: string };
+
+export interface VectorResolverOptions {
+  /** Error log. Messages never contain the requested DID. */
+  readonly log?: (message: string) => void;
+  /** Record histories kept for the current tip (Part 1 Section 9, denial of service). */
+  readonly historyCacheSize?: number;
+  /** Blocks whose witnesses are kept for the legacy key search. */
+  readonly blockCacheSize?: number;
+  /** Verified domains, verified organisations and detected protocols that background jobs stored. Default: none. */
+  readonly fetchedFacts?: FetchedFactsProvider;
+}
+
+const VECTOR_ID = /^[0-9a-f]{64}$/;
+
+export class VectorResolver {
+  private readonly log: (message: string) => void;
+  private readonly historyCacheSize: number;
+  private readonly blockCacheSize: number;
+  private readonly fetchedFacts: FetchedFactsProvider;
+  private networkChecked: Promise<void> | null = null;
+  private histories: { tipHash: string; entries: Map<string, Promise<HistoryLookup>> } = { tipHash: "", entries: new Map() };
+  private readonly blocks = new Map<string, BlockWitnesses>();
+
+  constructor(
+    private readonly chain: ChainSource,
+    readonly settings: ResolverSettings,
+    options: VectorResolverOptions = {},
+  ) {
+    checkRegistrySettings(settings.registries);
+    this.log = options.log ?? ((message) => console.error(message));
+    this.historyCacheSize = options.historyCacheSize ?? 512;
+    this.blockCacheSize = options.blockCacheSize ?? 256;
+    this.fetchedFacts = options.fetchedFacts ?? (() => undefined);
+  }
 
   /**
-   * Resolves a DID. Expected failures (bad DID, unknown DID, unsupported request) come back as an
-   * error result; unexpected failures (chain source down, inconsistent chain data) are thrown.
+   * Resolves a DID (Part 1 Section 7.1). Never throws: every outcome is a resolution result, and a
+   * failed ledger read is INTERNAL_ERROR.
    */
-  async resolve(did: string, options: Record<string, string> = {}): Promise<ResolutionResult> {
+  async resolveDid(did: string, options: ResolutionOptionsInput = {}): Promise<ResolutionResult> {
     try {
       return await this.resolveOrThrow(did, options);
     } catch (e) {
       if (e instanceof ResolutionError) return errorResult(e);
-      throw e;
+      this.log(`identity-gateway: resolution failed: ${e instanceof Error ? e.message : String(e)}`);
+      return errorResult(new ResolutionError("INTERNAL_ERROR", "Internal error: the resolver could not read the ledger"));
     }
   }
 
-  private async resolveOrThrow(did: string, options: Record<string, string>): Promise<ResolutionResult> {
+  /**
+   * The current view and effective status of one identifier (no resolution options). Not found:
+   * `{ found: false }`. A failed ledger read throws.
+   */
+  async currentRecord(vectorId: string): Promise<CurrentLookup> {
+    if (!VECTOR_ID.test(vectorId)) throw new Error("an identifier is 64 lowercase hex characters");
+    const snapshot = await this.snapshot();
+    const lookup = await this.history(snapshot, vectorId);
+    if (!lookup.found) return lookup;
+    const chain = await this.lineage(snapshot, lookup.history);
+    const current = this.currentSelection(snapshot);
+    const evaluation = evaluate(chain, current, current, this.settings);
+    if (!evaluation) return { found: false, reason: "the record has no confirmed version" };
+    const { base, pending, view } = evaluation.state;
+    const deactivated = isEnded(evaluation.effective);
+    const legacy = view.kind === "legacy" && !deactivated ? await this.legacyKey(lookup.history, base, view, current) : null;
+    return {
+      found: true,
+      record: {
+        vectorId,
+        origin: lookup.history.origin,
+        tip: snapshot.tip,
+        created: lookup.history.firstMint.timeMs,
+        versionId: base.number,
+        pending: pending.map((v) => v.made.tx.txHash),
+        view,
+        effective: evaluation.effective,
+        deactivated,
+        invalidFrom: evaluation.invalidFrom,
+        legacyControllerKey: legacy?.key ?? null,
+        ledger: baseLedger(base, current.counts),
+      },
+    };
+  }
+
+  /** Every identifier that resolves, with its first mint and status-list index (Part 2 Section 8.6). A failed read throws. */
+  async listRecords(): Promise<RecordList> {
+    return listRecords(this.chain, await this.snapshot());
+  }
+
+  private async resolveOrThrow(did: string, rawOptions: ResolutionOptionsInput): Promise<ResolutionResult> {
     const parsed = parseDid(did);
-    const optionNames = Object.keys(options);
-    if (optionNames.length) {
-      throw new ResolutionError(
-        "FEATURE_NOT_SUPPORTED",
-        "Resolution option not supported",
-        `this resolver resolves the current version only and accepts no options (got ${optionNames.join(", ")})`,
-      );
-    }
-    if (parsed.network !== "mainnet") {
-      throw new ResolutionError("FEATURE_NOT_SUPPORTED", "Network not supported", "this resolver serves Vector mainnet only");
-    }
-    if (parsed.legacyPolicyId !== null && parsed.legacyPolicyId !== GENERATION_1.policyId) {
-      throw new ResolutionError("NOT_FOUND", "DID not found", `policy ${parsed.legacyPolicyId} is not a did:vector registry generation`);
+    const options = parseResolutionOptions(rawOptions);
+    if (parsed.form === "testnet") throw new ResolutionError("FEATURE_NOT_SUPPORTED", "Feature not supported: the testnet form is reserved");
+    const legacyPolicy = this.settings.registries.legacy.policyId;
+    if (parsed.form === "legacy" && parsed.legacyPolicyId !== legacyPolicy) {
+      throw new ResolutionError("NOT_FOUND", "DID not found: the legacy form names another policy");
     }
 
-    const lookup = await findLegacyRecord(this.chain, parsed.vectorId);
-    switch (lookup.state) {
-      case "neverMinted":
-        throw new ResolutionError("NOT_FOUND", "DID not found", "no registry generation ever minted this identifier");
-      case "notAuthentic":
-        throw new ResolutionError("NOT_FOUND", "DID not found", "the identity token is not held by an authentic generation-1 record");
-      case "deactivated": {
-        const tip = await this.chain.tip();
-        return {
-          didDocument: minimalDidDocument(parsed.did),
-          didResolutionMetadata: { contentType: DID_DOCUMENT_MEDIA_TYPE },
-          didDocumentMetadata: {
-            created: isoTime(lookup.mintTx.blockTime),
-            updated: isoTime(lookup.burnTx.blockTime),
-            deactivated: true,
-            canonicalId: parsed.canonicalId,
-            vectorOrigin: "legacy",
-            vectorLedger: vectorLedger(lookup.burnTx, null, tip),
-          },
-        };
-      }
-      case "active": {
-        let controllerKey: string | null = null;
-        let metadataError: VectorMetadataError | undefined;
-        if (lookup.record.datumHex === null) metadataError = "recordDatumUnavailable";
-        else {
-          let owner: LegacyOwner | null = null;
-          try {
-            owner = decodeLegacyOwner(lookup.record.datumHex);
-          } catch {
-            metadataError = "recordDatumInvalid";
-          }
-          if (owner?.kind === "script") metadataError = "controllerIsScript";
-          else if (owner) {
-            controllerKey = await findControllerKey(this.chain, owner.hash, lookup.history);
-            if (controllerKey === null) metadataError = "controllerKeyNotFound";
-          }
-        }
-        const tip = await this.chain.tip();
-        return {
-          didDocument: legacyDidDocument(parsed.did, controllerKey),
-          didResolutionMetadata: { contentType: DID_DOCUMENT_MEDIA_TYPE },
-          didDocumentMetadata: {
-            created: isoTime(lookup.mintTx.blockTime),
-            updated: isoTime(lookup.producedBy.blockTime),
-            versionId: String(lookup.updates),
-            canonicalId: parsed.canonicalId,
-            vectorOrigin: "legacy",
-            // Section 6.5: before the generation-2 deployment a legacy record is effectively active.
-            vectorStatus: { status: "active", effective: "active" },
-            vectorLedger: vectorLedger(lookup.producedBy, lookup.record.outputIndex, tip),
-            ...(metadataError ? { vectorMetadataError: metadataError } : {}),
-          },
-        };
-      }
+    const snapshot = await this.snapshot();
+    const lookup = await this.history(snapshot, parsed.vectorId);
+    if (!lookup.found) throw new ResolutionError("NOT_FOUND", `DID not found: ${lookup.reason}`);
+    const history = lookup.history;
+    if (parsed.form === "legacy" && !history.legacyMinted) {
+      throw new ResolutionError("NOT_FOUND", "DID not found: the legacy registry never minted this identifier");
     }
+    const chain = await this.lineage(snapshot, history);
+
+    const current = this.currentSelection(snapshot);
+    let selection = current;
+    let ancestorSelection = current;
+    if (options.versionId !== null) {
+      const version = options.versionId < BigInt(history.versions.length) ? history.versions[Number(options.versionId)] : undefined;
+      if (!version) throw new ResolutionError("NOT_FOUND", "DID not found: the version does not exist");
+      if (version.made.confirmations < CONFIRMATION_DEPTH) throw new ResolutionError("NOT_FOUND", "DID not found: the version is not confirmed");
+      const t = version.made.timeMs;
+      selection = { t, counts: () => true, version: version.number };
+      ancestorSelection = { t, counts: (at) => at.timeMs <= t, version: null };
+    } else if (options.versionTime !== null) {
+      const requested = options.versionTime;
+      selection = { t: Math.min(requested, current.t), counts: (at) => at.timeMs < requested, version: null };
+      ancestorSelection = selection;
+    }
+
+    const evaluation = evaluate(chain, selection, ancestorSelection, this.settings);
+    if (!evaluation) throw new ResolutionError("NOT_FOUND", "DID not found: no confirmed version at the requested time");
+    const versionOption = options.versionId !== null || options.versionTime !== null;
+    const now: Evaluation | null = versionOption ? evaluate(chain, current, current, this.settings) : evaluation;
+    if (!now) throw new Error("the record has a confirmed version in the past but none now");
+
+    const deactivatedAtT = isEnded(evaluation.effective);
+    const { base, pending, view } = evaluation.state;
+    let metadataError: VectorMetadataError | null = null;
+    let legacyKey: string | null = null;
+    if (view.kind === "identity") {
+      if (view.keys.some((k) => !k.popValid)) metadataError = "keyProofInvalid";
+    } else if (!deactivatedAtT) {
+      const legacy = await this.legacyKey(history, base, view, selection);
+      legacyKey = legacy?.key ?? null;
+      metadataError = legacy?.error ?? null;
+    }
+
+    const facts = this.fetchedFacts(parsed.vectorId);
+    const didDocument = deactivatedAtT ? null : buildDocument(parsed.did, view, legacyKey, options.expandRelativeUrls, facts?.alsoKnownAs);
+    return {
+      didDocument,
+      didResolutionMetadata: didDocument ? { contentType: DID_MEDIA_TYPE } : {},
+      didDocumentMetadata: buildMetadata({
+        history,
+        base,
+        pending,
+        view,
+        effective: evaluation.effective,
+        invalidFrom: evaluation.invalidFrom,
+        counts: selection.counts,
+        canonicalRequest: parsed.form === "canonical",
+        legacyPolicyId: legacyPolicy,
+        deactivated: deactivatedAtT || isEnded(now.effective),
+        current: versionOption ? now.effective : null,
+        metadataError,
+        facts,
+      }),
+    };
+  }
+
+  /** Part 1 Section 8.1, legacy record: the controller key of a legacy view, or why there is none. Null: the view has no controller. */
+  private async legacyKey(
+    history: RecordHistory,
+    base: Version,
+    view: Extract<RecordView, { kind: "legacy" }>,
+    selection: Selection,
+  ): Promise<{ key: string | null; error: VectorMetadataError | null } | null> {
+    if (view.datumError) return { key: null, error: view.datumError };
+    if (!view.owner) return null;
+    if (view.owner.kind === "script") return { key: null, error: "controllerIsScript" };
+    const key = await findLegacyKey(history, base, view.owner.hash, selection.counts, (height, hash) => this.blockWitnesses(height, hash));
+    return { key, error: key === null ? "controllerKeyNotFound" : null };
+  }
+
+  private currentSelection(snapshot: LedgerSnapshot): Selection {
+    return { t: blockTimeMs(snapshot.tip.slot, this.settings.network), counts: () => true, version: null };
+  }
+
+  /** The tip, after a check that the ledger source serves the configured network (Part 1 Section 4: by genesis values, not by magic). */
+  private async snapshot(): Promise<LedgerSnapshot> {
+    if (!this.networkChecked) {
+      const check = this.chain.genesis().then((genesis) => {
+        const n = this.settings.network;
+        if (
+          genesis.networkMagic !== n.networkMagic ||
+          genesis.systemStart !== n.systemStart ||
+          genesis.slotLength !== n.slotLength ||
+          genesis.securityParam !== n.securityParam
+        ) {
+          throw new Error("the ledger source serves another network: its genesis values differ from the configuration");
+        }
+      });
+      this.networkChecked = check;
+      check.catch(() => {
+        if (this.networkChecked === check) this.networkChecked = null;
+      });
+    }
+    const [tip] = await Promise.all([this.chain.tip(), this.networkChecked]);
+    return { tip, settings: this.settings };
+  }
+
+  /** Record histories, kept while the tip stays the same. */
+  private history(snapshot: LedgerSnapshot, vectorId: string): Promise<HistoryLookup> {
+    if (this.histories.tipHash !== snapshot.tip.blockHash) this.histories = { tipHash: snapshot.tip.blockHash, entries: new Map() };
+    const entries = this.histories.entries;
+    let lookup = entries.get(vectorId);
+    if (!lookup) {
+      if (entries.size >= this.historyCacheSize) entries.clear();
+      const loading = loadHistory(this.chain, snapshot, vectorId);
+      lookup = loading;
+      entries.set(vectorId, loading);
+      loading.catch(() => {
+        if (entries.get(vectorId) === loading) entries.delete(vectorId);
+      });
+    }
+    return lookup;
+  }
+
+  /** The record and its ancestors: chain[i + 1] is the parent of chain[i]. */
+  private async lineage(snapshot: LedgerSnapshot, subject: RecordHistory): Promise<RecordHistory[]> {
+    const chain = [subject];
+    for (;;) {
+      const lineage = lineageOf(chain[chain.length - 1]!);
+      if (lineage.type === "Root") return chain;
+      if (chain.length > MAX_ANCESTORS) throw new Error("a lineage is deeper than the method allows");
+      if (chain.some((h) => h.vectorId === lineage.parent)) throw new Error("a lineage names one of its own records");
+      const parent = await this.history(snapshot, lineage.parent);
+      if (!parent.found) throw new Error("the parent record of a subagent does not resolve");
+      chain.push(parent.history);
+    }
+  }
+
+  private async blockWitnesses(height: number, hash: string): Promise<BlockWitnesses> {
+    const known = this.blocks.get(hash);
+    if (known) return known;
+    const block = await this.chain.blockWitnesses(height);
+    if (block.blockHash !== hash) throw new Error("the block at a height changed while the resolver read it");
+    if (this.blocks.size >= this.blockCacheSize) this.blocks.clear();
+    this.blocks.set(hash, block);
+    return block;
   }
 }

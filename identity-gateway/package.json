@@ -2,15 +2,18 @@
   "name": "identity-gateway",
   "version": "0.0.0",
   "private": true,
-  "description": "did:vector resolver (M0: generation-1 legacy identifiers on Vector mainnet).",
+  "description": "did:vector resolver: identity registry and legacy registry records on Vector mainnet.",
+  "license": "Apache-2.0",
   "type": "module",
   "engines": {
     "node": ">=20.0.0"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json",
     "test": "vitest run --root .. identity-gateway/",
-    "start": "tsx src/main.ts"
+    "start": "node dist/main.js",
+    "dev": "tsx src/main.ts"
   },
   "dependencies": {
     "@noble/hashes": "^1.8.0",

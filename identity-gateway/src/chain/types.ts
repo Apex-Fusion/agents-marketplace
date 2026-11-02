@@ -1,77 +1,96 @@
-// The chain data the resolver needs, independent of where it comes from. Hashes and asset names are
-// lowercase hex; quantities are bigint; times are POSIX seconds.
+// The ledger data the resolver needs, independent of where it comes from. Hashes, asset names and
+// datums are lowercase hex; quantities are bigint. Every method reads the selected chain as the
+// source sees it now; a failed or inconsistent read throws (the resolver answers INTERNAL_ERROR).
 
 export interface Asset {
-  policyId: string;
-  assetName: string;
-  quantity: bigint;
+  readonly policyId: string;
+  readonly assetName: string;
+  readonly quantity: bigint;
 }
 
 export interface ChainTip {
-  blockHeight: number;
-  blockHash: string;
-  slot: number;
+  readonly blockHeight: number;
+  readonly blockHash: string;
+  readonly slot: number;
 }
 
-export interface UnspentOutput {
-  txHash: string;
-  outputIndex: number;
-  address: string;
-  assets: Asset[];
-  /** The datum bytes (inline, or resolved from the datum hash); null if the source cannot provide them. */
-  datumHex: string | null;
+/** Shelley genesis values that identify the network (Part 1 Section 4). */
+export interface GenesisParameters {
+  readonly networkMagic: number;
+  /** POSIX seconds. */
+  readonly systemStart: number;
+  /** Seconds. */
+  readonly slotLength: number;
+  readonly securityParam: number;
 }
 
 export interface TxInput {
-  txHash: string;
-  outputIndex: number;
-  address: string;
-  assets: Asset[];
+  /** The spent output reference. */
+  readonly txHash: string;
+  readonly outputIndex: number;
+  readonly address: string;
+  readonly assets: readonly Asset[];
 }
 
 export interface TxOutput {
-  outputIndex: number;
-  address: string;
-  assets: Asset[];
+  readonly outputIndex: number;
+  /** Bech32 address. Two outputs are at the same address only when these strings are equal. */
+  readonly address: string;
+  readonly lovelace: bigint;
+  readonly assets: readonly Asset[];
+  /** CBOR of the inline datum; null when the output has no inline datum. */
+  readonly inlineDatum: string | null;
+  /** Hash of the datum (inline or by hash); null when the output has no datum. */
+  readonly datumHash: string | null;
+  readonly hasReferenceScript: boolean;
 }
 
 export interface LedgerTx {
-  txHash: string;
-  blockHash: string;
-  blockHeight: number;
+  readonly txHash: string;
+  readonly blockHash: string;
+  readonly blockHeight: number;
   /** Position of the transaction in its block. */
-  blockIndex: number;
-  slot: number;
-  blockTime: number;
-  inputs: TxInput[];
-  outputs: TxOutput[];
+  readonly txIndex: number;
+  readonly slot: number;
+  readonly inputs: readonly TxInput[];
+  readonly outputs: readonly TxOutput[];
   /** Minted (positive) and burned (negative) quantities. */
-  mint: Asset[];
-}
-
-/** A transaction located by height only (for example from a credential index). */
-export interface TxPointer {
-  txHash: string;
-  blockHeight: number;
+  readonly mint: readonly Asset[];
 }
 
 export interface TxWitnesses {
-  txHash: string;
-  /** Ed25519 public keys (32 bytes, hex) of the vkey witnesses. Bootstrap (Byron) witnesses are excluded. */
-  vkeys: string[];
+  readonly txHash: string;
+  /** Ed25519 public keys (32 bytes, hex) of the vkey witnesses. Bootstrap witnesses are excluded. */
+  readonly vkeys: readonly string[];
+}
+
+export interface BlockWitnesses {
+  readonly blockHash: string;
+  /** Every transaction of the block, in block order. */
+  readonly transactions: readonly TxWitnesses[];
+}
+
+/** One asset of a policy, as the source's asset index lists it. */
+export interface PolicyAsset {
+  readonly assetName: string;
+  /** Number of transactions that minted the asset. */
+  readonly mintCount: number;
+  /** The newest transaction that minted the asset (the only one when mintCount is 1). */
+  readonly lastMintTx: string;
 }
 
 export interface ChainSource {
   /** The current tip of the selected chain. */
   tip(): Promise<ChainTip>;
-  /** Unspent outputs holding at least one unit of the asset, at any address. */
-  utxosWithAsset(policyId: string, assetName: string): Promise<UnspentOutput[]>;
-  /** Every transaction that minted, burned, spent or produced the asset. */
+  genesis(): Promise<GenesisParameters>;
+  /** Every transaction that minted, burned or produced the asset, in any order. */
   assetTxHashes(policyId: string, assetName: string): Promise<string[]>;
-  /** Full transactions; the result has one entry per requested hash, in any order. */
-  transactions(txHashes: string[]): Promise<LedgerTx[]>;
-  /** Transactions that spend from or pay to an address whose payment credential is this key hash. */
-  paymentCredentialTxs(keyHash: string): Promise<TxPointer[]>;
-  /** The vkey witnesses of every transaction in the block at this height, in block order. */
-  blockWitnesses(blockHeight: number): Promise<TxWitnesses[]>;
+  /** Full transactions; the result has one entry for each requested hash, in any order. */
+  transactions(txHashes: readonly string[]): Promise<LedgerTx[]>;
+  /** Datum CBOR for the hashes that the source knows (from witness sets or inline datums). */
+  datums(datumHashes: readonly string[]): Promise<Map<string, string>>;
+  /** The vkey witnesses of every transaction in the block at this height. */
+  blockWitnesses(blockHeight: number): Promise<BlockWitnesses>;
+  /** Every asset that the policy ever minted. */
+  policyAssets(policyId: string): Promise<PolicyAsset[]>;
 }

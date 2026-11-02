@@ -1,9 +1,9 @@
-// Error model of the resolver: the DID Resolution v1.0 error types this resolver can return
-// (https://www.w3.org/TR/did-resolution/ Section 10), each with the HTTP status the HTTPS binding
-// maps it to (Section 11).
+// Error model of the resolver: the DID Resolution v1.0 error types this resolver returns, each with
+// the HTTP status of the HTTPS binding (Part 1 Section 7.4).
 
 export type ResolutionErrorType =
   | "INVALID_DID"
+  | "INVALID_OPTIONS"
   | "NOT_FOUND"
   | "METHOD_NOT_SUPPORTED"
   | "FEATURE_NOT_SUPPORTED"
@@ -12,6 +12,7 @@ export type ResolutionErrorType =
 
 export const ERROR_HTTP_STATUS: Record<ResolutionErrorType, number> = {
   INVALID_DID: 400,
+  INVALID_OPTIONS: 400,
   NOT_FOUND: 404,
   REPRESENTATION_NOT_SUPPORTED: 406,
   METHOD_NOT_SUPPORTED: 501,
@@ -21,14 +22,16 @@ export const ERROR_HTTP_STATUS: Record<ResolutionErrorType, number> = {
 
 export const errorTypeUri = (type: ResolutionErrorType): string => `https://www.w3.org/ns/did#${type}`;
 
-/** An expected resolution outcome that is not a DID document: bad input, unknown DID, unsupported request. */
+/**
+ * An expected resolution outcome that is not a DID document: bad input, unknown DID, unsupported
+ * request. The title is free text (Part 1 Section 8.2 lets it differ between resolvers).
+ */
 export class ResolutionError extends Error {
   constructor(
     readonly type: ResolutionErrorType,
     readonly title: string,
-    readonly detail?: string,
   ) {
-    super(detail ? `${title}: ${detail}` : title);
+    super(title);
     this.name = "ResolutionError";
   }
 }

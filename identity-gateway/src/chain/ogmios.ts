@@ -67,7 +67,7 @@ export function fetchBlockAfter(url: string, point: OgmiosPoint, timeoutMs = 20_
       if (msg.error) return finish(new Error(`Ogmios ${String(msg.id)}: ${msg.error.message ?? JSON.stringify(msg.error)}`));
       if (msg.id === "findIntersection") {
         const at = msg.result?.intersection;
-        if (typeof at !== "object" || at.id !== point.id) return finish(new Error(`Ogmios: no intersection at ${point.slot}.${point.id}`));
+        if (typeof at !== "object" || at.id !== point.id) return finish(new Error("Ogmios: no intersection at the requested point"));
         return send("nextBlock");
       }
       if (msg.id === "nextBlock") {
