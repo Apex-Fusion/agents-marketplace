@@ -827,16 +827,20 @@ One combined release, in this order:
    - Filip completes the name check.
    - The Foundation sets the licence of the Part 1 text.
    - Register `did:vector` with W3C, using a permalink to Part 1. The identity registry's values are "published at deployment" until step 3.
-2. **Contracts:**
-   - fix the cutoff slot and build the allowlist (§9.1);
-   - the configuration holder and seal policy;
-   - `identity`;
-   - Module-1 with `identity_party`, then the seal with its hash, then the check of §3.8;
-   - `attestation`, `delegation`, the new `escrow`, `vault` and the new `advert`;
-   - Modules 3 and 6.
-   - Publish all reference scripts.
+2. **Contracts**, in two parts (decision of 2026-11-03):
+   - **Identity side:**
+     - fix the cutoff slot and build the allowlist (§9.1);
+     - the configuration holder and seal policy. The seal seed is the only output of a key that nothing else uses, so no other transaction can spend it before the seal;
+     - `identity`, `attestation`, `delegation`, the new `escrow`, `vault` and the new `advert`;
+     - publish their reference scripts at an address that nobody can spend.
+   - **Module side**, after the module owners decide the Module-1 mode and the verdict policy (§13.4). It can come after steps 3 to 7:
+     - Module-1 with `identity_party`, then the seal with its hash, then the check of §3.8;
+     - Modules 3 and 6;
+     - their reference scripts.
+
+     Until the seal, no `Script` party can be appointed (§3.8). Every other identity action works.
 3. **Publication:**
-   - Add the policy ID, the address, the cutoff slot, the allowlist and its root, the configuration policy and the Module-1 hash to Part 1 §4 and to every consumer.
+   - Add the policy ID, the address, the cutoff slot, the allowlist and its root, the configuration policy and, after the module side, the Module-1 hash to Part 1 §4 and to every consumer.
    - Send a second pull request to `w3c/did-extensions` that moves the permalink to that commit.
 4. **Off-chain release:**
    - the gateway (resolver, renderings, M4 services) and the indexer with its backfill;
@@ -1027,8 +1031,8 @@ The tests are in `tests/legacy-registry/` (offline, `aiken tx simulate`). Result
 | Filip's `DECISIONS.md`, `CONTEXT.md` and `research/`, to check the recorded decisions | Filip |
 | DNS-AID zone and publishing method (§8.7) | David |
 | Licence of the Part 1 text | David |
-| Foundation operator keys: record controllers, Accountable Party, gateway controller, module operators | David |
-| Guardian key holders for Foundation records | David |
+| Foundation operator keys: record controllers, Accountable Party, gateway controller, module operators | David (done 2026-11-03: one new operator key) |
+| Guardian key holders for Foundation records | David (none at launch; add them later with an Update) |
 | Owners of the 36 supplier keys without a legacy record (§9.2) | David |
 | Key files for the simulation cleanup, from colleagues (private note) | David |
 | Module owners' review of the module changes | David |
