@@ -15,9 +15,14 @@ export interface DidResolver {
   resolveDid(did: string, options: ResolutionOptionsInput): Promise<ResolutionResult>;
 }
 
+/** A route outside the HTTPS binding (renderings, M4 services). Returns false when the request is not its own. */
+export type Route = (req: IncomingMessage, res: ServerResponse, path: string, query: string) => Promise<boolean>;
+
 export interface ServerOptions {
   /** Error log. */
   readonly log?: (message: string) => void;
+  /** Extra routes, tried in order before the 404. */
+  readonly routes?: readonly Route[];
 }
 
 function send(res: ServerResponse, status: number, contentType: string, body: string, extra: Record<string, string> = {}): void {
@@ -53,6 +58,7 @@ export function createResolverServer(resolver: DidResolver, options: ServerOptio
       if (req.method !== "GET" && req.method !== "HEAD") return send(res, 405, "text/plain; charset=utf-8", "method not allowed\n", { allow: "GET, HEAD" });
       return send(res, 200, "application/json", '{"status":"ok"}');
     }
+    for (const route of options.routes ?? []) if (await route(req, res, path, query)) return;
     if (!path.startsWith(PREFIX)) return send(res, 404, "text/plain; charset=utf-8", "not found\n");
     if (req.method !== "GET") return send(res, 405, "text/plain; charset=utf-8", "method not allowed\n", { allow: "GET" });
 
