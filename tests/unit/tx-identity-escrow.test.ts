@@ -26,9 +26,10 @@ import type { IdentityDatum } from "../../packages/shared/src/cbor/IdentityDatum
 import type { IdentityAdvertDatum } from "../../packages/shared/src/cbor/IdentityAdvertDatum.js";
 import type { IdentityBlueprint } from "../../packages/shared/src/tx/blueprint.js";
 import { loadBlueprint } from "../../packages/shared/src/tx/blueprint.js";
+import { MAX_RANGE_MS } from "../../packages/shared/src/identity/constants.js";
 import {
   buildAcceptTx, buildClaimTx, buildPostChatEscrowTx, buildPostEscrowTx, buildPostOcrEscrowTx, buildPostTtsEscrowTx,
-  buildReclaimTx, buildRefundRevokedTx, buildReleaseTx, buildSubmitTx, escrowLockFloor, MAX_RANGE_MS, refundAllowed,
+  buildReclaimTx, buildRefundRevokedTx, buildReleaseTx, buildSubmitTx, escrowLockFloor, refundAllowed,
   TxConstructionError, type ClaimParams, type PostEscrowParams, type RecordLookup, type SubmitParams,
 } from "../../packages/shared/src/tx/index.js";
 import { pkhToEnterpriseAddress } from "../../packages/shared/src/tx/internal/pkhAddress.js";

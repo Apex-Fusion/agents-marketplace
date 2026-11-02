@@ -42,7 +42,7 @@ import {
 import { vectorDid } from "@marketplace/shared/identity";
 import { AGENT_RECEIPT_FIELDS, RECEIPT_FIELDS } from "@marketplace/shared/receipt-fields";
 import {
-  ESCROW_VALUE_CAP_LOVELACE,
+  assertEscrowWithinCap,
   loadIdentityBlueprint,
   readAgentRecord,
   refundAllowed,
@@ -135,19 +135,11 @@ export function buyerRefund(address: string): Refund {
  * builder checks it again, with the locked amount.
  */
 export function assertWithinValueCap(advert: AdvertDatum): void {
-  const payment = advert.price_lovelace;
-  const buyerBond = advert.buyer_bond_lovelace;
-  const supplierBond = advert.supplier_bond_lovelace;
-  if (payment < 0n || buyerBond < 0n || supplierBond < 0n) {
-    throw new TxConstructionError(
-      "negative escrow amount",
-      `payment ${payment}, buyer bond ${buyerBond}, supplier bond ${supplierBond}`,
-    );
-  }
-  const total = payment + buyerBond + supplierBond;
-  if (total > ESCROW_VALUE_CAP_LOVELACE) {
-    throw new TxConstructionError("escrow above value cap", `payment + bonds = ${total} > ${ESCROW_VALUE_CAP_LOVELACE}`);
-  }
+  assertEscrowWithinCap({
+    payment_lovelace: advert.price_lovelace,
+    buyer_bond_lovelace: advert.buyer_bond_lovelace,
+    supplier_bond_lovelace: advert.supplier_bond_lovelace,
+  });
 }
 
 /**

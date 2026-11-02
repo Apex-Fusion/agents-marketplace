@@ -12,7 +12,8 @@ import { encodeEscrowDatum } from "../../packages/shared/src/cbor/EscrowDatum.js
 import { encodeIdentityAdvertDatum } from "../../packages/shared/src/cbor/IdentityAdvertDatum.js";
 import { encodeIdentityEscrowDatum } from "../../packages/shared/src/cbor/IdentityEscrowDatum.js";
 import type { AdvertDatum, EscrowDatum } from "../../packages/shared/src/cbor/types.js";
-import { ESCROW_VALUE_CAP_LOVELACE, TxConstructionError } from "../../packages/shared/src/tx/index.js";
+import { MAX_ESCROW_LOVELACE } from "../../packages/shared/src/identity/constants.js";
+import { TxConstructionError } from "../../packages/shared/src/tx/index.js";
 import {
   agentIdOf, assertWithinValueCap, BuyerIdentity, buyerRefund, chainRecordLookup, decodeAdvert, decodeEscrow,
   encodeAdvert, encodeEscrow, indexerAdvertSigners, receiptAgentProblem, sameRefund,
@@ -120,13 +121,13 @@ describe("receipt fields (Part 2 §6.3)", () => {
 describe("value cap (Part 2 §6.5, F-29)", () => {
   it("accepts payment + bonds up to 10,000 AP3X", () => {
     expect(() => assertWithinValueCap(newAdvert({
-      price_lovelace: ESCROW_VALUE_CAP_LOVELACE - 2n, buyer_bond_lovelace: 1n, supplier_bond_lovelace: 1n,
+      price_lovelace: MAX_ESCROW_LOVELACE - 2n, buyer_bond_lovelace: 1n, supplier_bond_lovelace: 1n,
     }))).not.toThrow();
   });
 
   it("refuses payment + bonds above 10,000 AP3X and negative amounts", () => {
     expect(() => assertWithinValueCap(newAdvert({
-      price_lovelace: ESCROW_VALUE_CAP_LOVELACE - 1n, buyer_bond_lovelace: 1n, supplier_bond_lovelace: 1n,
+      price_lovelace: MAX_ESCROW_LOVELACE - 1n, buyer_bond_lovelace: 1n, supplier_bond_lovelace: 1n,
     }))).toThrow(expect.objectContaining({ reason: "escrow above value cap" }));
     expect(() => assertWithinValueCap(newAdvert({ buyer_bond_lovelace: -1n })))
       .toThrow(expect.objectContaining({ reason: "negative escrow amount" }));

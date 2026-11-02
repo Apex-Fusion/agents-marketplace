@@ -17,9 +17,10 @@ import { encodeAdvertDatum } from "../../packages/shared/src/cbor/AdvertDatum.js
 import { encodeEscrowDatum } from "../../packages/shared/src/cbor/EscrowDatum.js";
 import { plutusAddressFromBech32 } from "../../packages/shared/src/cbor/address.js";
 import { loadBlueprint, type IdentityBlueprint } from "../../packages/shared/src/tx/blueprint.js";
+import { MAX_RANGE_MS } from "../../packages/shared/src/identity/constants.js";
 import {
   buildAcceptTx, buildClaimTx, buildPostAdvertTx, buildPostEscrowTx, buildReclaimTx, buildRefundRevokedTx, buildReleaseTx,
-  buildRetireAdvertTx, buildSubmitTx, buildUpdateAdvertTx, MAX_RANGE_MS, TxConstructionError, type RecordLookup,
+  buildRetireAdvertTx, buildSubmitTx, buildUpdateAdvertTx, TxConstructionError, type RecordLookup,
 } from "../../packages/shared/src/tx/index.js";
 import { loadEscrowScript } from "../../packages/shared/src/tx/internal/liveCbor.js";
 import { inspectSignedTransactionFinancials, type SignedTransactionFinancials } from "../../packages/shared/src/tx/internal/signedTransaction.js";

@@ -17,7 +17,8 @@ import {
   type IdentityEscrowDatum,
   type Status,
 } from "@marketplace/shared/cbor";
-import { ESCROW_VALUE_CAP_LOVELACE, escrowLockFloor, minAdaForEscrowDatum, type IdentityBlueprint } from "@marketplace/shared/tx";
+import { MAX_ESCROW_LOVELACE } from "@marketplace/shared/identity";
+import { escrowLockFloor, minAdaForEscrowDatum, type IdentityBlueprint } from "@marketplace/shared/tx";
 import { loadConfig } from "../src/config.js";
 import type { GatewayDeps } from "../src/deps.js";
 import { newAdvertsOnly, paper2AgentClientOptions } from "../src/routing/escrowSwitch.js";
@@ -159,14 +160,14 @@ describe("routing — agent_id, value cap and switch", () => {
   });
 
   it("refuses adverts whose price and bonds exceed 10,000 AP3X (F-29)", async () => {
-    const atCap = (ESCROW_VALUE_CAP_LOVELACE - 2n * AP3X).toString();
-    const overCap = (ESCROW_VALUE_CAP_LOVELACE - 2n * AP3X + 1n).toString();
+    const atCap = (MAX_ESCROW_LOVELACE - 2n * AP3X).toString();
+    const overCap = (MAX_ESCROW_LOVELACE - 2n * AP3X + 1n).toString();
     const got = await selectCandidates({
       ...base,
       fetchFn: indexer([
         row("1", { price_lovelace: atCap }),
         row("2", { price_lovelace: overCap }),
-        row("3", { supplier_bond_lovelace: ESCROW_VALUE_CAP_LOVELACE.toString() }),
+        row("3", { supplier_bond_lovelace: MAX_ESCROW_LOVELACE.toString() }),
       ]),
     });
     expect(got.map((candidate) => candidate.supplierPkh)).toEqual(["1".repeat(56)]);
@@ -198,7 +199,7 @@ describe("routing — agent_id, value cap and switch", () => {
     const rows = [
       row("1", { model: "legacy-only" }),
       row("2", { model: "new", agent_id: AGENT_A }),
-      row("3", { model: "over-cap", agent_id: AGENT_B, price_lovelace: ESCROW_VALUE_CAP_LOVELACE.toString() }),
+      row("3", { model: "over-cap", agent_id: AGENT_B, price_lovelace: MAX_ESCROW_LOVELACE.toString() }),
     ];
     expect(await listModels({ indexerUrl: "http://ix", fetchFn: indexer(rows) })).toEqual(["legacy-only", "new"]);
     expect(await listModels({ indexerUrl: "http://ix", fetchFn: indexer(rows), newAdvertsOnly: true })).toEqual(["new"]);

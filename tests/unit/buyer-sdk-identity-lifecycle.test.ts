@@ -27,9 +27,9 @@ import { signReceipt } from "../../packages/shared/src/receipt/sign.js";
 import {
   createResponse, responseRequestCommitment, responseResultCommitment, type ResponseItem, type ResponseRequest,
 } from "../../packages/shared/src/responses.js";
+import { MAX_ESCROW_LOVELACE } from "../../packages/shared/src/identity/constants.js";
 import {
-  chatSessionPromptHash, ESCROW_VALUE_CAP_LOVELACE, ocrPromptHash, ttsPromptHash, TxConstructionError,
-  type WalletKey,
+  chatSessionPromptHash, ocrPromptHash, ttsPromptHash, TxConstructionError, type WalletKey,
 } from "../../packages/shared/src/tx/index.js";
 import { pkhToEnterpriseAddress } from "../../packages/shared/src/tx/internal/pkhAddress.js";
 import {
@@ -219,7 +219,7 @@ describe("Marketplace Post on a new advert (Part 2 §6.1, §6.2, §6.5)", () => 
   });
 
   it("refuses an advert above the value cap before the supplier preflight", async () => {
-    const advert = newAdvert({ price_lovelace: ESCROW_VALUE_CAP_LOVELACE });
+    const advert = newAdvert({ price_lovelace: MAX_ESCROW_LOVELACE });
     const { marketplace, urls, submitSpy } = world({ advert });
     expect(await rejection(marketplace.preparePrompt({ advertRef: ADVERT_REF, input: INPUT, payment_lovelace: advert.price_lovelace })))
       .toEqual({ kind: "tx", reason: "escrow above value cap" });

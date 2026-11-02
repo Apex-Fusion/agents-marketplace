@@ -20,7 +20,7 @@
  */
 
 import type { OutputReference } from "@marketplace/shared/chain";
-import { ESCROW_VALUE_CAP_LOVELACE } from "@marketplace/shared/tx";
+import { MAX_ESCROW_LOVELACE } from "@marketplace/shared/identity";
 import { GatewayError } from "../openai/errors.js";
 
 /** Subset of the indexer's SupplierView we depend on. */
@@ -103,7 +103,7 @@ function routable(raw: SupplierView, newAdvertsOnly: boolean): boolean {
     return false;
   }
   return amounts.every((amount) => amount >= 0n) &&
-    amounts.reduce((sum, amount) => sum + amount, 0n) <= ESCROW_VALUE_CAP_LOVELACE;
+    amounts.reduce((sum, amount) => sum + amount, 0n) <= MAX_ESCROW_LOVELACE;
 }
 
 async function readLiveStatus(

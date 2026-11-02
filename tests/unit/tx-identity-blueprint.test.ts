@@ -9,9 +9,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { bech32 } from "bech32";
 import { loadBlueprint, loadIdentityBlueprint } from "../../packages/shared/src/tx/blueprint.js";
 import { applyDataParameter, plutusV3ScriptHash } from "../../packages/shared/src/tx/internal/plutusScript.js";
-import {
-  ESCROW_INPUT_CAP_LOVELACE, ESCROW_VALUE_CAP_LOVELACE, MAX_RANGE_MS,
-} from "../../packages/shared/src/tx/index.js";
+import { MAX_ESCROW_LOVELACE, MAX_RANGE_MS } from "../../packages/shared/src/identity/constants.js";
+import { ESCROW_INPUT_CAP_LOVELACE } from "../../packages/shared/src/tx/index.js";
 import { IDENTITY_BLUEPRINT_PATH, REPO_ROOT, TEST_IDENTITY_HASH } from "../fixtures/identity-builders/blueprint.js";
 
 interface BlueprintFile {
@@ -129,7 +128,7 @@ describe("loadIdentityBlueprint", () => {
 describe("escrow constants (Part 2 §6.1, §6.5)", () => {
   it("one hour of validity, 10,000 AP3X value cap, 10,005 AP3X input cap", () => {
     expect(MAX_RANGE_MS).toBe(3_600_000);
-    expect(ESCROW_VALUE_CAP_LOVELACE).toBe(10_000_000_000n);
+    expect(MAX_ESCROW_LOVELACE).toBe(10_000_000_000n);
     expect(ESCROW_INPUT_CAP_LOVELACE).toBe(10_005_000_000n);
   });
 });

@@ -10,8 +10,9 @@ import { decodeIdentityAdvertDatum, type IdentityAdvertDatum } from "../../packa
 import { decodeAdvertDatum, encodeAdvertDatum } from "../../packages/shared/src/cbor/AdvertDatum.js";
 import type { IdentityDatum } from "../../packages/shared/src/cbor/IdentityDatum.js";
 import { loadBlueprint, type IdentityBlueprint } from "../../packages/shared/src/tx/blueprint.js";
+import { MAX_RANGE_MS } from "../../packages/shared/src/identity/constants.js";
 import {
-  buildPostAdvertTx, buildRetireAdvertTx, buildUpdateAdvertTx, MAX_RANGE_MS, TxConstructionError, type RecordLookup,
+  buildPostAdvertTx, buildRetireAdvertTx, buildUpdateAdvertTx, TxConstructionError, type RecordLookup,
   type UpdateAdvertParams,
 } from "../../packages/shared/src/tx/index.js";
 import { pkhToEnterpriseAddress } from "../../packages/shared/src/tx/internal/pkhAddress.js";
