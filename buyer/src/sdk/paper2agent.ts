@@ -90,9 +90,12 @@ function object(value: unknown): Record<string, unknown> {
 function refString(ref: OutputReference): string {
   return `${ref.txHash}#${ref.index}`;
 }
+/** A receipt has the 8 legacy fields, or those 8 and agent_did (new escrow, Part 2 §6.3). */
 function parseReceipt(value: unknown): Receipt {
   const raw = object(value);
-  if (Object.keys(raw).length !== 8 ||
+  const fields = Object.keys(raw).length;
+  const agentDid = raw.agent_did;
+  if ((fields !== 8 && fields !== 9) || (fields === 9) !== (typeof agentDid === "string") ||
       typeof raw.prompt_hash !== "string" || typeof raw.response_hash !== "string" ||
       typeof raw.model !== "string" || typeof raw.supplier_pkh !== "string" ||
       typeof raw.escrow_ref !== "string" || typeof raw.prompt_tokens !== "number" ||
@@ -103,6 +106,7 @@ function parseReceipt(value: unknown): Receipt {
     prompt_hash: raw.prompt_hash, response_hash: raw.response_hash, model: raw.model,
     supplier_pkh: raw.supplier_pkh, escrow_ref: raw.escrow_ref, prompt_tokens: raw.prompt_tokens,
     completion_tokens: raw.completion_tokens, wallclock_ms: raw.wallclock_ms,
+    ...(typeof agentDid === "string" ? { agent_did: agentDid } : {}),
   });
 }
 function parseRef(value: unknown): OutputReference {

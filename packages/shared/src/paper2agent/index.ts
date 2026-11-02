@@ -4,8 +4,9 @@ import { Point } from "@noble/ed25519";
 import { blake2b } from "@noble/hashes/blake2b";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils";
 import { canonicalize } from "../cbor/canonical.js";
-import { buildReceipt, type Receipt } from "../receipt/build.js";
+import { AGENT_RECEIPT_FIELDS, buildReceipt, RECEIPT_FIELDS, type Receipt } from "../receipt/build.js";
 import { verifyReceipt } from "../receipt/verify.js";
+import { isVectorId, vectorDid } from "../identity/id.js";
 
 export const PAPER2AGENT_CAPABILITY_ID = "mcp.tool.execute.v1";
 export const MAX_TOOL_INPUT_BYTES = 65536;
@@ -334,10 +335,17 @@ export function paper2AgentSupplierPkh(publicKeyHex: string): string {
   if (point.isSmallOrder() || !point.isTorsionFree()) fail("invalid supplier signing key");
   return bytesToHex(blake2b(hexToBytes(publicKeyHex), { dkLen: 28 }));
 }
+/**
+ * Verify a tool receipt against its escrow. A new escrow (agentId set) needs a
+ * 9-field receipt whose agent_did names that agent; a legacy escrow (agentId
+ * null or absent) needs the 8 legacy fields (Part 2 §6.3).
+ */
 export function verifyPaper2AgentReceipt(args: {
   manifest: Paper2AgentManifest; input: JsonObject; result: JsonObject;
   receipt: Receipt; signature: string; publicKeyHex: string;
   supplierPkh: string; escrowRef: string;
+  /** agent_id of a new escrow datum; null or absent for a legacy escrow. */
+  agentId?: string | null;
 }): void {
   const manifest = parsePaper2AgentManifest(args.manifest);
   const input = validatePaper2AgentInput(manifest, args.input);
@@ -347,9 +355,12 @@ export function verifyPaper2AgentReceipt(args: {
   if (typeof args.supplierPkh !== "string" || !/^[0-9a-f]{56}$/.test(args.supplierPkh) ||
       paper2AgentSupplierPkh(args.publicKeyHex) !== args.supplierPkh) fail("supplier public key does not match PKH");
   if (typeof args.escrowRef !== "string" || !/^[0-9a-f]{64}#(?:0|[1-9][0-9]{0,9})$/.test(args.escrowRef)) fail("invalid escrow reference");
+  const agentId = args.agentId ?? null;
+  if (agentId !== null && !isVectorId(agentId)) fail("invalid escrow agent identifier");
   const raw = object(normalizeJson(args.receipt, 4096), "receipt");
-  exactKeys(raw, ["prompt_hash", "response_hash", "model", "prompt_tokens", "completion_tokens", "wallclock_ms", "supplier_pkh", "escrow_ref"], "receipt");
+  exactKeys(raw, agentId === null ? RECEIPT_FIELDS : AGENT_RECEIPT_FIELDS, "receipt");
   const receipt = buildReceipt(raw as unknown as Receipt);
+  if (agentId !== null && receipt.agent_did !== vectorDid(agentId)) fail("receipt agent DID does not match the escrow agent");
   if (receipt.supplier_pkh !== args.supplierPkh || receipt.escrow_ref !== args.escrowRef ||
       receipt.model !== `paper2agent:${manifestHash}` || receipt.prompt_hash !== requestHash ||
       receipt.response_hash !== paper2AgentResultHash(manifestHash, requestHash, result)) fail("receipt commitment mismatch");
