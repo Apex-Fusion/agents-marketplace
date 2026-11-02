@@ -27,7 +27,7 @@ const PAST_WINDOW_NOW = SUBMITTED_AT + ACCEPT_WINDOW_MS + 60_000;
 
 function config(overrides: Partial<ReleaseEscrowsConfig> = {}): ReleaseEscrowsConfig {
   return {
-    escrowAddress: buildSubmittedEscrowUtxo().address,
+    escrowAddresses: [buildSubmittedEscrowUtxo().address],
     supplierKey: buildSupplierWalletKey(),
     refs: [],
     limit: Number.POSITIVE_INFINITY,

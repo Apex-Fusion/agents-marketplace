@@ -19,6 +19,7 @@ import { PublisherTarget, loadPaperPublisherConfig, type PaperPublisherConfig } 
 import { PaperPublisherService, createPaperPublisherApp, type PaperPublisherDeps, type RuntimeImages,
   type SupplierLauncher } from "../src/publisher.js";
 import { PaperPublisherStore, type AdvertTransaction } from "../src/publisher-store.js";
+import { AGENT_ID, CONTROLLER, IDENTITY, recordUtxo, supplierAgentRecord, testIdentity } from "../../tests/fixtures/supplier-side/identity.js";
 
 const TOKEN = "publisher-token-".repeat(3);
 const TOOL_TOKEN = "tool-call-token-".repeat(3);
@@ -180,7 +181,9 @@ function supplierLauncher(launches: Launch[], price: string): SupplierLauncher {
 }
 
 async function publisher(options: { dataDir?: string; targets?: PublisherTarget[]; chain?: MockChainProvider; images?: RuntimeImages;
-  postAdvert?: PaperPublisherDeps["postAdvert"]; price?: string; toolCallToken?: string } = {}) {
+  postAdvert?: PaperPublisherDeps["postAdvert"]; price?: string; toolCallToken?: string;
+  identityController?: PaperPublisherConfig["identityController"]; registrar?: PaperPublisherDeps["registrar"];
+  identity?: PaperPublisherDeps["identity"] } = {}) {
   const dataDir = options.dataDir ?? temporary();
   const chain = options.chain ?? new MockChainProvider();
   const images = options.images ?? fakeImages();
@@ -188,10 +191,11 @@ async function publisher(options: { dataDir?: string; targets?: PublisherTarget[
   const publisherConfig: PaperPublisherConfig = { dataDir, port: 8096, host: "127.0.0.1", token: TOKEN,
     toolCallToken: options.toolCallToken ?? null, publicUrl: PUBLIC_URL,
     runtimeImage: BASE_IMAGE, dockerPath: "/usr/bin/docker", dockerHost: null, repoRoot: process.cwd(),
-    supplierEntry: join(process.cwd(), "supplier/src/index.ts"), targets: options.targets ?? [target("slot-a", KEY_A)] };
+    supplierEntry: join(process.cwd(), "supplier/src/index.ts"), targets: options.targets ?? [target("slot-a", KEY_A)],
+    identityController: options.identityController ?? null };
   const service = await PaperPublisherService.open(publisherConfig, {
     chain: () => chain, images, launchSupplier: supplierLauncher(launches, options.price ?? "2000000"), postAdvert: options.postAdvert,
-    sleep: tick, log: () => undefined,
+    sleep: tick, log: () => undefined, registrar: options.registrar, identity: options.identity,
   });
   services.push(service);
   return { service, app: createPaperPublisherApp(service), chain, images, launches, dataDir };
@@ -236,7 +240,7 @@ describe("publisher management boundary", () => {
     expect(listed.status).toBe(200);
     expect(listed.body.targets).toEqual([{ id: "slot-a", label: "Slot slot-a", network_id: 0,
       supplier_pkh: deriveSupplierKey(KEY_A, 0).pubKeyHash, deposit_address: deriveSupplierKey(KEY_A, 0).address,
-      endpoint_url: `${PUBLIC_URL}/tools/slot-a`, available: true, live_chain: true }]);
+      endpoint_url: `${PUBLIC_URL}/tools/slot-a`, available: true, live_chain: true, agent_id: null }]);
     expect(listed.text).not.toContain(KEY_A);
   });
 });
@@ -550,5 +554,80 @@ describe("publisher configuration", () => {
       expect(text).not.toContain(KEY_A);
       expect(text).not.toContain(KEY_B);
     }
+  });
+});
+
+describe("slot identity records (Part 2 §9.2)", () => {
+  const identitySlot = (agentId?: string) => new PublisherTarget("slot-a", "Slot slot-a", { SUPPLIER_PRIV_KEY_HEX: KEY_A, NETWORK_ID: "0",
+    OGMIOS_URL: "http://127.0.0.1:1337", LIVE_CHAIN: "1", IDENTITY_POLICY_ID: IDENTITY.identityHash,
+    ...(agentId === undefined ? {} : { AGENT_ID: agentId }) }, PUBLIC_URL);
+  const controller = { controller: CONTROLLER.pubKeyHex, accountable: { type: "ControllerSet" as const } };
+  /** A stand-in Register builder: the slot key and the controller must sign. */
+  const registrar: PaperPublisherDeps["registrar"] = () => ({
+    async build(args) {
+      const signers = [args.wallet.pubKeyHash, deriveSupplierKey(CONTROLLER.privateKeyHex, 0).pubKeyHash].sort();
+      return { txCborHex: "84a0a0f5f6", txHash: "ab".repeat(32), agentId: AGENT_ID, requiredSigners: signers };
+    },
+    sign: async (tx) => tx,
+    txId: () => "ab".repeat(32),
+  });
+
+  async function prepared(options: Parameters<typeof publisher>[0]) {
+    const fixture = await publisher(options);
+    const pkg = await reviewedPackage();
+    expect((await request(fixture.app).post("/publications").set(AUTH).send(preparation(pkg, terms(pkg.artifact)))).status).toBe(200);
+    const publish = () => request(fixture.app).post(`/publications/${JOB_ID}/publish`).set(AUTH)
+      .send({ artifact_sha256: pkg.artifact.sha256, confirm: true, max_debit_lovelace: "5000000" });
+    return { ...fixture, publish };
+  }
+
+  it("builds the slot key's Register for the offline controller, once, and shows the agent", async () => {
+    const chain = new MockChainProvider();
+    const { app } = await publisher({ chain, targets: [identitySlot()], identityController: controller, registrar,
+      identity: () => testIdentity(chain) });
+    const built = await request(app).post("/targets/slot-a/record").set(AUTH);
+    expect(built.status).toBe(200);
+    expect(built.body).toMatchObject({ agent_id: AGENT_ID, agent_did: `did:vector:${AGENT_ID}`, state: "awaiting_signatures",
+      tx_hash: "ab".repeat(32), missing_signers: [deriveSupplierKey(CONTROLLER.privateKeyHex, 0).pubKeyHash] });
+    expect((await request(app).post("/targets/slot-a/record").set(AUTH)).body.tx_hash).toBe(built.body.tx_hash);
+    expect((await request(app).get("/targets").set(AUTH)).body.targets[0].agent_id).toBe(AGENT_ID);
+    expect((await request(app).get("/targets/slot-a/record").set(AUTH)).body.state).toBe("awaiting_signatures");
+  });
+
+  it("refuses a registration for a legacy slot, without a controller, or when the key is already listed", async () => {
+    const chain = new MockChainProvider();
+    const legacy = await publisher({ chain, identityController: controller, registrar });
+    expect((await request(legacy.app).post("/targets/slot-a/record").set(AUTH)).body.error).toBe("identity_not_configured");
+    const noController = await publisher({ chain, targets: [identitySlot()], registrar, identity: () => testIdentity(chain) });
+    expect((await request(noController.app).post("/targets/slot-a/record").set(AUTH)).status).toBe(503);
+    chain.seed(recordUtxo(supplierAgentRecord(deriveSupplierKey(KEY_A, 0), [PAPER2AGENT_CAPABILITY_ID])));
+    const listed = await publisher({ chain, targets: [identitySlot()], identityController: controller, registrar,
+      identity: () => testIdentity(chain) });
+    const response = await request(listed.app).post("/targets/slot-a/record").set(AUTH);
+    expect(response.status).toBe(409);
+    expect(response.body.error).toBe("slot_record_exists");
+  });
+
+  it("publishes a new advert only after the slot record lists the key and the capability", async () => {
+    const chain = new MockChainProvider();
+    const postAdvert = vi.fn<NonNullable<PaperPublisherDeps["postAdvert"]>>();
+    const missing = await prepared({ chain, targets: [identitySlot()], postAdvert, identity: () => testIdentity(chain) });
+    const refused = await missing.publish();
+    expect(refused.status).toBe(409);
+    expect(refused.body.error).toBe("slot_record_required");
+
+    const configured = await prepared({ chain, targets: [identitySlot(AGENT_ID)], postAdvert, identity: () => testIdentity(chain) });
+    const notFound = await configured.publish();
+    expect(notFound.body.error).toBe("slot_record_invalid");
+    expect(notFound.body.message).toMatch(/agent record not found/);
+    expect(postAdvert).not.toHaveBeenCalled();
+    expect((await request(configured.app).get(`/publications/${JOB_ID}`).set(AUTH)).body.state).toBe("prepared");
+
+    chain.seed(recordUtxo(supplierAgentRecord(deriveSupplierKey(KEY_A, 0), [PAPER2AGENT_CAPABILITY_ID])));
+    postAdvert.mockRejectedValue(new Error("stop before signing"));
+    await configured.publish();
+    expect(postAdvert).toHaveBeenCalledTimes(1);
+    expect(postAdvert.mock.calls[0]![0].advertDatum).toMatchObject({ agent_id: AGENT_ID, supplier_pkh: deriveSupplierKey(KEY_A, 0).pubKeyHash });
+    expect(postAdvert.mock.calls[0]![0].identity).toBeDefined();
   });
 });
