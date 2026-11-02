@@ -104,6 +104,28 @@ describe("Conway encoding (checked with CML)", () => {
     expect(parsed.body().script_data_hash()?.to_hex()).toBe(cmlScriptDataHash(tx.txCborHex));
   });
 
+  it("withdraws the whole Module-1 reward balance in a consent and keeps the value balanced", () => {
+    const { tx: created, wallet } = register("ledger: consent rewards");
+    const record = created.outputs[0]!;
+    const more = walletFunds("ledger: consent rewards more", wallet, 100n * AP3X);
+    const args = {
+      record,
+      window,
+      parties: [controllerAccountable(window), { ...controllerAccountable(window), role: "Responsible" as const, signer: { type: "Script" as const, hash: world.module1.hash }, rights: 1 }],
+    };
+    const scripts = { ...world.identityScripts, module1Rewards: 7n * AP3X };
+    const tx = buildUpdate({ ...testContext(wallet, [more]), protocol }, scripts, args);
+    const withdrawals = CML.Transaction.from_cbor_hex(tx.txCborHex).body().withdrawals()!;
+    expect(withdrawals.len()).toBe(1);
+    expect(withdrawals.get(withdrawals.keys().get(0))).toBe(7n * AP3X);
+    const spent = [record, more].filter((u) => tx.inputs.some((r) => r.txHash === u.ref.txHash && r.index === u.ref.index));
+    expect(spent).toHaveLength(tx.inputs.length);
+    const coinIn = spent.reduce((sum, u) => sum + u.lovelace, 0n) + 7n * AP3X;
+    const coinOut = tx.outputs.reduce((sum, u) => sum + u.lovelace, 0n) + tx.fee;
+    expect(coinOut).toBe(coinIn);
+    expect(() => buildUpdate({ ...testContext(wallet, [more]), protocol }, { ...scripts, module1Rewards: -1n }, args)).toThrow(TxConstructionError);
+  });
+
   it("pays at least CML's minimum fee of the signed transaction, and not much more", () => {
     const { tx } = register("ledger: cml fee");
     const signedHex = signed(tx, ["ledger: cml fee"]);
