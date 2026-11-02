@@ -453,7 +453,14 @@ pub type VaultSpend { Pay  Close }
 
 ### 5.4 Presentation
 
-The gateway's token service (§8.6) issues an RFC 8693 token for a delegation only after it checks the whole chain. The token has the delegate's DID as `sub`, the delegators in a nested `act` claim, the actions and resources in RFC 9396 `authorization_details`, a lifetime of at most 5 minutes and `cnf.jkt`.
+The gateway's token service (§8.6) issues an RFC 8693 token for a delegation only after it checks the whole chain. The claims follow RFC 8693 §4.1 (decision of 2026-11-02; the first text had `sub` and `act` the other way round):
+
+- `sub` is the root delegator, the principal: `did:vector:<id>` for an agent, or `https://id.vector.apexfusion.org/principals/key/<key hash>` for a `PrincipalKey`;
+- `act` is the chain of actors: the current delegate (`did:vector:<id>`) is the outermost `act.sub`, and each earlier delegate agent is a nested `act`;
+- the actions and resources are in RFC 9396 `authorization_details`;
+- the lifetime is at most 5 minutes, and `cnf.jkt` binds the token to the delegate key.
+
+A token without a delegation has `sub = did:vector:<id>` of the agent and no `act`.
 
 ## 6. Marketplace
 
@@ -667,7 +674,7 @@ All three modules get new deployments in this phase. They use `vector_identity` 
 | Service | Path | Rules |
 |---|---|---|
 | Authorisation server metadata | `GET /.well-known/oauth-authorization-server` | RFC 8414 |
-| Token service | `POST /token` | RFC 8693, `subject_token_type = urn:ietf:params:oauth:token-type:jwt`. The subject token is a JWT signed (EdDSA) by an authentication key of the agent, with `iss = sub = did:vector:<id>`, `aud = https://id.vector.apexfusion.org/token`, `exp − iat ≤ 5 min` and a single-use `jti` (kept for at least the token lifetime). RFC 7523 client assertions follow the same rules. Issued tokens use ES256, last at most 5 minutes, and carry `sub = did:vector:<id>`, `cnf.jkt` (RFC 9449), a Token Status List claim and, for delegations, `act` and `authorization_details` (§5.4). |
+| Token service | `POST /token` | RFC 8693, `subject_token_type = urn:ietf:params:oauth:token-type:jwt`. The subject token is a JWT signed (EdDSA) by an authentication key of the agent, with `iss = sub = did:vector:<id>`, `aud = https://id.vector.apexfusion.org/token`, `exp − iat ≤ 5 min` and a single-use `jti` (kept for at least the token lifetime). RFC 7523 client assertions follow the same rules. Issued tokens use ES256, last at most 5 minutes, and carry `cnf.jkt` (RFC 9449) and a Token Status List claim. Without a delegation, `sub = did:vector:<id>`; with a delegation, `sub`, `act` and `authorization_details` follow §5.4. |
 | Introspection, revocation | `POST /introspect`, `POST /revoke` | RFC 7662, RFC 7009. Tokens issued by the gateway only. A change that makes the agent's effective status other than Active revokes all tokens of that agent. |
 | SPIFFE | `POST /spiffe/x509-svid`, `POST /spiffe/jwt-svid`, `GET /spiffe/bundle` | An X.509-SVID needs a CSR and a signature by an authentication key over the CSR public key and a single-use gateway nonce (at most 5 minutes old). P-256; one URI SAN `spiffe://id.vector.apexfusion.org/agent/{id}`; lifetime at most 1 hour; `noRevAvail`. JWT-SVIDs use ES256. The bundle endpoint uses the `https_web` profile with refresh hint 300 s. |
 | Status lists | `GET /status/bsl/{n}`, `GET /status/tsl/{n}` | W3C Bitstring Status List (revocation and suspension purposes) and IETF Token Status List (2 bits: 0 valid, 1 invalid, 2 suspended), signed with ES256. Each list has 131,072 entries. Index `i` is in list `n = floor(i / 131,072)` at position `i mod 131,072`. |
