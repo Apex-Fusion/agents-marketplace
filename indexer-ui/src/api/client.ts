@@ -38,6 +38,8 @@ export interface SupplierRow {
   current_escrow_ref: string | null;
   last_seen_iso: string | null;
   created_slot: number;
+  /** Part 2 §6.4: 64 lowercase hex for a new advert, null for a legacy advert. */
+  agent_id: string | null;
 }
 
 export interface CapabilityCount {
@@ -62,6 +64,17 @@ export interface EscrowView {
   result_receipt_hash: string | null;
   state: string;
   created_slot: number;
+  /** "legacy": the 14-field escrow; "identity": the new 16-field escrow (Part 2 §6.1). */
+  layout: "legacy" | "identity";
+  /** 64 lowercase hex for a new escrow, null for a legacy escrow. */
+  agent_id: string | null;
+  /**
+   * Where buyer payouts go: a bech32 address (Plutus Data CBOR hex when it has
+   * no bech32 form) and the inline datum CBOR hex or null. null: the buyer key.
+   */
+  refund: { address: string; datum: string | null } | null;
+  /** false when payment + both bonds exceed 10,000 AP3X (F-29): no supplier can claim it. */
+  routable: boolean;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

@@ -1,6 +1,7 @@
 import { Paper2AgentClient, type Paper2AgentOffer } from "@marketplace/buyer/sdk/paper2agent";
 import { paper2AgentToolName } from "@marketplace/shared/paper2agent";
 import type { GatewayDeps } from "../deps.js";
+import { paper2AgentClientOptions } from "../routing/escrowSwitch.js";
 
 export type ToolCatalog = ReadonlyMap<string, Paper2AgentOffer>;
 
@@ -17,7 +18,10 @@ export function createToolCatalog(deps: GatewayDeps): () => Promise<ToolCatalog>
   let loading: Promise<ToolCatalog> | undefined;
 
   const load = async (): Promise<ToolCatalog> => {
-    client ??= new Paper2AgentClient({ chain: deps.chain, indexerUrl: deps.config.indexerUrl, fetchFn: deps.fetchFn });
+    client ??= new Paper2AgentClient({
+      chain: deps.chain, indexerUrl: deps.config.indexerUrl, fetchFn: deps.fetchFn,
+      ...paper2AgentClientOptions(deps.config),
+    });
     // Busy and not yet polled tools stay listed; a call waits or reports busy.
     const offers = await client.discover({ includeBusy: true });
     const tools = new Map<string, Paper2AgentOffer>();

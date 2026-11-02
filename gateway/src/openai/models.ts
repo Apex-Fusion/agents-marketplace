@@ -9,6 +9,7 @@ import type { GatewayDeps } from "../deps.js";
 import { asyncHandler } from "../middleware/http.js";
 import { requireKey } from "../middleware/apiKeyAuth.js";
 import { listModels } from "../routing/selectSupplier.js";
+import { newAdvertsOnly } from "../routing/escrowSwitch.js";
 import { buildModelsList } from "./shapes.js";
 import { CAPABILITY as CHAT_CAPABILITY } from "./sessions.js";
 
@@ -21,6 +22,7 @@ export function makeModelsHandler(deps: GatewayDeps) {
       indexerUrl: deps.config.indexerUrl,
       capabilityId: keyRow.demo ? CHAT_CAPABILITY : "llm.text.generate.v1",
       fetchFn: deps.fetchFn,
+      newAdvertsOnly: await newAdvertsOnly(deps),
     });
     res.status(200).json(buildModelsList(models));
   });

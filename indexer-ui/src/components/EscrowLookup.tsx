@@ -6,7 +6,8 @@
  *   2. Client-side validates against /^[0-9a-fA-F]{64}#\d+$/.
  *   3. On valid submit, calls fetchEscrow(ref). On 404 shows "not found";
  *      on success renders a state-machine pill row with the current state
- *      highlighted.
+ *      highlighted, then the identity facts of the escrow (Part 2 §6.1):
+ *      layout, agent DID, refund target and the value-cap flag.
  *
  * data-testid hooks (test contract):
  *   - escrow-ref-input          — text input
@@ -15,10 +16,15 @@
  *   - escrow-state-machine      — shown on 200
  *   - escrow-state-current      — current-state pill (one)
  *   - escrow-state-other        — non-current pills (rest)
+ *   - escrow-layout             — "legacy" or "identity"
+ *   - escrow-agent              — agent DID, or "none" for a legacy escrow
+ *   - escrow-refund             — refund address, or "buyer key"
+ *   - escrow-not-routable       — shown when payment + bonds exceed the 10,000 AP3X cap
  */
 
 import { useState } from "react";
 import { fetchEscrow, type EscrowView } from "../api/client.js";
+import { agentDid } from "../api/did.js";
 
 const REF_REGEX = /^[0-9a-fA-F]{64}#\d+$/;
 
@@ -126,6 +132,32 @@ export default function EscrowLookup() {
               );
             })}
           </ol>
+          <dl className="mt-3 grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-xs">
+            <dt className="text-gray-500">Layout</dt>
+            <dd data-testid="escrow-layout" className="font-mono">
+              {escrow.layout === "identity" ? "identity" : "legacy"}
+            </dd>
+            <dt className="text-gray-500">Agent</dt>
+            <dd data-testid="escrow-agent" className="truncate font-mono">
+              {escrow.agent_id ? agentDid(escrow.agent_id) : "none"}
+            </dd>
+            <dt className="text-gray-500">Refund to</dt>
+            <dd data-testid="escrow-refund" className="truncate font-mono">
+              {escrow.refund
+                ? `${escrow.refund.address}${escrow.refund.datum ? " (with datum)" : ""}`
+                : "buyer key"}
+            </dd>
+          </dl>
+          {escrow.routable === false && (
+            <div
+              data-testid="escrow-not-routable"
+              role="note"
+              className="mt-2 rounded bg-yellow-50 p-2 text-xs text-yellow-800"
+            >
+              Payment and bonds exceed 10,000 AP3X. No supplier can claim this escrow; the
+              buyer gets it back by Reclaim after deliver_by.
+            </div>
+          )}
         </div>
       )}
     </div>

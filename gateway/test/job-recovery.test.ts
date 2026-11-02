@@ -2,14 +2,22 @@ import { randomUUID } from "crypto";
 import { rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   MockChainProvider,
   type OutputReference,
   type Utxo,
 } from "@marketplace/shared/chain";
-import { encodeEscrowDatum, type EscrowDatum } from "@marketplace/shared/cbor";
-import type { WalletKey } from "@marketplace/shared/tx";
+import {
+  encodeEscrowDatum,
+  encodeIdentityEscrowDatum,
+  plutusAddressFromBech32,
+  type EscrowDatum,
+  type IdentityDatum,
+  type IdentityEscrowDatum,
+  type Status,
+} from "@marketplace/shared/cbor";
+import type { IdentityBlueprint, WalletKey } from "@marketplace/shared/tx";
 import { loadConfig } from "../src/config.js";
 import type { GatewayDeps } from "../src/deps.js";
 import { GatewayStore, type ApiKeyRow } from "../src/db/store.js";
@@ -21,6 +29,8 @@ import {
 import type { EscrowLineage } from "../src/onchain/settle.js";
 import { Mutex, type KeyContext, type SdkRegistry } from "../src/sdk/registry.js";
 import { deriveWalletKey, genPrivKeyHex } from "../src/wallet.js";
+import { TEST_IDENTITY_HASH, testIdentityBlueprint } from "../../tests/fixtures/identity-builders/blueprint.js";
+import { agentRecord, recordUtxo, testWallet, tombstone } from "../../tests/fixtures/identity-builders/world.js";
 
 const MASTER_KEY = "c7".repeat(32);
 const MODEL = "recovery-model";
@@ -811,5 +821,214 @@ describe("one-shot financial recovery", () => {
     expect(await chain.queryUtxo({ txHash: "1".repeat(64), index: 2 })).not.toBeNull();
     expect(store.listUsage(key.id, 10)).toEqual([]);
     expect(chain.submissions).toEqual([]);
+  });
+});
+
+describe("one-shot recovery — new escrows (identity layout)", () => {
+  const AGENT = "a1".repeat(32);
+  const controller = testWallet("recovery controller");
+  const agentKey = testWallet("recovery agent key", 0);
+  let blueprint: IdentityBlueprint;
+
+  beforeAll(() => {
+    vi.stubEnv("IDENTITY_POLICY_ID", TEST_IDENTITY_HASH);
+    blueprint = testIdentityBlueprint();
+  });
+
+  afterAll(() => {
+    vi.unstubAllEnvs();
+  });
+
+  interface SyntheticBody {
+    type: string;
+    inputs: OutputReference[];
+    referenceInputs: OutputReference[];
+    outputs: Array<{ address: string; lovelace: string; datumHex: string | null }>;
+    requiredSigners: string[];
+  }
+
+  /** The JSON body of a synthetic (mock backend) transaction; bigints stay strings. */
+  function syntheticBody(txCborHex: string): SyntheticBody {
+    const byteLength = Number.parseInt(txCborHex.slice(0, 8), 16);
+    return JSON.parse(Buffer.from(txCborHex.slice(8, 8 + byteLength * 2), "hex").toString("utf8")) as SyntheticBody;
+  }
+
+  const revoked = (invalidFrom: number | null): Status => ({
+    type: "Revoked", by: { type: "ControllerSet" }, reason: 1, at: Date.now() - 60_000, invalidFrom, successor: null,
+  });
+
+  function identityEscrow(walletKey: WalletKey, changes: Partial<IdentityEscrowDatum>): IdentityEscrowDatum {
+    return {
+      buyer_pkh: walletKey.pubKeyHash,
+      supplier_pkh: agentKey.pubKeyHash,
+      advert_ref: { txHash: "ad".repeat(32), index: 0 },
+      capability_id: CAPABILITY,
+      request_spec_hash: "1".repeat(64),
+      prompt_hash: "2".repeat(64),
+      payment_lovelace: PRICE,
+      buyer_bond_lovelace: 1_000_000n,
+      supplier_bond_lovelace: 1_000_000n,
+      deliver_by: Date.now() + 60_000,
+      posted_at: Date.now() - 120_000,
+      submitted_at: null,
+      result_receipt_hash: null,
+      state: "Open",
+      agent_id: AGENT,
+      refund: { address: plutusAddressFromBech32(walletKey.address), datum: null },
+      ...changes,
+    };
+  }
+
+  function seedIdentityEscrow(chain: ObservedMockChain, ref: OutputReference, datum: IdentityEscrowDatum): Utxo {
+    const utxo: Utxo = {
+      ref,
+      address: blueprint.escrowScriptAddress(0),
+      lovelace: datum.payment_lovelace + datum.buyer_bond_lovelace + datum.supplier_bond_lovelace,
+      assets: {},
+      datumHex: encodeIdentityEscrowDatum(datum),
+      scriptRef: null,
+    };
+    chain.seed(utxo);
+    return utxo;
+  }
+
+  /** The agent record at the testnet identity address (the deps use NETWORK_ID 0). */
+  function seedRecord(chain: ObservedMockChain, datum: IdentityDatum): Utxo {
+    const utxo: Utxo = {
+      ...recordUtxo(blueprint, datum, { txHash: "7e".repeat(32), index: 0 }, AGENT),
+      address: blueprint.identityScriptAddress(0),
+    };
+    chain.seed(utxo);
+    return utxo;
+  }
+
+  function liveWorld(label: string) {
+    const directory = databaseDirectory(label);
+    const store = openStore(directory);
+    const chain = new ObservedMockChain();
+    chain.advanceSlot(Math.floor(Date.now() / 1_000));
+    const { key, walletKey } = keyFixture(`key-${label}`);
+    store.insertKey(key);
+    return { directory, store, chain, key, walletKey };
+  }
+
+  it("counts a RefundRevokedEscrow terminal as a refund", async () => {
+    const { directory, store, chain, key, walletKey } = liveWorld("refund-terminal");
+    const createdAt = Date.now() - 120_000;
+    const escrowRef = `${"5".repeat(64)}#0`;
+    insertFundedJob(store, {
+      id: "job-refund-terminal",
+      keyId: key.id,
+      supplierPkh: agentKey.pubKeyHash,
+      escrowRef,
+      createdAt,
+      advertMarker: "5",
+    });
+    const refundTx = "c".repeat(64);
+    const indexer = lineageIndexer({
+      [escrowRef]: {
+        original_ref: escrowRef,
+        rows: [{ utxo_ref: escrowRef, state: "Claimed", posted_at: createdAt, spent_tx: refundTx }],
+        terminal: { type: "RefundRevokedEscrow", tx_hash: refundTx },
+      },
+    });
+
+    await recoverOneShotJobs(makeDeps(directory, store, chain, indexer.fetchFn, registryFor(key, walletKey, chain)));
+
+    expect(store.getOneShotJob("job-refund-terminal")).toMatchObject({ state: "reclaimed", settle_tx_hash: refundTx });
+    expect(store.listUsage(key.id, 10)).toMatchObject([{
+      status: "reclaimed", cost_lovelace: null, failure_reason: "interrupted request refunded",
+    }]);
+    expect(chain.submissions).toEqual([]);
+  });
+
+  it("refunds a Submitted new escrow of an agent revoked from before submitted_at", async () => {
+    const { directory, store, chain, key, walletKey } = liveWorld("refund-revoked-live");
+    const escrowRef = `${"6".repeat(64)}#0`;
+    const receipt = "e".repeat(64);
+    const submittedAt = Date.now() - 60_000;
+    insertFundedJob(store, {
+      id: "job-refund-revoked",
+      keyId: key.id,
+      supplierPkh: agentKey.pubKeyHash,
+      escrowRef,
+      state: "submitted",
+      receiptHash: receipt,
+      advertMarker: "6",
+    });
+    const escrow = seedIdentityEscrow(chain, { txHash: "6".repeat(64), index: 0 }, identityEscrow(walletKey, {
+      state: "Submitted", submitted_at: submittedAt, result_receipt_hash: receipt,
+    }));
+    const record = seedRecord(chain, tombstone(agentRecord(controller, agentKey), revoked(submittedAt - 1_000)));
+    const indexer = lineageIndexer({ [escrowRef]: liveLineage(escrowRef, "Submitted", Date.now() - 120_000) });
+
+    await recoverOneShotJobs(makeDeps(directory, store, chain, indexer.fetchFn, registryFor(key, walletKey, chain)));
+
+    expect(store.getOneShotJob("job-refund-revoked")).toMatchObject({ state: "reclaimed" });
+    expect(store.listUsage(key.id, 10)).toMatchObject([{ status: "reclaimed", cost_lovelace: null }]);
+    expect(chain.submissions).toHaveLength(1);
+    const body = syntheticBody(chain.submissions[0]!);
+    expect(body.type).toBe("refund-revoked");
+    expect(body.inputs).toEqual([escrow.ref]);
+    expect(body.referenceInputs).toEqual([record.ref]);
+    expect(body.requiredSigners).toEqual([]);
+    expect(body.outputs.map((output) => [output.address, String(output.lovelace)]))
+      .toEqual([[walletKey.address, `${escrow.lovelace}n`]]);
+    expect(await chain.queryUtxo(escrow.ref)).toBeNull();
+  });
+
+  it("accepts a Submitted new escrow of an Active agent", async () => {
+    const { directory, store, chain, key, walletKey } = liveWorld("identity-accept");
+    const escrowRef = `${"8".repeat(64)}#0`;
+    const receipt = "e".repeat(64);
+    insertFundedJob(store, {
+      id: "job-identity-accept",
+      keyId: key.id,
+      supplierPkh: agentKey.pubKeyHash,
+      escrowRef,
+      state: "submitted",
+      receiptHash: receipt,
+      advertMarker: "8",
+    });
+    seedIdentityEscrow(chain, { txHash: "8".repeat(64), index: 0 }, identityEscrow(walletKey, {
+      state: "Submitted", submitted_at: Date.now() - 60_000, result_receipt_hash: receipt,
+    }));
+    seedRecord(chain, agentRecord(controller, agentKey));
+    const indexer = lineageIndexer({ [escrowRef]: liveLineage(escrowRef, "Submitted", Date.now() - 120_000) });
+
+    await recoverOneShotJobs(makeDeps(directory, store, chain, indexer.fetchFn, registryFor(key, walletKey, chain)));
+
+    expect(store.getOneShotJob("job-identity-accept")).toMatchObject({ state: "completed" });
+    expect(chain.submissions.map((tx) => syntheticBody(tx).type)).toEqual(["accept"]);
+    expect(store.sumCostLovelace(key.id)).toBe(PRICE);
+  });
+
+  it("reclaims an Open new escrow past deliver_by to the refund address without a buyer signature", async () => {
+    const { directory, store, chain, key, walletKey } = liveWorld("identity-reclaim");
+    const escrowRef = `${"9".repeat(64)}#0`;
+    const deliverBy = Date.now() - 61_000;
+    insertFundedJob(store, {
+      id: "job-identity-reclaim",
+      keyId: key.id,
+      supplierPkh: agentKey.pubKeyHash,
+      escrowRef,
+      deliverBy,
+      advertMarker: "9",
+    });
+    const escrow = seedIdentityEscrow(chain, { txHash: "9".repeat(64), index: 0 }, identityEscrow(walletKey, {
+      deliver_by: deliverBy, posted_at: deliverBy - 30_000,
+    }));
+    seedRecord(chain, agentRecord(controller, agentKey));
+    const indexer = lineageIndexer({ [escrowRef]: liveLineage(escrowRef, "Open", Date.now() - 120_000) });
+
+    await recoverOneShotJobs(makeDeps(directory, store, chain, indexer.fetchFn, registryFor(key, walletKey, chain)));
+
+    expect(store.getOneShotJob("job-identity-reclaim")).toMatchObject({ state: "reclaimed" });
+    expect(chain.submissions).toHaveLength(1);
+    const body = syntheticBody(chain.submissions[0]!);
+    expect(body.type).toBe("reclaim");
+    expect(body.requiredSigners).toEqual([]);
+    expect(body.outputs.map((output) => [output.address, String(output.lovelace)]))
+      .toEqual([[walletKey.address, `${escrow.lovelace}n`]]);
   });
 });

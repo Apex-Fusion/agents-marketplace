@@ -19,6 +19,7 @@ import type { KeyContext } from "../sdk/registry.js";
 import { requireKey } from "../middleware/apiKeyAuth.js";
 import { asyncHandler, requestAbortSignal } from "../middleware/http.js";
 import { selectCandidates, type SupplierCandidate } from "../routing/selectSupplier.js";
+import { newAdvertsOnly } from "../routing/escrowSwitch.js";
 import { preflight } from "../onchain/preflight.js";
 import { resolveSubmittedRef, acceptAndConfirm } from "../onchain/settle.js";
 import { ensureWalletHealthy } from "../walletHealth.js";
@@ -266,7 +267,7 @@ async function runOneShot(
       const candidates = await selectCandidates({
         indexerUrl: deps.config.indexerUrl, model: parsed.model, capabilityId: CAPABILITY,
         supplierPkh: parsed.supplierPkh, preferredSupplierPkh: deps.config.preferredSupplierPkh,
-        fetchFn: deps.fetchFn, signal: admissionSignal,
+        fetchFn: deps.fetchFn, signal: admissionSignal, newAdvertsOnly: await newAdvertsOnly(deps),
       });
       const eligible = candidates.filter((item) => !excluded.has(item.supplierPkh));
       if (eligible.length === 0 && lastError) throw lastError;

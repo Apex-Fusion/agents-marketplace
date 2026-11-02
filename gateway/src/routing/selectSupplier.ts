@@ -10,9 +10,17 @@
  * `status==="unknown"` is treated as eligible: the indexer poller (~20s) leaves
  * freshly-advertised suppliers as "unknown" until first polled, and excluding
  * them would create artificial availability gaps.
+ *
+ * Identity registry (Part 2 §6.4, §6.5, §9.6): a row's `agent_id` is 64
+ * lowercase hex for a new advert and null (or absent) for a legacy advert.
+ * The gateway never routes an advert whose price + buyer bond + supplier bond
+ * exceed 10,000 AP3X (F-29): such an escrow cannot be claimed. After the
+ * escrow switch it routes only new adverts. The indexer lists only adverts
+ * that pass the listing rule, so a routed new advert is a listed one.
  */
 
 import type { OutputReference } from "@marketplace/shared/chain";
+import { ESCROW_VALUE_CAP_LOVELACE } from "@marketplace/shared/tx";
 import { GatewayError } from "../openai/errors.js";
 
 /** Subset of the indexer's SupplierView we depend on. */
@@ -29,6 +37,8 @@ interface SupplierView {
   endpoint_url: string;
   advert_status: string;
   status: string;
+  /** Absent from an indexer without identity support: a legacy advert. */
+  agent_id?: string | null;
 }
 
 export interface SupplierCandidate {
@@ -45,9 +55,13 @@ export interface SupplierCandidate {
   /** Advert SLA; every wait budget for a job against this supplier derives from it. */
   maxProcessingMs: number;
   status: string;
+  /** The advert's agent (64 lowercase hex), or null for a legacy advert. */
+  agentId: string | null;
 }
 
 const ESCROW_REF_RE = /^([0-9a-fA-F]{64})#(\d+)$/;
+const AGENT_ID_RE = /^[0-9a-f]{64}$/;
+
 const STATUS_PROBE_CONCURRENCY = 4;
 const STATUS_PROBE_TIMEOUT_MS = 2_000;
 
@@ -69,7 +83,27 @@ function toCandidate(raw: SupplierView, status = raw.status): SupplierCandidate 
     maxOutputTokens: raw.max_output_tokens,
     maxProcessingMs: raw.max_processing_ms,
     status,
+    agentId: raw.agent_id ?? null,
   };
+}
+
+/**
+ * The identity rules of routing: payment (the advert price) + both bonds at
+ * most 10,000 AP3X with no negative amount, as the Post builders check (F-29);
+ * a well-formed agent_id; and only new adverts once `newAdvertsOnly` is set.
+ */
+function routable(raw: SupplierView, newAdvertsOnly: boolean): boolean {
+  const agentId = raw.agent_id ?? null;
+  if (agentId !== null && !AGENT_ID_RE.test(agentId)) return false;
+  if (newAdvertsOnly && agentId === null) return false;
+  let amounts: bigint[];
+  try {
+    amounts = [BigInt(raw.price_lovelace), BigInt(raw.buyer_bond_lovelace), BigInt(raw.supplier_bond_lovelace)];
+  } catch {
+    return false;
+  }
+  return amounts.every((amount) => amount >= 0n) &&
+    amounts.reduce((sum, amount) => sum + amount, 0n) <= ESCROW_VALUE_CAP_LOVELACE;
 }
 
 async function readLiveStatus(
@@ -153,6 +187,8 @@ export interface SelectSupplierOpts {
    * rechecked even if another cached candidate looks ready, because that other
    * candidate may be the busy supplier that caused the eviction. */
   ignoreStatusFor?: ReadonlySet<string>;
+  /** After the escrow switch (Part 2 §9.6): route only new adverts (agent_id set). */
+  newAdvertsOnly?: boolean;
 }
 
 /**
@@ -181,6 +217,7 @@ export async function selectCandidates(opts: SelectSupplierOpts): Promise<Suppli
       continue;
     }
     if (raw.advert_status !== "Active") continue;
+    if (!routable(raw, opts.newAdvertsOnly ?? false)) continue;
     matching.push(raw);
   }
   if (matching.length === 0) return [];
@@ -233,13 +270,16 @@ export async function selectCandidates(opts: SelectSupplierOpts): Promise<Suppli
   );
 }
 
-/** Distinct models across Active suppliers (for GET /openai/v1/models).
+/** Distinct models across routable Active suppliers (for GET /openai/v1/models).
  * Pass capabilityId to list only models under one capability (demo keys see
- * only llm.chat.v1 models — the session-backed executor's routing target). */
+ * only llm.chat.v1 models — the session-backed executor's routing target).
+ * The routing rules apply, so the list names only models that can be routed. */
 export async function listModels(opts: {
   indexerUrl: string;
   capabilityId?: string;
   fetchFn?: typeof globalThis.fetch;
+  /** After the escrow switch (Part 2 §9.6): only new adverts. */
+  newAdvertsOnly?: boolean;
 }): Promise<string[]> {
   const fetchFn = opts.fetchFn ?? globalThis.fetch;
   const url = opts.capabilityId
@@ -253,6 +293,7 @@ export async function listModels(opts: {
   for (const raw of body as SupplierView[]) {
     if (raw.advert_status !== "Active" || typeof raw.model !== "string") continue;
     if (opts.capabilityId !== undefined && raw.capability_id !== opts.capabilityId) continue;
+    if (!routable(raw, opts.newAdvertsOnly ?? false)) continue;
     models.add(raw.model);
   }
   return [...models].sort();

@@ -42,8 +42,11 @@ describe("crypto/seal", () => {
     expect(open(sealed, MASTER)).toBe(priv);
     // Wrong key fails the GCM auth tag.
     expect(() => open(sealed, "ff".repeat(32))).toThrow();
-    // Tampered ciphertext fails.
-    expect(() => open({ ...sealed, ct: sealed.ct.replace(/.$/, "0") }, MASTER)).toThrow();
+    // Tampered ciphertext fails. Flip the last hex digit to another value, so
+    // the ciphertext always changes (a fixed "0" left it unchanged 1 in 16 runs).
+    const tampered = sealed.ct.replace(/.$/, (c) => (c === "0" ? "1" : "0"));
+    expect(tampered).not.toBe(sealed.ct);
+    expect(() => open({ ...sealed, ct: tampered }, MASTER)).toThrow();
   });
 });
 

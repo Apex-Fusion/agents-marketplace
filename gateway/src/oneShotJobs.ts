@@ -1,13 +1,17 @@
 import { randomUUID } from "crypto";
 import { setTimeout as delay } from "node:timers/promises";
-import { decodeEscrowDatum } from "@marketplace/shared/cbor";
+import { decodeAnyEscrowDatum } from "@marketplace/shared/cbor";
+import type { RecordLookup } from "@marketplace/shared/tx";
 import type { GatewayDeps } from "./deps.js";
 import type { ApiKeyRow, GatewayStore, OneShotJobRow } from "./db/store.js";
 import { GatewayError, notFound, toGatewayError } from "./openai/errors.js";
 import { completeStoredResponse } from "./openai/responseStore.js";
 import { isResponseObject, streamFailure } from "./openai/shapes.js";
-import { acceptAndConfirm, fetchEscrowLineage, reclaimAndConfirm } from "./onchain/settle.js";
+import {
+  acceptAndConfirm, fetchEscrowLineage, isRefundTerminal, reclaimAndConfirm, refundRevokedAndConfirm,
+} from "./onchain/settle.js";
 import type { EscrowLineage } from "./onchain/settle.js";
+import { chainRecordLookup, refundRevokedApplies } from "./onchain/records.js";
 import { parseRef, type SupplierCandidate } from "./routing/selectSupplier.js";
 
 const HEARTBEAT_MS = 5_000;
@@ -187,8 +191,12 @@ export interface OneShotRecoveryResult {
   protectedKeys: Set<string>;
 }
 
-/** Recover finances, never replay a prompt or create another payment. */
-export async function recoverOneShotJobs(deps: GatewayDeps): Promise<OneShotRecoveryResult> {
+/** Recover finances, never replay a prompt or create another payment. A sweep
+ * passes its record lookup, so it reads the identity address once at most. */
+export async function recoverOneShotJobs(
+  deps: GatewayDeps,
+  lookupRecord: RecordLookup = chainRecordLookup(deps.chain, deps.config.networkId),
+): Promise<OneShotRecoveryResult> {
   const current = runtime(deps);
   const protection: OneShotRecoveryResult = { protectedRefs: new Set(), protectedKeys: new Set() };
   for (const initial of deps.store.listUnfinishedOneShotJobs()) {
@@ -253,10 +261,10 @@ export async function recoverOneShotJobs(deps: GatewayDeps): Promise<OneShotReco
         }
         if (observed.original_ref !== job.escrow_ref) throw new Error("escrow lineage origin mismatch");
         if (observed.terminal) {
-          const reclaimed = observed.terminal.type === "ReclaimEscrow";
+          const refunded = isRefundTerminal(observed.terminal.type);
           updateOneShotJob(deps, job.id, { settle_tx_hash: observed.terminal.tx_hash });
-          recordRecoveredOutcome(deps, job, reclaimed ? "reclaimed" : "completed",
-            reclaimed ? "interrupted request refunded" : "interrupted request settled on chain");
+          recordRecoveredOutcome(deps, job, refunded ? "reclaimed" : "completed",
+            refunded ? "interrupted request refunded" : "interrupted request settled on chain");
           return;
         }
         const latest = observed.rows.at(-1);
@@ -265,9 +273,19 @@ export async function recoverOneShotJobs(deps: GatewayDeps): Promise<OneShotReco
         if (!ref) throw new Error("invalid escrow lineage reference");
         const utxo = await ctx.chain.queryUtxo(ref);
         if (!utxo?.datumHex) return; // spent after the indexer's snapshot
-        const datum = decodeEscrowDatum(utxo.datumHex);
+        const escrow = decodeAnyEscrowDatum(utxo.datumHex);
+        const datum = escrow.datum;
         if (datum.buyer_pkh !== key.wallet_pkh || datum.supplier_pkh !== job.supplier_pkh) {
           throw new Error("escrow lineage wallet mismatch");
+        }
+        // A new escrow whose agent is revoked or retired goes back to the buyer
+        // in full (RefundRevoked, Part 2 §6.1), also before deliver_by and
+        // instead of an Accept that would pay the agent.
+        if (escrow.layout === "identity" && await refundRevokedApplies(escrow.datum, lookupRecord)) {
+          const txHash = await refundRevokedAndConfirm(ctx.chain, ctx.walletKey, ref, lookupRecord);
+          updateOneShotJob(deps, job.id, { settle_tx_hash: txHash });
+          recordRecoveredOutcome(deps, job, "reclaimed", "interrupted request refunded");
+          return;
         }
         if (datum.state === "Submitted") {
           if (job.receipt_hash && datum.result_receipt_hash !== job.receipt_hash) {

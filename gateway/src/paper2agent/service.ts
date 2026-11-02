@@ -3,6 +3,7 @@ import { SupplierError } from "@marketplace/buyer/sdk";
 import type { JsonObject } from "@marketplace/shared/paper2agent";
 import type { GatewayDeps } from "../deps.js";
 import { createLimiter, type Limiter } from "../middleware/rateLimit.js";
+import { paper2AgentClientOptions } from "../routing/escrowSwitch.js";
 
 /** Bounds queue memory; the queue wait time is `mcpCallQueueTimeoutMs`. */
 const MAX_QUEUED_CALLS = 64;
@@ -154,7 +155,10 @@ export class FreeToolCalls {
         throw new ToolCallError("paper2agent_tool_busy", "The tool is busy with other calls. Try again in a few minutes.");
       }
       try {
-        this.client ??= new Paper2AgentClient({ chain: this.deps.chain, indexerUrl: this.deps.config.indexerUrl, fetchFn: this.deps.fetchFn });
+        this.client ??= new Paper2AgentClient({
+          chain: this.deps.chain, indexerUrl: this.deps.config.indexerUrl, fetchFn: this.deps.fetchFn,
+          ...paper2AgentClientOptions(this.deps.config),
+        });
         return await this.client.call(offer, input, { token });
       } catch (error) {
         throw mapCallFailure(error);

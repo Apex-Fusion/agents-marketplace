@@ -4,13 +4,17 @@
  * Sources:
  *   - usePolling(fetchSuppliers, 30_000) — periodic refresh
  *   - useSSE("") — re-fetch on chain-event so the table reflects fresh state
- *     (PostAdvert / RetireAdvert / Post/Claim/Submit/Accept/Reclaim/ReleaseEscrow)
+ *     (PostAdvert / RetireAdvert / Post/Claim/Submit/Accept/Reclaim/Release/RefundRevokedEscrow)
  *
- * Columns: capability_id | model | price (AP3X) | status | last_seen
+ * Columns: capability_id | model | agent (DID) | price (AP3X) | status | last_seen
+ *
+ * The agent column shows the canonical DID of a new advert's agent_id, and
+ * "legacy" for a legacy advert (agent_id null, Part 2 §6.4).
  *
  * data-testid hooks (test contract):
  *   - suppliers-table   — the <table> element
  *   - supplier-row      — each <tr> data row
+ *   - supplier-agent    — each agent cell
  *   - status-pill       — each status badge (className includes a colour token
  *                         matching {green|blue|gray} for {free|working|offline})
  */
@@ -19,6 +23,7 @@ import { useCallback, useEffect, useState } from "react";
 import { usePolling } from "../hooks/usePolling.js";
 import { useSSE } from "../hooks/useSSE.js";
 import { fetchSuppliers, type SupplierRow } from "../api/client.js";
+import { agentDid } from "../api/did.js";
 
 const POLL_INTERVAL_MS = 30_000;
 
@@ -85,6 +90,7 @@ export default function SuppliersTable() {
           <tr className="border-b border-gray-200 text-gray-600">
             <th className="py-2 pr-3">Capability</th>
             <th className="py-2 pr-3">Model</th>
+            <th className="py-2 pr-3">Agent</th>
             <th className="py-2 pr-3">Price</th>
             <th className="py-2 pr-3">Status</th>
             <th className="py-2 pr-3">Last seen</th>
@@ -99,6 +105,11 @@ export default function SuppliersTable() {
             >
               <td className="py-2 pr-3 font-mono text-xs">{row.capability_id}</td>
               <td className="py-2 pr-3">{row.model}</td>
+              <td data-testid="supplier-agent" className="max-w-[16rem] truncate py-2 pr-3 font-mono text-xs">
+                {row.agent_id
+                  ? <span title={agentDid(row.agent_id)}>{agentDid(row.agent_id)}</span>
+                  : <span className="text-gray-400">legacy</span>}
+              </td>
               <td className="py-2 pr-3">{formatPrice(row.price_lovelace)}</td>
               <td className="py-2 pr-3">
                 <span data-testid="status-pill" className={statusPillClass(row.status)}>

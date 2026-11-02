@@ -18,12 +18,19 @@
  *
  * acceptResult/reclaim on the SDK are fire-and-forget; here we buildAcceptTx /
  * buildReclaimTx and AWAIT confirmation so a returned success means settled.
+ *
+ * Both escrow layouts (Part 2 §9.6 drain): the datum decides. The builders
+ * spend a legacy (14-field) escrow at the legacy script and a new (16-field)
+ * escrow at the new script. A new escrow with `refund` set returns its funds
+ * to refund.address, and anybody may submit its Reclaim. RefundRevoked
+ * (new escrow only) returns the whole escrow when the agent is revoked or
+ * retired (onchain/records.ts).
  */
 
 import type { ChainProvider, OutputReference } from "@marketplace/shared/chain";
-import { decodeEscrowDatum } from "@marketplace/shared/cbor";
-import type { WalletKey } from "@marketplace/shared/tx";
-import { buildAcceptTx, buildReclaimTx } from "@marketplace/shared/tx";
+import { decodeAnyEscrowDatum } from "@marketplace/shared/cbor";
+import type { RecordLookup, WalletKey } from "@marketplace/shared/tx";
+import { buildAcceptTx, buildReclaimTx, buildRefundRevokedTx } from "@marketplace/shared/tx";
 import { submitBudgetMs } from "@marketplace/buyer/sdk";
 import { parseRef } from "../routing/selectSupplier.js";
 import { GatewayError } from "../openai/errors.js";
@@ -75,13 +82,26 @@ export interface EscrowRow {
   result_receipt_hash?: string | null;
   created_slot?: number;
   spent_tx?: string | null;
+  /** Datum layout; absent from an indexer without identity support (legacy). */
+  layout?: "legacy" | "identity";
+  /** 64 lowercase hex for a new escrow, null for a legacy escrow. */
+  agent_id?: string | null;
+  /** Where buyer payouts go (bech32 address, inline datum CBOR); null: the buyer key. */
+  refund?: { address: string; datum: string | null } | null;
+  /** false when payment + bonds exceed 10,000 AP3X (F-29): only Reclaim after deliver_by returns it. */
+  routable?: boolean;
 }
 
 export interface EscrowLineageRow extends EscrowRow {
   spent_tx: string | null;
 }
 
-export type EscrowTerminalType = "AcceptEscrow" | "ReclaimEscrow" | "ReleaseEscrow";
+export type EscrowTerminalType = "AcceptEscrow" | "ReclaimEscrow" | "ReleaseEscrow" | "RefundRevokedEscrow";
+
+/** Reclaim and RefundRevoked return the escrow to the buyer; Accept and Release pay the supplier. */
+export function isRefundTerminal(type: EscrowTerminalType): boolean {
+  return type === "ReclaimEscrow" || type === "RefundRevokedEscrow";
+}
 
 export interface EscrowLineage {
   original_ref: string;
@@ -129,7 +149,8 @@ function isEscrowTerminal(
   return (
     value.type === "AcceptEscrow" ||
     value.type === "ReclaimEscrow" ||
-    value.type === "ReleaseEscrow"
+    value.type === "ReleaseEscrow" ||
+    value.type === "RefundRevokedEscrow"
   );
 }
 
@@ -193,7 +214,7 @@ async function hintVerified(
     if (hint.resultReceiptHash !== receiptHash) return false;
     const utxo = await chain.queryUtxo(hint.ref);
     if (!utxo?.datumHex) return false;
-    const datum = decodeEscrowDatum(utxo.datumHex);
+    const { datum } = decodeAnyEscrowDatum(utxo.datumHex);
     return (
       datum.state === "Submitted" &&
       datum.buyer_pkh === buyerPkh &&
@@ -217,7 +238,7 @@ async function lineageSubmittedVerified(
     const ref = refOrThrow(row.utxo_ref);
     const utxo = await chain.queryUtxo(ref);
     if (!utxo?.datumHex) return false;
-    const datum = decodeEscrowDatum(utxo.datumHex);
+    const { datum } = decodeAnyEscrowDatum(utxo.datumHex);
     return (
       datum.state === "Submitted" &&
       datum.buyer_pkh === buyerPkh &&
@@ -318,7 +339,8 @@ export async function acceptAndConfirm(
   return built.expectedTxHash;
 }
 
-/** Build + submit + await a Reclaim tx (Open/Claimed → Reclaimed). */
+/** Build + submit + await a Reclaim tx (Open/Claimed → Reclaimed). For a new
+ * escrow with `refund` set, the builder needs no buyer signature. */
 export async function reclaimAndConfirm(
   chain: ChainProvider,
   walletKey: WalletKey,
@@ -326,6 +348,20 @@ export async function reclaimAndConfirm(
   awaitTimeoutMs = ACCEPT_CONFIRM_TIMEOUT_MS,
 ): Promise<string> {
   const built = await buildReclaimTx({ chain, buyerKey: walletKey, escrowRef });
+  await chain.awaitTx(built.expectedTxHash, awaitTimeoutMs);
+  return built.expectedTxHash;
+}
+
+/** Build + submit + await a RefundRevoked tx (new escrow, terminal): the whole
+ * escrow goes to the buyer because the agent is revoked or retired. */
+export async function refundRevokedAndConfirm(
+  chain: ChainProvider,
+  walletKey: WalletKey,
+  escrowRef: OutputReference,
+  lookupRecord: RecordLookup,
+  awaitTimeoutMs = ACCEPT_CONFIRM_TIMEOUT_MS,
+): Promise<string> {
+  const built = await buildRefundRevokedTx({ chain, walletKey, escrowRef, lookupRecord });
   await chain.awaitTx(built.expectedTxHash, awaitTimeoutMs);
   return built.expectedTxHash;
 }

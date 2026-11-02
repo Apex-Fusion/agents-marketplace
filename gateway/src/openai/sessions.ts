@@ -21,6 +21,7 @@ import type { GatewayDeps } from "../deps.js";
 import type { ApiKeyRow, SessionRow } from "../db/store.js";
 import type { KeyContext } from "../sdk/registry.js";
 import { selectCandidates } from "../routing/selectSupplier.js";
+import { newAdvertsOnly } from "../routing/escrowSwitch.js";
 import { preflight } from "../onchain/preflight.js";
 import { seal } from "../crypto/seal.js";
 import { badRequest, notFound, paymentRequired, toGatewayError } from "./errors.js";
@@ -111,6 +112,7 @@ export async function openSessionCore(
     preferredSupplierPkh: deps.config.preferredSupplierPkh,
     fetchFn: deps.fetchFn,
     ignoreStatusFor: opts?.ignoreStatusFor,
+    newAdvertsOnly: await newAdvertsOnly(deps),
   });
   if (candidates.length === 0) {
     throw notFound("model_not_found", `no active supplier for model "${model}" with capability "${CAPABILITY}"`, "model");

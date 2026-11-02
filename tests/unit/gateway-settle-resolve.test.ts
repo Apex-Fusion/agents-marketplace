@@ -13,6 +13,7 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   fetchEscrowLineage,
+  isRefundTerminal,
   resolveSubmittedRef,
   oneShotBudgetMs,
   type EscrowLineage,
@@ -20,6 +21,7 @@ import {
 import { Mutex } from "../../gateway/src/sdk/registry.js";
 import { submitBudgetMs } from "../../buyer/src/sdk/budget.js";
 import { encodeEscrowDatum } from "../../packages/shared/src/cbor/EscrowDatum.js";
+import { encodeIdentityEscrowDatum } from "../../packages/shared/src/cbor/IdentityEscrowDatum.js";
 import type { ChainProvider, Utxo } from "../../packages/shared/src/chain/ChainProvider.js";
 import {
   buildSubmittedEscrowUtxo,
@@ -100,11 +102,87 @@ describe("fetchEscrowLineage()", () => {
       fetchFn as unknown as typeof fetch,
     )).resolves.toBeNull();
   });
+
+  it("accepts a RefundRevoked terminal of a new escrow (Part 2 §6.4)", async () => {
+    const refundTx = "9".repeat(64);
+    const lineage: EscrowLineage = {
+      original_ref: ORIGINAL_REF,
+      rows: [{
+        utxo_ref: ORIGINAL_REF,
+        state: "Claimed",
+        posted_at: 1,
+        spent_tx: refundTx,
+        layout: "identity",
+        agent_id: "a1".repeat(32),
+        refund: { address: "addr_test1vqexample", datum: null },
+        routable: true,
+      }],
+      terminal: { type: "RefundRevokedEscrow", tx_hash: refundTx },
+    };
+    const fetchFn = indexerWith(lineage);
+
+    await expect(fetchEscrowLineage(
+      "http://indexer.test",
+      ORIGINAL_REF,
+      fetchFn as unknown as typeof fetch,
+    )).resolves.toEqual(lineage);
+  });
+
+  it("still refuses an unknown terminal type", async () => {
+    const fetchFn = indexerWith({
+      original_ref: ORIGINAL_REF,
+      rows: [],
+      terminal: { type: "BurnEscrow", tx_hash: "9".repeat(64) },
+    } as unknown as EscrowLineage);
+
+    await expect(fetchEscrowLineage(
+      "http://indexer.test",
+      ORIGINAL_REF,
+      fetchFn as unknown as typeof fetch,
+    )).rejects.toThrow("invalid response");
+  });
+});
+
+describe("isRefundTerminal()", () => {
+  it("counts Reclaim and RefundRevoked as refunds", () => {
+    expect(isRefundTerminal("ReclaimEscrow")).toBe(true);
+    expect(isRefundTerminal("RefundRevokedEscrow")).toBe(true);
+    expect(isRefundTerminal("AcceptEscrow")).toBe(false);
+    expect(isRefundTerminal("ReleaseEscrow")).toBe(false);
+  });
 });
 
 describe("resolveSubmittedRef() — exact lineage", () => {
   it("preserves a supplier hint verified against the expected receipt", async () => {
     const utxo = buildSubmittedEscrowUtxo();
+    const fetchFn = indexerWith(null, 404);
+
+    const ref = await resolveSubmittedRef({
+      chain: chainWith(utxo),
+      indexerUrl: "http://indexer.test",
+      buyerPkh: BUYER_PKH,
+      originalRefStr: ORIGINAL_REF,
+      hint: { ref: utxo.ref, resultReceiptHash: RECEIPT_HASH },
+      receiptHash: RECEIPT_HASH,
+      fetchFn: fetchFn as unknown as typeof fetch,
+      timeoutMs: 0,
+    });
+
+    expect(ref).toEqual(utxo.ref);
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it("verifies a hint that holds a new (16-field) Submitted escrow", async () => {
+    const base = buildSubmittedEscrowUtxo();
+    const utxo: Utxo = {
+      ...base,
+      ref: { txHash: "5".repeat(64), index: 0 },
+      datumHex: encodeIdentityEscrowDatum({
+        ...submittedEscrowDatum(),
+        agent_id: "a1".repeat(32),
+        refund: null,
+      }),
+    };
     const fetchFn = indexerWith(null, 404);
 
     const ref = await resolveSubmittedRef({

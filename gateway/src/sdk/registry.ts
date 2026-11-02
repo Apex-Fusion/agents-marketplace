@@ -128,6 +128,8 @@ export interface SdkRegistryDeps {
   masterKeyHex: string;
   max: number;
   fetchFn?: typeof globalThis.fetch;
+  /** Escrow switch slot (Part 2 §9.6): from it on, the SDK posts only new escrows. */
+  switchSlot?: number | null;
 }
 
 interface StableWalletState {
@@ -159,6 +161,9 @@ export class SdkRegistry {
     );
     const walletKey = deriveWalletKey(privHex, this.deps.networkId);
     const walletState = this.getWalletState(keyRow.id, walletKey.pubKeyHash);
+    // The SDK takes the switch slot as an option fragment (spread), the same
+    // value that the gateway's own routing uses.
+    const switchOptions = { switchSlot: this.deps.switchSlot ?? null };
     const sdk = new Marketplace({
       chain: walletState.guard.chain,
       indexerUrl: this.deps.indexerUrl,
@@ -166,6 +171,7 @@ export class SdkRegistry {
       networkParams: { networkId: this.deps.networkId },
       historyStore: new MemoryTaskHistoryStore(),
       _fetch: this.deps.fetchFn,
+      ...switchOptions,
     });
     const ctx: KeyContext = {
       sdk,

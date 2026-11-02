@@ -11,10 +11,14 @@
  * buyer_bond + supplier_bond) + collateral + fee reserve, AND the wallet
  * must currently hold a pure-AP3X UTxO ≥ collateral. We check both up front
  * and return a clean 402 instead of failing mid-flight.
+ *
+ * The floor uses the new (16-field) escrow datum (Part 2 §6.1): `agent_id`
+ * and `refund` make it larger than the legacy 14-field datum, so the same
+ * estimate covers both layouts during the drain.
  */
 
 import type { ChainProvider, Utxo } from "@marketplace/shared/chain";
-import type { EscrowDatum } from "@marketplace/shared/cbor";
+import type { IdentityEscrowDatum } from "@marketplace/shared/cbor";
 import { escrowLockFloor } from "@marketplace/shared/tx";
 
 export const COLLATERAL_MIN_LOVELACE = 5_000_000n;
@@ -49,10 +53,13 @@ export interface PreflightCost {
  * floor. Every field except capability_id and the cost amounts is a
  * fixed-size stand-in (real hash/pkh byte widths, a realistic 13-digit
  * POSIX-ms timestamp) — capability_id's actual length is what drives the
- * estimate, exactly as in escrowLockFloor's own contract. */
-function representativeEscrowDatum(cost: PreflightCost): EscrowDatum {
+ * estimate, exactly as in escrowLockFloor's own contract. The refund is the
+ * buyer's own address with no datum, as the Post builders set it; gateway
+ * wallets are enterprise key addresses (wallet.ts). */
+function representativeEscrowDatum(cost: PreflightCost): IdentityEscrowDatum {
+  const buyerPkh = "3b2fdaed0398485ff35887fb7d0ad2025348864407854f7831dc6a55";
   return {
-    buyer_pkh: "3b2fdaed0398485ff35887fb7d0ad2025348864407854f7831dc6a55",
+    buyer_pkh: buyerPkh,
     supplier_pkh: "401af418a7e6fb106277292881fcdeaa1cc15b5b112e9c8bdb2d46c9",
     advert_ref: { txHash: "a6".repeat(32), index: 0 },
     capability_id: cost.capabilityId,
@@ -66,6 +73,11 @@ function representativeEscrowDatum(cost: PreflightCost): EscrowDatum {
     submitted_at: null,
     result_receipt_hash: null,
     state: "Open",
+    agent_id: "5e".repeat(32),
+    refund: {
+      address: { paymentCredential: { type: "VerificationKey", hash: buyerPkh }, stakeCredential: null },
+      datum: null,
+    },
   };
 }
 

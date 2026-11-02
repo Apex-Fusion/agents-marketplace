@@ -34,6 +34,7 @@ export function buildUiSupplierRow(overrides: Partial<SupplierRow> = {}): Suppli
     current_escrow_ref: null,
     last_seen_iso: "2026-04-24T12:00:00.000Z",
     created_slot: 2000,
+    agent_id: null,
     ...overrides,
   };
 }
@@ -59,6 +60,17 @@ export const SAMPLE_OFFLINE_SUPPLIER: SupplierRow = buildUiSupplierRow({
   status: "offline",
   price_lovelace: "3000000",
   model: "mistral:7b",
+});
+
+/** A new advert (Part 2 §6.2): the indexer sends its agent_id as 64 lowercase hex. */
+export const UI_AGENT_ID = "c4".repeat(32);
+
+export const SAMPLE_NEW_ADVERT_SUPPLIER: SupplierRow = buildUiSupplierRow({
+  utxo_ref: "c".repeat(64) + "#3",
+  supplier_pkh: "2".repeat(56),
+  status: "free",
+  model: "qwen3:8b",
+  agent_id: UI_AGENT_ID,
 });
 
 export const ALL_SAMPLE_SUPPLIERS: SupplierRow[] = [

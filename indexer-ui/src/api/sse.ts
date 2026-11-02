@@ -35,6 +35,8 @@ const KNOWN_EVENT_TYPES = [
   "AcceptEscrow",
   "ReclaimEscrow",
   "ReleaseEscrow",
+  // New escrow only (Part 2 §6.1): the agent is revoked or retired; the buyer gets the whole escrow back.
+  "RefundRevokedEscrow",
   "sync-progress",
 ] as const;
 

@@ -6,6 +6,7 @@
  * importing this module (tests) does not start the server.
  */
 
+import { loadIdentityBlueprint } from "@marketplace/shared/tx";
 import { loadConfig } from "./config.js";
 import { buildChainProvider } from "./chain.js";
 import { GatewayStore } from "./db/store.js";
@@ -17,6 +18,9 @@ import type { GatewayDeps } from "./deps.js";
 
 export function buildDeps(env: Record<string, string | undefined>): GatewayDeps {
   const config = loadConfig(env);
+  // Fail at boot, not at the first new escrow: the image must hold the
+  // identity blueprint, and its code must hash to the blueprint hashes.
+  if (config.identityPolicyId !== null) loadIdentityBlueprint({ identityHash: config.identityPolicyId });
   const store = new GatewayStore(config.dbDir);
   const chain = buildChainProvider(config);
   const registry = new SdkRegistry({
@@ -27,6 +31,7 @@ export function buildDeps(env: Record<string, string | undefined>): GatewayDeps 
     networkId: config.networkId,
     masterKeyHex: config.masterKeyHex,
     max: config.sdkRegistryMax,
+    switchSlot: config.switchSlot,
   });
   return { config, store, chain, registry, fetchFn: globalThis.fetch };
 }

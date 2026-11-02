@@ -7,12 +7,25 @@
  * under ticket config (they can only come from full-mode suppliers). The
  * settled-refs memory prevents re-attempting refs already settled, and the
  * deliver_by gate skips reclaims the validator would reject.
+ *
+ * New escrows (Part 2 §6.1, §9.6): RefundRevoked when the agent's record
+ * allows it, Accept and Reclaim otherwise, one read of the identity address
+ * per sweep.
  */
 
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeAll, afterAll, type Mock } from "vitest";
 import { tmpdir } from "os";
 import { join } from "path";
 import { randomBytes, randomUUID } from "crypto";
+import type { Utxo } from "@marketplace/shared/chain";
+import {
+  encodeIdentityEscrowDatum,
+  plutusAddressFromBech32,
+  type IdentityDatum,
+  type IdentityEscrowDatum,
+  type Status,
+} from "@marketplace/shared/cbor";
+import type { IdentityBlueprint, RecordLookup, WalletKey } from "@marketplace/shared/tx";
 import { GatewayStore } from "../src/db/store.js";
 import { SdkRegistry } from "../src/sdk/registry.js";
 import { genPrivKeyHex, deriveWalletKey } from "../src/wallet.js";
@@ -23,10 +36,17 @@ import { transcripts } from "../src/openai/transcripts.js";
 import type { GatewayConfig } from "../src/config.js";
 import type { GatewayDeps } from "../src/deps.js";
 import type { EscrowRow } from "../src/onchain/settle.js";
+import { TEST_IDENTITY_HASH, testIdentityBlueprint } from "../../tests/fixtures/identity-builders/blueprint.js";
+import { agentRecord, recordUtxo, testWallet, tombstone } from "../../tests/fixtures/identity-builders/world.js";
 
 const MASTER = "ab".repeat(32);
 
-function makeSweepDeps(opts: { chatSettleMode: "full" | "ticket"; escrows: EscrowRow[] }) {
+function makeSweepDeps(opts: {
+  chatSettleMode: "full" | "ticket";
+  escrows: EscrowRow[];
+  chain?: GatewayDeps["chain"];
+  privHex?: string;
+}) {
   const dbDir = join(tmpdir(), `gw-sweep-${randomUUID()}`);
   const store = new GatewayStore(dbDir);
   const config: GatewayConfig = {
@@ -46,10 +66,18 @@ function makeSweepDeps(opts: { chatSettleMode: "full" | "ticket"; escrows: Escro
     walletHealthIntervalMs: 600_000,
     sdkRegistryMax: 100,
     oneShotConcurrency: 4, oneShotMaxOutstanding: 64, oneShotQueueTimeoutMs: 60_000,
+    mcpIpRate: { max: 1000, windowMs: 60_000 },
+    mcpCallIpRate: { max: 1000, windowMs: 60_000 },
+    mcpCallIpConcurrency: 1,
+    mcpCallConcurrency: 2,
+    mcpCallQueueTimeoutMs: 60_000,
+    mcpCatalogTtlMs: 30_000,
     ocrCapabilityId: "ocr.page.extract.chandra-ocr-2.v1",
     corsOrigins: [],
+    identityPolicyId: null,
+    switchSlot: null,
   };
-  const chain = { queryUtxo: async () => null } as unknown as GatewayDeps["chain"];
+  const chain = opts.chain ?? ({ queryUtxo: async () => null } as unknown as GatewayDeps["chain"]);
   const registry = new SdkRegistry({
     chain,
     store,
@@ -65,7 +93,7 @@ function makeSweepDeps(opts: { chatSettleMode: "full" | "ticket"; escrows: Escro
   const deps: GatewayDeps = { config, store, chain, registry, fetchFn };
 
   const rawKey = `vk_test_${randomBytes(24).toString("hex")}`;
-  const privHex = genPrivKeyHex();
+  const privHex = opts.privHex ?? genPrivKeyHex();
   const walletKey = deriveWalletKey(privHex, 0);
   const sealed = seal(privHex, MASTER);
   store.insertKey({
@@ -116,6 +144,7 @@ function openRow(refChar: string, opts?: Partial<EscrowRow>): EscrowRow {
 const settleOk = () => ({
   accept: vi.fn(async () => undefined) as never,
   reclaim: vi.fn(async () => undefined) as never,
+  refundRevoked: vi.fn(async () => undefined) as never,
 });
 
 describe("sweeper — ticket-mode reclaim/close decoupling", () => {
@@ -204,5 +233,229 @@ describe("sweeper — legacy Submitted settlement", () => {
     expect(settle.accept).not.toHaveBeenCalled();
     expect(deps.store.getSession(sessionId)!.state).toBe("closed");
     expect(deps.store.listUsage(keyRow.id, 10)).toMatchObject([{ status: "completed", cost_lovelace: "200000" }]);
+  });
+});
+
+describe("sweeper — new escrows (identity layout)", () => {
+  const AGENT = "a1".repeat(32);
+  const controller = testWallet("sweeper controller");
+  const supplier = testWallet("sweeper supplier", 0);
+  let blueprint: IdentityBlueprint;
+
+  beforeAll(() => {
+    vi.stubEnv("IDENTITY_POLICY_ID", TEST_IDENTITY_HASH);
+    blueprint = testIdentityBlueprint();
+  });
+
+  afterAll(() => {
+    vi.unstubAllEnvs();
+  });
+
+  const revoked = (invalidFrom: number | null): Status => ({
+    type: "Revoked", by: { type: "ControllerSet" }, reason: 1, at: Date.now() - 60_000, invalidFrom, successor: null,
+  });
+  const activeRecord = (): IdentityDatum => agentRecord(controller, supplier);
+
+  function escrowDatum(wallet: WalletKey, changes: Partial<IdentityEscrowDatum> = {}): IdentityEscrowDatum {
+    const now = Date.now();
+    return {
+      buyer_pkh: wallet.pubKeyHash,
+      supplier_pkh: supplier.pubKeyHash,
+      advert_ref: { txHash: "ad".repeat(32), index: 0 },
+      capability_id: "llm.chat.v1",
+      request_spec_hash: "1b".repeat(32),
+      prompt_hash: "c3".repeat(32),
+      payment_lovelace: 200_000n,
+      buyer_bond_lovelace: 1_000_000n,
+      supplier_bond_lovelace: 1_000_000n,
+      deliver_by: now + 10 * 60 * 1000,
+      posted_at: now - 5 * 60 * 1000,
+      submitted_at: null,
+      result_receipt_hash: null,
+      state: "Open",
+      agent_id: AGENT,
+      refund: { address: plutusAddressFromBech32(wallet.address), datum: null },
+      ...changes,
+    };
+  }
+
+  /** The indexer row (identity view) and the live escrow output at the new escrow address. */
+  function escrowAt(refChar: string, wallet: WalletKey, datum: IdentityEscrowDatum): { row: EscrowRow; utxo: Utxo } {
+    const ref = { txHash: refChar.repeat(64), index: 0 };
+    return {
+      row: {
+        utxo_ref: `${ref.txHash}#0`,
+        state: datum.state,
+        posted_at: datum.posted_at,
+        deliver_by: datum.deliver_by,
+        submitted_at: datum.submitted_at,
+        layout: "identity",
+        agent_id: datum.agent_id,
+        refund: { address: wallet.address, datum: null },
+        routable: true,
+      },
+      utxo: {
+        ref,
+        address: blueprint.escrowScriptAddress(0),
+        lovelace: datum.payment_lovelace + datum.buyer_bond_lovelace + datum.supplier_bond_lovelace,
+        assets: {},
+        datumHex: encodeIdentityEscrowDatum(datum),
+        scriptRef: null,
+      },
+    };
+  }
+
+  function setup(opts: {
+    chatSettleMode: "full" | "ticket";
+    privHex: string;
+    escrows: Array<{ row: EscrowRow; utxo: Utxo }>;
+    record: IdentityDatum;
+  }) {
+    const record: Utxo = {
+      ...recordUtxo(blueprint, opts.record, { txHash: "7e".repeat(32), index: 0 }, AGENT),
+      address: blueprint.identityScriptAddress(0),
+    };
+    const queryUtxosByAddress = vi.fn(async (address: string) => (address === record.address ? [record] : []));
+    const queryUtxo = vi.fn(async (ref: { txHash: string; index: number }) =>
+      opts.escrows.find(({ utxo }) => utxo.ref.txHash === ref.txHash && utxo.ref.index === ref.index)?.utxo ?? null);
+    const chain = { queryUtxo, queryUtxosByAddress } as unknown as GatewayDeps["chain"];
+    const world = makeSweepDeps({
+      chatSettleMode: opts.chatSettleMode,
+      escrows: opts.escrows.map(({ row }) => row),
+      chain,
+      privHex: opts.privHex,
+    });
+    return { ...world, record, queryUtxosByAddress };
+  }
+
+  it("refunds an Open new escrow of a revoked agent before deliver_by and closes its session", async () => {
+    const privHex = genPrivKeyHex();
+    const wallet = deriveWalletKey(privHex, 0);
+    const escrow = escrowAt("7", wallet, escrowDatum(wallet));
+    const { deps, keyRow, record } = setup({
+      chatSettleMode: "full", privHex, escrows: [escrow], record: tombstone(activeRecord(), revoked(null)),
+    });
+    const sessionId = insertOpenSession(deps, keyRow.id, escrow.row.utxo_ref);
+    const settle = settleOk();
+
+    await runSweepOnce(deps, settle);
+
+    const refund = settle.refundRevoked as unknown as Mock;
+    expect(refund).toHaveBeenCalledTimes(1);
+    const [, walletKey, ref, lookupRecord] = refund.mock.calls[0] as [unknown, WalletKey, unknown, RecordLookup];
+    expect(walletKey.pubKeyHash).toBe(wallet.pubKeyHash);
+    expect(ref).toEqual(escrow.utxo.ref);
+    expect(await lookupRecord(AGENT)).toBe(record);
+    expect(settle.reclaim).not.toHaveBeenCalled();
+    expect(deps.store.getSession(sessionId)!.state).toBe("closed");
+    expect(deps.store.listUsage(keyRow.id, 10)).toMatchObject([{ status: "reclaimed", cost_lovelace: null }]);
+  });
+
+  it("ticket mode keeps the live session open after a refund of its Open escrow", async () => {
+    const privHex = genPrivKeyHex();
+    const wallet = deriveWalletKey(privHex, 0);
+    const escrow = escrowAt("8", wallet, escrowDatum(wallet));
+    const { deps, keyRow } = setup({
+      chatSettleMode: "ticket", privHex, escrows: [escrow],
+      record: tombstone(activeRecord(), { type: "Retired", at: Date.now() - 60_000, successor: null }),
+    });
+    const sessionId = insertOpenSession(deps, keyRow.id, escrow.row.utxo_ref);
+    const settle = settleOk();
+
+    await runSweepOnce(deps, settle);
+
+    expect(settle.refundRevoked).toHaveBeenCalledTimes(1);
+    expect(deps.store.getSession(sessionId)!.state).toBe("open");
+    expect(deps.store.listUsage(keyRow.id, 10)).toHaveLength(0);
+  });
+
+  it("leaves an Open new escrow of an Active agent until deliver_by", async () => {
+    const privHex = genPrivKeyHex();
+    const wallet = deriveWalletKey(privHex, 0);
+    const escrow = escrowAt("9", wallet, escrowDatum(wallet));
+    const { deps, keyRow } = setup({ chatSettleMode: "full", privHex, escrows: [escrow], record: activeRecord() });
+    const sessionId = insertOpenSession(deps, keyRow.id, escrow.row.utxo_ref);
+    const settle = settleOk();
+
+    await runSweepOnce(deps, settle);
+
+    expect(settle.refundRevoked).not.toHaveBeenCalled();
+    expect(settle.reclaim).not.toHaveBeenCalled();
+    expect(deps.store.getSession(sessionId)!.state).toBe("open");
+  });
+
+  it("refunds a Submitted new escrow instead of the Accept when the agent was revoked from before submitted_at", async () => {
+    const privHex = genPrivKeyHex();
+    const wallet = deriveWalletKey(privHex, 0);
+    const submittedAt = Date.now() - 2 * 60 * 1000;
+    const escrow = escrowAt("a", wallet, escrowDatum(wallet, {
+      state: "Submitted", submitted_at: submittedAt, result_receipt_hash: "e5".repeat(32),
+    }));
+    const { deps } = setup({
+      chatSettleMode: "full", privHex, escrows: [escrow], record: tombstone(activeRecord(), revoked(submittedAt - 1_000)),
+    });
+    const settle = settleOk();
+
+    await runSweepOnce(deps, settle);
+
+    expect(settle.refundRevoked).toHaveBeenCalledTimes(1);
+    expect(settle.accept).not.toHaveBeenCalled();
+  });
+
+  it("accepts a Submitted new escrow when its record allows no refund", async () => {
+    const privHex = genPrivKeyHex();
+    const wallet = deriveWalletKey(privHex, 0);
+    const submittedAt = Date.now() - 2 * 60 * 1000;
+    const escrow = escrowAt("b", wallet, escrowDatum(wallet, {
+      state: "Submitted", submitted_at: submittedAt, result_receipt_hash: "e5".repeat(32),
+    }));
+    const { deps } = setup({
+      chatSettleMode: "full", privHex, escrows: [escrow], record: tombstone(activeRecord(), revoked(submittedAt + 1)),
+    });
+    const settle = settleOk();
+
+    await runSweepOnce(deps, settle);
+
+    expect(settle.accept).toHaveBeenCalledTimes(1);
+    expect(settle.refundRevoked).not.toHaveBeenCalled();
+  });
+
+  it("reads the identity address once per sweep for several new escrows", async () => {
+    const privHex = genPrivKeyHex();
+    const wallet = deriveWalletKey(privHex, 0);
+    const submittedAt = Date.now() - 2 * 60 * 1000;
+    const escrows = [
+      escrowAt("c", wallet, escrowDatum(wallet)),
+      escrowAt("d", wallet, escrowDatum(wallet, { state: "Claimed" })),
+      escrowAt("e", wallet, escrowDatum(wallet, {
+        state: "Submitted", submitted_at: submittedAt, result_receipt_hash: "e5".repeat(32),
+      })),
+    ];
+    const { deps, queryUtxosByAddress } = setup({ chatSettleMode: "full", privHex, escrows, record: activeRecord() });
+    const settle = settleOk();
+
+    await runSweepOnce(deps, settle);
+
+    expect(queryUtxosByAddress).toHaveBeenCalledTimes(1);
+    expect(settle.accept).toHaveBeenCalledTimes(1);
+    expect(settle.refundRevoked).not.toHaveBeenCalled();
+  });
+
+  it("reclaims a new escrow past deliver_by without reading its record", async () => {
+    const privHex = genPrivKeyHex();
+    const wallet = deriveWalletKey(privHex, 0);
+    const escrow = escrowAt("f", wallet, escrowDatum(wallet, {
+      posted_at: Date.now() - 40 * 60 * 1000, deliver_by: Date.now() - 5 * 60 * 1000,
+    }));
+    const { deps, queryUtxosByAddress } = setup({
+      chatSettleMode: "full", privHex, escrows: [escrow], record: tombstone(activeRecord(), revoked(null)),
+    });
+    const settle = settleOk();
+
+    await runSweepOnce(deps, settle);
+
+    expect(settle.reclaim).toHaveBeenCalledTimes(1);
+    expect(settle.refundRevoked).not.toHaveBeenCalled();
+    expect(queryUtxosByAddress).not.toHaveBeenCalled();
   });
 });

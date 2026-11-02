@@ -36,12 +36,30 @@
  * an Open ticket does NOT close a still-open session row: nothing re-checks
  * the escrow after /v1/chat/start, so the typed conversation state lives on,
  * bounded by the idle janitor.
+ *
+ * Both escrow layouts (Part 2 §9.6 drain): legacy escrows keep Accept and
+ * Reclaim until none is left, and the builders take the layout from the
+ * datum. A new escrow with `refund` set needs no buyer signature for Reclaim;
+ * the key's own wallet still submits it. New escrows (row.layout "identity")
+ * also get RefundRevoked (Part 2 §6.1) when the agent's own record allows it:
+ * an Open or Claimed escrow goes back before deliver_by when the agent is
+ * Revoked or Retired, and a Submitted escrow goes back instead of the Accept
+ * when the agent is Revoked with invalid_from ≤ submitted_at. A refund counts
+ * as a reclaim for the session row. One sweep reads the identity address once
+ * at most (onchain/records.ts).
  */
 
 import { randomUUID } from "crypto";
+import type { OutputReference } from "@marketplace/shared/chain";
+import { decodeAnyEscrowDatum } from "@marketplace/shared/cbor";
+import type { RecordLookup } from "@marketplace/shared/tx";
 import type { GatewayDeps } from "./deps.js";
 import type { SessionRow } from "./db/store.js";
-import { fetchEscrows, acceptAndConfirm, reclaimAndConfirm, type EscrowRow } from "./onchain/settle.js";
+import type { KeyContext } from "./sdk/registry.js";
+import {
+  fetchEscrows, acceptAndConfirm, reclaimAndConfirm, refundRevokedAndConfirm, type EscrowRow,
+} from "./onchain/settle.js";
+import { chainRecordLookup, refundRevokedApplies } from "./onchain/records.js";
 import { parseRef } from "./routing/selectSupplier.js";
 import { dropSessionState } from "./openai/transcripts.js";
 import { sweepIdleDemoSessions } from "./openai/demoChat.js";
@@ -105,17 +123,57 @@ function closeSessionRow(
   log(`closed abandoned session ${session.id} (${outcome.status})`);
 }
 
+/** The escrow went back to the buyer (Reclaim or RefundRevoked): the session
+ * never settled, so it records no cost. */
+function closeRefundedSession(deps: GatewayDeps, row: EscrowRow, session: SessionRow): void {
+  const ticketOpen = deps.config.chatSettleMode === "ticket" &&
+    row.state === "Open" && session.state === "open";
+  if (ticketOpen) {
+    // Ticket escrow returned out from under a LIVE session — by design.
+    // Keep the session row + mirror; only the idle janitor / close paths end
+    // ticket sessions.
+    log(`ticket mode: escrow returned to the buyer, session ${session.id} stays open`);
+  } else {
+    closeSessionRow(deps, session, { status: "reclaimed", costLovelace: null });
+  }
+}
+
+/** RefundRevoked for the live new escrow `datumHex` when its agent's record
+ * allows it. True when the refund ran; false for a legacy escrow. */
+async function refundIfRevoked(
+  ctx: KeyContext,
+  settle: SweepSettleFns,
+  ref: OutputReference,
+  datumHex: string,
+  lookupRecord: RecordLookup,
+): Promise<boolean> {
+  const escrow = decodeAnyEscrowDatum(datumHex);
+  if (escrow.layout !== "identity" || !(await refundRevokedApplies(escrow.datum, lookupRecord))) return false;
+  await ctx.mutex.run(
+    () => settle.refundRevoked(ctx.chain, ctx.walletKey, ref, lookupRecord),
+    "sweep-refund-revoked",
+    0,
+  );
+  return true;
+}
+
 /** Chain-settle functions, injectable for tests. */
 export interface SweepSettleFns {
   accept: typeof acceptAndConfirm;
   reclaim: typeof reclaimAndConfirm;
+  refundRevoked: typeof refundRevokedAndConfirm;
 }
 
 export async function runSweepOnce(
   deps: GatewayDeps,
-  settle: SweepSettleFns = { accept: acceptAndConfirm, reclaim: reclaimAndConfirm },
+  settle: SweepSettleFns = {
+    accept: acceptAndConfirm,
+    reclaim: reclaimAndConfirm,
+    refundRevoked: refundRevokedAndConfirm,
+  },
 ): Promise<void> {
-  const protection = await recoverOneShotJobs(deps);
+  const lookupRecord = chainRecordLookup(deps.chain, deps.config.networkId);
+  const protection = await recoverOneShotJobs(deps, lookupRecord);
   // Idle demo sessions first: closing them makes the supplier Submit, so this
   // sweep (or the next) can Accept the escrow right after.
   await sweepIdleDemoSessions(deps).catch((err) =>
@@ -164,6 +222,12 @@ export async function runSweepOnce(
             continue;
           }
           if (!live.datumHex) continue;
+          if (await refundIfRevoked(ctx, settle, ref, live.datumHex, lookupRecord)) {
+            log(`refunded Submitted escrow ${row.utxo_ref}: its agent is revoked`);
+            markSettled(row.utxo_ref);
+            if (chatSession) closeRefundedSession(deps, row, chatSession);
+            continue;
+          }
           try {
             await ctx.mutex.run(() => settle.accept(ctx.chain, ctx.walletKey, ref), "sweep-accept", 0);
             log(`accepted stranded Submitted escrow ${row.utxo_ref}`);
@@ -197,18 +261,15 @@ export async function runSweepOnce(
             await ctx.mutex.run(() => settle.reclaim(ctx.chain, ctx.walletKey, ref), "sweep-reclaim", 0);
             log(`reclaimed stranded ${row.state} escrow ${row.utxo_ref}`);
             markSettled(row.utxo_ref);
-            if (chatSession) {
-              const ticketOpen = deps.config.chatSettleMode === "ticket" &&
-                row.state === "Open" && chatSession.state === "open";
-              if (ticketOpen) {
-                // Ticket escrow reclaimed out from under a LIVE session —
-                // by design. Keep the session row + mirror; only the idle
-                // janitor / close paths end ticket sessions.
-                log(`ticket mode: escrow reclaimed, session ${chatSession.id} stays open`);
-              } else {
-                // Funds returned — the session never settled; record no cost.
-                closeSessionRow(deps, chatSession, { status: "reclaimed", costLovelace: null });
-              }
+            if (chatSession) closeRefundedSession(deps, row, chatSession);
+          } else if (row.layout === "identity") {
+            // Before deliver_by only RefundRevoked returns a new escrow, and
+            // only when its agent is revoked or retired.
+            const live = await ctx.chain.queryUtxo(ref);
+            if (live?.datumHex && await refundIfRevoked(ctx, settle, ref, live.datumHex, lookupRecord)) {
+              log(`refunded ${row.state} escrow ${row.utxo_ref}: its agent is revoked or retired`);
+              markSettled(row.utxo_ref);
+              if (chatSession) closeRefundedSession(deps, row, chatSession);
             }
           }
         }

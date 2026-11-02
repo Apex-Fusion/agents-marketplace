@@ -61,6 +61,7 @@ function makeDeps(
     walletHealthIntervalMs: 600_000, sdkRegistryMax: 100,
     oneShotConcurrency: 4, oneShotMaxOutstanding: 64, oneShotQueueTimeoutMs: 60_000,
     ocrCapabilityId: "ocr.page.extract.chandra-ocr-2.v1", corsOrigins: [],
+    identityPolicyId: null, switchSlot: null,
   };
   const chain = chainOverride ??
     ({ queryUtxosByAddress: async () => [] } as unknown as GatewayDeps["chain"]);

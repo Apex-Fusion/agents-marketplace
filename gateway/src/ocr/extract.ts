@@ -47,6 +47,7 @@ import type { KeyContext } from "../sdk/registry.js";
 import { requireKey } from "../middleware/apiKeyAuth.js";
 import { asyncHandler } from "../middleware/http.js";
 import { selectCandidates, type SupplierCandidate } from "../routing/selectSupplier.js";
+import { newAdvertsOnly } from "../routing/escrowSwitch.js";
 import { preflight } from "../onchain/preflight.js";
 import { resolveSubmittedRef, acceptAndConfirm, oneShotBudgetMs } from "../onchain/settle.js";
 import { ensureWalletHealthy } from "../walletHealth.js";
@@ -209,6 +210,7 @@ export function makeOcrExtractHandler(deps: GatewayDeps) {
       model: parsed.model,
       capabilityId,
       fetchFn: deps.fetchFn,
+      newAdvertsOnly: await newAdvertsOnly(deps),
     });
     if (candidates.length === 0) {
       throw notFound(

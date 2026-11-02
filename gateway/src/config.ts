@@ -41,11 +41,29 @@
  *                         call the gateway cross-origin (e.g. the marketplace
  *                         frontend's "Generate API key" page). Default empty =
  *                         CORS off (no Access-Control-* headers emitted).
+ *
+ * Identity registry (Part 2 §6, §9.6). Values are published at the identity
+ * deployment; unset means the state before it (legacy escrows only):
+ *   IDENTITY_POLICY_ID  — identity registry policy ID, 56 lowercase hex. The
+ *                         escrow builders read it from the environment to
+ *                         settle new (16-field) escrows, and the sweeper reads
+ *                         agent records at its address for RefundRevoked.
+ *   IDENTITY_ESCROW_REF_UTXO — "<txHash>#<index>" of the new escrow reference
+ *                         script, read by the escrow builders (unset: the
+ *                         script goes inline). ESCROW_REF_UTXO stays for the
+ *                         legacy escrows of the drain.
+ *   SWITCH_SLOT         — escrow switch slot, the same value as the indexer's.
+ *                         From this chain slot on, the gateway routes only
+ *                         new adverts (agent_id set) and the buyer SDK posts
+ *                         only new escrows.
  */
 
 const HEX64_RE = /^[0-9a-fA-F]{64}$/;
 const POS_INT_RE = /^[1-9]\d*$/;
 const PKH_RE = /^[0-9a-fA-F]{56}$/;
+/** The shared blueprint loader accepts only lowercase hex (loadIdentityBlueprint). */
+const POLICY_ID_RE = /^[0-9a-f]{56}$/;
+const SLOT_RE = /^(0|[1-9]\d*)$/;
 
 export interface GatewayConfig {
   masterKeyHex: string;
@@ -90,6 +108,10 @@ export interface GatewayConfig {
   ocrCapabilityId: string;
   /** Seller preferred for matching one-shot models. Other suppliers remain fallback. */
   preferredSupplierPkh?: string;
+  /** Identity registry policy ID (56 lowercase hex); null before the identity deployment. */
+  identityPolicyId: string | null;
+  /** Escrow switch slot (Part 2 §9.6); null while no switch is set. */
+  switchSlot: number | null;
 }
 
 function requireField(env: Record<string, string | undefined>, name: string): string {
@@ -136,6 +158,25 @@ function paper2AgentToolEndpointPrefix(raw: string): string | undefined {
     throw new Error("loadConfig: PAPER2AGENT_PUBLISHER_PUBLIC_URL must be an http(s) URL without credentials, query or fragment");
   }
   return `${url.href.replace(/\/+$/, "")}/tools/`;
+}
+
+/** The identity registry policy ID, or null when unset. Not trimmed: the escrow builders read the raw variable. */
+function identityPolicyId(env: Record<string, string | undefined>): string | null {
+  const v = env.IDENTITY_POLICY_ID;
+  if (v === undefined || v === "") return null;
+  if (!POLICY_ID_RE.test(v)) {
+    throw new Error("loadConfig: IDENTITY_POLICY_ID must be 56 lowercase hex characters (the identity registry policy ID)");
+  }
+  return v;
+}
+
+function switchSlot(env: Record<string, string | undefined>): number | null {
+  const v = env.SWITCH_SLOT;
+  if (v === undefined || v === "") return null;
+  if (!SLOT_RE.test(v) || !Number.isSafeInteger(Number(v))) {
+    throw new Error("loadConfig: SWITCH_SLOT must be a non-negative integer slot number");
+  }
+  return Number(v);
 }
 
 export function loadConfig(env: Record<string, string | undefined>): GatewayConfig {
@@ -241,5 +282,7 @@ export function loadConfig(env: Record<string, string | undefined>): GatewayConf
       .split(",")
       .map((o) => o.trim().replace(/\/+$/, ""))
       .filter((o) => o !== ""),
+    identityPolicyId: identityPolicyId(env),
+    switchSlot: switchSlot(env),
   };
 }
