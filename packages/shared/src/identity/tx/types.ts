@@ -88,6 +88,13 @@ export interface TxContext {
    * always enough but costs a higher fee.
    */
   exUnits?: Readonly<Record<string, ExUnits>>;
+  /**
+   * The current reward balance of each script stake credential that a
+   * builder withdraws from, keyed by the script hash (Module-1 for a
+   * consent). The ledger accepts a withdrawal only of the whole balance, so
+   * read it from the chain (for example `getDelegation`) just before the build.
+   */
+  rewardBalances?: Readonly<Record<string, bigint>>;
 }
 
 /** One redeemer of a built transaction, in ledger order. */

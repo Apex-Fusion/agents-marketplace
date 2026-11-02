@@ -156,11 +156,19 @@ function checkConsent(before: readonly Party[], after: readonly Party[], lo: num
   }
 }
 
-/** The Module-1 consent withdrawal: amount 0 from Script(M1), redeemer Consent. */
-function consentWithdrawal(scripts: IdentityScripts, m1: string): PlannedWithdrawal {
+/**
+ * The Module-1 consent withdrawal from Script(M1) with the redeemer Consent.
+ * The ledger accepts only a withdrawal of the whole reward balance, so the
+ * amount is `ctx.rewardBalances[M1]`, which the caller reads from the chain.
+ */
+function consentWithdrawal(ctx: TxContext, scripts: IdentityScripts, m1: string): PlannedWithdrawal {
   if (scripts.module1 === undefined) refuse("module1_script_missing", "a Module-1 consent needs the Module-1 script (scripts.module1)");
   if (scripts.module1.hash !== m1) refuse("module1_script_mismatch", `the Module-1 script is ${scripts.module1.hash}, but the configuration record names ${m1}`);
-  return { credential: { type: "Script", hash: m1 }, amount: 0n, redeemer: { data: MODULE1_CONSENT, label: "Module-1 Consent" }, script: scripts.module1 };
+  const amount = ctx.rewardBalances?.[m1];
+  if (amount === undefined || amount < 0n) {
+    refuse("reward_balance_missing", `a Module-1 consent withdraws the whole reward balance of ${m1}; read it from the chain and pass ctx.rewardBalances`);
+  }
+  return { credential: { type: "Script", hash: m1 }, amount, redeemer: { data: MODULE1_CONSENT, label: "Module-1 Consent" }, script: scripts.module1 };
 }
 
 /** Adds the configuration reference input when the datum has a Module-1 party; returns M1 or null. */
@@ -291,7 +299,7 @@ export function buildRegister(ctx: TxContext, scripts: IdentityScripts, args: Re
       redeemer: { data: identityMintToData({ type: "Register", seed: args.seed.ref }), label: "identity Register" },
       script: scripts.identity,
     }],
-    withdrawals: needs.consent ? [consentWithdrawal(scripts, created.m1!)] : [],
+    withdrawals: needs.consent ? [consentWithdrawal(ctx, scripts, created.m1!)] : [],
     extraSignatories: [...needs.signers],
     window: args.window,
   };
@@ -416,7 +424,7 @@ export function buildAdopt(ctx: TxContext, scripts: AdoptionScripts, args: Adopt
     referenceInputs: [...needs.references.values()],
     outputs,
     mints,
-    withdrawals: needs.consent ? [consentWithdrawal(scripts, created.m1!)] : [],
+    withdrawals: needs.consent ? [consentWithdrawal(ctx, scripts, created.m1!)] : [],
     extraSignatories: [...needs.signers],
     window: args.window,
     ...(changeMin === undefined ? {} : { changeMin }),
@@ -464,7 +472,7 @@ function spendRecord(
     referenceInputs: [...needs.references.values()],
     outputs: [recordOutput(ctx, scripts, spent.id, next, floor)],
     mints: [],
-    withdrawals: needs.consent ? [consentWithdrawal(scripts, m1!)] : [],
+    withdrawals: needs.consent ? [consentWithdrawal(ctx, scripts, m1!)] : [],
     extraSignatories: [...needs.signers],
     window,
   };
@@ -705,6 +713,8 @@ export function buildRevoke(ctx: TxContext, scripts: IdentityScripts, args: Revo
   checkReason(args.reason, REVOKE_REASONS, "Revoke");
   const invalidFrom = args.invalidFrom ?? null;
   if (invalidFrom === null && args.reason === REASON_KEY_COMPROMISE) refuse("invalid_from_missing", "reason 1 (keyCompromise) requires invalid_from");
+  // The pinned blueprint (b5d66a6) checks [created_at, lo]. A pending contract fix widens it to
+  // [created_at − 3,600,000, lo]; the narrower range passes both, so the builder keeps it.
   if (invalidFrom !== null && (invalidFrom < spent.datum.createdAt || invalidFrom > lo)) {
     refuse("invalid_from_range", `invalid_from must be in [created_at ${spent.datum.createdAt}, lo ${lo}]`);
   }

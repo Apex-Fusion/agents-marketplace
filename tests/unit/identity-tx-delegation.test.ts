@@ -8,11 +8,11 @@
 import { describe, expect, it } from "vitest";
 import type { Utxo } from "../../packages/shared/src/chain/ChainProvider.js";
 import { decodeVaultDatum, vaultDatumToData, type Delegator } from "../../packages/shared/src/cbor/Delegation.js";
-import { decodeIdentityEscrowDatum } from "../../packages/shared/src/cbor/IdentityEscrowDatum.js";
+import { decodeIdentityEscrowDatum, identityEscrowDatumToData } from "../../packages/shared/src/cbor/IdentityEscrowDatum.js";
 import { encodePlutusDataHex } from "../../packages/shared/src/cbor/plutus-data.js";
 import {
   buildDelegate, buildUndelegate, buildVaultClose, buildVaultOpen, buildVaultPay, ed25519Key, enterpriseAddress,
-  escrowResource, TxConstructionError, type UnsignedTx, type VaultEscrowJob,
+  escrowResource, minUtxo, TxConstructionError, type UnsignedTx, type VaultEscrowJob,
 } from "../../packages/shared/src/identity/tx/index.js";
 import { DAYS_7_MS, DAY_MS } from "../../packages/shared/src/identity/constants.js";
 import { describeSimulation } from "../legacy-registry/harness/simulate.js";
@@ -269,6 +269,24 @@ describe("Vault (§5.3)", () => {
     expect(refusal(() => buildVaultPay(context(wallets.keyC), vaultScripts, {
       vault: state.v2!, window, delegation: state.d2!, records: [agentB.record, agentC.record], escrows: [job(1n * AP3X)],
     })).reason).toBe("delegation_ancestor_missing");
+  });
+
+  it("raises the buyer bond of a small escrow to the min-UTxO, so the output's AP3X equals payment + bonds", () => {
+    const tx = buildVaultPay(context(wallets.keyC), vaultScripts, {
+      vault: known.find((u) => u.ref.txHash === state.v2!.ref.txHash && u.address === state.v2!.address) === undefined ? state.v2! : known.filter((u) => u.address === state.v2!.address && u.datumHex !== null && decodeVaultDatum(u.datumHex).type === "Live" && u.ref.txHash !== state.v1?.ref.txHash).at(-1)!,
+      window,
+      delegation: state.d2!,
+      ancestors: [state.d1!],
+      records: [agentB.record, agentC.record],
+      escrows: [job(100_000n, 0n, 50_000n)],
+    });
+    const escrow = decodeIdentityEscrowDatum(tx.outputs[0]!.datumHex!);
+    expect(escrow.payment_lovelace).toBe(100_000n);
+    expect(escrow.supplier_bond_lovelace).toBe(50_000n);
+    expect(escrow.buyer_bond_lovelace).toBeGreaterThan(1_000_000n);
+    expect(tx.outputs[0]!.lovelace).toBe(escrow.payment_lovelace + escrow.buyer_bond_lovelace + escrow.supplier_bond_lovelace);
+    expect(tx.outputs[0]!.lovelace).toBe(minUtxo({ address: tx.outputs[0]!.address, coin: tx.outputs[0]!.lovelace, assets: [], datum: identityEscrowDatumToData(escrow), scriptRef: null }, 4310n));
+    expectPass(tx, [wallets.keyC], ["vault Pay"]);
   });
 
   it("closes a Live vault and a Returned refund output of two owners in one transaction", () => {

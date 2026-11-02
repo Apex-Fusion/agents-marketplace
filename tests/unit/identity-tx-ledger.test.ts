@@ -88,20 +88,33 @@ describe("Conway encoding (checked with CML)", () => {
     expect(CML.hash_transaction(body).to_hex()).toBe(tx.txHash);
   });
 
-  it("encodes a Module-1 withdrawal and two redeemers that CML hashes the same way", () => {
+  it("withdraws Module-1's whole reward balance in a consent; CML reads the withdrawal and hashes the two redeemers the same way", () => {
     const { tx: created, funds, wallet } = register("ledger: cml consent");
     const simulation = simulateUnsigned(created, [...world.utxos, funds], [wallet.key]);
     expect(simulation.passed).toBe(true);
     const more = walletFunds("ledger: cml consent more", wallet, 100n * AP3X);
-    const tx = buildUpdate({ ...testContext(wallet, [more]), protocol }, world.identityScripts, {
+    const balance = 3_250_000n;
+    const args = {
       record: created.outputs[0]!,
       window,
-      parties: [controllerAccountable(window), { ...controllerAccountable(window), role: "Responsible", signer: { type: "Script", hash: world.module1.hash }, rights: 1 }],
-    });
+      parties: [controllerAccountable(window), { ...controllerAccountable(window), role: "Responsible" as const, signer: { type: "Script" as const, hash: world.module1.hash }, rights: 1 }],
+    };
+    expect(() => buildUpdate({ ...testContext(wallet, [more]), protocol, rewardBalances: {} }, world.identityScripts, args)).toThrow(/reward balance/);
+    const ctx = { ...testContext(wallet, [more]), protocol, rewardBalances: { [world.module1.hash]: balance } };
+    const tx = buildUpdate(ctx, world.identityScripts, args);
     const parsed = CML.Transaction.from_cbor_hex(tx.txCborHex);
-    expect(parsed.body().withdrawals()?.len()).toBe(1);
+    const withdrawals = parsed.body().withdrawals()!;
+    expect(withdrawals.len()).toBe(1);
+    expect(withdrawals.get(withdrawals.keys().get(0))).toBe(balance);
+    const spent = [created.outputs[0]!, more].filter((u) => tx.inputs.some((r) => r.txHash === u.ref.txHash && r.index === u.ref.index));
+    const inputs = spent.reduce((t, u) => t + u.lovelace, 0n);
+    const outputs = tx.outputs.reduce((t, o) => t + o.lovelace, 0n);
+    expect(inputs + balance).toBe(outputs + tx.fee);
     expect(parsed.witness_set().redeemers()?.to_flat_format().len()).toBe(2);
     expect(parsed.body().script_data_hash()?.to_hex()).toBe(cmlScriptDataHash(tx.txCborHex));
+    const result = simulateUnsigned(tx, [...world.utxos, created.outputs[0]!, more], [wallet.key]);
+    reportEvaluation(expect.getState().currentTestName ?? "", tx, result);
+    expect(result.passed, describeSimulation(result)).toBe(true);
   });
 
   it("pays at least CML's minimum fee of the signed transaction, and not much more", () => {

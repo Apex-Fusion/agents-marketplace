@@ -293,7 +293,11 @@ export interface IdentityWorld {
 
 const reference = (source: Utxo, hash: string): ScriptSource => ({ hash, referenceUtxo: source });
 
-/** A builder context with the test protocol, the Vector slot clock and the given wallet UTxOs. */
+/**
+ * A builder context with the test protocol, the Vector slot clock and the
+ * given wallet UTxOs. The reward balance of the stand-in Module-1 is 0 unless
+ * `extra.rewardBalances` says otherwise.
+ */
 export function testContext(wallet: TestWallet, utxos: Utxo[], extra: Partial<TxContext> = {}): TxContext {
   return {
     networkId: 1,
@@ -301,6 +305,7 @@ export function testContext(wallet: TestWallet, utxos: Utxo[], extra: Partial<Tx
     protocol: TEST_PROTOCOL,
     wallet: utxos,
     changeAddress: wallet.address,
+    rewardBalances: { [toHex(scriptHash(MODULE1_STAND_IN))]: 0n },
     ...extra,
   };
 }

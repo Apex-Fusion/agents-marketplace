@@ -13,7 +13,7 @@ import { DAYS_7_MS, MAX_ESCROW_LOVELACE } from "../constants.js";
 import { keyHash } from "../id.js";
 import { completeTx } from "./complete.js";
 import { delegationUse, escrowResource, HIRE_ACTION, patternsCover, readDelegation } from "./delegation.js";
-import { coinForOutput, enterpriseAddress, isEnterpriseAddressOf, utxoAssets, type TxOutput } from "./ledger.js";
+import { coinForOutput, enterpriseAddress, isEnterpriseAddressOf, minUtxo, utxoAssets, type TxOutput } from "./ledger.js";
 import { readRecord } from "./records.js";
 import { refuse, type ScriptSource, type TxContext, type UnsignedTx, type ValidityWindow } from "./types.js";
 
@@ -83,6 +83,7 @@ export interface VaultEscrowJob {
   requestSpecHash: string;
   promptHash: string;
   payment: bigint;
+  /** The builder raises it when payment + bonds is below the min-UTxO of the escrow output (see `buildVaultPay`). */
   buyerBond: bigint;
   supplierBond: bigint;
   /** At most hi + 7 days. */
@@ -134,10 +135,11 @@ export function buildVaultPay(ctx: TxContext, scripts: VaultScripts, args: Vault
     datum: vaultDatumToData({ type: "Returned", owner: live.owner }),
   };
   const escrowAddress = enterpriseAddress({ type: "Script", hash: scripts.escrowHash }, ctx.networkId);
+  // Each escrow output holds exactly payment + buyer bond + supplier bond in AP3X. When that sum is
+  // below the ledger min-UTxO of the output, the buyer bond takes the difference: the buyer funds
+  // all three amounts, and every refund returns them (§6.1).
   const outputs: TxOutput[] = args.escrows.map((job, i) => {
-    const total = job.payment + job.buyerBond + job.supplierBond;
     if (job.payment < 0n || job.buyerBond < 0n || job.supplierBond < 0n) refuse("escrow_negative", `escrow ${i}: amounts must be 0 or more`);
-    if (total > MAX_ESCROW_LOVELACE) refuse("escrow_over_cap", `escrow ${i}: payment + bonds exceed 10,000 AP3X`);
     if (job.deliverBy > hi + DAYS_7_MS) refuse("escrow_deliver_by", `escrow ${i}: deliver_by must be at most hi + 7 days (${hi + DAYS_7_MS})`);
     const datum: IdentityEscrowDatum = {
       buyer_pkh: leaf.datum.delegateKey,
@@ -157,8 +159,17 @@ export function buildVaultPay(ctx: TxContext, scripts: VaultScripts, args: Vault
       agent_id: job.agentId,
       refund,
     };
-    const shape = { address: escrowAddress, assets: [], datum: identityEscrowDatumToData(datum), scriptRef: null };
-    return { ...shape, coin: coinForOutput(shape, ctx.protocol.coinsPerUtxoByte, total) };
+    for (let round = 0; round < 8; round += 1) {
+      const total = datum.payment_lovelace + datum.buyer_bond_lovelace + datum.supplier_bond_lovelace;
+      const output: TxOutput = { address: escrowAddress, coin: total, assets: [], datum: identityEscrowDatumToData(datum), scriptRef: null };
+      const needed = minUtxo(output, ctx.protocol.coinsPerUtxoByte);
+      if (total >= needed) {
+        if (total > MAX_ESCROW_LOVELACE) refuse("escrow_over_cap", `escrow ${i}: payment + bonds exceed 10,000 AP3X`);
+        return output;
+      }
+      datum.buyer_bond_lovelace += needed - total;
+    }
+    return refuse("escrow_min_utxo", `escrow ${i}: the buyer bond does not settle at the min-UTxO`);
   });
   const amount = outputs.reduce((t, o) => t + o.coin, 0n);
   if (amount > limit.perTx) refuse("vault_per_tx", `the payment of ${amount} exceeds per_tx ${limit.perTx}`);
