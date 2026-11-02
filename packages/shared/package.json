@@ -9,6 +9,7 @@
     ".": "./src/index.ts",
     "./chain": "./src/chain/index.ts",
     "./cbor": "./src/cbor/index.ts",
+    "./identity": "./src/identity/index.ts",
     "./receipt": "./src/receipt/index.ts",
     "./paper2agent": "./src/paper2agent/index.ts",
     "./paper2agent/workflow": "./src/paper2agent/workflow.ts",
