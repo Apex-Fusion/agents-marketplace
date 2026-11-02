@@ -192,7 +192,10 @@ export interface OneShotRecoveryResult {
 }
 
 /** Recover finances, never replay a prompt or create another payment. A sweep
- * passes its record lookup, so it reads the identity address once at most. */
+ * passes its record lookup, so it reads the identity address once at most.
+ * A Submitted new escrow is Accepted only with the receipt that the SDK
+ * verified (receipt_hash): the SDK checks agent_did against the escrow's
+ * agent_id (Part 2 §6.3), and a refused or unseen receipt gets no Accept. */
 export async function recoverOneShotJobs(
   deps: GatewayDeps,
   lookupRecord: RecordLookup = chainRecordLookup(deps.chain, deps.config.networkId),
@@ -290,6 +293,10 @@ export async function recoverOneShotJobs(
         if (datum.state === "Submitted") {
           if (job.receipt_hash && datum.result_receipt_hash !== job.receipt_hash) {
             throw new Error("escrow receipt commitment mismatch");
+          }
+          if (escrow.layout === "identity" && job.receipt_hash === null) {
+            recordRecoveredOutcome(deps, job, "failed", "no verified receipt; the new escrow is not accepted");
+            return;
           }
           updateOneShotJob(deps, job.id, { state: "settling", submitted_ref: latest.utxo_ref });
           const txHash = await acceptAndConfirm(ctx.chain, ctx.walletKey, ref);

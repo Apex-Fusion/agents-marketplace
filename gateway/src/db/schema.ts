@@ -53,7 +53,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   max_processing_ms INTEGER NOT NULL DEFAULT 300000,
   transcript_nonce  TEXT,
   transcript_ct     TEXT,
-  transcript_tag    TEXT
+  transcript_tag    TEXT,
+  agent_id          TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_key ON sessions(key_id, opened_at DESC);
 
@@ -131,4 +132,14 @@ CREATE TABLE IF NOT EXISTS wallet_transaction_outcomes (
   resolved_at       INTEGER NOT NULL,
   PRIMARY KEY (key_id, tx_hash)
 );
+
+CREATE TABLE IF NOT EXISTS escrow_receipts (
+  receipt_hash      TEXT PRIMARY KEY,
+  key_id            TEXT NOT NULL,
+  escrow_ref        TEXT NOT NULL,
+  receipt           TEXT NOT NULL,
+  receipt_signature TEXT NOT NULL,
+  created_at        INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_escrow_receipts_created ON escrow_receipts(created_at);
 `;

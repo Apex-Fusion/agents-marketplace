@@ -77,7 +77,7 @@ describe("GatewayStore demo-column migration", () => {
     expect(responseTable?.name).toBe("responses");
     expect(sessionColumns.map((column) => column.name)).toEqual(expect.arrayContaining([
       "last_used_at", "head_response_id", "managed_demo", "max_output_tokens",
-      "max_processing_ms", "transcript_nonce", "transcript_ct", "transcript_tag",
+      "max_processing_ms", "transcript_nonce", "transcript_ct", "transcript_tag", "agent_id",
     ]));
     expect(responseIndexes.map((index) => index.name)).toEqual(expect.arrayContaining([
       "idx_responses_owner",

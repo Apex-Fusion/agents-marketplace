@@ -50,6 +50,7 @@ import { selectCandidates, type SupplierCandidate } from "../routing/selectSuppl
 import { newAdvertsOnly } from "../routing/escrowSwitch.js";
 import { preflight } from "../onchain/preflight.js";
 import { resolveSubmittedRef, acceptAndConfirm, oneShotBudgetMs } from "../onchain/settle.js";
+import { keepReceipt } from "../onchain/receipts.js";
 import { ensureWalletHealthy } from "../walletHealth.js";
 import { badRequest, forbidden, notFound, paymentRequired, toGatewayError } from "../openai/errors.js";
 
@@ -326,6 +327,10 @@ async function runOcrOneShot(
 
     // Settle: resolve the live Submitted ref, Accept, await confirmation.
     escrowRefStr = `${result.escrowRef.txHash}#${result.escrowRef.index}`;
+    // The SDK verified this receipt (agent_did included). If the Accept below
+    // does not happen, the sweeper Accepts only with a kept receipt
+    // (onchain/receipts.ts).
+    keepReceipt(store, keyId, escrowRefStr, result.receipt, result.receiptSignature);
     const submittedRef = await resolveSubmittedRef({
       chain,
       indexerUrl: config.indexerUrl,

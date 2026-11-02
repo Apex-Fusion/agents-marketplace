@@ -11,6 +11,12 @@
  * New escrows (Part 2 §6.1, §9.6): RefundRevoked when the agent's record
  * allows it, Accept and Reclaim otherwise, one read of the identity address
  * per sweep.
+ *
+ * Receipt check before the Accept (Part 2 §6.3): the chat end keeps the
+ * supplier's receipt and records a receipt that names another agent as
+ * failed; the sweeper Accepts a new escrow only with a kept receipt that
+ * names its agent, and refuses a kept receipt that fails the check for both
+ * layouts.
  */
 
 import { describe, it, expect, vi, beforeAll, afterAll, type Mock } from "vitest";
@@ -19,12 +25,15 @@ import { join } from "path";
 import { randomBytes, randomUUID } from "crypto";
 import type { Utxo } from "@marketplace/shared/chain";
 import {
+  encodeEscrowDatum,
   encodeIdentityEscrowDatum,
   plutusAddressFromBech32,
+  type EscrowDatum,
   type IdentityDatum,
   type IdentityEscrowDatum,
   type Status,
 } from "@marketplace/shared/cbor";
+import { buildReceipt, receiptResultHash, signReceipt, type SignedReceipt } from "@marketplace/shared/receipt";
 import type { IdentityBlueprint, RecordLookup, WalletKey } from "@marketplace/shared/tx";
 import { GatewayStore } from "../src/db/store.js";
 import { SdkRegistry } from "../src/sdk/registry.js";
@@ -36,6 +45,7 @@ import { transcripts } from "../src/openai/transcripts.js";
 import type { GatewayConfig } from "../src/config.js";
 import type { GatewayDeps } from "../src/deps.js";
 import type { EscrowRow } from "../src/onchain/settle.js";
+import { keepReceipt } from "../src/onchain/receipts.js";
 import { TEST_IDENTITY_HASH, testIdentityBlueprint } from "../../tests/fixtures/identity-builders/blueprint.js";
 import { agentRecord, recordUtxo, testWallet, tombstone } from "../../tests/fixtures/identity-builders/world.js";
 
@@ -46,6 +56,8 @@ function makeSweepDeps(opts: {
   escrows: EscrowRow[];
   chain?: GatewayDeps["chain"];
   privHex?: string;
+  /** Answers a request first; undefined falls through to the indexer stub. */
+  fetch?: (url: string, init?: RequestInit) => Response | undefined;
 }) {
   const dbDir = join(tmpdir(), `gw-sweep-${randomUUID()}`);
   const store = new GatewayStore(dbDir);
@@ -86,7 +98,9 @@ function makeSweepDeps(opts: {
     masterKeyHex: config.masterKeyHex,
     max: config.sdkRegistryMax,
   });
-  const fetchFn = (async (url: unknown) => {
+  const fetchFn = (async (url: unknown, init?: RequestInit) => {
+    const answer = opts.fetch?.(String(url), init);
+    if (answer) return answer;
     if (String(url).includes("/escrows")) return new Response(JSON.stringify(opts.escrows), { status: 200 });
     return new Response("[]", { status: 200 });
   }) as unknown as typeof globalThis.fetch;
@@ -114,7 +128,12 @@ function makeSweepDeps(opts: {
   return { deps, keyRow };
 }
 
-function insertOpenSession(deps: GatewayDeps, keyId: string, escrowRef: string): string {
+function insertOpenSession(
+  deps: GatewayDeps,
+  keyId: string,
+  escrowRef: string,
+  changes: { state?: string; managed_demo?: number; agent_id?: string | null } = {},
+): string {
   const id = randomUUID();
   deps.store.insertSession({
     id,
@@ -127,6 +146,7 @@ function insertOpenSession(deps: GatewayDeps, keyId: string, escrowRef: string):
     price_lovelace: "200000",
     state: "open",
     opened_at: Date.now() - 40 * 60 * 1000,
+    ...changes,
   });
   return id;
 }
@@ -238,6 +258,7 @@ describe("sweeper — legacy Submitted settlement", () => {
 
 describe("sweeper — new escrows (identity layout)", () => {
   const AGENT = "a1".repeat(32);
+  const OTHER_AGENT = "b2".repeat(32);
   const controller = testWallet("sweeper controller");
   const supplier = testWallet("sweeper supplier", 0);
   let blueprint: IdentityBlueprint;
@@ -281,7 +302,11 @@ describe("sweeper — new escrows (identity layout)", () => {
 
   /** The indexer row (identity view) and the live escrow output at the new escrow address. */
   function escrowAt(refChar: string, wallet: WalletKey, datum: IdentityEscrowDatum): { row: EscrowRow; utxo: Utxo } {
-    const ref = { txHash: refChar.repeat(64), index: 0 };
+    return escrowAtRef(refChar.repeat(64), wallet, datum);
+  }
+
+  function escrowAtRef(txHash: string, wallet: WalletKey, datum: IdentityEscrowDatum): { row: EscrowRow; utxo: Utxo } {
+    const ref = { txHash, index: 0 };
     return {
       row: {
         utxo_ref: `${ref.txHash}#0`,
@@ -310,6 +335,7 @@ describe("sweeper — new escrows (identity layout)", () => {
     privHex: string;
     escrows: Array<{ row: EscrowRow; utxo: Utxo }>;
     record: IdentityDatum;
+    fetch?: (url: string, init?: RequestInit) => Response | undefined;
   }) {
     const record: Utxo = {
       ...recordUtxo(blueprint, opts.record, { txHash: "7e".repeat(32), index: 0 }, AGENT),
@@ -324,8 +350,36 @@ describe("sweeper — new escrows (identity layout)", () => {
       escrows: opts.escrows.map(({ row }) => row),
       chain,
       privHex: opts.privHex,
+      fetch: opts.fetch,
     });
     return { ...world, record, queryUtxosByAddress };
+  }
+
+  /** A receipt of `supplier` for `escrowRef`, with agent_did when given (9 fields), else the 8 legacy fields. */
+  function signedReceipt(escrowRef: string, agentDid?: string): SignedReceipt {
+    return signReceipt(buildReceipt({
+      prompt_hash: "c3".repeat(32), response_hash: "f1".repeat(32), model: "kimi", prompt_tokens: 1,
+      completion_tokens: 1, wallclock_ms: 10, supplier_pkh: supplier.pubKeyHash, escrow_ref: escrowRef,
+      ...(agentDid === undefined ? {} : { agent_did: agentDid }),
+    }), supplier.privateKeyHex);
+  }
+
+  /** A Submitted new escrow at a fresh ref that commits to `receipt`. */
+  function submittedFor(wallet: WalletKey, receipt: (escrowRef: string) => SignedReceipt) {
+    const txHash = randomBytes(32).toString("hex");
+    const signed = receipt(`${txHash}#0`);
+    const escrow = escrowAtRef(txHash, wallet, escrowDatum(wallet, {
+      state: "Submitted", submitted_at: Date.now() - 2 * 60 * 1000, result_receipt_hash: receiptResultHash(signed),
+    }));
+    return { escrow, signed };
+  }
+
+  /** The supplier's /v1/chat/end answer with `signed`. */
+  function endAnswer(escrowRef: string, signed: SignedReceipt): Response {
+    return new Response(JSON.stringify({
+      status: "submitted", escrow_ref: escrowRef, submitted_ref: escrowRef,
+      receipt: signed.receipt, receipt_signature: signed.signature,
+    }), { status: 200 });
   }
 
   it("refunds an Open new escrow of a revoked agent before deliver_by and closes its session", async () => {
@@ -402,16 +456,18 @@ describe("sweeper — new escrows (identity layout)", () => {
     expect(settle.accept).not.toHaveBeenCalled();
   });
 
-  it("accepts a Submitted new escrow when its record allows no refund", async () => {
+  it("accepts a Submitted new escrow when its record allows no refund and the kept receipt names its agent", async () => {
     const privHex = genPrivKeyHex();
     const wallet = deriveWalletKey(privHex, 0);
     const submittedAt = Date.now() - 2 * 60 * 1000;
+    const receipt = signedReceipt(`${"b".repeat(64)}#0`, `did:vector:${AGENT}`);
     const escrow = escrowAt("b", wallet, escrowDatum(wallet, {
-      state: "Submitted", submitted_at: submittedAt, result_receipt_hash: "e5".repeat(32),
+      state: "Submitted", submitted_at: submittedAt, result_receipt_hash: receiptResultHash(receipt),
     }));
-    const { deps } = setup({
+    const { deps, keyRow } = setup({
       chatSettleMode: "full", privHex, escrows: [escrow], record: tombstone(activeRecord(), revoked(submittedAt + 1)),
     });
+    keepReceipt(deps.store, keyRow.id, escrow.row.utxo_ref, receipt.receipt, receipt.signature);
     const settle = settleOk();
 
     await runSweepOnce(deps, settle);
@@ -424,14 +480,16 @@ describe("sweeper — new escrows (identity layout)", () => {
     const privHex = genPrivKeyHex();
     const wallet = deriveWalletKey(privHex, 0);
     const submittedAt = Date.now() - 2 * 60 * 1000;
+    const receipt = signedReceipt(`${"e".repeat(64)}#0`, `did:vector:${AGENT}`);
     const escrows = [
       escrowAt("c", wallet, escrowDatum(wallet)),
       escrowAt("d", wallet, escrowDatum(wallet, { state: "Claimed" })),
       escrowAt("e", wallet, escrowDatum(wallet, {
-        state: "Submitted", submitted_at: submittedAt, result_receipt_hash: "e5".repeat(32),
+        state: "Submitted", submitted_at: submittedAt, result_receipt_hash: receiptResultHash(receipt),
       })),
     ];
-    const { deps, queryUtxosByAddress } = setup({ chatSettleMode: "full", privHex, escrows, record: activeRecord() });
+    const { deps, keyRow, queryUtxosByAddress } = setup({ chatSettleMode: "full", privHex, escrows, record: activeRecord() });
+    keepReceipt(deps.store, keyRow.id, escrows[2]!.row.utxo_ref, receipt.receipt, receipt.signature);
     const settle = settleOk();
 
     await runSweepOnce(deps, settle);
@@ -457,5 +515,112 @@ describe("sweeper — new escrows (identity layout)", () => {
     expect(settle.reclaim).toHaveBeenCalledTimes(1);
     expect(settle.refundRevoked).not.toHaveBeenCalled();
     expect(queryUtxosByAddress).not.toHaveBeenCalled();
+  });
+
+  describe("receipt check before the Accept (Part 2 §6.3)", () => {
+    it("refuses the Accept when the kept receipt names another agent or no agent, and records the session as failed", async () => {
+      for (const agentDid of [`did:vector:${OTHER_AGENT}`, undefined]) {
+        const privHex = genPrivKeyHex();
+        const wallet = deriveWalletKey(privHex, 0);
+        const { escrow, signed } = submittedFor(wallet, (ref) => signedReceipt(ref, agentDid));
+        const { deps, keyRow } = setup({ chatSettleMode: "full", privHex, escrows: [escrow], record: activeRecord() });
+        keepReceipt(deps.store, keyRow.id, escrow.row.utxo_ref, signed.receipt, signed.signature);
+        const sessionId = insertOpenSession(deps, keyRow.id, escrow.row.utxo_ref, { state: "invalid", agent_id: AGENT });
+        const settle = settleOk();
+
+        await runSweepOnce(deps, settle);
+        await runSweepOnce(deps, settle);
+
+        expect(settle.accept).not.toHaveBeenCalled();
+        expect(deps.store.getSession(sessionId)!.state).toBe("closed");
+        expect(deps.store.listUsage(keyRow.id, 10)).toMatchObject([
+          { kind: "chat_session", status: "failed", cost_lovelace: null, failure_reason: "agent_did_mismatch" },
+        ]);
+      }
+    });
+
+    it("does not Accept a Submitted new escrow without a kept receipt", async () => {
+      const privHex = genPrivKeyHex();
+      const wallet = deriveWalletKey(privHex, 0);
+      const { escrow } = submittedFor(wallet, (ref) => signedReceipt(ref, `did:vector:${AGENT}`));
+      const { deps } = setup({ chatSettleMode: "full", privHex, escrows: [escrow], record: activeRecord() });
+      const settle = settleOk();
+
+      await runSweepOnce(deps, settle);
+
+      expect(settle.accept).not.toHaveBeenCalled();
+      expect(settle.refundRevoked).not.toHaveBeenCalled();
+    });
+
+    it("asks the supplier for the end result of an invalidated session, then Accepts with its receipt", async () => {
+      const privHex = genPrivKeyHex();
+      const wallet = deriveWalletKey(privHex, 0);
+      const { escrow, signed } = submittedFor(wallet, (ref) => signedReceipt(ref, `did:vector:${AGENT}`));
+      const ends: string[] = [];
+      const { deps, keyRow } = setup({
+        chatSettleMode: "full", privHex, escrows: [escrow], record: activeRecord(),
+        fetch: (url, init) => {
+          if (!url.endsWith("/v1/chat/end")) return undefined;
+          ends.push(new Headers(init?.headers).get("X-Escrow-Ref") ?? "");
+          return endAnswer(escrow.row.utxo_ref, signed);
+        },
+      });
+      const sessionId = insertOpenSession(deps, keyRow.id, escrow.row.utxo_ref, { state: "invalid", agent_id: AGENT });
+      const settle = settleOk();
+
+      await runSweepOnce(deps, settle);
+
+      expect(ends).toEqual([escrow.row.utxo_ref]);
+      expect(settle.accept).toHaveBeenCalledTimes(1);
+      expect(deps.store.getSession(sessionId)!.state).toBe("closed");
+      expect(deps.store.listUsage(keyRow.id, 10)).toMatchObject([{ status: "completed", cost_lovelace: "200000" }]);
+    });
+
+    it("the chat end keeps the receipt, records another agent's receipt as failed, and the sweep refuses its Accept", async () => {
+      for (const [agentDid, accepted] of [[`did:vector:${OTHER_AGENT}`, false], [`did:vector:${AGENT}`, true]] as const) {
+        const privHex = genPrivKeyHex();
+        const wallet = deriveWalletKey(privHex, 0);
+        const { escrow, signed } = submittedFor(wallet, (ref) => signedReceipt(ref, agentDid));
+        const { deps, keyRow } = setup({
+          chatSettleMode: "full", privHex, escrows: [escrow], record: activeRecord(),
+          fetch: (url) => (url.endsWith("/v1/chat/end") ? endAnswer(escrow.row.utxo_ref, signed) : undefined),
+        });
+        // An idle managed demo session: the sweep's janitor ends it first.
+        const sessionId = insertOpenSession(deps, keyRow.id, escrow.row.utxo_ref, { managed_demo: 1, agent_id: AGENT });
+        const settle = settleOk();
+
+        await runSweepOnce(deps, settle);
+
+        expect(deps.store.getSession(sessionId)!.state).toBe("closed");
+        expect(deps.store.getEscrowReceipt(receiptResultHash(signed))).toMatchObject({ escrow_ref: escrow.row.utxo_ref });
+        expect(deps.store.listUsage(keyRow.id, 10)).toMatchObject([accepted
+          ? { kind: "chat_session", status: "completed", cost_lovelace: "200000", failure_reason: null }
+          : { kind: "chat_session", status: "failed", cost_lovelace: null, failure_reason: "agent_did_mismatch" }]);
+        expect(settle.accept).toHaveBeenCalledTimes(accepted ? 1 : 0);
+      }
+    });
+
+    it("keeps the legacy Accept without a kept receipt, and refuses a kept legacy receipt with agent_did", async () => {
+      for (const kept of [false, true]) {
+        const privHex = genPrivKeyHex();
+        const wallet = deriveWalletKey(privHex, 0);
+        const txHash = randomBytes(32).toString("hex");
+        const signed = signedReceipt(`${txHash}#0`, `did:vector:${AGENT}`);
+        const { agent_id: _agent, refund: _refund, ...legacy } = escrowDatum(wallet, {
+          state: "Submitted", submitted_at: Date.now() - 2 * 60 * 1000, result_receipt_hash: receiptResultHash(signed),
+        });
+        const datum: EscrowDatum = legacy;
+        const escrow = escrowAtRef(txHash, wallet, escrowDatum(wallet));
+        escrow.row = { ...escrow.row, state: "Submitted", layout: "legacy", agent_id: null, refund: null };
+        escrow.utxo = { ...escrow.utxo, address: "addr_test1_legacy_escrow", datumHex: encodeEscrowDatum(datum) };
+        const { deps, keyRow } = setup({ chatSettleMode: "full", privHex, escrows: [escrow], record: activeRecord() });
+        if (kept) keepReceipt(deps.store, keyRow.id, escrow.row.utxo_ref, signed.receipt, signed.signature);
+        const settle = settleOk();
+
+        await runSweepOnce(deps, settle);
+
+        expect(settle.accept).toHaveBeenCalledTimes(kept ? 0 : 1);
+      }
+    });
   });
 });

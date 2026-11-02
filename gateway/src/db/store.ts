@@ -56,6 +56,8 @@ export interface SessionRow {
   transcript_nonce: string | null;
   transcript_ct: string | null;
   transcript_tag: string | null;
+  /** agent_id of the session's escrow (StartChatResult.agentId); null for a legacy escrow. */
+  agent_id: string | null;
 }
 
 export interface ResponseEncryptionUpdate {
@@ -146,6 +148,22 @@ export interface WalletTransactionOutcome {
   resolved_at: number;
 }
 
+/**
+ * A receipt that a supplier gave the gateway for an escrow (onchain/receipts.ts).
+ * `receipt_hash` is receiptResultHash({ receipt, signature }): the value that
+ * Submit writes into the escrow as `result_receipt_hash`.
+ */
+export interface EscrowReceiptRow {
+  receipt_hash: string;
+  key_id: string;
+  /** The original Open escrow ref (the receipt's escrow_ref). */
+  escrow_ref: string;
+  /** The receipt object as JSON. */
+  receipt: string;
+  receipt_signature: string;
+  created_at: number;
+}
+
 const ONE_SHOT_MUTABLE_FIELDS: Partial<Record<keyof OneShotJobRow, true>> = {
   state: true,
   updated_at: true,
@@ -213,6 +231,9 @@ export class GatewayStore {
   private readonly sClearPendingWalletTransaction: Statement;
   private readonly sGetWalletTransactionOutcome: Statement;
   private readonly sInsertWalletTransactionOutcome: Statement;
+  private readonly sKeepEscrowReceipt: Statement;
+  private readonly sGetEscrowReceipt: Statement;
+  private readonly sDeleteEscrowReceiptsBefore: Statement;
 
 
   constructor(dbDir: string) {
@@ -251,6 +272,9 @@ export class GatewayStore {
     }
     if (!sessionCols.some((column) => column.name === "transcript_tag")) {
       this.db.exec("ALTER TABLE sessions ADD COLUMN transcript_tag TEXT");
+    }
+    if (!sessionCols.some((column) => column.name === "agent_id")) {
+      this.db.exec("ALTER TABLE sessions ADD COLUMN agent_id TEXT");
     }
 
     this.sInsertKey = this.db.prepare(`INSERT INTO api_keys (
@@ -303,12 +327,12 @@ export class GatewayStore {
       id, key_id, escrow_ref, session_nonce, supplier_base_url, supplier_pkh,
       model, price_lovelace, state, opened_at, closed_at, last_used_at, head_response_id,
       managed_demo, max_output_tokens, max_processing_ms,
-      transcript_nonce, transcript_ct, transcript_tag
+      transcript_nonce, transcript_ct, transcript_tag, agent_id
     ) VALUES (
       @id, @key_id, @escrow_ref, @session_nonce, @supplier_base_url, @supplier_pkh,
       @model, @price_lovelace, @state, @opened_at, NULL, @opened_at, NULL,
       @managed_demo, @max_output_tokens, @max_processing_ms,
-      @transcript_nonce, @transcript_ct, @transcript_tag
+      @transcript_nonce, @transcript_ct, @transcript_tag, @agent_id
     )`);
     this.sGetSession = this.db.prepare("SELECT * FROM sessions WHERE id = @id");
     this.sSetSessionState = this.db.prepare(`UPDATE sessions SET state = @state, closed_at = @closed_at,
@@ -451,7 +475,13 @@ export class GatewayStore {
     ) VALUES (
       @key_id, @tx_hash, @state, @resolved_at
     )`);
-
+    this.sKeepEscrowReceipt = this.db.prepare(`INSERT OR IGNORE INTO escrow_receipts (
+      receipt_hash, key_id, escrow_ref, receipt, receipt_signature, created_at
+    ) VALUES (
+      @receipt_hash, @key_id, @escrow_ref, @receipt, @receipt_signature, @created_at
+    )`);
+    this.sGetEscrowReceipt = this.db.prepare("SELECT * FROM escrow_receipts WHERE receipt_hash = @receipt_hash");
+    this.sDeleteEscrowReceiptsBefore = this.db.prepare("DELETE FROM escrow_receipts WHERE created_at < @cutoff");
   }
 
   insertOneShotJob(
@@ -612,6 +642,20 @@ export class GatewayStore {
     }) as WalletTransactionOutcome | undefined;
   }
 
+  /** Keeps a receipt; the first copy of a hash stays. */
+  keepEscrowReceipt(row: EscrowReceiptRow): void {
+    this.sKeepEscrowReceipt.run(row);
+  }
+
+  getEscrowReceipt(receiptHash: string): EscrowReceiptRow | undefined {
+    return this.sGetEscrowReceipt.get({ receipt_hash: receiptHash }) as EscrowReceiptRow | undefined;
+  }
+
+  /** Deletes the receipts kept before `cutoff` (ms); returns the count. */
+  deleteEscrowReceiptsBefore(cutoff: number): number {
+    return this.sDeleteEscrowReceiptsBefore.run({ cutoff }).changes;
+  }
+
   resolvePendingWalletTransaction(
     keyId: string,
     txHash: string,
@@ -710,7 +754,7 @@ export class GatewayStore {
   insertSession(row: Omit<SessionRow,
     "closed_at" | "last_used_at" | "head_response_id" | "managed_demo" |
     "max_output_tokens" | "max_processing_ms" | "transcript_nonce" |
-    "transcript_ct" | "transcript_tag"
+    "transcript_ct" | "transcript_tag" | "agent_id"
   > & {
     managed_demo?: number;
     max_output_tokens?: number;
@@ -718,6 +762,7 @@ export class GatewayStore {
     transcript_nonce?: string | null;
     transcript_ct?: string | null;
     transcript_tag?: string | null;
+    agent_id?: string | null;
   }): void {
     this.sInsertSession.run({
       ...row,
@@ -727,6 +772,7 @@ export class GatewayStore {
       transcript_nonce: row.transcript_nonce ?? null,
       transcript_ct: row.transcript_ct ?? null,
       transcript_tag: row.transcript_tag ?? null,
+      agent_id: row.agent_id ?? null,
     });
   }
   getSession(id: string): SessionRow | undefined {

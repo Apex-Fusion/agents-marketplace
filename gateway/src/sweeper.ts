@@ -47,6 +47,15 @@
  * when the agent is Revoked with invalid_from ≤ submitted_at. A refund counts
  * as a reclaim for the session row. One sweep reads the identity address once
  * at most (onchain/records.ts).
+ *
+ * Receipt check before the Accept (Part 2 §6.3, onchain/receipts.ts): the
+ * receipt that the gateway keeps for a Submitted escrow must name the
+ * escrow's agent, as the buyer SDK requires. The sweeper does not Accept an
+ * escrow whose kept receipt fails the check (the session is recorded as
+ * failed), nor a new escrow without a kept receipt; the supplier then settles
+ * it with Release after the acceptance window. For an invalidated session the
+ * sweeper first asks the supplier for the end result, which carries the
+ * receipt.
  */
 
 import { randomUUID } from "crypto";
@@ -62,9 +71,10 @@ import {
 import { chainRecordLookup, refundRevokedApplies } from "./onchain/records.js";
 import { parseRef } from "./routing/selectSupplier.js";
 import { dropSessionState } from "./openai/transcripts.js";
-import { sweepIdleDemoSessions } from "./openai/demoChat.js";
+import { requestSupplierEnd, sweepIdleDemoSessions } from "./openai/demoChat.js";
 import { CAPABILITY as CHAT_CAPABILITY } from "./openai/sessions.js";
 import { recoverOneShotJobs } from "./oneShotJobs.js";
+import { acceptRefusal, RECEIPT_RETENTION_MS } from "./onchain/receipts.js";
 
 // Don't touch escrows newer than this — an in-flight request is settling them.
 const MIN_AGE_MS = 90_000;
@@ -81,13 +91,19 @@ const DELIVER_BY_BUFFER_MS = 60_000;
  * escrow is retried each sweep. Bounded FIFO; restart = one retry burst. */
 const settledRefs = new Set<string>();
 const SETTLED_REFS_MAX = 5_000;
+/** Submitted new escrows without a kept receipt that this process has logged once. */
+const unheldRefs = new Set<string>();
+
+function remember(refs: Set<string>, ref: string): void {
+  refs.add(ref);
+  if (refs.size > SETTLED_REFS_MAX) {
+    const first = refs.values().next().value;
+    if (first !== undefined) refs.delete(first);
+  }
+}
 
 function markSettled(ref: string): void {
-  settledRefs.add(ref);
-  if (settledRefs.size > SETTLED_REFS_MAX) {
-    const first = settledRefs.values().next().value;
-    if (first !== undefined) settledRefs.delete(first);
-  }
+  remember(settledRefs, ref);
 }
 
 function log(msg: string): void {
@@ -98,7 +114,7 @@ function log(msg: string): void {
 function closeSessionRow(
   deps: GatewayDeps,
   session: SessionRow,
-  outcome: { status: "completed" | "reclaimed"; costLovelace: string | null },
+  outcome: { status: "completed" | "reclaimed" | "failed"; costLovelace: string | null; failureReason?: string },
 ): void {
   // Re-read: an in-flight close (route handler or demo executor) may have won.
   const current = deps.store.getSession(session.id);
@@ -118,7 +134,7 @@ function closeSessionRow(
     prompt_tokens: 0,
     completion_tokens: 0,
     status: outcome.status,
-    failure_reason: null,
+    failure_reason: outcome.failureReason ?? null,
   });
   log(`closed abandoned session ${session.id} (${outcome.status})`);
 }
@@ -182,6 +198,7 @@ export async function runSweepOnce(
 
   const now = Date.now();
   deps.store.deleteExpiredResponses(now);
+  deps.store.deleteEscrowReceiptsBefore(now - RECEIPT_RETENTION_MS);
   for (const keyRow of deps.store.listKeys()) {
     if (protection.protectedKeys.has(keyRow.id)) continue;
     let rows: EscrowRow[];
@@ -226,6 +243,27 @@ export async function runSweepOnce(
             log(`refunded Submitted escrow ${row.utxo_ref}: its agent is revoked`);
             markSettled(row.utxo_ref);
             if (chatSession) closeRefundedSession(deps, row, chatSession);
+            continue;
+          }
+          // The receipt check before the Accept (Part 2 §6.3).
+          const escrow = decodeAnyEscrowDatum(live.datumHex);
+          let refusal = acceptRefusal(deps.store, escrow);
+          if (refusal === "receipt_not_held" && chatSession?.state === "invalid") {
+            // The gateway stopped this session; the supplier keeps its end result and receipt.
+            await requestSupplierEnd(deps, chatSession);
+            refusal = acceptRefusal(deps.store, escrow);
+          }
+          if (refusal === "receipt_not_held") {
+            if (!unheldRefs.has(row.utxo_ref)) {
+              remember(unheldRefs, row.utxo_ref);
+              log(`no Accept for Submitted escrow ${row.utxo_ref}: the gateway keeps no receipt to check its agent`);
+            }
+            continue;
+          }
+          if (refusal !== null) {
+            log(`refused the Accept of Submitted escrow ${row.utxo_ref}: ${refusal}`);
+            markSettled(row.utxo_ref);
+            if (chatSession) closeSessionRow(deps, chatSession, { status: "failed", costLovelace: null, failureReason: refusal });
             continue;
           }
           try {

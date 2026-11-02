@@ -1,4 +1,5 @@
 import { randomUUID } from "crypto";
+import { receiptAgentProblem } from "@marketplace/buyer/sdk";
 import type {
   ResponseItem,
   ResponseObject,
@@ -14,26 +15,43 @@ import type { ParsedResponseRequest } from "./validate.js";
 import { publicResponse, publicStreamEvent } from "./shapes.js";
 import { completeStoredResponse } from "./responseStore.js";
 import { GatewayError } from "./errors.js";
+import { keepReceipt } from "../onchain/receipts.js";
 
-function recordSessionCost(deps: GatewayDeps, session: SessionRow): void {
+/** The longest end answer that the gateway reads; a receipt answer is far below 1 KiB. */
+const MAX_END_ANSWER_CHARS = 65_536;
+
+/** A refused receipt (`failureReason`) records the session as failed, at no cost, as the buyer SDK records a refusal. */
+function recordSessionCost(deps: GatewayDeps, session: SessionRow, failureReason: string | null): void {
+  const cost = deps.config.chatSettleMode === "ticket" ? "0" : session.price_lovelace;
   deps.store.insertUsage({
     id: randomUUID(), key_id: session.key_id, created_at: Date.now(), kind: "chat_session",
     model: session.model, capability_id: CAPABILITY, supplier_pkh: session.supplier_pkh,
     escrow_ref: session.escrow_ref,
-    cost_lovelace: deps.config.chatSettleMode === "ticket" ? "0" : session.price_lovelace,
-    prompt_tokens: 0, completion_tokens: 0, status: "completed", failure_reason: null,
+    cost_lovelace: failureReason === null ? cost : null,
+    prompt_tokens: 0, completion_tokens: 0,
+    status: failureReason === null ? "completed" : "failed", failure_reason: failureReason,
   });
 }
 
-function markSessionGone(deps: GatewayDeps, session: SessionRow): void {
+function markSessionGone(deps: GatewayDeps, session: SessionRow, failureReason: string | null): void {
   const current = deps.store.getSession(session.id);
   if (!current || current.state !== "open") return;
   deps.store.setSessionState(session.id, "closed", Date.now());
   dropSessionState(session.id);
-  recordSessionCost(deps, session);
+  recordSessionCost(deps, session, failureReason);
 }
 
-async function requestSupplierEnd(deps: GatewayDeps, session: SessionRow): Promise<boolean> {
+/**
+ * Asks the supplier to end the session (POST /v1/chat/end; the supplier
+ * answers the same result again for an ended session). A full-mode answer
+ * carries the receipt that Submit committed. The gateway keeps it for the
+ * sweeper's Accept check (onchain/receipts.ts) and checks its agent fields
+ * against the session's escrow (Part 2 §6.3), as the buyer SDK's endChat
+ * does. Returns the failed check ("agent_did_mismatch" or
+ * "malformed_receipt"), or null.
+ */
+export async function requestSupplierEnd(deps: GatewayDeps, session: SessionRow): Promise<string | null> {
+  let answer: unknown;
   try {
     const response = await deps.fetchFn(`${session.supplier_base_url.replace(/\/+$/, "")}/v1/chat/end`, {
       method: "POST",
@@ -41,11 +59,20 @@ async function requestSupplierEnd(deps: GatewayDeps, session: SessionRow): Promi
       body: JSON.stringify({}),
       signal: AbortSignal.timeout(90_000),
     });
-    await response.text().catch(() => "");
-    return response.ok;
+    const text = await response.text().catch(() => "");
+    if (!response.ok || text.length > MAX_END_ANSWER_CHARS) return null;
+    answer = JSON.parse(text);
   } catch {
-    return false;
+    return null;
   }
+  if (typeof answer !== "object" || answer === null || !("status" in answer) || answer.status !== "submitted" ||
+      !("receipt" in answer) || !("receipt_signature" in answer)) return null;
+  const { receipt, receipt_signature: signature } = answer;
+  if (typeof receipt !== "object" || receipt === null ||
+      keepReceipt(deps.store, session.key_id, session.escrow_ref, receipt, signature) === null) return null;
+  const problem = receiptAgentProblem(receipt, session.agent_id);
+  if (problem !== null) console.warn(`[gateway:demo] session ${session.id}: supplier receipt refused (${problem})`);
+  return problem;
 }
 
 async function closeDemoSession(
@@ -58,8 +85,7 @@ async function closeDemoSession(
     if (!session || session.state !== "open" || session.managed_demo !== 1) return null;
     if (opts.idleCutoffMs !== undefined &&
         (opts.nowMs ?? Date.now()) - session.last_used_at < opts.idleCutoffMs) return null;
-    await requestSupplierEnd(deps, session);
-    markSessionGone(deps, session);
+    markSessionGone(deps, session, await requestSupplierEnd(deps, session));
     console.log(`[gateway:demo] closed session ${sessionId} (${opts.reason})`);
     return session.supplier_pkh;
   });
@@ -204,7 +230,8 @@ export async function runDemoResponse(args: DemoRunArgs): Promise<ResponseObject
           return finish(session, turn.response);
         } catch (error) {
           if (error instanceof SessionGoneError) {
-            markSessionGone(deps, session);
+            // An ended supplier session still answers its end result: keep its receipt.
+            markSessionGone(deps, session, await requestSupplierEnd(deps, session));
             return undefined;
           }
           throw error;
@@ -225,7 +252,7 @@ export async function runDemoResponse(args: DemoRunArgs): Promise<ResponseObject
       const turn = await streamSupplierTurn(deps, session, capped, relaySupplierEvent);
       return finish(session, turn.response);
     } catch (error) {
-      if (error instanceof SessionGoneError) markSessionGone(deps, session);
+      if (error instanceof SessionGoneError) markSessionGone(deps, session, await requestSupplierEnd(deps, session));
       throw error;
     }
   });

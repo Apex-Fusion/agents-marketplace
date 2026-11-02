@@ -1003,6 +1003,33 @@ describe("one-shot recovery — new escrows (identity layout)", () => {
     expect(store.sumCostLovelace(key.id)).toBe(PRICE);
   });
 
+  it("does not Accept a Submitted new escrow without the receipt that the SDK verified (Part 2 §6.3)", async () => {
+    const { directory, store, chain, key, walletKey } = liveWorld("identity-unverified");
+    const escrowRef = `${"a".repeat(64)}#0`;
+    // The SDK refused the receipt (for example agent_did_mismatch): no receipt_hash, the job recovers.
+    insertFundedJob(store, {
+      id: "job-identity-unverified",
+      keyId: key.id,
+      supplierPkh: agentKey.pubKeyHash,
+      escrowRef,
+      state: "recovering",
+      advertMarker: "a",
+    });
+    seedIdentityEscrow(chain, { txHash: "a".repeat(64), index: 0 }, identityEscrow(walletKey, {
+      state: "Submitted", submitted_at: Date.now() - 60_000, result_receipt_hash: "e".repeat(64),
+    }));
+    seedRecord(chain, agentRecord(controller, agentKey));
+    const indexer = lineageIndexer({ [escrowRef]: liveLineage(escrowRef, "Submitted", Date.now() - 120_000) });
+
+    await recoverOneShotJobs(makeDeps(directory, store, chain, indexer.fetchFn, registryFor(key, walletKey, chain)));
+
+    expect(chain.submissions).toEqual([]);
+    expect(store.getOneShotJob("job-identity-unverified")).toMatchObject({ state: "failed" });
+    expect(store.listUsage(key.id, 10)).toMatchObject([{
+      status: "failed", cost_lovelace: null, failure_reason: "no verified receipt; the new escrow is not accepted",
+    }]);
+  });
+
   it("reclaims an Open new escrow past deliver_by to the refund address without a buyer signature", async () => {
     const { directory, store, chain, key, walletKey } = liveWorld("identity-reclaim");
     const escrowRef = `${"9".repeat(64)}#0`;

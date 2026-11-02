@@ -204,6 +204,8 @@ export async function openSessionCore(
     transcript_nonce: emptyTranscript.nonce,
     transcript_ct: emptyTranscript.ct,
     transcript_tag: emptyTranscript.tag,
+    // The escrow's agent (Part 2 §6.3): the chat end checks the receipt's agent_did against it.
+    agent_id: started.agentId,
   });
   transcripts.set(sessionId, []);
   const session = deps.store.getSession(sessionId);
