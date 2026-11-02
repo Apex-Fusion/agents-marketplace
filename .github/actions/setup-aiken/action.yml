@@ -1,0 +1,57 @@
+name: Set up aiken
+description: >-
+  Installs the pinned aiken release binary for Linux x86_64
+  (https://github.com/aiken-lang/aiken/releases), checks its sha256, caches it
+  and puts it on PATH. contracts/identity-marketplace/aiken.toml pins the same
+  compiler version.
+
+inputs:
+  version:
+    description: Release tag of aiken-lang/aiken.
+    default: v1.1.21
+  sha256:
+    description: sha256 of aiken-x86_64-unknown-linux-musl.tar.gz of that release.
+    default: 9fe0bb94efbb79f4d351664def3da0d58c7e30716fcb65590ff9b6c6b0ffb715
+
+runs:
+  using: composite
+  steps:
+    - name: Restore aiken from the cache
+      id: cache
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.tool_cache }}/aiken/${{ inputs.version }}
+        key: aiken-${{ inputs.version }}-x86_64-unknown-linux-musl-${{ inputs.sha256 }}
+
+    - name: Download aiken and check its sha256
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        SHA256: ${{ inputs.sha256 }}
+        DEST: ${{ runner.tool_cache }}/aiken/${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        asset=aiken-x86_64-unknown-linux-musl.tar.gz
+        curl --fail --silent --show-error --location --retry 3 \
+          --output "$RUNNER_TEMP/$asset" \
+          "https://github.com/aiken-lang/aiken/releases/download/$VERSION/$asset"
+        echo "$SHA256  $RUNNER_TEMP/$asset" | sha256sum --check --strict
+        mkdir -p "$DEST"
+        tar --extract --gzip --file "$RUNNER_TEMP/$asset" --directory "$DEST" \
+          --strip-components 1 aiken-x86_64-unknown-linux-musl/aiken
+
+    - name: Put aiken on PATH
+      shell: bash
+      env:
+        DEST: ${{ runner.tool_cache }}/aiken/${{ inputs.version }}
+      run: echo "$DEST" >> "$GITHUB_PATH"
+
+    - name: Check the aiken version
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        aiken --version
+        aiken --version | grep -F "aiken $VERSION+"

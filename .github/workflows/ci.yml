@@ -14,6 +14,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # pnpm test evaluates builder transactions with `aiken tx simulate`
+      # (tests/unit/identity-tx-*.test.ts, tests/unit/paper2agent-identity-e2e.test.ts).
+      - name: Setup aiken
+        uses: ./.github/actions/setup-aiken
+
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
@@ -33,3 +38,54 @@ jobs:
 
       - name: Vitest
         run: pnpm test
+
+  contracts:
+    name: aiken contracts + script evaluation (Node 20)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup aiken
+        uses: ./.github/actions/setup-aiken
+
+      - name: Cache aiken packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/aiken/packages
+          key: aiken-packages-${{ hashFiles('contracts/identity-marketplace/aiken.lock') }}
+
+      - name: Aiken check (contracts/identity-marketplace)
+        working-directory: contracts/identity-marketplace
+        run: aiken check -D
+
+      - name: Aiken build (contracts/identity-marketplace)
+        working-directory: contracts/identity-marketplace
+        run: aiken build
+
+      - name: Committed blueprint equals the build
+        working-directory: contracts/identity-marketplace
+        run: git diff --exit-code plutus.json
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.2
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Vitest legacy registry scripts
+        run: pnpm exec vitest run --config tests/legacy-registry/vitest.config.ts
+
+      - name: Vitest escrow and advert builder evaluation
+        run: pnpm exec vitest run --config tests/identity-builders/vitest.config.ts
+
+      - name: Vitest vectors, benchmarks and resolver properties
+        run: pnpm exec vitest run --config tests/identity-vectors/vitest.config.ts
