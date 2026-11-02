@@ -146,6 +146,21 @@ describe("OgmiosLucidProvider — getProtocolParameters()", () => {
     expect(typeof params.priceStep).toBe("number");
   });
 
+  it("reads the Ogmios v6 names for the CPU price and the min-UTxO coefficient", async () => {
+    // The live Vector Ogmios answer: no `prices` and no `coinsPerUtxoByte`. The
+    // values differ from the built-in defaults, so a fallback to them fails.
+    const { prices: _prices, coinsPerUtxoByte: _coins, ...rest } = makeOgmiosProtocolParams();
+    const live = { ...rest, scriptExecutionPrices: { memory: "600/10000", cpu: "800/10000000" }, minUtxoDepositCoefficient: 4400 };
+    mockFetch.mockResolvedValueOnce(rpcOk(live));
+    const provider = new OgmiosLucidProvider({ ogmiosUrl: TEST_URL, fetch: mockFetch });
+
+    const params = await provider.getProtocolParameters();
+
+    expect(params.priceMem).toBeCloseTo(0.06, 12);
+    expect(params.priceStep).toBeCloseTo(0.00008, 12);
+    expect(params.coinsPerUtxoByte).toBe(4400n);
+  });
+
   it("returns maxTxSize as a number", async () => {
     mockFetch.mockResolvedValueOnce(rpcOk(makeOgmiosProtocolParams()));
     const provider = new OgmiosLucidProvider({ ogmiosUrl: TEST_URL, fetch: mockFetch });
