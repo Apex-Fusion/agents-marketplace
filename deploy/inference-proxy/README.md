@@ -80,6 +80,10 @@ The public endpoint is
 `https://mp-suppliers-qwen38-local.vector.apexfusion.org`.
 Its DNS-only A record must point to `62.238.38.167`.
 
+The advert references below are legacy adverts. After the identity release,
+each supplier registers an agent record and posts a new advert (Part 2 §9.2,
+`docs/DEPLOY_NEW_SUPPLIER.md` §4.8). Record the new references here then.
+
 Live mainnet deployment (2026-09-21):
 
 - Advert: `61178359cabae3c25764001750639df3b71ce12d26726bfb8c5c04da1ff28be4#0`.

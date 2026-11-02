@@ -76,6 +76,7 @@ COPY buyer ./buyer
 # contracts/identity-marketplace/plutus.json for the new escrow and advert
 # (both layouts during the drain, Part 2 §9.6).
 COPY contracts/marketplace/plutus.json ./contracts/marketplace/plutus.json
+
 COPY contracts/identity-marketplace/plutus.json ./contracts/identity-marketplace/plutus.json
 
 # Build the static UI into buyer/dist (Vite outDir is buyer/dist;

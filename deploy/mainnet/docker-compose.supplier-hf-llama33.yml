@@ -17,6 +17,8 @@
 #        SUPPLIER_PUB_KEY_HEX, OPENAI_API_KEY (hf_ token), OGMIOS_URL,
 #        NETWORK_ID=1, VECTOR_ZERO_TIME_MS, ESCROW_REF_UTXO, ADVERT_REF_UTXO,
 #        ADVERT_REF, LIVE_CHAIN=1
+#        Identity release (Part 2 §9.2, §9.6): IDENTITY_POLICY_ID, AGENT_ID,
+#        IDENTITY_ESCROW_REF_UTXO, IDENTITY_ADVERT_REF_UTXO
 #      Advert posted with --capability-id llm.text.generate.v1.
 #      Do NOT set OPENAI_REASONING — the HF router rejects it (HTTP 400) and the
 #      supplier's config guard refuses to boot.

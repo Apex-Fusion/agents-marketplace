@@ -545,6 +545,8 @@ The managed demo session controller can close idle or least-recently-used sessio
 
 The sweeper is state aware. It reclaims expired Open or Claimed escrows. It retries Accept for Submitted escrows while valid. It never blindly reclaims Submitted state.
 
+Both escrow layouts (identity registry, `docs/IDENTITY_REGISTRY.md` §6, §9.6): the sweeper keeps Accept and Reclaim for legacy escrows until the drain ends. For a new escrow it also reads the agent's record. When the agent is Revoked or Retired, it returns an Open or Claimed escrow with RefundRevoked before `deliver_by`. When the agent is Revoked with `invalid_from` at or before `submitted_at`, it returns a Submitted escrow with RefundRevoked instead of the Accept. One sweep reads the identity address once at most. One-shot recovery applies the same rules and counts a RefundRevoked terminal as a refund. Routing skips adverts whose price and bonds exceed 10,000 AP3X, and from `SWITCH_SLOT` on it uses only new adverts (`agent_id` set). Settings: `IDENTITY_POLICY_ID`, `IDENTITY_ESCROW_REF_UTXO` and `SWITCH_SLOT` (`gateway/.env.example`).
+
 ## Receipt commitments
 
 All hashes below use SHA-256 over UTF-8 bytes of the repository canonical JSON function. That function recursively sorts object keys in code-unit order, NFC-normalizes keys and string values, preserves array order, drops undefined object values, and emits compact `JSON.stringify` number syntax. This is a defined subset with additional NFC handling. Do not call it plain RFC 8785 JCS.

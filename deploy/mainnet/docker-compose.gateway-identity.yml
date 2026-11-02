@@ -1,0 +1,132 @@
+# deploy/mainnet/docker-compose.gateway-identity.yml — did:vector identity gateway — MAINNET
+#
+# Part 2 §8.1 (docs/IDENTITY_REGISTRY.md). The resolver, the renderings and
+# the M4 services of identity-gateway/ at https://id.vector.apexfusion.org on
+# the vector-marketplace host (91.98.147.172). The same name is the SPIFFE
+# trust domain.
+#
+# DNS: a DNS-only (not proxied) A record, made with the Cloudflare CLI
+# (profile apexfusion, run --dry-run first):
+#   {"type":"A","name":"id.vector.apexfusion.org","content":"91.98.147.172","proxied":false,"ttl":1}
+# Traefik answers the Let's Encrypt HTTP-01 challenge on :80, so the record
+# must not be proxied.
+#
+# Release: selective release procedure (docs/DEPLOY_NEW_SUPPLIER.md). Build the
+# image off-host from a version tag (identity-gateway/README.md "Update the
+# image"), push the version tag, then on this host:
+#   echo 'IDENTITY_GATEWAY_VERSION=<version>' >> deploy/mainnet/.env   # gitignored
+#   docker compose -f deploy/mainnet/docker-compose.gateway-identity.yml pull
+#   docker compose -f deploy/mainnet/docker-compose.gateway-identity.yml up -d --no-build
+# Never build the image on this host, and never use a `latest` tag. Without
+# IDENTITY_GATEWAY_VERSION the pull fails on the tag "unreleased".
+# deploy.sh does not manage this project.
+#
+# Gateway keys (Part 2 §8.2): two PEM private key files that only the
+# container user can read. The image runs as the `node` user (uid 1000), and
+# the gateway refuses a key file that its group or other users can read or
+# write. On the host:
+#   install -d -o 1000 -g 1000 -m 0700 /root/identity-gateway/keys
+#   chown 1000:1000 /root/identity-gateway/keys/*.pem
+#   chmod 0600 /root/identity-gateway/keys/*.pem
+# The files are mounted read-only. Set both or neither: without them the M4
+# services are off and agent cards answer 503.
+#
+# Private settings in identity-gateway/.env (gitignored, mode 0600; optional):
+#   KOIOS_TOKEN=<Koios bearer token, if the Koios instance needs one>
+#   ACCESS_LOG_RETENTION=<the retention text of Traefik's access log, §13.4>
+# Values published at the identity deployment (Part 2 §11 step 3) go into the
+# environment block below when they exist: IDENTITY_POLICY_ID, CUTOFF_SLOT,
+# GATEWAY_VECTOR_ID (after the gateway registers itself, §8.2) and
+# DELEGATION_POLICY_ID. Without IDENTITY_POLICY_ID the resolver answers legacy
+# records only.
+#
+# Logs: the gateway writes no request log. Traefik's access log on this host
+# holds request paths with DIDs; /policy publishes its retention time.
+#
+# The indexer reaches the gateway on marketplace-mainnet-net at
+# http://marketplace-mainnet-gateway-identity:8080 (IDENTITY_GATEWAY_URL).
+
+name: marketplace-mainnet-gateway-identity
+
+services:
+  identity-gateway:
+    image: ghcr.io/apex-fusion/uni-resolver-driver-did-vector:${IDENTITY_GATEWAY_VERSION:-unreleased}
+    container_name: marketplace-mainnet-gateway-identity
+    restart: unless-stopped
+    env_file:
+      - path: ../../identity-gateway/.env
+        required: false
+    environment:
+      # The image sets HOST=0.0.0.0 and PORT=8080; repeated here for Traefik.
+      HOST: 0.0.0.0
+      PORT: "8080"
+      GATEWAY_BASE_URL: https://id.vector.apexfusion.org
+      # Background fetch jobs (protocol detection, domain linkage). They need
+      # outbound DNS and HTTPS. "off" lists no agent.
+      FETCH_JOBS: "on"
+      FETCH_SCAN_INTERVAL_S: "600"
+      KOIOS_URL: https://v2.koios.vector.mainnet.apexfusion.org/api/v1
+      OGMIOS_URL: wss://ogmios.vector.mainnet.apexfusion.org
+      GENESIS_NETWORK_MAGIC: "764824073"
+      GENESIS_SYSTEM_START: "2025-08-29T16:40:00Z"
+      GENESIS_SLOT_LENGTH: "1"
+      GENESIS_SECURITY_PARAM: "2160"
+      GATEWAY_ED25519_KEY_FILE: /run/secrets/gateway-ed25519.pem
+      GATEWAY_P256_KEY_FILE: /run/secrets/gateway-p256.pem
+      # Published at the identity deployment (see the header):
+      #   IDENTITY_POLICY_ID: <56 hex>
+      #   CUTOFF_SLOT: <slot>
+      #   GATEWAY_VECTOR_ID: <64 hex, the gateway's own identifier>
+      #   DELEGATION_POLICY_ID: <56 hex>
+    volumes:
+      - type: bind
+        source: ${IDENTITY_GATEWAY_ED25519_KEY_HOST_FILE:-/root/identity-gateway/keys/ed25519.pem}
+        target: /run/secrets/gateway-ed25519.pem
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${IDENTITY_GATEWAY_P256_KEY_HOST_FILE:-/root/identity-gateway/keys/p256.pem}
+        target: /run/secrets/gateway-p256.pem
+        read_only: true
+        bind:
+          create_host_path: false
+    mem_limit: 512m
+    networks:
+      - marketplace-mainnet-net
+      - traefik-net
+    labels:
+      # Traefik v3 Docker labels: https://doc.traefik.io/traefik/routing/providers/docker/
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-net"
+      # HTTP router: redirect to HTTPS (ACME HTTP-01 is answered before the redirect).
+      - "traefik.http.routers.vector-id-mainnet.entrypoints=web"
+      - "traefik.http.routers.vector-id-mainnet.rule=Host(`id.vector.apexfusion.org`)"
+      - "traefik.http.routers.vector-id-mainnet.middlewares=vector-id-mainnet-https"
+      - "traefik.http.middlewares.vector-id-mainnet-https.redirectscheme.scheme=https"
+      - "traefik.http.middlewares.vector-id-mainnet-https.redirectscheme.permanent=true"
+      # HTTPS router with a per-client rate limit: 20 requests per second on
+      # average, bursts of 40. Without a sourceCriterion, Traefik groups
+      # requests by the client address (RemoteAddr); this host is not behind
+      # a proxy. https://doc.traefik.io/traefik/middlewares/http/ratelimit/
+      - "traefik.http.routers.vector-id-mainnet-tls.entrypoints=websecure"
+      - "traefik.http.routers.vector-id-mainnet-tls.rule=Host(`id.vector.apexfusion.org`)"
+      - "traefik.http.routers.vector-id-mainnet-tls.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.vector-id-mainnet-tls.middlewares=vector-id-mainnet-ratelimit"
+      - "traefik.http.middlewares.vector-id-mainnet-ratelimit.ratelimit.average=20"
+      - "traefik.http.middlewares.vector-id-mainnet-ratelimit.ratelimit.period=1s"
+      - "traefik.http.middlewares.vector-id-mainnet-ratelimit.ratelimit.burst=40"
+      - "traefik.http.services.vector-id-mainnet.loadbalancer.server.port=8080"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  marketplace-mainnet-net:
+    external: true
+    name: marketplace-mainnet-net
+  traefik-net:
+    external: true
+    name: traefik-net

@@ -51,7 +51,16 @@ OGMIOS_URL=https://ogmios.vector.mainnet.apexfusion.org
 VECTOR_ZERO_TIME_MS=1756485600000
 ESCROW_REF_UTXO=c8d84c6d67ec67a1efe5e9c6c06d53020e05d1bb96d1c55ecb1eb7d5010c4d54#0
 ADVERT_REF_UTXO=c8d84c6d67ec67a1efe5e9c6c06d53020e05d1bb96d1c55ecb1eb7d5010c4d54#1
+# Identity release (Part 2 §9.6). The identity deployment publishes these:
+IDENTITY_POLICY_ID=<56 hex, the identity registry policy ID>
+IDENTITY_ESCROW_REF_UTXO=<txHash>#0
+IDENTITY_ADVERT_REF_UTXO=<txHash>#1
 ```
+
+During the drain (Part 2 §9.6) a supplier needs both pairs of reference
+scripts: `ESCROW_REF_UTXO` and `ADVERT_REF_UTXO` for legacy escrows and
+adverts, `IDENTITY_ESCROW_REF_UTXO` and `IDENTITY_ADVERT_REF_UTXO` for new
+ones. Nobody can claim an escrow whose payment and bonds exceed 10,000 AP3X.
 
 `OGMIOS_URL` above is a public endpoint; if you run your own Vector node +
 Ogmios, point at that instead. Never pin `NETWORK_ID` / `OGMIOS_URL` inside
@@ -255,7 +264,28 @@ Verify before going on-chain:
 Later updates are manual on this box. Follow the drain procedure in §6 before
 `git pull` and `docker compose ... up -d --build`.
 
-### 4.8 Post the advert (go-live — do this LAST)
+### 4.8 Register the agent record, then post the advert (go-live — do this LAST)
+
+After the identity release (Part 2 §9.2, §9.6), every new advert names an
+agent: the identity record of your supplier key. Register the record before
+you post the advert. The indexer lists a new advert only when the record is
+live, independent and Active, lists the supplier key with the transaction
+purpose, and lists the advert's capability id. The supplier key must also
+sign the transaction that posts the advert (`tx:post-advert` does this).
+
+1. Register one native record for the supplier key with
+   `tx:register-record` (`supplier/src/cli/register-record.ts`). `build`
+   writes the transaction (name, endpoint, one `--capability` for each
+   advert capability id), the controller key signs it with `sign`, and
+   `submit` sends it and prints `AGENT_ID=<64 hex>`. The record lists the
+   supplier key with the authentication and transaction purposes, and it
+   names an Accountable Party (by default the controller). The deposit is
+   10 AP3X. For this step, set `IDENTITY_CONTROLLER_PUB_KEY_HEX` (and, if
+   needed, `IDENTITY_ACCOUNTABLE_PARTY`) in the env file.
+2. Put `AGENT_ID=<64 hex>` into `supplier/.env.<name>`. `tx:post-advert`
+   reads it (or `--agent-id`), checks the record, and posts the new advert
+   at the new advert address. Without an agent id it posts a legacy advert,
+   which the marketplace lists only before the switch.
 
 The advert is the go-live flag: the moment it confirms, the indexer starts
 probing `<endpoint>/status` and buyers can lock escrows. Post it only after

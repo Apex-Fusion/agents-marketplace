@@ -12,6 +12,8 @@
 #   2. supplier/.env.kimi-2 on host (chmod 600): SUPPLIER_PRIV_KEY_HEX, OPENAI_API_KEY,
 #        OGMIOS_URL, NETWORK_ID=1, VECTOR_ZERO_TIME_MS, ESCROW_REF_UTXO, ADVERT_REF_UTXO,
 #        ADVERT_REF, LIVE_CHAIN=1
+#        Identity release (Part 2 §9.2, §9.6): IDENTITY_POLICY_ID, AGENT_ID,
+#        IDENTITY_ESCROW_REF_UTXO, IDENTITY_ADVERT_REF_UTXO
 #   3. Networks marketplace-mainnet-net + traefik-net already exist.
 
 name: marketplace-mainnet-supplier-kimi-2

@@ -56,6 +56,8 @@ RUN set -e \
 COPY packages/shared ./packages/shared
 COPY supplier ./supplier
 COPY contracts/marketplace/plutus.json ./contracts/marketplace/plutus.json
+# loadIdentityBlueprint reads the new escrow and advert (Part 2 §6.1, §6.2).
+COPY contracts/identity-marketplace/plutus.json ./contracts/identity-marketplace/plutus.json
 
 # ─── runtime ──────────────────────────────────────────────────────────────
 FROM node:${NODE_VERSION}-alpine AS runtime

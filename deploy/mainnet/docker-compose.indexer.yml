@@ -20,6 +20,21 @@ services:
       # OGMIOS_URL intentionally not pinned here — comes from indexer/.env so
       # the operator can choose hosted WSS vs an in-cluster ogmios container.
       # NETWORK_ID intentionally not pinned — see supplier compose comment.
+      # Identity registry (Part 2 §6.4; indexer/src/config.ts). Set all four
+      # IDENTITY_* values below or none; they are published at the identity
+      # deployment (Part 2 §11 step 3). The identity gateway answers on
+      # marketplace-mainnet-net (deploy/mainnet/docker-compose.gateway-identity.yml).
+      # Backfill: load the current outputs at the identity address at each
+      # start (IDENTITY_LOAD_AT_START), or set RESYNC_FROM_SLOT and
+      # RESYNC_FROM_BLOCK_HASH once to a block before the identity deployment.
+      #   IDENTITY_POLICY_ID: <56 hex>
+      #   IDENTITY_ADVERT_SCRIPT_ADDRESS: <new advert enterprise script address>
+      #   IDENTITY_ESCROW_SCRIPT_ADDRESS: <new escrow enterprise script address>
+      #   IDENTITY_GATEWAY_URL: http://marketplace-mainnet-gateway-identity:8080
+      #   IDENTITY_LOAD_AT_START: "1"
+      #   SWITCH_SLOT: <escrow switch slot, the same value as the gateway's>
+      # ADVERT_SCRIPT_ADDRESS and ESCROW_SCRIPT_ADDRESS (legacy, indexer/.env)
+      # stay set until the drain ends.
     volumes:
       - marketplace_mainnet_indexer_data:/repo/indexer/data
     healthcheck:

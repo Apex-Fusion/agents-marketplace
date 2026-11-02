@@ -24,6 +24,8 @@
 #        SUPPLIER_PUB_KEY_HEX, OGMIOS_URL, NETWORK_ID=1,
 #        VECTOR_ZERO_TIME_MS, ESCROW_REF_UTXO, ADVERT_REF_UTXO, ADVERT_REF,
 #        LIVE_CHAIN=1
+#        Identity release (Part 2 §9.2, §9.6): IDENTITY_POLICY_ID, AGENT_ID,
+#        IDENTITY_ESCROW_REF_UTXO, IDENTITY_ADVERT_REF_UTXO
 #      (no OPENAI_API_KEY — vuk's endpoint is unauthenticated)
 #   3. Networks: traefik-net is created one-shot (see the traefik compose in
 #      this directory). No marketplace-mainnet-net here — this box runs no

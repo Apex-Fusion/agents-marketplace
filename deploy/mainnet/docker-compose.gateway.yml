@@ -38,6 +38,14 @@ services:
       # Accept/Reclaim/Submit. Same values the buyer/suppliers use on mainnet.
       ESCROW_REF_UTXO: c8d84c6d67ec67a1efe5e9c6c06d53020e05d1bb96d1c55ecb1eb7d5010c4d54#0
       ADVERT_REF_UTXO: c8d84c6d67ec67a1efe5e9c6c06d53020e05d1bb96d1c55ecb1eb7d5010c4d54#1
+      # Identity release (Part 2 §6, §9.6). The identity deployment publishes
+      # these values (Part 2 §11 step 3); set them here then. Keep
+      # ESCROW_REF_UTXO and ADVERT_REF_UTXO until the drain ends.
+      #   IDENTITY_POLICY_ID: <56 hex, the identity registry policy ID>
+      #   IDENTITY_ESCROW_REF_UTXO: <txHash>#0 of the new escrow reference script
+      #   IDENTITY_ADVERT_REF_UTXO: <txHash>#1 of the new advert reference script
+      #   SWITCH_SLOT: <escrow switch slot, the same value as the indexer's>
+      # Without IDENTITY_POLICY_ID the gateway settles legacy escrows only.
       # Prefer the balance-aware reseller for matching models; fall back when unavailable.
       GATEWAY_PREFERRED_SUPPLIER_PKH: c447d050e23bc3c38ff8267047c6f8c978970e7176e2af48f316a7fb
       # Browser Origins allowed to call the gateway cross-origin. The buyer

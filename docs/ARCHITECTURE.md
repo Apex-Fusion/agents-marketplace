@@ -175,6 +175,35 @@ EscrowState = Open | Claimed | Submitted | Accepted | Reclaimed | Released
 
 Terminal states: `Accepted`, `Reclaimed`, `Released`.
 
+### 4.5 New escrow and advert (identity registry)
+
+The identity registry (`docs/IDENTITY_REGISTRY.md` §6) adds a second pair of
+scripts in `contracts/identity-marketplace/`. During the drain (§9.6) both
+pairs are live: the datum decides the layout, and every reader decodes both.
+
+```
+IdentityAdvertDatum = AdvertDatum fields 0..12, then
+  agent_id:               ByteArray(32)       // field 13: the agent's identifier
+
+IdentityEscrowDatum = EscrowDatum fields 0..13, then
+  agent_id:               ByteArray(32)       // field 14: copied from a listed advert
+  refund:                 Option<Refund>      // field 15: where buyer payouts go; None = the buyer key
+Refund { address: Address, datum: Option<Data> }
+
+Escrow redeemers: Claim | Submit | Accept | Reclaim | Release | RefundRevoked (appended)
+```
+
+- Claim and Submit read the agent record as a reference input: independent,
+  effective status Active, and the supplier key listed with the transaction
+  purpose. Claim also checks the capability and payment + bonds ≤ 10,000 AP3X.
+- Reclaim with `refund` set: anybody can submit it, and the whole escrow goes
+  to `refund.address`.
+- RefundRevoked: anybody, before or after `deliver_by`, when the record is
+  Revoked or Retired (Open, Claimed) or Revoked with `invalid_from` ≤
+  `submitted_at` (Submitted). The whole escrow goes back to the buyer.
+- A receipt for a new escrow has 9 fields: the 8 fields and
+  `agent_did = did:vector:<agent_id>`.
+
 ## 5. HTTP and receipt contracts
 
 ### 5.1 Public gateway
@@ -284,7 +313,8 @@ Every field traces back to chain through `advert_ref` or `escrow_ref`. The index
 - Two new address roles: `advert`, `escrow`.
 - Two new decoders: `decodeAdvertDatum`, `decodeEscrowDatum`.
 - Two new tables: `advertisements`, `escrows` (keyed by OutputReference).
-- New event types: `PostAdvert`, `UpdateAdvert`, `RetireAdvert`, `PostEscrow`, `ClaimEscrow`, `SubmitEscrow`, `AcceptEscrow`, `ReclaimEscrow`, `ReleaseEscrow`.
+- New event types: `PostAdvert`, `UpdateAdvert`, `RetireAdvert`, `PostEscrow`, `ClaimEscrow`, `SubmitEscrow`, `AcceptEscrow`, `ReclaimEscrow`, `ReleaseEscrow`, and `RefundRevokedEscrow` (new escrow only). The redeemer of each escrow input decides the event. A spend without a redeemer that decodes gives no event.
+- Identity registry (`docs/IDENTITY_REGISTRY.md` §6.4): the indexer also follows the new advert and escrow addresses and the identity address. The supplier view has `agent_id` (64 lowercase hex, or `null` for a legacy advert) and lists only adverts that pass the listing rule; from the switch slot on, only new adverts. The escrow view has `layout`, `agent_id`, `refund` and `routable` (false above the 10,000 AP3X cap).
 - Status poller: background loop polling each Active supplier's `/status` every 20 s; writes to `supplier_status` table (off-chain).
 - Aggregator: per-capability active-supplier counts, p95 wallclock from receipts.
 

@@ -16,6 +16,7 @@ COPY packages/shared ./packages/shared
 COPY supplier ./supplier
 COPY paper2agent ./paper2agent
 COPY contracts/marketplace/plutus.json ./contracts/marketplace/plutus.json
+COPY contracts/identity-marketplace/plutus.json ./contracts/identity-marketplace/plutus.json
 
 FROM node:${NODE_VERSION}-alpine AS runtime
 WORKDIR /repo

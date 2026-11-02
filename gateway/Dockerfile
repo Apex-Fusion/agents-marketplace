@@ -49,6 +49,8 @@ COPY buyer ./buyer
 COPY gateway ./gateway
 # loadBlueprint reads contracts/marketplace/plutus.json at runtime (Accept/Withdraw).
 COPY contracts/marketplace/plutus.json ./contracts/marketplace/plutus.json
+# loadIdentityBlueprint reads the new escrow (settle, sweeper, RefundRevoked).
+COPY contracts/identity-marketplace/plutus.json ./contracts/identity-marketplace/plutus.json
 
 # ─── runtime ──────────────────────────────────────────────────────────────
 FROM node:${NODE_VERSION}-alpine AS runtime
