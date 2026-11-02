@@ -46,12 +46,6 @@ export interface IdentityScripts {
   configRecord?: Utxo;
   /** Module-1 `identity_party` (hash M1): the withdrawal script of a Module-1 consent. */
   module1?: ScriptSource;
-  /**
-   * The current reward balance of Script(M1), in base units (default 0). The
-   * ledger accepts only a withdrawal of the whole balance, and anybody can add
-   * to it, so callers read it from the chain before a consent.
-   */
-  module1Rewards?: bigint;
 }
 
 /** Adoption also needs the legacy registry (Part 2 §2: `legacy_hash`, `legacy_root`). */
@@ -162,13 +156,11 @@ function checkConsent(before: readonly Party[], after: readonly Party[], lo: num
   }
 }
 
-/** The Module-1 consent withdrawal: the whole reward balance of Script(M1), redeemer Consent. */
+/** The Module-1 consent withdrawal: amount 0 from Script(M1), redeemer Consent. */
 function consentWithdrawal(scripts: IdentityScripts, m1: string): PlannedWithdrawal {
   if (scripts.module1 === undefined) refuse("module1_script_missing", "a Module-1 consent needs the Module-1 script (scripts.module1)");
   if (scripts.module1.hash !== m1) refuse("module1_script_mismatch", `the Module-1 script is ${scripts.module1.hash}, but the configuration record names ${m1}`);
-  const amount = scripts.module1Rewards ?? 0n;
-  if (amount < 0n) refuse("module1_rewards_negative", `the Module-1 reward balance is ${amount}`);
-  return { credential: { type: "Script", hash: m1 }, amount, redeemer: { data: MODULE1_CONSENT, label: "Module-1 Consent" }, script: scripts.module1 };
+  return { credential: { type: "Script", hash: m1 }, amount: 0n, redeemer: { data: MODULE1_CONSENT, label: "Module-1 Consent" }, script: scripts.module1 };
 }
 
 /** Adds the configuration reference input when the datum has a Module-1 party; returns M1 or null. */
