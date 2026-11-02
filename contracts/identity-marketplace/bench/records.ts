@@ -16,29 +16,13 @@ import {
   type IdentityDatum,
   type Key,
   type Party,
-  type PlutusData,
   type Signer,
 } from "@marketplace/shared/cbor";
-import { constr, dataMap, fromHex, posixMsToSlot, toHex, type Data } from "../../../tests/legacy-registry/harness/index.js";
+import { posixMsToSlot, toHex, type Data } from "../../../tests/legacy-registry/harness/index.js";
+import { harnessData } from "../../../tests/legacy-registry/harness/identity.js";
 import { M1, wallet, type Wallet } from "./scripts.js";
 
-/** Plutus Data of the shared codecs as the harness writes it (the same bytes). */
-export function toData(pd: PlutusData): Data {
-  switch (pd.kind) {
-    case "constr":
-      return constr(Number(pd.index), ...pd.fields.map(toData));
-    case "list":
-      return pd.items.map(toData);
-    case "map":
-      return dataMap(pd.entries.map(([key, value]) => [toData(key), toData(value)] as const));
-    case "int":
-      return pd.value;
-    case "bytes":
-      return fromHex(pd.hex);
-  }
-}
-
-export const recordData = (d: IdentityDatum): Data => toData(identityDatumToData(d));
+export const recordData = (d: IdentityDatum): Data => harnessData(identityDatumToData(d));
 
 // ─── Times ───────────────────────────────────────────────────────────────
 

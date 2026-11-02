@@ -10,7 +10,7 @@
  * - Chain: one fake Ogmios for both sides. It keeps a ledger: a submitted
  *   transaction spends its inputs and adds its outputs under its ID. When a
  *   builder evaluates a draft, the fake runs the committed escrow script with
- *   `aiken tx simulate` (tests/identity-builders/evaluate.ts).
+ *   `aiken tx simulate` (evaluateBuiltTx of tests/legacy-registry/harness/identity.ts).
  * - Indexer: a fake. GET /suppliers lists the advert with its agent_id, and
  *   GET /escrows/:ref/lineage reads the escrow history from the ledger.
  *
@@ -51,7 +51,7 @@ import { Paper2AgentRuntime } from "../../supplier/src/paper2agent/runtime.js";
 import { createApp } from "../../supplier/src/server.js";
 import { SupplierState } from "../../supplier/src/state.js";
 import { aikenVersion, describeSimulation, type Simulation } from "../legacy-registry/harness/index.js";
-import { evaluateBuiltTx } from "../identity-builders/evaluate.js";
+import { evaluateBuiltTx } from "../legacy-registry/harness/identity.js";
 import { escrowView, listingRow, refText } from "../fixtures/buyer-side/identity-world.js";
 import { testIdentityBlueprint } from "../fixtures/identity-builders/blueprint.js";
 import {

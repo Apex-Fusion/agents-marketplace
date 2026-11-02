@@ -1,8 +1,10 @@
 /**
  * Identity-registry additions to the legacy-script harness: the applied
  * identity-marketplace scripts with test parameters, conversions between the
- * shared builder types and the harness types, and the offline evaluation of
- * an unsigned builder transaction with `aiken tx simulate`.
+ * shared builder types and the harness types, and the offline evaluation with
+ * `aiken tx simulate` of the shared builders' transactions: an unsigned
+ * transaction of the identity builders (identity/tx) or a signed transaction
+ * of the lucid builders (tx/).
  *
  * The test deployment follows Part 2 §3.8: `config_holder`, then
  * `config_seal(seed, holder)`, then `identity(legacy_hash, legacy_root,
@@ -17,11 +19,12 @@ import { sign } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import type { Utxo } from "../../../packages/shared/src/chain/ChainProvider.js";
 import { decodePlutusDataHex, type PlutusData } from "../../../packages/shared/src/cbor/plutus-data.js";
-import { readCbor } from "../../../packages/shared/src/identity/tx/cbor.js";
+import { readCbor, type CborItem } from "../../../packages/shared/src/identity/tx/cbor.js";
 import {
-  addressBytes, buildConfigSeal, buildRegister, validityWindow, VECTOR_MAINNET_SLOT_CONFIG, type AdoptionScripts,
-  type AttestationScripts, type CreatedRecordTx, type DelegationScripts, type IdentityScripts, type Profile,
-  type ProtocolParameters, type ScriptSource, type TxContext, type UnsignedTx, type ValidityWindow, type VaultScripts,
+  addressBytes, buildConfigSeal, buildRegister, paymentCredential, validityWindow, VECTOR_MAINNET_SLOT_CONFIG,
+  type AdoptionScripts, type AttestationScripts, type CreatedRecordTx, type DelegationScripts, type IdentityScripts,
+  type Profile, type ProtocolParameters, type ScriptSource, type TxContext, type UnsignedTx, type ValidityWindow,
+  type VaultScripts,
 } from "../../../packages/shared/src/identity/tx/index.js";
 import type { Key, Party } from "../../../packages/shared/src/cbor/IdentityDatum.js";
 import { allowlistRoot } from "../../../packages/shared/src/identity/allowlist.js";
@@ -104,7 +107,11 @@ export function harnessUtxo(u: Utxo): HarnessUtxo {
     address: addressBytes(u.address),
     value: {
       coin: u.lovelace,
-      assets: Object.entries(u.assets).map(([unit, quantity]) => ({ policy: fromHex(unit.slice(0, 56)), name: fromHex(unit.slice(56)), quantity })),
+      assets: Object.entries(u.assets).map(([unit, quantity]) => {
+        // A unit is the policy ID and the asset name: "policy.name" from the Ogmios providers, "policyname" from lucid.
+        const flat = unit.replace(".", "");
+        return { policy: fromHex(flat.slice(0, 56)), name: fromHex(flat.slice(56)), quantity };
+      }),
     },
     ...(u.datumHex === null ? {} : { datum: { inline: harnessData(decodePlutusDataHex(u.datumHex)) } }),
     ...(u.scriptRef === null ? {} : { referenceScript: { compiledCode: fromHex(u.scriptRef) } }),
@@ -116,6 +123,31 @@ export function harnessUtxo(u: Utxo): HarnessUtxo {
 
 const refKey = (ref: { txHash: string; index: number }): string => `${ref.txHash}#${ref.index}`;
 
+/** The body, the witness set and the transaction ID of a Conway transaction. */
+function conwayParts(bytes: Uint8Array): { body: CborItem; witnessSet: CborItem; bodyBytes: Uint8Array; id: Uint8Array } {
+  const parsed = readCbor(bytes);
+  if (parsed.kind !== "array" || parsed.items.length !== 4) throw new Error("not a Conway transaction");
+  const body = parsed.items[0]!;
+  const bodyBytes = bytes.slice(body.start, body.end);
+  return { body, witnessSet: parsed.items[1]!, bodyBytes, id: blake2b256(bodyBytes) };
+}
+
+/** The output references of body field `key` (0 inputs, 13 collateral) in body order; none when the field is absent. */
+function bodyRefs(body: CborItem, key: bigint): Array<{ txHash: string; index: number }> {
+  if (body.kind !== "map") throw new Error("the body is not a map");
+  const field = body.entries.find(([k]) => k.kind === "uint" && k.value === key);
+  if (field === undefined) return [];
+  const value = field[1];
+  const list = value.kind === "tag" ? value.item : value;
+  if (list.kind !== "array") throw new Error(`body field ${key} is not an array`);
+  return list.items.map((item) => {
+    if (item.kind !== "array" || item.items[0]?.kind !== "bytes" || item.items[1]?.kind !== "uint") {
+      throw new Error(`bad output reference in body field ${key}`);
+    }
+    return { txHash: toHex(item.items[0].value), index: Number(item.items[1].value) };
+  });
+}
+
 /**
  * The harness view of an unsigned builder transaction: the body bytes stay
  * as built, `keys` add the key witnesses, and `encode(order)` writes the
@@ -125,13 +157,8 @@ const refKey = (ref: { txHash: string; index: number }): string => `${ref.txHash
  */
 export function builtFromUnsigned(tx: UnsignedTx, utxos: Iterable<Utxo>, keys: readonly KeyPair[]): BuiltTx {
   const bytes = fromHex(tx.txCborHex);
-  const parsed = readCbor(bytes);
-  if (parsed.kind !== "array" || parsed.items.length !== 4) throw new Error("not a Conway transaction");
-  const body = parsed.items[0]!;
-  const witnessSet = parsed.items[1]!;
+  const { body, witnessSet, bodyBytes, id } = conwayParts(bytes);
   const slice = (item: { start: number; end: number }): Uint8Array => bytes.slice(item.start, item.end);
-  const bodyBytes = slice(body);
-  const id = blake2b256(bodyBytes);
   if (toHex(id) !== tx.txHash) throw new Error("txHash does not match the body");
   if (body.kind !== "map" || witnessSet.kind !== "map") throw new Error("body or witness set is not a map");
 
@@ -150,17 +177,7 @@ export function builtFromUnsigned(tx: UnsignedTx, utxos: Iterable<Utxo>, keys: r
     if (u === undefined) throw new Error(`unknown UTxO ${refKey(ref)}`);
     return u;
   };
-  const collateral: Array<{ txHash: string; index: number }> = [];
-  for (const [key, value] of body.entries) {
-    if (key.kind === "uint" && key.value === 13n) {
-      const list = value.kind === "tag" ? value.item : value;
-      if (list.kind !== "array") throw new Error("collateral is not an array");
-      for (const item of list.items) {
-        if (item.kind !== "array" || item.items[0]?.kind !== "bytes" || item.items[1]?.kind !== "uint") throw new Error("bad collateral input");
-        collateral.push({ txHash: toHex(item.items[0].value), index: Number(item.items[1].value) });
-      }
-    }
-  }
+  const collateral = bodyRefs(body, 13n);
   const seen = new Set<string>();
   const resolved: HarnessUtxo[] = [];
   for (const ref of [...tx.inputs, ...tx.referenceInputs, ...collateral]) {
@@ -202,6 +219,38 @@ export function builtFromUnsigned(tx: UnsignedTx, utxos: Iterable<Utxo>, keys: r
 /** Runs `aiken tx simulate` on an unsigned builder transaction, signed with `keys`. */
 export function simulateUnsigned(tx: UnsignedTx, utxos: Iterable<Utxo>, keys: readonly KeyPair[]): Simulation {
   return simulate(builtFromUnsigned(tx, utxos, keys));
+}
+
+/**
+ * Runs `aiken tx simulate` on a signed transaction of the lucid builders
+ * (tx/), with its bytes and key witnesses as built. The transaction spends
+ * exactly one script input; `label` names its spend redeemer, whose index is
+ * the input's position in the sorted inputs. `utxos` resolves the spent and
+ * reference inputs (a superset is fine).
+ */
+export function evaluateBuiltTx(txCborHex: string, utxos: Iterable<Utxo>, label: string): Simulation {
+  const bytes = fromHex(txCborHex);
+  const { body, bodyBytes, id } = conwayParts(bytes);
+  const known = new Map<string, Utxo>();
+  for (const u of utxos) known.set(refKey(u.ref), u);
+  const inputs = bodyRefs(body, 0n)
+    .sort((a, b) => (a.txHash === b.txHash ? a.index - b.index : a.txHash < b.txHash ? -1 : 1));
+  const scriptInputs = inputs.flatMap((ref, index) => {
+    const u = known.get(refKey(ref));
+    return u !== undefined && paymentCredential(u.address)?.type === "Script" ? [index] : [];
+  });
+  if (scriptInputs.length !== 1) throw new Error(`expected one script input, found ${scriptInputs.length}`);
+  return simulate({
+    spec: { inputs: [], outputs: [], fee: 0n },
+    id,
+    body: bodyBytes,
+    redeemers: [{ tag: "spend", index: scriptInputs[0]!, data: 0n, label }],
+    resolved: [...known.values()].map(harnessUtxo),
+    encode: () => bytes,
+    utxo: () => {
+      throw new Error("not a harness transaction");
+    },
+  });
 }
 
 /**

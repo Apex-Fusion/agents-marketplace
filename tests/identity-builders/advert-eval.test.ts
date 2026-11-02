@@ -27,7 +27,7 @@ import { testIdentityBlueprint } from "../fixtures/identity-builders/blueprint.j
 import {
   agentRecord, AP3X, FakeOgmios, identityAdvert, outputOf, recordUtxo, testWallet, VECTOR_MAINNET_ZERO_TIME_MS,
 } from "../fixtures/identity-builders/world.js";
-import { evaluateBuiltTx } from "./evaluate.js";
+import { evaluateBuiltTx } from "../legacy-registry/harness/identity.js";
 
 const NOW_MS = Date.UTC(2026, 10, 2, 12, 0, 0, 500);
 const SCRIPT_REF: OutputReference = { txHash: "5c".repeat(32), index: 1 };

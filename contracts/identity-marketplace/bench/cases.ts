@@ -58,6 +58,7 @@ import {
   type Utxo,
   type Withdrawal,
 } from "../../../tests/legacy-registry/harness/index.js";
+import { harnessData } from "../../../tests/legacy-registry/harness/identity.js";
 import {
   ALLOWLIST,
   ALLOWLIST_IDS,
@@ -103,7 +104,6 @@ import {
   recordData,
   SUCCESSOR_RECORD,
   SUPPLIER,
-  toData,
   tombstone,
   VALIDITY,
   ed25519,
@@ -131,7 +131,7 @@ export const TOTAL_COLLATERAL = 3n * AP3X;
 
 const funds = (label: string, coin = 500n * AP3X): Utxo => existing(`funds for ${label}`, { address: PAYER.address, value: { coin } });
 
-const asData = (hex: string): Data => toData(decodePlutusDataHex(hex));
+const asData = (hex: string): Data => harnessData(decodePlutusDataHex(hex));
 const spendRedeemer = (r: IdentitySpend): Data => asData(encodeIdentitySpend(r));
 
 /** The record deposit of the benchmarks: above the min-UTxO of the largest record output (about 18.1 AP3X). */
@@ -543,7 +543,7 @@ const escrowDatum = (state: IdentityEscrowDatum["state"]): IdentityEscrowDatum =
 const escrowOutput = (datum: IdentityEscrowDatum): TxOut => ({
   address: ESCROW_ADDRESS,
   value: { coin: 12n * AP3X },
-  datum: { inline: toData(identityEscrowDatumToData(datum)) },
+  datum: { inline: harnessData(identityEscrowDatumToData(datum)) },
 });
 
 /** A Claim or Submit of the escrow with the largest record as reference input, signed by `signer`. */
@@ -621,7 +621,7 @@ const delegationUtxo = (n: number): Utxo =>
   existing(`delegation ${n}`, {
     address: DELEGATION_ADDRESS,
     value: { coin: 0n, assets: [{ policy: DELEGATION_HASH, name: fromHex(delegationId(n)), quantity: 1n }] },
-    datum: { inline: toData(delegationDatumToData(link(n))) },
+    datum: { inline: harnessData(delegationDatumToData(link(n))) },
   });
 
 /** The owner of the vault: agent 3, the delegator of link 4. Agent 4 is the delegate. */
@@ -632,7 +632,7 @@ const PERIOD_START = LO - 3_600_000;
 const vaultOutput = (spent: bigint, coin: bigint): TxOut => ({
   address: VAULT_ADDRESS,
   value: { coin },
-  datum: { inline: toData(vaultDatumToData({ type: "Live", owner: VAULT_OWNER, delegation: delegationId(4), spent, periodStart: PERIOD_START })) },
+  datum: { inline: harnessData(vaultDatumToData({ type: "Live", owner: VAULT_OWNER, delegation: delegationId(4), spent, periodStart: PERIOD_START })) },
 });
 
 /** A new escrow of a vault payment: AP3X equal to the payment and both bonds; the vault refund. */
@@ -658,7 +658,7 @@ function paidEscrow(index: number, coin: bigint): TxOut {
       datum: vaultDatumToData({ type: "Returned", owner: VAULT_OWNER }),
     },
   };
-  return { address: ESCROW_ADDRESS, value: { coin }, datum: { inline: toData(identityEscrowDatumToData(datum)) } };
+  return { address: ESCROW_ADDRESS, value: { coin }, datum: { inline: harnessData(identityEscrowDatumToData(datum)) } };
 }
 
 /**

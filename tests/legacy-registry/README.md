@@ -92,6 +92,7 @@ address (the script, no stake credential).
 | `harness/simulate.ts` | `simulate()`: runs `aiken tx simulate` and gives a verdict for each redeemer. |
 | `harness/blueprint.ts` | `blueprintScript()`: loads a validator from a blueprint and applies its parameters with `aiken blueprint apply`. |
 | `harness/legacy.ts` | The legacy script, hash, address, `AgentDatum`, redeemers and the identifier derivation. |
+| `harness/identity.ts` | The identity-marketplace test deployment (`identityWorld()`), the conversions between the shared builder types and the harness types (`harnessData`, `harnessUtxo`, `sharedUtxo`), and the evaluation of builder transactions: `simulateUnsigned()` for an unsigned transaction of the identity builders, `evaluateBuiltTx()` for a signed transaction of the lucid builders. |
 | `scenario.ts` | Test wallets, funds, the record profile, the rule-following Register, `evaluate()`. |
 
 - **Transactions.** A test writes a `TxSpec` (inputs with redeemers, reference inputs, collateral, outputs, fee, mints, withdrawals, required signers, validity slots, scripts, datums, signers). `buildTx()` sorts the inputs, policies and reward accounts as the ledger does, gives each redeemer its index, writes the Conway body and witness set (tag 258 sets, a redeemer map), and signs the body hash with the keys.
