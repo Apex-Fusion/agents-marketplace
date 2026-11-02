@@ -645,7 +645,7 @@ All three modules get new deployments in this phase. They use `vector_identity` 
 
 - **Protocol detection.** The gateway detects each listed agent's protocol:
   - **A2A:** `<endpoint origin>/.well-known/agent-card.json` returns a valid agent card.
-  - **MCP:** an MCP `initialize` request to the endpoint succeeds.
+  - **MCP:** the endpoint answers an MCP discovery request: first `server/discover` (MCP revision 2026-07-28, which removed `initialize`), then an `initialize` request of revision 2025-11-25.
   - **Web:** neither check succeeds.
 - **Fetch rules** (Part 1 §9, amplification). Detection and domain linkage run as background jobs, never during a request. They fetch only `https` URLs whose host resolves to a public unicast address, checked for each connection and each redirect. They do not follow a redirect to another host. Each fetch is limited to 1 MiB and 10 seconds, with at most one fetch per host each minute.
 - **Rechecks.** The gateway checks again daily and after each record change. The result goes to `vectorFetched`.
@@ -654,10 +654,10 @@ All three modules get new deployments in this phase. They use `vector_identity` 
 | Rendering | Path | Standard |
 |---|---|---|
 | `did:web` alias | `GET /agents/{id}/did.json` (for `did:web:id.vector.apexfusion.org:agents:{id}`; its `alsoKnownAs` names `did:vector:{id}`) | did:web |
-| Agent card | `GET /agents/{id}/agent-card.json`, signed (JWS, Ed25519) | A2A |
+| Agent card | `GET /agents/{id}/agent-card.json`, signed (JWS, Ed25519); A2A agents only, because an A2A card needs an A2A interface | A2A |
 | MCP server card | `GET /agents/{id}/server-card` (MCP agents only) | MCP Server Cards |
 | MCP subregistry | `GET /v0/servers` | MCP Registry API |
-| Catalogs | `GET /.well-known/ai-catalog.json`, `GET /.well-known/ard.json` | AI Catalog, ARD |
+| Catalogs | `GET /.well-known/ai-catalog.json`, `GET /.well-known/ard.json`; they list A2A agents through the agent card and MCP agents through the server card, so web agents do not appear | AI Catalog, ARD |
 | OASF record | `GET /agents/{id}/oasf.json` | OASF |
 | ERC-8004 file | `GET /agents/{id}/registration.json` (`agentId` = the identifier as an unsigned 256-bit integer, in decimal; `agentRegistry = vector:mainnet:<identity policy>`, provisional until a CAIP namespace for Vector exists; the network magic cannot identify Vector) | ERC-8004 |
 | JWKS | `GET /agents/{id}/jwks.json`, `GET /.well-known/jwks.json` | RFC 7517 |
@@ -681,7 +681,7 @@ All three modules get new deployments in this phase. They use `vector_identity` 
 - **Decision open.** How the gateway publishes the DNS-AID zone is not decided (§13.4). Until it is, the gateway publishes no DNS-AID records.
 - **Record content.** When the zone exists, each listed agent gets:
   - an SVCB record at `<DNS-safe identifier>.<zone>` (Part 1 §3.2), with `well-known=agent-card.json`;
-  - `cap-sha256`, the SHA-256 of the gateway's agent card for that agent.
+  - `cap-sha256`, the SHA-256 of the gateway's agent card for that agent. Only A2A agents have an agent card (§8.5): the DNS-AID decision (§13.4) must also say what MCP and web agents publish.
 - **Index.** `_index._agents.<zone>` points to the catalog.
 - **DNSSEC.** The draft says that these records SHOULD be DNSSEC-signed.
 
