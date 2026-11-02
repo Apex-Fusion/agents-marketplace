@@ -5,11 +5,16 @@
  * Tests inject MockChainSyncSource instead, so this implementation is exercised
  * end-to-end only in M1-F lifecycle tests.
  *
+ * Each Ogmios v6 block is converted to an IndexerBlock (ogmiosBlock.ts) before
+ * it is emitted: failed transactions are left out and spend redeemers are
+ * keyed by the spent output.
+ *
  * Adapted from apex-dashboard/server/ws-transport.ts.
  */
 
 import { EventEmitter } from "events";
-import type { ChainSyncSource, IndexerBlock, RollbackPoint } from "./types.js";
+import type { ChainSyncSource, RollbackPoint } from "./types.js";
+import { fromOgmiosBlock } from "./ogmiosBlock.js";
 
 const INITIAL_BACKOFF = 1_000;
 const MAX_BACKOFF = 30_000;
@@ -180,12 +185,12 @@ export class OgmiosSource extends EventEmitter implements ChainSyncSource {
     if (msg.method === "nextBlock") {
       const r = msg.result as {
         direction?: "forward" | "backward";
-        block?: IndexerBlock;
+        block?: unknown;
         tip?: { slot: number; id: string };
         point?: RollbackPoint | string;
       };
       if (r?.direction === "forward" && r.block) {
-        this.emit("block", { block: r.block, tip: r.tip });
+        this.emit("block", { block: fromOgmiosBlock(r.block), tip: r.tip });
       } else if (r?.direction === "backward") {
         let point: RollbackPoint = { slot: 0, id: "origin" };
         if (r.point && typeof r.point === "object") {

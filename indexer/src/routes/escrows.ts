@@ -2,9 +2,17 @@
  * indexer/src/routes/escrows.ts
  *
  * GET /escrows/:ref  — ref is "<txHash>#<index>"; 404 if not found.
- * GET /escrows/:ref/lineage — exact spend-linked escrow history.
+ * GET /escrows/:ref/lineage — exact spend-linked escrow history; `terminal.type`
+ *   is AcceptEscrow, ReclaimEscrow, ReleaseEscrow or RefundRevokedEscrow.
  * GET /escrows?buyer=PKH  — list escrows by buyer_pkh.
- * GET /escrows?supplier=PKH — list escrows by supplier_pkh.
+ * GET /escrows?supplier=PKH — list the routable escrows of supplier_pkh.
+ *
+ * Each view has the layout ("legacy" | "identity"), agent_id (64 lowercase hex,
+ * or null for a legacy escrow), refund ({ address, datum } or null: payouts go
+ * to the buyer key) and routable. routable is false when payment + buyer bond
+ * + supplier bond exceed 10,000 AP3X (Part 2 §6.5 F-29): such a new escrow
+ * cannot be claimed, and the buyer gets it back by Reclaim after deliver_by.
+ * The buyer views keep it for that Reclaim; the supplier list leaves it out.
  */
 
 import { Router, type Request, type Response } from "express";
@@ -14,6 +22,8 @@ import {
   type EscrowRow,
   type SqliteCache,
 } from "../db/cache.js";
+import type { DatumLayout } from "../follower/types.js";
+import { withinValueCap } from "../listing/rule.js";
 
 export interface EscrowsDeps {
   cache: SqliteCache;
@@ -36,10 +46,19 @@ interface EscrowView {
   result_receipt_hash: string | null;
   state: string;
   created_slot: number;
+  layout: DatumLayout;
+  agent_id: string | null;
+  /** address: bech32 (Plutus Data CBOR hex when it has no bech32 form); datum: inline datum CBOR hex or null. */
+  refund: { address: string; datum: string | null } | null;
+  routable: boolean;
 }
 
 interface LineageEscrowView extends EscrowView {
   spent_tx: string | null;
+}
+
+function routable(row: EscrowRow): boolean {
+  return withinValueCap(row.payment_lovelace, row.buyer_bond_lovelace, row.supplier_bond_lovelace);
 }
 
 function shapeEscrow(row: EscrowRow): EscrowView {
@@ -60,6 +79,10 @@ function shapeEscrow(row: EscrowRow): EscrowView {
     result_receipt_hash: row.result_receipt_hash,
     state: row.state,
     created_slot: row.created_slot,
+    layout: row.layout ?? "legacy",
+    agent_id: row.agent_id ?? null,
+    refund: row.refund_address ? { address: row.refund_address, datum: row.refund_datum ?? null } : null,
+    routable: routable(row),
   };
 }
 
@@ -82,7 +105,7 @@ export function escrowsRouter(deps: EscrowsDeps): Router {
     }
     const rows: EscrowRow[] = buyer
       ? deps.cache.listEscrowsByBuyer(buyer)
-      : deps.cache.listEscrowsBySupplier(supplier!);
+      : deps.cache.listEscrowsBySupplier(supplier!).filter(routable);
     res.status(200).json(rows.map(shapeEscrow));
   });
 

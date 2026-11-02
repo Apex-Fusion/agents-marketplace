@@ -2,17 +2,27 @@
  * indexer/src/db/cache.ts — SqliteCache for the indexer.
  *
  * Wraps better-sqlite3 with domain-specific methods for advertisements,
- * escrows, supplier_status, events, cursor, and UTxOs.
+ * escrows, supplier_status, events, cursor, UTxOs and identity facts.
  *
  * Rollback semantics (apex-dashboard pattern):
  *   - Events: soft-delete (rolled_back = 1) for events after rollback slot
  *   - UTxOs: delete created-after, restore spent-after
+ *
+ * Listing: listActiveAdvertisements returns only the adverts that the indexer
+ * lists (listing/rule.ts): the legacy adverts before the switch slot, the new
+ * adverts that pass the identity listing rule, and none above the value cap.
  *
  * WAL mode is enabled on open for concurrent readers.
  */
 
 import Database from "better-sqlite3";
 import fs from "fs";
+import type { DatumLayout } from "../follower/types.js";
+import {
+  IDENTITY_RESULT_MAX_AGE_MS,
+  advertListing,
+  type IdentityFacts,
+} from "../listing/rule.js";
 import { applySchema } from "./schema.js";
 
 export interface AdvertRow {
@@ -33,7 +43,16 @@ export interface AdvertRow {
   created_slot: number;
   datum_hex: string;
   rolled_back: number;
+  layout: DatumLayout;
+  /** 64 lowercase hex for the identity layout, null for the legacy layout. */
+  agent_id: string | null;
+  /** 1 when the transaction that created the advert lists supplier_pkh as a required signer. */
+  creator_signed: number;
 }
+
+/** Upsert input: rows from before identity support default to the legacy layout. */
+export type AdvertUpsert = Omit<AdvertRow, "layout" | "agent_id" | "creator_signed"> &
+  Partial<Pick<AdvertRow, "layout" | "agent_id" | "creator_signed">>;
 
 export interface EscrowRow {
   utxo_ref: string;
@@ -55,7 +74,21 @@ export interface EscrowRow {
   created_slot: number;
   datum_hex: string;
   rolled_back: number;
+  layout: DatumLayout;
+  /** 64 lowercase hex for the identity layout, null for the legacy layout. */
+  agent_id: string | null;
+  /**
+   * Refund address (bech32; Plutus Data CBOR hex when the address has no
+   * bech32 form). null: refund not set, buyer payouts go to the buyer key.
+   */
+  refund_address: string | null;
+  /** Inline datum (Plutus Data CBOR hex) that refund outputs carry; null: no datum. */
+  refund_datum: string | null;
 }
+
+/** Upsert input: rows from before identity support default to the legacy layout. */
+export type EscrowUpsert = Omit<EscrowRow, "layout" | "agent_id" | "refund_address" | "refund_datum"> &
+  Partial<Pick<EscrowRow, "layout" | "agent_id" | "refund_address" | "refund_datum">>;
 
 export interface SupplierStatusRow {
   supplier_pkh: string;
@@ -90,9 +123,29 @@ export interface UtxoRow {
   created_tx: string;
   spent_slot: number | null;
   spent_tx: string | null;
+  /** Identity record outputs: the identifier that the token names. */
+  agent_id: string | null;
 }
 
-export type EscrowTerminalType = "AcceptEscrow" | "ReclaimEscrow" | "ReleaseEscrow";
+export type EscrowTerminalType = "AcceptEscrow" | "ReclaimEscrow" | "ReleaseEscrow" | "RefundRevokedEscrow";
+
+/** Inputs of the listing rule that come from configuration and the clock. */
+export interface ListingPolicy {
+  /** Switch slot (§9.6). null: legacy adverts stay listed. */
+  switchSlot: number | null;
+  /** Identity address `IA`. null: no new advert can be listed. */
+  identityAddress: string | null;
+  /** How long the last identity gateway answer counts (10 minutes). */
+  maxAgeMs: number;
+  now: () => number;
+}
+
+export interface SqliteCacheOptions {
+  listing?: Partial<ListingPolicy>;
+}
+
+/** Rows per `IN (...)` query; below the SQLite host-parameter limit. */
+const IN_CHUNK = 500;
 
 export interface EscrowLineageRow extends EscrowRow {
   spent_tx: string | null;
@@ -114,12 +167,24 @@ export class AmbiguousEscrowLineageError extends Error {
 export class SqliteCache {
   private db: Database.Database;
   private dbPath: string;
+  private listing: ListingPolicy;
 
-  constructor(dbPath: string) {
+  constructor(dbPath: string, options: SqliteCacheOptions = {}) {
     this.dbPath = dbPath;
     this.db = new Database(dbPath);
     this.db.pragma("journal_mode = WAL");
     applySchema(this.db);
+    this.listing = {
+      switchSlot: options.listing?.switchSlot ?? null,
+      identityAddress: options.listing?.identityAddress ?? null,
+      maxAgeMs: options.listing?.maxAgeMs ?? IDENTITY_RESULT_MAX_AGE_MS,
+      now: options.listing?.now ?? Date.now,
+    };
+  }
+
+  /** Run `fn` in one SQLite transaction (all its writes or none). */
+  transaction<T>(fn: () => T): T {
+    return this.db.transaction(fn)();
   }
 
   // ─── Cursor ────────────────────────────────────────────────────────────
@@ -140,11 +205,37 @@ export class SqliteCache {
 
   // ─── UTxO tracking ─────────────────────────────────────────────────────
 
-  insertUtxo(ref: string, address: string, datumHex: string, slot: number, txHash: string): void {
+  insertUtxo(
+    ref: string,
+    address: string,
+    datumHex: string,
+    slot: number,
+    txHash: string,
+    agentId: string | null = null,
+  ): void {
     this.db.prepare(
-      `INSERT OR REPLACE INTO utxos (ref, address, datum_hex, created_slot, created_tx, spent_slot, spent_tx)
-       VALUES (?, ?, ?, ?, ?, NULL, NULL)`
-    ).run(ref, address, datumHex, slot, txHash);
+      `INSERT OR REPLACE INTO utxos (ref, address, datum_hex, created_slot, created_tx, spent_slot, spent_tx, agent_id)
+       VALUES (?, ?, ?, ?, ?, NULL, NULL, ?)`
+    ).run(ref, address, datumHex, slot, txHash, agentId);
+  }
+
+  /**
+   * Insert a UTxO that the follower has not seen (start-up load of the
+   * outputs at the identity address). A row that exists stays as it is.
+   * Returns true when the row was inserted.
+   */
+  insertUtxoIfAbsent(
+    ref: string,
+    address: string,
+    datumHex: string,
+    slot: number,
+    txHash: string,
+    agentId: string | null,
+  ): boolean {
+    return this.db.prepare(
+      `INSERT OR IGNORE INTO utxos (ref, address, datum_hex, created_slot, created_tx, spent_slot, spent_tx, agent_id)
+       VALUES (?, ?, ?, ?, ?, NULL, NULL, ?)`
+    ).run(ref, address, datumHex, slot, txHash, agentId).changes === 1;
   }
 
   spendUtxo(ref: string, slot: number, txHash: string): void {
@@ -155,28 +246,43 @@ export class SqliteCache {
 
   getUnspentUtxos(address: string): UtxoRow[] {
     return this.db.prepare(
-      `SELECT ref, address, datum_hex, created_slot, created_tx, spent_slot, spent_tx
+      `SELECT ref, address, datum_hex, created_slot, created_tx, spent_slot, spent_tx, agent_id
        FROM utxos WHERE address = ? AND spent_slot IS NULL`
     ).all(address) as UtxoRow[];
   }
 
+  /** The unspent UTxOs among `refs` (any address). */
+  getUnspentUtxosByRefs(refs: readonly string[]): UtxoRow[] {
+    const out: UtxoRow[] = [];
+    for (let i = 0; i < refs.length; i += IN_CHUNK) {
+      const chunk = refs.slice(i, i + IN_CHUNK);
+      out.push(...(this.db.prepare(
+        `SELECT ref, address, datum_hex, created_slot, created_tx, spent_slot, spent_tx, agent_id
+         FROM utxos WHERE spent_slot IS NULL AND ref IN (${chunk.map(() => "?").join(", ")})`
+      ).all(...chunk) as UtxoRow[]));
+    }
+    return out;
+  }
+
   // ─── Advertisements ────────────────────────────────────────────────────
 
-  upsertAdvertisement(row: Omit<AdvertRow, "id">): void {
+  upsertAdvertisement(row: AdvertUpsert): void {
     this.db.prepare(
       `INSERT OR REPLACE INTO advertisements (
          utxo_ref, supplier_pkh, capability_id, model,
          max_output_tokens, max_processing_ms,
          price_lovelace, supplier_bond_lovelace, buyer_bond_lovelace,
          endpoint_url, detail_uri, detail_hash, advertised_at, status,
-         created_slot, datum_hex, rolled_back
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+         created_slot, datum_hex, rolled_back,
+         layout, agent_id, creator_signed
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       row.utxo_ref, row.supplier_pkh, row.capability_id, row.model,
       row.max_output_tokens, row.max_processing_ms,
       row.price_lovelace, row.supplier_bond_lovelace, row.buyer_bond_lovelace,
       row.endpoint_url, row.detail_uri, row.detail_hash, row.advertised_at, row.status,
-      row.created_slot, row.datum_hex, row.rolled_back
+      row.created_slot, row.datum_hex, row.rolled_back,
+      row.layout ?? "legacy", row.agent_id ?? null, row.creator_signed ?? 0
     );
   }
 
@@ -197,6 +303,11 @@ export class SqliteCache {
     ).run(utxoRef);
   }
 
+  /**
+   * The adverts that the indexer lists, newest first (listing/rule.ts): Active,
+   * not rolled back, within the value cap; legacy adverts only before the
+   * switch slot; new adverts only when they pass the identity listing rule.
+   */
   listActiveAdvertisements(filter?: { capability_id?: string; supplier_pkh?: string }): AdvertRow[] {
     let sql = `SELECT * FROM advertisements WHERE status = 'Active' AND rolled_back = 0`;
     const params: unknown[] = [];
@@ -209,12 +320,115 @@ export class SqliteCache {
       params.push(filter.supplier_pkh);
     }
     sql += ` ORDER BY created_slot DESC`;
-    return this.db.prepare(sql).all(...params) as AdvertRow[];
+    const adverts = this.db.prepare(sql).all(...params) as AdvertRow[];
+
+    const agentIds = [...new Set(adverts.flatMap((a) => (a.layout === "identity" && a.agent_id ? [a.agent_id] : [])))];
+    const facts = this.getIdentityFacts(agentIds);
+    const records = this.liveIdentityRecords(agentIds);
+    const ctx = {
+      currentSlot: this.getCursor()?.slot ?? 0,
+      switchSlot: this.listing.switchSlot,
+      nowMs: this.listing.now(),
+      maxAgeMs: this.listing.maxAgeMs,
+    };
+    return adverts.filter((a) => {
+      const agentId = a.agent_id;
+      const record = {
+        hasRecord: agentId !== null && records.has(agentId),
+        facts: agentId === null ? null : facts.get(agentId) ?? null,
+      };
+      return advertListing(a, record, ctx).listed;
+    });
+  }
+
+  // ─── Identity records and gateway answers ──────────────────────────────
+
+  /** The agent ids among `agentIds` that have an unspent record output at the identity address. */
+  private liveIdentityRecords(agentIds: readonly string[]): Set<string> {
+    const live = new Set<string>();
+    const identityAddress = this.listing.identityAddress;
+    if (!identityAddress) return live;
+    for (let i = 0; i < agentIds.length; i += IN_CHUNK) {
+      const chunk = agentIds.slice(i, i + IN_CHUNK);
+      const rows = this.db.prepare(
+        `SELECT DISTINCT agent_id FROM utxos
+         WHERE address = ? AND spent_slot IS NULL AND agent_id IN (${chunk.map(() => "?").join(", ")})`
+      ).all(identityAddress, ...chunk) as Array<{ agent_id: string }>;
+      for (const r of rows) live.add(r.agent_id);
+    }
+    return live;
+  }
+
+  /**
+   * Agents whose identity facts the refresher keeps current: the agent_id of
+   * each Active new advert whose creating transaction lists the supplier key
+   * and whose record is an unspent output at the identity address.
+   */
+  listIdentityAgentsToResolve(): string[] {
+    const identityAddress = this.listing.identityAddress;
+    if (!identityAddress) return [];
+    const rows = this.db.prepare(
+      `SELECT DISTINCT a.agent_id FROM advertisements a
+       WHERE a.layout = 'identity' AND a.status = 'Active' AND a.rolled_back = 0
+         AND a.creator_signed = 1 AND a.agent_id IS NOT NULL
+         AND EXISTS (SELECT 1 FROM utxos u
+                     WHERE u.address = ? AND u.agent_id = a.agent_id AND u.spent_slot IS NULL)
+       ORDER BY a.agent_id`
+    ).all(identityAddress) as Array<{ agent_id: string }>;
+    return rows.map((r) => r.agent_id);
+  }
+
+  getIdentityFacts(agentIds: readonly string[]): Map<string, IdentityFacts> {
+    const out = new Map<string, IdentityFacts>();
+    for (let i = 0; i < agentIds.length; i += IN_CHUNK) {
+      const chunk = agentIds.slice(i, i + IN_CHUNK);
+      const rows = this.db.prepare(
+        `SELECT * FROM identity_facts WHERE agent_id IN (${chunk.map(() => "?").join(", ")})`
+      ).all(...chunk) as IdentityFacts[];
+      for (const r of rows) out.set(r.agent_id, r);
+    }
+    return out;
+  }
+
+  /**
+   * Store a definitive gateway answer. `facts.resolved_at` is the start of the
+   * request. A record change that the follower saw after that start keeps the
+   * entry invalidated; an older one is cleared.
+   */
+  saveIdentityFacts(facts: Omit<IdentityFacts, "invalidated_at">): void {
+    this.db.prepare(
+      `INSERT INTO identity_facts (
+         agent_id, found, effective, independent, origin, transaction_keys, capabilities, detail, resolved_at, invalidated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+       ON CONFLICT(agent_id) DO UPDATE SET
+         found = excluded.found,
+         effective = excluded.effective,
+         independent = excluded.independent,
+         origin = excluded.origin,
+         transaction_keys = excluded.transaction_keys,
+         capabilities = excluded.capabilities,
+         detail = excluded.detail,
+         resolved_at = excluded.resolved_at,
+         invalidated_at = CASE
+           WHEN identity_facts.invalidated_at IS NOT NULL AND identity_facts.invalidated_at > excluded.resolved_at
+           THEN identity_facts.invalidated_at
+           ELSE NULL
+         END`
+    ).run(
+      facts.agent_id, facts.found, facts.effective, facts.independent, facts.origin,
+      facts.transaction_keys, facts.capabilities, facts.detail, facts.resolved_at,
+    );
+  }
+
+  /** The follower saw a change of these records at `atMs`: their stored answers no longer count. */
+  invalidateIdentityFacts(agentIds: readonly string[], atMs: number): void {
+    const stmt = this.db.prepare(`UPDATE identity_facts SET invalidated_at = ? WHERE agent_id = ?`);
+    for (const id of agentIds) stmt.run(atMs, id);
   }
 
   // ─── Escrows ───────────────────────────────────────────────────────────
 
-  upsertEscrow(row: Omit<EscrowRow, "id">): void {
+  upsertEscrow(row: EscrowUpsert): void {
     this.db.prepare(
       `INSERT OR REPLACE INTO escrows (
          utxo_ref, buyer_pkh, supplier_pkh,
@@ -222,15 +436,17 @@ export class SqliteCache {
          capability_id, request_spec_hash, prompt_hash,
          payment_lovelace, buyer_bond_lovelace, supplier_bond_lovelace,
          deliver_by, posted_at, submitted_at, result_receipt_hash,
-         state, created_slot, datum_hex, rolled_back
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+         state, created_slot, datum_hex, rolled_back,
+         layout, agent_id, refund_address, refund_datum
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       row.utxo_ref, row.buyer_pkh, row.supplier_pkh,
       row.advert_ref_tx, row.advert_ref_index,
       row.capability_id, row.request_spec_hash, row.prompt_hash,
       row.payment_lovelace, row.buyer_bond_lovelace, row.supplier_bond_lovelace,
       row.deliver_by, row.posted_at, row.submitted_at, row.result_receipt_hash,
-      row.state, row.created_slot, row.datum_hex, row.rolled_back
+      row.state, row.created_slot, row.datum_hex, row.rolled_back,
+      row.layout ?? "legacy", row.agent_id ?? null, row.refund_address ?? null, row.refund_datum ?? null
     );
   }
 
@@ -256,9 +472,11 @@ export class SqliteCache {
   /**
    * Follow one escrow through the transactions which spend it. A transition is
    * eligible only when the spending transaction creates exactly one escrow
-   * output with the same immutable datum fields and the next protocol state.
-   * Terminal state is reported only when the matching, non-rolled-back event
-   * was observed for the spend.
+   * output with the same immutable datum fields (for the identity layout also
+   * agent_id and refund) and the next protocol state. Terminal state is
+   * reported only when the matching, non-rolled-back event was observed for
+   * the spend. RefundRevoked ends a new escrow in any of Open, Claimed and
+   * Submitted (Part 2 §6.1).
    */
   getEscrowLineage(originalRef: string): EscrowLineage | null {
     const getRow = this.db.prepare(`
@@ -286,6 +504,10 @@ export class SqliteCache {
         AND e.deliver_by = ?
         AND e.posted_at = ?
         AND e.state = ?
+        AND e.layout = ?
+        AND e.agent_id IS ?
+        AND e.refund_address IS ?
+        AND e.refund_datum IS ?
       ORDER BY e.utxo_ref ASC
     `);
     const getTerminalEvents = this.db.prepare(`
@@ -294,7 +516,7 @@ export class SqliteCache {
       WHERE rolled_back = 0
         AND tx_hash = ?
         AND utxo_ref = ?
-        AND type IN ('AcceptEscrow', 'ReclaimEscrow', 'ReleaseEscrow')
+        AND type IN ('AcceptEscrow', 'ReclaimEscrow', 'ReleaseEscrow', 'RefundRevokedEscrow')
       ORDER BY id ASC
     `);
 
@@ -340,6 +562,10 @@ export class SqliteCache {
               current.deliver_by,
               current.posted_at,
               nextState,
+              current.layout,
+              current.agent_id,
+              current.refund_address,
+              current.refund_datum,
             ) as EscrowLineageRow[];
         const terminalEvents = getTerminalEvents.all(
           current.spent_tx,
@@ -362,7 +588,10 @@ export class SqliteCache {
             (terminal.type === "ReclaimEscrow" &&
               (current.state === "Open" || current.state === "Claimed")) ||
             ((terminal.type === "AcceptEscrow" || terminal.type === "ReleaseEscrow") &&
-              current.state === "Submitted");
+              current.state === "Submitted") ||
+            (terminal.type === "RefundRevokedEscrow" &&
+              current.layout === "identity" &&
+              (current.state === "Open" || current.state === "Claimed" || current.state === "Submitted"));
           if (!validTerminal) {
             throw new AmbiguousEscrowLineageError(current.utxo_ref);
           }
@@ -429,8 +658,19 @@ export class SqliteCache {
 
   // ─── Rollback ──────────────────────────────────────────────────────────
 
-  rollbackToSlot(slot: number): void {
-    const tx = this.db.transaction(() => {
+  /**
+   * Roll the state back to `slot`. Returns the agent ids of the identity
+   * record outputs that the rollback removes or makes unspent again, so the
+   * caller can invalidate their identity facts.
+   */
+  rollbackToSlot(slot: number): string[] {
+    const tx = this.db.transaction((): string[] => {
+      const touched = this.db.prepare(
+        `SELECT DISTINCT agent_id FROM utxos
+         WHERE agent_id IS NOT NULL AND (created_slot > ? OR spent_slot > ?)
+         ORDER BY agent_id`
+      ).all(slot, slot) as Array<{ agent_id: string }>;
+
       // Soft-delete events strictly after rollback slot
       this.db.prepare(`UPDATE events SET rolled_back = 1 WHERE slot > ?`).run(slot);
 
@@ -444,8 +684,37 @@ export class SqliteCache {
 
       // Update cursor if it's beyond rollback point
       this.db.prepare(`UPDATE cursor SET slot = ? WHERE id = 1 AND slot > ?`).run(slot, slot);
+      return touched.map((r) => r.agent_id);
     });
-    tx();
+    return tx();
+  }
+
+  // ─── Resync (Part 2 §6.4 backfill) ─────────────────────────────────────
+
+  /**
+   * Sync again from an earlier block. When the cursor is after `point`, the
+   * state rolls back to `point.slot` and the cursor moves to `point`, so the
+   * follower reads the later blocks again with the current watched
+   * addresses. A cursor at or before `point` does not move: the follower
+   * reads those blocks anyway. A marker in `meta` makes this happen once per
+   * point. Returns true when the cursor moved back.
+   */
+  applyResync(point: { slot: number; blockHash: string }): boolean {
+    const marker = `${point.slot}:${point.blockHash}`;
+    return this.db.transaction((): boolean => {
+      const done = this.db.prepare(`SELECT value FROM meta WHERE key = 'resync_point'`).get() as
+        | { value: string }
+        | undefined;
+      if (done?.value === marker) return false;
+      const cursor = this.getCursor();
+      const rewind = cursor !== null && cursor.slot > point.slot;
+      if (rewind) {
+        this.rollbackToSlot(point.slot);
+        this.saveCursor(point.slot, point.blockHash);
+      }
+      this.db.prepare(`INSERT OR REPLACE INTO meta (key, value) VALUES ('resync_point', ?)`).run(marker);
+      return rewind;
+    })();
   }
 
   // ─── Lifecycle ─────────────────────────────────────────────────────────

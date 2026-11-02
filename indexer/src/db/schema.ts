@@ -1,7 +1,11 @@
 /**
- * indexer/src/db/schema.ts — CREATE TABLE statements for the indexer database.
+ * indexer/src/db/schema.ts — schema and migrations for the indexer database.
  *
- * Runs on boot if tables are missing. Idempotent (IF NOT EXISTS).
+ * `PRAGMA user_version` holds the schema version. On open, applySchema runs
+ * every migration above the stored version in one transaction. Version 1 is
+ * the original schema (CREATE TABLE IF NOT EXISTS, so a database that existed
+ * before versioning starts at 0 and keeps its rows). CREATE IF NOT EXISTS does
+ * not add columns to an existing table, so later versions use ALTER TABLE.
  *
  * Tables:
  *   cursor            — single row tracking chain-sync position
@@ -10,7 +14,16 @@
  *   advertisements    — decoded AdvertDatum state keyed by utxo_ref
  *   escrows           — decoded EscrowDatum state keyed by utxo_ref
  *   supplier_status   — latest polled /status for each active supplier
+ *   identity_facts    — (v2) last identity gateway answer per agent_id
+ *   meta              — (v2) key/value markers (resync point)
+ *
+ * Version 2 (identity registry, Part 2 §6.4):
+ *   advertisements: layout ('legacy' | 'identity'), agent_id, creator_signed
+ *   escrows:        layout, agent_id, refund_address, refund_datum
+ *   utxos:          agent_id (identity record outputs at the identity address)
  */
+
+import type Database from "better-sqlite3";
 
 export const CREATE_TABLES_SQL = `
   CREATE TABLE IF NOT EXISTS cursor (
@@ -104,10 +117,62 @@ export const CREATE_TABLES_SQL = `
   );
 `;
 
-interface DbLike {
-  exec(sql: string): unknown;
+const IDENTITY_SQL = `
+  CREATE INDEX IF NOT EXISTS idx_utxos_agent ON utxos(agent_id, spent_slot);
+  CREATE INDEX IF NOT EXISTS idx_adverts_agent ON advertisements(agent_id);
+
+  CREATE TABLE IF NOT EXISTS identity_facts (
+    agent_id TEXT PRIMARY KEY,
+    found INTEGER NOT NULL,
+    effective TEXT,
+    independent INTEGER NOT NULL DEFAULT 0,
+    origin TEXT,
+    transaction_keys TEXT NOT NULL DEFAULT '[]',
+    capabilities TEXT NOT NULL DEFAULT '[]',
+    detail TEXT,
+    resolved_at INTEGER NOT NULL,
+    invalidated_at INTEGER
+  );
+
+  CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
+`;
+
+function addColumn(db: Database.Database, table: string, column: string, declaration: string): void {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === column)) return;
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${declaration}`);
 }
 
-export function applySchema(db: unknown): void {
-  (db as DbLike).exec(CREATE_TABLES_SQL);
+/** MIGRATIONS[n] moves the schema from version n to version n + 1. */
+const MIGRATIONS: ReadonlyArray<(db: Database.Database) => void> = [
+  (db) => {
+    db.exec(CREATE_TABLES_SQL);
+  },
+  (db) => {
+    addColumn(db, "advertisements", "layout", "TEXT NOT NULL DEFAULT 'legacy'");
+    addColumn(db, "advertisements", "agent_id", "TEXT");
+    addColumn(db, "advertisements", "creator_signed", "INTEGER NOT NULL DEFAULT 0");
+    addColumn(db, "escrows", "layout", "TEXT NOT NULL DEFAULT 'legacy'");
+    addColumn(db, "escrows", "agent_id", "TEXT");
+    addColumn(db, "escrows", "refund_address", "TEXT");
+    addColumn(db, "escrows", "refund_datum", "TEXT");
+    addColumn(db, "utxos", "agent_id", "TEXT");
+    db.exec(IDENTITY_SQL);
+  },
+];
+
+export const SCHEMA_VERSION = MIGRATIONS.length;
+
+export function applySchema(db: Database.Database): void {
+  const current = db.pragma("user_version", { simple: true }) as number;
+  if (current > SCHEMA_VERSION) {
+    throw new Error(`applySchema: database schema version ${current} is newer than this indexer (${SCHEMA_VERSION})`);
+  }
+  db.transaction(() => {
+    for (let version = current; version < SCHEMA_VERSION; version++) MIGRATIONS[version]!(db);
+    db.pragma(`user_version = ${SCHEMA_VERSION}`);
+  })();
 }

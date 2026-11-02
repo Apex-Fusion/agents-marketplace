@@ -2,16 +2,28 @@
  * indexer/src/follower/worker.ts — ChainSyncWorker for the indexer.
  *
  * Drives a ChainSyncSource, persists events to SqliteCache, handles rollbacks,
- * and exposes an EventEmitter for the SSE layer.
+ * and exposes an EventEmitter for the SSE layer and the identity refresher.
+ * Each block is written in one SQLite transaction; listeners hear about it
+ * after the commit.
  *
- * Emitted events (for SSE consumers):
- *   "chain-event"     — { type, ref, slot, datum? }  (on each MarketplaceEvent)
+ * Emitted events:
+ *   "chain-event"     — { type, ref, slot, txHash, address }  (on each MarketplaceEvent)
  *   "sync-progress"   — { currentSlot, tipSlot }
+ *   "identity-change" — string[]: agent ids whose identity record changed
+ *                       (outputs at the identity address, or a rollback of them)
  *   "error"           — { message, stale }
  */
 
 import { EventEmitter } from "events";
-import { decodeAdvertDatum, decodeEscrowDatum } from "@marketplace/shared/cbor";
+import type { NetworkId } from "@marketplace/shared";
+import {
+  decodeAnyAdvertDatum,
+  decodeAnyEscrowDatum,
+  encodePlutusAddress,
+  encodePlutusDataHex,
+  plutusAddressToBech32,
+  type PlutusAddress,
+} from "@marketplace/shared/cbor";
 import type { ChainSyncSource, IndexerBlock, RollbackPoint, MarketplaceEvent } from "./types.js";
 import type { SqliteCache } from "../db/cache.js";
 import { processBlock, type ScriptAddresses, type KnownUtxoInfo } from "./blockProcessor.js";
@@ -20,14 +32,38 @@ export interface ChainSyncWorkerOpts {
   source: ChainSyncSource;
   cache: SqliteCache;
   addresses: ScriptAddresses;
+  /** Network of the escrow refund addresses (bech32 prefix). */
+  networkId: NetworkId;
   skipBeforeSlot?: number;
+  /** Clock for identity invalidation times (tests). */
+  now?: () => number;
+}
+
+interface ChainEventPayload {
+  type: string;
+  ref: string;
+  slot: number;
+  txHash: string;
+  address: string;
+}
+
+/** Refund address as bech32; Plutus Data CBOR hex when it has no bech32 form (negative pointer values). */
+function refundAddressText(address: PlutusAddress, networkId: NetworkId): string {
+  try {
+    return plutusAddressToBech32(address, networkId);
+  } catch {
+    return encodePlutusAddress(address);
+  }
 }
 
 export class ChainSyncWorker extends EventEmitter {
   private source: ChainSyncSource;
   private cache: SqliteCache;
   private addresses: ScriptAddresses;
+  private networkId: NetworkId;
   private skipBeforeSlot: number;
+  private now: () => number;
+  private watched: Set<string>;
 
   private currentSlot: number = 0;
   private tipSlot: number = 0;
@@ -38,7 +74,19 @@ export class ChainSyncWorker extends EventEmitter {
     this.source = opts.source;
     this.cache = opts.cache;
     this.addresses = opts.addresses;
+    this.networkId = opts.networkId;
     this.skipBeforeSlot = opts.skipBeforeSlot ?? 0;
+    this.now = opts.now ?? Date.now;
+    const a = opts.addresses;
+    this.watched = new Set(
+      [
+        a.advertAddress,
+        a.escrowAddress,
+        a.identityAdvertAddress,
+        a.identityEscrowAddress,
+        a.identityPolicyId ? a.identityAddress : undefined,
+      ].filter((x): x is string => typeof x === "string" && x.length > 0),
+    );
 
     const cursor = this.cache.getCursor();
     if (cursor) {
@@ -78,12 +126,16 @@ export class ChainSyncWorker extends EventEmitter {
 
   // ─── Internal helpers ────────────────────────────────────────────────────
 
-  private buildKnownUtxosMap(): Map<string, KnownUtxoInfo> {
+  /** Unspent watched UTxOs that the block's transactions spend. */
+  private knownUtxosFor(block: IndexerBlock): Map<string, KnownUtxoInfo> {
+    const refs = new Set<string>();
+    for (const tx of block.transactions ?? []) {
+      for (const input of tx?.inputs ?? []) refs.add(`${input.transaction.id}#${input.index}`);
+    }
     const map = new Map<string, KnownUtxoInfo>();
-    for (const addr of [this.addresses.advertAddress, this.addresses.escrowAddress]) {
-      for (const utxo of this.cache.getUnspentUtxos(addr)) {
-        map.set(utxo.ref, { address: utxo.address, datumHex: utxo.datum_hex || undefined });
-      }
+    for (const utxo of this.cache.getUnspentUtxosByRefs([...refs])) {
+      if (!this.watched.has(utxo.address)) continue;
+      map.set(utxo.ref, { address: utxo.address, datumHex: utxo.datum_hex || undefined, agentId: utxo.agent_id });
     }
     return map;
   }
@@ -115,40 +167,35 @@ export class ChainSyncWorker extends EventEmitter {
       return;
     }
 
-    const knownUtxos = this.buildKnownUtxosMap();
-    const { events, spentRefs } = processBlock(block, knownUtxos, this.addresses);
+    const { events, spentRefs, created, identityChanges } = processBlock(
+      block,
+      this.knownUtxosFor(block),
+      this.addresses,
+    );
+
+    this.cache.transaction(() => {
+      // Outputs first: a later transaction of the same block may spend one.
+      for (const c of created) {
+        this.cache.insertUtxo(c.ref, c.address, c.datumHex, slot, c.txHash, c.agentId);
+      }
+      for (const event of events) this.persistEvent(event);
+      for (const s of spentRefs) this.cache.spendUtxo(s.ref, s.slot, s.txHash);
+      if (identityChanges.length > 0) this.cache.invalidateIdentityFacts(identityChanges, this.now());
+      this.cache.saveCursor(slot, block.id);
+    });
 
     for (const event of events) {
-      this.persistEvent(event);
-      this.emit("chain-event", {
+      const payload: ChainEventPayload = {
         type: event.type,
         ref: event.utxoRef,
         slot: event.slot,
         txHash: event.txHash,
         address: event.address,
-      } as { type: string; ref: string; slot: number; txHash: string; address: string });
+      };
+      this.emit("chain-event", payload);
     }
+    if (identityChanges.length > 0) this.emit("identity-change", identityChanges);
 
-    // Spend known UTxOs after inserts (handles self-referencing edge case in apex pattern)
-    for (const s of spentRefs) {
-      this.cache.spendUtxo(s.ref, s.slot, s.txHash);
-      // Also update advert/escrow domain rows: mark terminal for spend-no-continue cases.
-      this.markDomainSpend(s.ref, slot, events);
-    }
-
-    // Insert UTxOs for new outputs at watched addresses (so spend detection works for next block)
-    for (const tx of block.transactions ?? []) {
-      for (let i = 0; i < (tx.outputs ?? []).length; i++) {
-        const out = tx.outputs[i];
-        if (!out.datum) continue;
-        if (out.address === this.addresses.advertAddress || out.address === this.addresses.escrowAddress) {
-          const ref = `${tx.id}#${i}`;
-          this.cache.insertUtxo(ref, out.address, out.datum, slot, tx.id);
-        }
-      }
-    }
-
-    this.cache.saveCursor(slot, block.id);
     // Mirror the saved cursor into the source's reconnect-intersect so that
     // a WebSocket drop+reconnect resumes from here rather than rewinding to
     // the startup intersect point.
@@ -173,7 +220,8 @@ export class ChainSyncWorker extends EventEmitter {
     // Update domain projections (advertisements, escrows)
     if (event.type === "PostAdvert" || event.type === "UpdateAdvert") {
       try {
-        const d = decodeAdvertDatum(event.datumHex);
+        const decoded = decodeAnyAdvertDatum(event.datumHex);
+        const d = decoded.datum;
         this.cache.upsertAdvertisement({
           utxo_ref: event.utxoRef,
           supplier_pkh: d.supplier_pkh,
@@ -192,6 +240,9 @@ export class ChainSyncWorker extends EventEmitter {
           created_slot: event.slot,
           datum_hex: event.datumHex,
           rolled_back: 0,
+          layout: decoded.layout,
+          agent_id: decoded.layout === "identity" ? decoded.datum.agent_id.toLowerCase() : null,
+          creator_signed: event.requiredSigners.includes(d.supplier_pkh.toLowerCase()) ? 1 : 0,
         });
       } catch {
         // already warned by processBlock
@@ -202,7 +253,9 @@ export class ChainSyncWorker extends EventEmitter {
       this.cache.markAdvertisementRetired(event.utxoRef);
     } else if (event.type === "PostEscrow" || event.type === "ClaimEscrow" || event.type === "SubmitEscrow") {
       try {
-        const d = decodeEscrowDatum(event.datumHex);
+        const decoded = decodeAnyEscrowDatum(event.datumHex);
+        const d = decoded.datum;
+        const refund = decoded.layout === "identity" ? decoded.datum.refund : null;
         this.cache.upsertEscrow({
           utxo_ref: event.utxoRef,
           buyer_pkh: d.buyer_pkh,
@@ -223,6 +276,10 @@ export class ChainSyncWorker extends EventEmitter {
           created_slot: event.slot,
           datum_hex: event.datumHex,
           rolled_back: 0,
+          layout: decoded.layout,
+          agent_id: decoded.layout === "identity" ? decoded.datum.agent_id.toLowerCase() : null,
+          refund_address: refund ? refundAddressText(refund.address, this.networkId) : null,
+          refund_datum: refund?.datum ? encodePlutusDataHex(refund.datum) : null,
         });
       } catch {
         // already warned
@@ -230,18 +287,14 @@ export class ChainSyncWorker extends EventEmitter {
     }
   }
 
-  private markDomainSpend(ref: string, _slot: number, events: MarketplaceEvent[]): void {
-    // For terminal events (Retire / Accept / Reclaim / Release), the spend has no continuing
-    // output so the domain row stays at its prior state (caller can interpret via events table).
-    // For Update / Claim / Submit, a fresh upsertAdvertisement/upsertEscrow happens via persistEvent
-    // for the NEW utxo_ref. We could also update the OLD row's status here if needed.
-    void ref; void events;
-  }
-
   private handleRollback(data: { point: RollbackPoint }): void {
     if (this.stopped) return;
     const slot = data.point?.slot ?? 0;
-    this.cache.rollbackToSlot(slot);
+    const touched = this.cache.rollbackToSlot(slot);
+    if (touched.length > 0) {
+      this.cache.invalidateIdentityFacts(touched, this.now());
+      this.emit("identity-change", touched);
+    }
     this.currentSlot = slot;
     // Also slide the source's reconnect-intersect back so a subsequent WS
     // drop doesn't resume past the rollback point.

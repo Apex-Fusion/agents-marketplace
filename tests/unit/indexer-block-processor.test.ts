@@ -6,12 +6,16 @@
  *
  * M1-D-fix changes:
  *   - AcceptEscrow / ReleaseEscrow tests now assert EXCLUSIVE event emission
- *     (Accept → no Release; Release → no Accept) driven by tx.redeemers.
- *   - Added: fallback test (ambiguous Submitted-spend → 1 AcceptEscrow + console.warn).
+ *     (Accept → no Release; Release → no Accept) driven by the spend redeemers.
  *   - Added: redeemer/state mismatch tests (e.g. Accept redeemer on Open → no event + warn).
  *   - DELETED (3 tests): old tests that asserted both AcceptEscrow AND ReleaseEscrow
  *     were emitted on the same Submitted-spend via .some() — those encoded the broken
  *     double-emit behaviour Catherine's blockProcessor.ts must no longer exhibit.
+ *
+ * Identity registry (wave 2): redeemers are Plutus Data CBOR hex in
+ * tx.spendRedeemers, decoded by the shared escrow redeemer codec. A spend
+ * without a redeemer no longer defaults to Accept or Reclaim: it gives no
+ * event and a warning (the lineage then fails closed).
  */
 
 import { describe, it, expect, vi, afterEach } from "vitest";
@@ -34,6 +38,7 @@ import {
   buildByronBlock,
   buildAdvertDatumHex,
   buildEscrowDatumHex,
+  escrowRedeemerHex,
   ADVERT_SCRIPT_ADDRESS,
   ESCROW_SCRIPT_ADDRESS,
   INDEXER_SUPPLIER_PKH,
@@ -344,31 +349,14 @@ describe("blockProcessor — ReleaseEscrow (redeemer-aware)", () => {
   });
 });
 
-// ─── Redeemer fallback (ambiguous Submitted-spend) ────────────────────────────
+// ─── Missing redeemer (ambiguous Submitted-spend) ─────────────────────────────
 //
-// M1-D-fix: When a Submitted-spend has NO redeemer, blockProcessor must emit
-// exactly ONE AcceptEscrow event (defensive default) and call console.warn.
-// This handles real-world Ogmios responses where redeemer info may be absent.
+// A valid script spend always carries a redeemer, and OgmiosSource now passes
+// the decoded spend redeemers. When one is missing, blockProcessor must not
+// guess Accept or Release: it emits no event and calls console.warn.
 
-describe("blockProcessor — redeemer fallback (ambiguous Submitted-spend)", () => {
-  it("ambiguous Submitted-spend → exactly ONE AcceptEscrow event (no ReleaseEscrow)", () => {
-    const submitTxId = "e".repeat(64);
-    const knownUtxos = new Map([
-      [submitTxId + "#0", { address: ESCROW_SCRIPT_ADDRESS, datumHex: buildEscrowDatumHex({ state: "Submitted" }) }],
-    ]);
-    const tx = buildAmbiguousSubmittedSpendTx({
-      txId: "z".repeat(64),
-      spentRef: { txId: submitTxId, index: 0 },
-    });
-    const block = buildMockBlock({ slot: 1_009_000, transactions: [tx] });
-    const result = processBlock(block, knownUtxos, ADDRESSES);
-    const acceptEvents = result.events.filter(e => e.type === "AcceptEscrow");
-    const releaseEvents = result.events.filter(e => e.type === "ReleaseEscrow");
-    expect(acceptEvents.length).toBe(1);
-    expect(releaseEvents.length).toBe(0);
-  });
-
-  it("ambiguous Submitted-spend → total event count is exactly 1", () => {
+describe("blockProcessor — missing redeemer (ambiguous Submitted-spend)", () => {
+  it("ambiguous Submitted-spend → no AcceptEscrow and no ReleaseEscrow event", () => {
     const submitTxId = "e".repeat(64);
     const knownUtxos = new Map([
       [submitTxId + "#0", { address: ESCROW_SCRIPT_ADDRESS, datumHex: buildEscrowDatumHex({ state: "Submitted" }) }],
@@ -380,7 +368,40 @@ describe("blockProcessor — redeemer fallback (ambiguous Submitted-spend)", () 
     });
     const block = buildMockBlock({ slot: 1_009_000, transactions: [tx] });
     const result = processBlock(block, knownUtxos, ADDRESSES);
-    expect(result.events.length).toBe(1);
+    expect(result.events.filter(e => e.type === "AcceptEscrow")).toHaveLength(0);
+    expect(result.events.filter(e => e.type === "ReleaseEscrow")).toHaveLength(0);
+  });
+
+  it("ambiguous Submitted-spend → no event, console.warn called, spend still recorded", () => {
+    const submitTxId = "e".repeat(64);
+    const knownUtxos = new Map([
+      [submitTxId + "#0", { address: ESCROW_SCRIPT_ADDRESS, datumHex: buildEscrowDatumHex({ state: "Submitted" }) }],
+    ]);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const tx = buildAmbiguousSubmittedSpendTx({
+      txId: "z".repeat(64),
+      spentRef: { txId: submitTxId, index: 0 },
+    });
+    const block = buildMockBlock({ slot: 1_009_000, transactions: [tx] });
+    const result = processBlock(block, knownUtxos, ADDRESSES);
+    expect(result.events.length).toBe(0);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("carried no escrow redeemer"));
+    expect(result.spentRefs.map(r => r.ref)).toEqual([submitTxId + "#0"]);
+  });
+
+  it("a redeemer that does not decode counts as missing", () => {
+    const submitTxId = "e".repeat(64);
+    const knownUtxos = new Map([
+      [submitTxId + "#0", { address: ESCROW_SCRIPT_ADDRESS, datumHex: buildEscrowDatumHex({ state: "Submitted" }) }],
+    ]);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const tx = {
+      ...buildAmbiguousSubmittedSpendTx({ txId: "y".repeat(64), spentRef: { txId: submitTxId, index: 0 } }),
+      spendRedeemers: { [submitTxId + "#0"]: "d8809fff" }, // tag 128 = constructor 7: not an escrow redeemer
+    };
+    const result = processBlock(buildMockBlock({ slot: 1_009_001, transactions: [tx] }), knownUtxos, ADDRESSES);
+    expect(result.events.length).toBe(0);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("redeemer does not decode"));
   });
 });
 
@@ -406,7 +427,7 @@ describe("blockProcessor — redeemer / state mismatch", () => {
         address: "addr_test1vqfrg4ncjz4ummcjx3t83y9tehh3ydzk0zg2hn00zg69v7q7sa96j",
         value: { ada: { lovelace: 4_000_000 } },
       }],
-      redeemers: { [postTxId + "#0"]: "Accept" as const },
+      spendRedeemers: { [postTxId + "#0"]: escrowRedeemerHex("Accept") },
     };
     const block = buildMockBlock({ slot: 1_010_000, transactions: [tx] });
     const result = processBlock(block, knownUtxos, ADDRESSES);
@@ -428,7 +449,7 @@ describe("blockProcessor — redeemer / state mismatch", () => {
         address: "addr_test1vqfrg4ncjz4ummcjx3t83y9tehh3ydzk0zg2hn00zg69v7q7sa96j",
         value: { ada: { lovelace: 4_000_000 } },
       }],
-      redeemers: { [submitTxId + "#0"]: "Reclaim" as const },
+      spendRedeemers: { [submitTxId + "#0"]: escrowRedeemerHex("Reclaim") },
     };
     const block = buildMockBlock({ slot: 1_010_100, transactions: [tx] });
     const result = processBlock(block, knownUtxos, ADDRESSES);
@@ -449,7 +470,7 @@ describe("blockProcessor — redeemer / state mismatch", () => {
         address: "addr_test1vqfrg4ncjz4ummcjx3t83y9tehh3ydzk0zg2hn00zg69v7q7sa96j",
         value: { ada: { lovelace: 4_000_000 } },
       }],
-      redeemers: { [postTxId + "#0"]: "Release" as const },
+      spendRedeemers: { [postTxId + "#0"]: escrowRedeemerHex("Release") },
     };
     const block = buildMockBlock({ slot: 1_010_200, transactions: [tx] });
     const result = processBlock(block, knownUtxos, ADDRESSES);
@@ -470,7 +491,7 @@ describe("blockProcessor — redeemer / state mismatch", () => {
         address: "addr_test1vqfrg4ncjz4ummcjx3t83y9tehh3ydzk0zg2hn00zg69v7q7sa96j",
         value: { ada: { lovelace: 4_000_000 } },
       }],
-      redeemers: { [claimTxId + "#0"]: "Accept" as const },
+      spendRedeemers: { [claimTxId + "#0"]: escrowRedeemerHex("Accept") },
     };
     const block = buildMockBlock({ slot: 1_010_300, transactions: [tx] });
     const result = processBlock(block, knownUtxos, ADDRESSES);

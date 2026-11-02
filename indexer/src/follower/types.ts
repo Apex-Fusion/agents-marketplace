@@ -5,8 +5,9 @@
  * without touching a real Ogmios WebSocket. OgmiosSource implements this interface
  * for production; MockChainSyncSource implements it for tests.
  *
- * Block/Tx/Output shapes mirror the apex-dashboard block-processor shapes
- * (Ogmios JSON over WebSocket).
+ * IndexerBlock is the indexer's own block shape. OgmiosSource converts each
+ * Ogmios v6 block into it (ogmiosBlock.ts): transactions that failed script
+ * validation are left out, and spend redeemers are keyed by the spent output.
  */
 import { EventEmitter } from "events";
 
@@ -22,22 +23,18 @@ export interface TxInput {
   index: number;
 }
 
-/**
- * EscrowRedeemerTag — the five redeemer constructors from escrow.ak.
- * Keyed in IndexerTx.redeemers by "<spentTxHash>#<spentIndex>".
- */
-export type EscrowRedeemerTag = "Claim" | "Submit" | "Accept" | "Reclaim" | "Release";
-
 export interface IndexerTx {
   id: string;
   inputs: TxInput[];
   outputs: TxOutput[];
+  /** Key hashes (56 lowercase hex) that the transaction lists as required signers. */
+  requiredSigners?: string[];
   /**
-   * Optional redeemer map populated from Ogmios redeemer info.
-   * Key: "<spentTxHash>#<outputIndex>" of the spent UTxO.
-   * Value: EscrowRedeemerTag identifying which redeemer was used.
+   * Spend redeemers. Key: "<spentTxHash>#<outputIndex>" of the spent output.
+   * Value: the redeemer as Plutus Data CBOR hex. The block processor decodes
+   * the redeemers of escrow inputs with the escrow redeemer codec.
    */
-  redeemers?: Record<string, EscrowRedeemerTag>;
+  spendRedeemers?: Record<string, string>;
 }
 
 export interface IndexerBlock {
@@ -74,7 +71,17 @@ export interface ChainSyncSource extends EventEmitter {
 }
 
 /**
+ * Datum layout of an advert or escrow output: "legacy" (13-field advert,
+ * 14-field escrow) or "identity" (Part 2 §6.1–6.2: 14-field advert with
+ * agent_id, 16-field escrow with agent_id and refund). Each script address
+ * has one layout.
+ */
+export type DatumLayout = "legacy" | "identity";
+
+/**
  * MarketplaceEvent — emitted by blockProcessor for each detected state transition.
+ * RefundRevokedEscrow is the terminal spend with the RefundRevoked redeemer
+ * (new escrow only, Part 2 §6.1).
  */
 export type MarketplaceEventType =
   | "PostAdvert"
@@ -85,7 +92,8 @@ export type MarketplaceEventType =
   | "SubmitEscrow"
   | "AcceptEscrow"
   | "ReclaimEscrow"
-  | "ReleaseEscrow";
+  | "ReleaseEscrow"
+  | "RefundRevokedEscrow";
 
 export interface MarketplaceEvent {
   type: MarketplaceEventType;
@@ -94,4 +102,8 @@ export interface MarketplaceEvent {
   utxoRef: string;       // "<txHash>#<outputIndex>"
   datumHex: string;
   address: string;
+  /** Layout of the datum in `datumHex`. */
+  layout: DatumLayout;
+  /** Required signers of the transaction that made the event (lowercase hex). */
+  requiredSigners: string[];
 }

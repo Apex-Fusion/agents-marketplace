@@ -3,51 +3,95 @@
  *
  * Wires:
  *   - Config from process.env (validated)
- *   - SqliteCache (opens or creates DB, applies schema)
+ *   - SqliteCache (opens or creates DB, applies schema migrations, listing policy)
+ *   - Backfill (Part 2 §6.4): one-time resync point and/or the start-up load
+ *     of the outputs at the identity address
  *   - OgmiosSource (real WebSocket — exercised in M1-F lifecycle)
- *   - ChainSyncWorker (drives source → cache + emits chain-event/sync-progress)
+ *   - ChainSyncWorker (drives source → cache + emits chain-event/sync-progress/identity-change)
  *   - StatusPoller (periodic supplier /status fetcher)
+ *   - IdentityRefresher (identity gateway answers for the new adverts)
  *   - Express app via createApp(deps)
  *
  * Installs SIGTERM/SIGINT handlers for graceful shutdown.
- *
- * NOTE: the script computes the advertScript / escrowScript addresses from a
- * future config map — for M1-D the addresses are sourced from environment fall-
- * backs to keep the boot pure. M1-F lifecycle test will plumb real addresses
- * through `config/marketplace-deployments.json`.
  */
 
+import { ReadOnlyOgmiosProvider } from "@marketplace/shared/chain";
 import { loadConfig } from "./config.js";
 import { SqliteCache } from "./db/cache.js";
 import { OgmiosSource } from "./follower/ogmiosSource.js";
 import { ChainSyncWorker } from "./follower/worker.js";
+import { loadIdentityOutputs } from "./identity/backfill.js";
+import { createGatewayClient } from "./identity/gateway.js";
+import { IdentityRefresher } from "./identity/refresher.js";
 import { StatusPoller } from "./poller/statusPoller.js";
 import { createApp } from "./server.js";
 
+/** Ogmios v6 serves JSON-RPC over HTTP on the WebSocket port: ws(s)://host → http(s)://host. */
+function ogmiosHttpUrl(wsUrl: string): string {
+  return wsUrl.replace(/^ws(s?):\/\//i, "http$1://");
+}
+
 async function main(): Promise<void> {
   const config = loadConfig(process.env);
+  const identity = config.identity;
 
-  const advertAddress = process.env.ADVERT_SCRIPT_ADDRESS ?? "";
-  const escrowAddress = process.env.ESCROW_SCRIPT_ADDRESS ?? "";
-
-  if (!advertAddress || !escrowAddress) {
+  if (!config.advertAddress || !config.escrowAddress) {
     console.warn(
       "[indexer] ADVERT_SCRIPT_ADDRESS / ESCROW_SCRIPT_ADDRESS not set — " +
-      "running in 'no scripts watched' mode. Set them via env or use M1-F config bridge."
+      "the legacy advert and escrow contracts are not watched.",
     );
   }
 
-  const cache = new SqliteCache(config.dbPath);
+  const cache = new SqliteCache(config.dbPath, {
+    listing: { switchSlot: config.switchSlot, identityAddress: identity?.address ?? null },
+  });
+
+  if (config.resyncFrom) {
+    const { slot, blockHash } = config.resyncFrom;
+    console.log(
+      cache.applyResync(config.resyncFrom)
+        ? `[indexer] resync: state rolled back to slot ${slot}; reading the later blocks again`
+        : `[indexer] resync point ${slot}:${blockHash} already applied or not behind the cursor`,
+    );
+  }
+
+  if (identity?.loadAtStart) {
+    const loaded = await loadIdentityOutputs({
+      cache,
+      chain: new ReadOnlyOgmiosProvider({ ogmiosUrl: ogmiosHttpUrl(config.ogmiosUrl) }),
+      identityAddress: identity.address,
+      policyId: identity.policyId,
+    });
+    console.log(
+      `[indexer] identity address: ${loaded.outputs} current record outputs, ${loaded.inserted} new to this database`,
+    );
+  }
+
   const source = new OgmiosSource(config.ogmiosUrl, {
     responseTimeoutMs: config.ogmiosResponseTimeoutMs,
   });
   const worker = new ChainSyncWorker({
     source,
     cache,
-    addresses: { advertAddress, escrowAddress },
+    addresses: {
+      advertAddress: config.advertAddress,
+      escrowAddress: config.escrowAddress,
+      identityAdvertAddress: identity?.advertAddress,
+      identityEscrowAddress: identity?.escrowAddress,
+      identityAddress: identity?.address,
+      identityPolicyId: identity?.policyId,
+    },
+    networkId: config.networkId,
     skipBeforeSlot: config.skipBeforeSlot,
   });
   const poller = new StatusPoller({ cache, pollIntervalMs: config.statusPollMs });
+  const refresher = identity
+    ? new IdentityRefresher({
+        cache,
+        resolve: createGatewayClient({ baseUrl: identity.gatewayUrl }),
+        refreshMs: identity.refreshMs,
+      })
+    : null;
 
   const app = createApp(
     { cache, worker },
@@ -57,21 +101,25 @@ async function main(): Promise<void> {
   worker.on("error", (err: { message: string; stale: boolean }) => {
     console.error(`[indexer] worker error: ${err.message}${err.stale ? " (stale)" : ""}`);
   });
+  worker.on("identity-change", (agentIds: string[]) => refresher?.invalidate(agentIds));
 
   const networkLabel = config.networkId === 0 ? "Vector testnet" : "Vector mainnet";
   const server = app.listen(config.indexerPort, () => {
     console.log(
       `[indexer] listening on :${config.indexerPort} ` +
-      `(NETWORK_ID=${config.networkId} — ${networkLabel})`,
+      `(NETWORK_ID=${config.networkId} — ${networkLabel}; ` +
+      `identity ${identity ? `on, switch slot ${config.switchSlot ?? "none"}` : "off"})`,
     );
   });
 
   await worker.start();
   poller.start();
+  refresher?.start();
 
   const shutdown = (signal: string): void => {
     console.log(`[indexer] received ${signal} — shutting down`);
     poller.stop();
+    refresher?.stop();
     worker.stop();
     server.close(() => {
       cache.close();

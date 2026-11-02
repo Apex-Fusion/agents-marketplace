@@ -1,7 +1,8 @@
 /**
  * tests/fixtures/indexer-side/sample-blocks.ts — synthetic block builders for indexer tests.
  *
- * Builds mock Ogmios-shaped blocks/txs encoding all marketplace events.
+ * Builds IndexerBlock-shaped blocks/txs (the shape that OgmiosSource emits after
+ * it converts an Ogmios v6 block) encoding all marketplace events.
  * Mirrors apex-dashboard's chain-sync-data.ts pattern.
  *
  * INDEPENDENCE rule: these builders are indexer-side only.
@@ -15,18 +16,25 @@
  * Addresses are DERIVED addresses for testnet (networkId = 0).
  * For tests we use stable synthetic addresses matching the script hashes.
  *
- * M1-D-fix: Added EscrowRedeemerTag inline (mirrors indexer/src/follower/types.ts).
- * All terminal-spend builders now attach tx.redeemers per the redeemer plumbing spec.
- * Added buildAmbiguousSubmittedSpendTx for fallback / warn tests.
+ * Spend redeemers: escrow spends carry `spendRedeemers` keyed by the spent
+ * output, with the redeemer as Plutus Data CBOR hex (escrowRedeemerHex), as
+ * ogmiosBlock.ts builds it from the Ogmios v6 `redeemers` array.
+ * buildAmbiguousSubmittedSpendTx has no redeemer (missing-redeemer tests).
  */
 
 import { encodeAdvertDatum } from "../../../packages/shared/src/cbor/AdvertDatum.js";
 import { encodeEscrowDatum } from "../../../packages/shared/src/cbor/EscrowDatum.js";
+import { encodeEscrowRedeemer, type EscrowRedeemer } from "../../../packages/shared/src/cbor/IdentityEscrowDatum.js";
 
-// ─── EscrowRedeemerTag (mirrors indexer/src/follower/types.ts) ──────────────
-// Declared here as a const-type so fixture files are self-contained.
-// Catherine's M1-D-fix-green will make blockProcessor.ts consume the one from types.ts.
-export type EscrowRedeemerTag = "Claim" | "Submit" | "Accept" | "Reclaim" | "Release";
+// ─── Escrow redeemers (Plutus Data CBOR hex) ─────────────────────────────────
+export type EscrowRedeemerType = EscrowRedeemer["type"];
+
+export const SAMPLE_SUBMIT_REDEEMER_RECEIPT = "d".repeat(64);
+
+/** CBOR hex of an escrow redeemer: Claim 0, Submit 1, Accept 2, Reclaim 3, Release 4, RefundRevoked 5. */
+export function escrowRedeemerHex(type: EscrowRedeemerType, receiptHash = SAMPLE_SUBMIT_REDEEMER_RECEIPT): string {
+  return encodeEscrowRedeemer(type === "Submit" ? { type, receipt_hash: receiptHash } : { type });
+}
 
 // ─── Script hashes from contracts/marketplace/plutus.json ──────────────────
 export const ADVERT_SCRIPT_HASH = "9929fa4eed8b66b30b8608e601ed2a4b7b413a2413dd13ab275594da";
@@ -149,8 +157,10 @@ export interface MockTx {
   id: string;
   inputs: MockTxInput[];
   outputs: MockTxOutput[];
-  /** Optional redeemer map: "<spentTxHash>#<outputIndex>" → EscrowRedeemerTag */
-  redeemers?: Record<string, EscrowRedeemerTag>;
+  /** Required signer key hashes (Ogmios v6 requiredExtraSignatories). */
+  requiredSigners?: string[];
+  /** Spend redeemers: "<spentTxHash>#<outputIndex>" → Plutus Data CBOR hex */
+  spendRedeemers?: Record<string, string>;
 }
 
 export interface MockBlock {
@@ -266,7 +276,7 @@ export function buildClaimEscrowTx(opts: {
       value: { ada: { lovelace: 4_000_000 } },
       datum: buildEscrowDatumHex({ ...opts.escrowDatumOpts, state: "Claimed" }),
     }],
-    redeemers: { [spentKey]: "Claim" },
+    spendRedeemers: { [spentKey]: escrowRedeemerHex("Claim") },
   };
 }
 
@@ -292,12 +302,12 @@ export function buildSubmitEscrowTx(opts: {
         resultReceiptHash: opts.receiptHash ?? SAMPLE_RECEIPT_HASH,
       }),
     }],
-    redeemers: { [spentKey]: "Submit" },
+    spendRedeemers: { [spentKey]: escrowRedeemerHex("Submit", opts.receiptHash ?? SAMPLE_RECEIPT_HASH) },
   };
 }
 
 /** AcceptEscrow — spends Submitted escrow, no continuing output (terminal).
- *  Attaches redeemers: { [spentRef]: "Accept" } so blockProcessor can
+ *  Attaches the Accept redeemer so blockProcessor can
  *  unambiguously emit AcceptEscrow ONLY (not ReleaseEscrow). */
 export function buildAcceptEscrowTx(opts: {
   txId?: string;
@@ -313,12 +323,12 @@ export function buildAcceptEscrowTx(opts: {
       address: opts.buyerAddress ?? "addr_test1vqfrg4ncjz4ummcjx3t83y9tehh3ydzk0zg2hn00zg69v7q7sa96j",
       value: { ada: { lovelace: 4_000_000 } },
     }],
-    redeemers: { [spentKey]: "Accept" },
+    spendRedeemers: { [spentKey]: escrowRedeemerHex("Accept") },
   };
 }
 
 /** ReclaimEscrow — spends Open/Claimed escrow, no continuing output (terminal).
- *  Attaches redeemers: { [spentRef]: "Reclaim" }. */
+ *  Attaches the Reclaim redeemer. */
 export function buildReclaimEscrowTx(opts: {
   txId?: string;
   spentRef: { txId: string; index: number };
@@ -333,12 +343,12 @@ export function buildReclaimEscrowTx(opts: {
       address: opts.buyerAddress ?? "addr_test1vqfrg4ncjz4ummcjx3t83y9tehh3ydzk0zg2hn00zg69v7q7sa96j",
       value: { ada: { lovelace: 4_000_000 } },
     }],
-    redeemers: { [spentKey]: "Reclaim" },
+    spendRedeemers: { [spentKey]: escrowRedeemerHex("Reclaim") },
   };
 }
 
 /** ReleaseEscrow — spends Submitted escrow, no continuing output (terminal).
- *  Attaches redeemers: { [spentRef]: "Release" } so blockProcessor emits
+ *  Attaches the Release redeemer so blockProcessor emits
  *  ReleaseEscrow ONLY (not AcceptEscrow). */
 export function buildReleaseEscrowTx(opts: {
   txId?: string;
@@ -354,13 +364,13 @@ export function buildReleaseEscrowTx(opts: {
       address: opts.supplierAddress ?? "addr_test1vz4ummcpydzk0zdtehhszg69v7y6hn00qy352euf40x77qgmly3us",
       value: { ada: { lovelace: 4_000_000 } },
     }],
-    redeemers: { [spentKey]: "Release" },
+    spendRedeemers: { [spentKey]: escrowRedeemerHex("Release") },
   };
 }
 
 /** AmbiguousSubmittedSpendTx — spends a Submitted escrow with NO redeemer.
- *  Used to test the defensive fallback: blockProcessor should emit exactly ONE
- *  AcceptEscrow event and call console.warn when redeemer info is absent. */
+ *  A valid script spend always has a redeemer, so blockProcessor must not
+ *  guess the transition: it emits no event and calls console.warn. */
 export function buildAmbiguousSubmittedSpendTx(opts: {
   txId?: string;
   spentRef: { txId: string; index: number };
@@ -373,7 +383,7 @@ export function buildAmbiguousSubmittedSpendTx(opts: {
       address: "addr_test1vqfrg4ncjz4ummcjx3t83y9tehh3ydzk0zg2hn00zg69v7q7sa96j",
       value: { ada: { lovelace: 4_000_000 } },
     }],
-    // NO redeemers field — deliberately absent to trigger fallback path
+    // NO spendRedeemers field — deliberately absent to test the missing-redeemer path
   };
 }
 

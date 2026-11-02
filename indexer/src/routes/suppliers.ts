@@ -1,8 +1,11 @@
 /**
  * indexer/src/routes/suppliers.ts — GET /suppliers, GET /suppliers/:pkh
  *
- * GET /suppliers — list all Active advertisements joined with latest supplier_status.
- * GET /suppliers/:pkh — single supplier detail; 404 if no active advert for pkh.
+ * GET /suppliers — list the listed advertisements (SqliteCache.listActiveAdvertisements:
+ *   listing rule, switch slot, value cap) joined with latest supplier_status.
+ * GET /suppliers/:pkh — single supplier detail; 404 if no listed advert for pkh.
+ *
+ * `agent_id` (Part 2 §6.4): 64 lowercase hex for a new advert, null for a legacy advert.
  */
 
 import { Router, type Request, type Response } from "express";
@@ -31,6 +34,7 @@ interface SupplierView {
   current_escrow_ref: string | null;
   last_seen_iso: string | null;
   created_slot: number;
+  agent_id: string | null;
 }
 
 export function shapeSupplier(advert: AdvertRow, status: SupplierStatusRow | null): SupplierView {
@@ -53,6 +57,7 @@ export function shapeSupplier(advert: AdvertRow, status: SupplierStatusRow | nul
     current_escrow_ref: status?.current_escrow_ref ?? null,
     last_seen_iso: status?.last_seen_iso ?? null,
     created_slot: advert.created_slot,
+    agent_id: advert.layout === "identity" && advert.agent_id ? advert.agent_id.toLowerCase() : null,
   };
 }
 
