@@ -270,6 +270,27 @@ describe("ReadOnlyOgmiosProvider — queryUtxo()", () => {
     const result = await provider.queryUtxo(TEST_REF);
     expect(result!.datumHex).toBeNull();
   });
+
+  // Ogmios v6 shape of a reference script; the identity Register reads its reference UTxO through this mapping.
+  it.each([
+    ["plutus:v3", "5901ab0101002229800aba2aba1", "5901ab0101002229800aba2aba1"],
+    ["plutus:v2", "5901ab0101002229800aba2aba1", null],
+  ])("maps a %s reference script to scriptRef %s -> %s", async (language, cbor, expected) => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ jsonrpc: "2.0", result: [{
+        transaction: { id: TEST_REF.txHash },
+        index: 0,
+        address: "addr1vyqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqkdl5mw",
+        value: { ada: { lovelace: 59_982_270 } },
+        script: { language, cbor },
+      }] }),
+    });
+
+    const provider = new ReadOnlyOgmiosProvider({ ogmiosUrl: TEST_URL });
+    const result = await provider.queryUtxo(TEST_REF);
+    expect(result!.scriptRef).toBe(expected);
+  });
 });
 
 // ─── queryUtxosByAddress() ────────────────────────────────────────────────────

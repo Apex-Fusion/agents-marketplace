@@ -219,8 +219,7 @@ function ogmiosUtxoToUtxo(o: OgmiosUtxo): Utxo {
 
   const datumHex =
     typeof o.datum === "string" && o.datum.length > 0 ? o.datum : null;
-  const scriptRef =
-    typeof o.script === "string" ? o.script : null;
+  const scriptRef = ogmiosScriptRef(o.script);
 
   return {
     ref: { txHash: o.transaction.id, index: o.index },
@@ -230,6 +229,17 @@ function ogmiosUtxoToUtxo(o: OgmiosUtxo): Utxo {
     datumHex,
     scriptRef,
   };
+}
+
+/**
+ * Ogmios v6 returns a reference script as `{ language, cbor }`. `Utxo.scriptRef`
+ * holds a Plutus V3 script (its compiled code, hex), so only `plutus:v3` maps;
+ * another language gives null.
+ */
+function ogmiosScriptRef(script: unknown): string | null {
+  if (typeof script !== "object" || script === null) return null;
+  const { language, cbor } = script as { language?: unknown; cbor?: unknown };
+  return language === "plutus:v3" && typeof cbor === "string" && cbor.length > 0 ? cbor : null;
 }
 
 function aggregateBudget(
