@@ -731,7 +731,7 @@ On 2026-11-02, 36 of the 43 Active adverts used supplier keys without a legacy r
 
 ### 9.3 Outside suppliers
 
-The identity tools (§10) are released before we announce the switch date. We announce it at least 14 days before the switch. Outside suppliers register or adopt in that time, name an Accountable Party and post new adverts. The announcement also says that an escrow above 10,000 AP3X cannot be claimed and returns to the buyer only by Reclaim after `deliver_by`.
+The identity tools (§10) are released first. The switch follows as soon as our supplier records and new adverts exist (decision of 2026-11-03). There is no 14-day notice period, because most escrows and most traffic are ours. The release announcement tells outside suppliers to register or adopt, name an Accountable Party and post new adverts; until then their legacy adverts are not routable. It also says that an escrow above 10,000 AP3X cannot be claimed and returns to the buyer only by Reclaim after `deliver_by`.
 
 ### 9.4 Legacy records after deployment
 
@@ -752,7 +752,7 @@ A legacy Register and a legacy Update in one transaction can put two legacy toke
 
 1. Deploy the new escrow and advert contracts, and publish their reference scripts.
 2. Release the services, tools and copies that read and spend both escrow layouts (§6.5).
-3. Announce the switch date (§9.3).
+3. Register our supplier records and post their new adverts (§9.2), then announce the switch (§9.3).
 4. Switch: all builders create new escrows and adverts only.
 5. Drain:
    - Suppliers keep the legacy Claim and Submit paths until the last legacy escrow passes its `deliver_by`.
@@ -849,7 +849,7 @@ One combined release, in this order:
    - the module clients.
 5. **Records:** our agents adopt (§9.1). Our supplier records are registered (§9.2). The gateway registers itself (§8.2).
 6. **Smoke test** (§12.6).
-7. **Escrow switch:** announce the switch date. Switch and drain (§9.6).
+7. **Escrow switch:** as soon as our supplier records and new adverts exist (§9.3). Switch and drain (§9.6).
 8. **Universal Resolver:** after the W3C merge, submit the driver (§8.8). Its test identifiers are one live native DID, one adopted DID, one legacy DID and one deactivated DID.
 
 Use the selective release procedure for every service. A push to `main` must never start image builds on the production host.
@@ -1041,8 +1041,8 @@ The tests are in `tests/legacy-registry/` (offline, `aiken tx simulate`). Result
 | Foundation approval of Apache-2.0 for `identity-gateway` | David |
 | Contact email for the W3C and DIF entries | David |
 | npm and PyPI publication rights | David |
-| The switch date | David |
-| Retention time of the Traefik access log on the gateway host | David |
+| The switch date | David (decided 2026-11-03: as soon as our supplier records and new adverts exist) |
+| Retention time of the Traefik access log on the gateway host | David (decided 2026-11-03: 7 days) |
 | Check that the default Ogmios endpoint answers public requests from the driver | Builder |
 
 ## Appendix A — Reason codes
