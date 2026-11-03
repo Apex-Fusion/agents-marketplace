@@ -21,24 +21,30 @@
 # IDENTITY_GATEWAY_VERSION the pull fails on the tag "unreleased".
 # deploy.sh does not manage this project.
 #
-# Gateway keys (Part 2 §8.2): two PEM private key files that only the
-# container user can read. The image runs as the `node` user (uid 1000), and
-# the gateway refuses a key file that its group or other users can read or
-# write. On the host:
+# Gateway keys (Part 2 §8.2): two PEM private key files in one directory that
+# only the container user can read. The image runs as the `node` user
+# (uid 1000), and the gateway refuses a key file that its group or other users
+# can read or write. On the host:
 #   install -d -o 1000 -g 1000 -m 0700 /root/identity-gateway/keys
 #   chown 1000:1000 /root/identity-gateway/keys/*.pem
 #   chmod 0600 /root/identity-gateway/keys/*.pem
-# The files are mounted read-only. Set both or neither: without them the M4
-# services are off and agent cards answer 503.
+# The directory is mounted read-only at /run/secrets/identity-gateway
+# (IDENTITY_GATEWAY_KEYS_DIR in deploy/mainnet/.env sets another host path).
+# The M4 services stay off until identity-gateway/.env sets all three of:
+#   GATEWAY_ED25519_KEY_FILE=/run/secrets/identity-gateway/ed25519.pem
+#   GATEWAY_P256_KEY_FILE=/run/secrets/identity-gateway/p256.pem
+#   GATEWAY_VECTOR_ID=<64 hex, the gateway's own identifier (§8.2)>
+# Without them, agent cards answer 503. With the key files but without
+# GATEWAY_VECTOR_ID, the gateway refuses to start.
 #
-# Private settings in identity-gateway/.env (gitignored, mode 0600; optional):
+# Settings in identity-gateway/.env (gitignored, mode 0600):
 #   KOIOS_TOKEN=<Koios bearer token, if the Koios instance needs one>
 #   ACCESS_LOG_RETENTION=<the retention text of Traefik's access log, §13.4>
-# Values published at the identity deployment (Part 2 §11 step 3) go into the
-# environment block below when they exist: IDENTITY_POLICY_ID, CUTOFF_SLOT,
-# GATEWAY_VECTOR_ID (after the gateway registers itself, §8.2) and
-# DELEGATION_POLICY_ID. Without IDENTITY_POLICY_ID the resolver answers legacy
-# records only.
+#   The values published at the identity deployment (Part 2 §11 step 3):
+#   IDENTITY_POLICY_ID, CUTOFF_SLOT and DELEGATION_POLICY_ID. Without
+#   IDENTITY_POLICY_ID the resolver answers legacy records only.
+# Do not edit this compose file on the host: deploy.sh refuses to run on a
+# changed checkout.
 #
 # Logs: the gateway writes no request log. Traefik's access log on this host
 # holds request paths with DIDs; /policy publishes its retention time.
@@ -71,23 +77,10 @@ services:
       GENESIS_SYSTEM_START: "2025-08-29T16:40:00Z"
       GENESIS_SLOT_LENGTH: "1"
       GENESIS_SECURITY_PARAM: "2160"
-      GATEWAY_ED25519_KEY_FILE: /run/secrets/gateway-ed25519.pem
-      GATEWAY_P256_KEY_FILE: /run/secrets/gateway-p256.pem
-      # Published at the identity deployment (see the header):
-      #   IDENTITY_POLICY_ID: <56 hex>
-      #   CUTOFF_SLOT: <slot>
-      #   GATEWAY_VECTOR_ID: <64 hex, the gateway's own identifier>
-      #   DELEGATION_POLICY_ID: <56 hex>
     volumes:
       - type: bind
-        source: ${IDENTITY_GATEWAY_ED25519_KEY_HOST_FILE:-/root/identity-gateway/keys/ed25519.pem}
-        target: /run/secrets/gateway-ed25519.pem
-        read_only: true
-        bind:
-          create_host_path: false
-      - type: bind
-        source: ${IDENTITY_GATEWAY_P256_KEY_HOST_FILE:-/root/identity-gateway/keys/p256.pem}
-        target: /run/secrets/gateway-p256.pem
+        source: ${IDENTITY_GATEWAY_KEYS_DIR:-/root/identity-gateway/keys}
+        target: /run/secrets/identity-gateway
         read_only: true
         bind:
           create_host_path: false
