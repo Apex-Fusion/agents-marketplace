@@ -16,11 +16,17 @@
  *   supplier_status   — latest polled /status for each active supplier
  *   identity_facts    — (v2) last identity gateway answer per agent_id
  *   meta              — (v2) key/value markers (resync point)
+ *   chain_points      — (v3) slot and hash of the last applied blocks
  *
  * Version 2 (identity registry, Part 2 §6.4):
  *   advertisements: layout ('legacy' | 'identity'), agent_id, creator_signed
  *   escrows:        layout, agent_id, refund_address, refund_datum
  *   utxos:          agent_id (identity record outputs at the identity address)
+ *
+ * Version 3: chain_points. The follower sends these points with the cursor
+ * to findIntersection, so a rollback of the last blocks while it is
+ * disconnected resumes by itself. The table starts empty; the cursor is
+ * always the first point.
  */
 
 import type Database from "better-sqlite3";
@@ -140,6 +146,13 @@ const IDENTITY_SQL = `
   );
 `;
 
+const CHAIN_POINTS_SQL = `
+  CREATE TABLE IF NOT EXISTS chain_points (
+    slot INTEGER PRIMARY KEY,
+    block_hash TEXT NOT NULL
+  );
+`;
+
 function addColumn(db: Database.Database, table: string, column: string, declaration: string): void {
   const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
   if (columns.some((c) => c.name === column)) return;
@@ -161,6 +174,9 @@ const MIGRATIONS: ReadonlyArray<(db: Database.Database) => void> = [
     addColumn(db, "escrows", "refund_datum", "TEXT");
     addColumn(db, "utxos", "agent_id", "TEXT");
     db.exec(IDENTITY_SQL);
+  },
+  (db) => {
+    db.exec(CHAIN_POINTS_SQL);
   },
 ];
 

@@ -13,10 +13,14 @@
  *   const worker = new ChainSyncWorker({ source, cache, addresses });
  *   await worker.start();
  *   // all blocks are replayed synchronously before start() resolves
+ *
+ * Like Ogmios, start() reports the intersection first: the newest point that
+ * the worker gives (or the origin for an empty list). The mock does not check
+ * the points against a chain; `startPoints` records them.
  */
 
 import { EventEmitter } from "events";
-import type { ChainSyncSource, IndexerBlock, RollbackPoint } from "../../../indexer/src/follower/types.js";
+import type { ChainPoint, ChainSyncSource, IndexerBlock, RollbackPoint } from "../../../indexer/src/follower/types.js";
 
 export type MockChainEvent =
   | { kind: "block"; block: IndexerBlock; tipSlot?: number }
@@ -26,15 +30,19 @@ export class MockChainSyncSource extends EventEmitter implements ChainSyncSource
   private events: MockChainEvent[];
   private eventIndex: number = 0;
   private started: boolean = false;
+  /** The points that the worker gave at start(). */
+  startPoints: ChainPoint[] = [];
 
   constructor(events: MockChainEvent[]) {
     super();
     this.events = events;
   }
 
-  async start(_intersectAt?: { slot: number; id: string } | null): Promise<void> {
+  async start(points: () => ChainPoint[]): Promise<void> {
     this.started = true;
+    this.startPoints = points();
     this.emit("connected");
+    this.emit("intersection", { point: this.startPoints[0] ?? "origin", tip: null });
     // Replay all events; the worker calls requestNextBlock() after each.
     // We pre-drain them here by emitting them synchronously.
     this._drainAll();
@@ -50,19 +58,14 @@ export class MockChainSyncSource extends EventEmitter implements ChainSyncSource
     // Subclasses that need step-by-step control can override.
   }
 
-  updateIntersect(_point: { slot: number; id: string }): void {
-    // No-op in mock mode; the source has no reconnect path. Kept to satisfy
-    // the ChainSyncSource interface contract.
-  }
-
   private _drainAll(): void {
     while (this.eventIndex < this.events.length) {
       const ev = this.events[this.eventIndex++];
       if (ev.kind === "block") {
         const tipSlot = ev.tipSlot ?? ev.block.slot + 100;
-        this.emit("block", { block: ev.block, tip: { slot: tipSlot } });
+        this.emit("block", { block: ev.block, tip: { slot: tipSlot, id: `tip_${tipSlot}` } });
       } else {
-        this.emit("rollback", { point: ev.point });
+        this.emit("rollback", { point: ev.point, tip: null });
       }
     }
   }

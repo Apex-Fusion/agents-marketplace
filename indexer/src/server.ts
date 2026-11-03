@@ -32,7 +32,7 @@ import type { EventEmitter } from "events";
 import type { SqliteCache } from "./db/cache.js";
 import type { ChainSyncWorker } from "./follower/worker.js";
 
-import { healthzRouter } from "./routes/healthz.js";
+import { DEFAULT_MAX_SYNC_LAG_SLOTS, healthzRouter } from "./routes/healthz.js";
 import { suppliersRouter } from "./routes/suppliers.js";
 import { capabilitiesRouter } from "./routes/capabilities.js";
 import { escrowsRouter } from "./routes/escrows.js";
@@ -58,12 +58,22 @@ export interface IndexerAppOptions {
    * preserves the legacy "API-only" behaviour.
    */
   uiDistDir?: string;
+
+  /**
+   * GET /healthz reports ok: false when the indexer is more slots than this
+   * behind the chain tip (MAX_SYNC_LAG_SLOTS). Default: 600.
+   */
+  maxSyncLagSlots?: number;
 }
 
 export function createApp(deps: IndexerDeps, options?: IndexerAppOptions): Application {
   const app = express();
 
-  app.use(healthzRouter({ cache: deps.cache, worker: deps.worker }));
+  app.use(healthzRouter({
+    cache: deps.cache,
+    worker: deps.worker,
+    maxSyncLagSlots: options?.maxSyncLagSlots ?? DEFAULT_MAX_SYNC_LAG_SLOTS,
+  }));
   app.use(suppliersRouter({ cache: deps.cache }));
   app.use(capabilitiesRouter({ cache: deps.cache }));
   app.use(escrowsRouter({ cache: deps.cache }));

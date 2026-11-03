@@ -27,8 +27,9 @@ function makeMockDeps(): IndexerDeps {
   } as unknown as IndexerDeps["cache"];
 
   const worker = {
-    getCurrentSlot: vi.fn(() => 0),
-    getTipSlot: vi.fn(() => 0),
+    getHealth: vi.fn(() => ({
+      state: "starting", connected: false, syncSlot: 0, tip: null, tipAgeMs: null, error: null,
+    })),
     start: vi.fn(),
     stop: vi.fn(),
     on: workerEmitter.on.bind(workerEmitter),

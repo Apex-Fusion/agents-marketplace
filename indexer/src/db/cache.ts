@@ -2,11 +2,20 @@
  * indexer/src/db/cache.ts — SqliteCache for the indexer.
  *
  * Wraps better-sqlite3 with domain-specific methods for advertisements,
- * escrows, supplier_status, events, cursor, UTxOs and identity facts.
+ * escrows, supplier_status, events, cursor, intersection points, UTxOs and
+ * identity facts.
  *
- * Rollback semantics (apex-dashboard pattern):
- *   - Events: soft-delete (rolled_back = 1) for events after rollback slot
+ * Intersection points: saveCursor also keeps the slot and hash of the last
+ * INTERSECTION_POINTS applied blocks (chain_points). The follower sends them,
+ * newest first, to findIntersection.
+ *
+ * Rollback to a block (rollbackTo) removes everything that later blocks wrote:
+ *   - Events: soft-delete (rolled_back = 1)
  *   - UTxOs: delete created-after, restore spent-after
+ *   - Adverts and escrows: delete created-after; an advert retired after the
+ *     block gets the status of its datum again
+ *   - Supplier status: delete the rows of the deleted adverts
+ *   - Cursor and intersection points: move to the block
  *
  * Listing: listActiveAdvertisements returns only the adverts that the indexer
  * lists (listing/rule.ts): the legacy adverts before the switch slot, the new
@@ -17,6 +26,7 @@
 
 import Database from "better-sqlite3";
 import fs from "fs";
+import { decodeAnyAdvertDatum } from "@marketplace/shared/cbor";
 import type { DatumLayout } from "../follower/types.js";
 import {
   IDENTITY_RESULT_MAX_AGE_MS,
@@ -147,6 +157,13 @@ export interface SqliteCacheOptions {
 /** Rows per `IN (...)` query; below the SQLite host-parameter limit. */
 const IN_CHUNK = 500;
 
+/**
+ * Saved intersection points: the last applied blocks. After a rollback of
+ * fewer blocks, findIntersection still finds a point and the follower resumes
+ * by itself. findIntersection sends all of them in one message.
+ */
+export const INTERSECTION_POINTS = 100;
+
 export interface EscrowLineageRow extends EscrowRow {
   spent_tx: string | null;
 }
@@ -187,12 +204,40 @@ export class SqliteCache {
     return this.db.transaction(fn)();
   }
 
-  // ─── Cursor ────────────────────────────────────────────────────────────
+  // ─── Cursor and intersection points ────────────────────────────────────
 
+  /**
+   * The chain now ends at this block: the cursor moves to it and it becomes
+   * the newest intersection point. Saved points at or after its slot (a
+   * rolled-back branch) go, and only the newest INTERSECTION_POINTS stay.
+   */
   saveCursor(slot: number, blockHash: string): void {
-    this.db.prepare(
-      `INSERT OR REPLACE INTO cursor (id, slot, block_hash) VALUES (1, ?, ?)`
-    ).run(slot, blockHash);
+    this.transaction(() => {
+      this.db.prepare(`DELETE FROM chain_points WHERE slot >= ?`).run(slot);
+      this.db.prepare(`INSERT INTO chain_points (slot, block_hash) VALUES (?, ?)`).run(slot, blockHash);
+      this.db.prepare(
+        `DELETE FROM chain_points
+         WHERE slot <= (SELECT slot FROM chain_points ORDER BY slot DESC LIMIT 1 OFFSET ?)`
+      ).run(INTERSECTION_POINTS);
+      this.db.prepare(
+        `INSERT OR REPLACE INTO cursor (id, slot, block_hash) VALUES (1, ?, ?)`
+      ).run(slot, blockHash);
+    });
+  }
+
+  /**
+   * The points for findIntersection, newest first: the cursor, then the
+   * saved points before it, at most INTERSECTION_POINTS in total. Empty for a
+   * new database. The cursor always comes first, also when chain_points
+   * misses it (a database of schema version 2 or older).
+   */
+  getIntersectionPoints(): CursorRow[] {
+    const cursor = this.getCursor();
+    if (!cursor) return [];
+    const older = this.db.prepare(
+      `SELECT slot, block_hash FROM chain_points WHERE slot < ? ORDER BY slot DESC LIMIT ?`
+    ).all(cursor.slot, INTERSECTION_POINTS - 1) as Array<{ slot: number; block_hash: string }>;
+    return [cursor, ...older.map((r) => ({ slot: r.slot, blockHash: r.block_hash }))];
   }
 
   getCursor(): CursorRow | null {
@@ -659,62 +704,95 @@ export class SqliteCache {
   // ─── Rollback ──────────────────────────────────────────────────────────
 
   /**
-   * Roll the state back to `slot`. Returns the agent ids of the identity
-   * record outputs that the rollback removes or makes unspent again, so the
-   * caller can invalidate their identity facts.
+   * Roll the state back to the block `point` (null: the origin, before the
+   * first block). Everything that later blocks wrote goes: their events
+   * (soft delete), UTxOs, adverts, escrows, and the supplier status of those
+   * adverts. Their spends are undone, and an advert that they retired gets
+   * the status of its datum again. The cursor and the intersection points
+   * move to `point`.
+   *
+   * Returns the agent ids of the identity record outputs that the rollback
+   * removes or makes unspent again, so the caller can invalidate their
+   * identity facts.
    */
-  rollbackToSlot(slot: number): string[] {
-    const tx = this.db.transaction((): string[] => {
+  rollbackTo(point: CursorRow | null): string[] {
+    // Rows at a slot after `after` come from the rolled-back blocks.
+    const after = point === null ? -1 : point.slot;
+    return this.transaction((): string[] => {
       const touched = this.db.prepare(
         `SELECT DISTINCT agent_id FROM utxos
          WHERE agent_id IS NOT NULL AND (created_slot > ? OR spent_slot > ?)
          ORDER BY agent_id`
-      ).all(slot, slot) as Array<{ agent_id: string }>;
+      ).all(after, after) as Array<{ agent_id: string }>;
 
-      // Soft-delete events strictly after rollback slot
-      this.db.prepare(`UPDATE events SET rolled_back = 1 WHERE slot > ?`).run(slot);
+      // Before the events go: adverts that a rolled-back RetireAdvert retired.
+      // Their status before the retirement is the status of their datum.
+      const retired = this.db.prepare(
+        `SELECT utxo_ref, datum_hex FROM advertisements
+         WHERE created_slot <= ? AND utxo_ref IN (
+           SELECT utxo_ref FROM events WHERE type = 'RetireAdvert' AND slot > ? AND rolled_back = 0)`
+      ).all(after, after) as Array<{ utxo_ref: string; datum_hex: string }>;
+      const restoreStatus = this.db.prepare(`UPDATE advertisements SET status = ? WHERE utxo_ref = ?`);
+      for (const r of retired) restoreStatus.run(decodeAnyAdvertDatum(r.datum_hex).datum.status, r.utxo_ref);
 
-      // Delete UTxOs created after rollback slot
-      this.db.prepare(`DELETE FROM utxos WHERE created_slot > ?`).run(slot);
-
-      // Restore UTxOs that were spent after rollback slot (clear spend)
+      this.db.prepare(
+        `DELETE FROM supplier_status
+         WHERE advert_ref IN (SELECT utxo_ref FROM advertisements WHERE created_slot > ?)`
+      ).run(after);
+      this.db.prepare(`DELETE FROM advertisements WHERE created_slot > ?`).run(after);
+      this.db.prepare(`DELETE FROM escrows WHERE created_slot > ?`).run(after);
+      this.db.prepare(`UPDATE events SET rolled_back = 1 WHERE slot > ? AND rolled_back = 0`).run(after);
+      this.db.prepare(`DELETE FROM utxos WHERE created_slot > ?`).run(after);
       this.db.prepare(
         `UPDATE utxos SET spent_slot = NULL, spent_tx = NULL WHERE spent_slot > ?`
-      ).run(slot);
+      ).run(after);
 
-      // Update cursor if it's beyond rollback point
-      this.db.prepare(`UPDATE cursor SET slot = ? WHERE id = 1 AND slot > ?`).run(slot, slot);
+      if (point === null) {
+        this.db.prepare(`DELETE FROM cursor`).run();
+        this.db.prepare(`DELETE FROM chain_points`).run();
+      } else {
+        this.saveCursor(point.slot, point.blockHash);
+      }
       return touched.map((r) => r.agent_id);
     });
-    return tx();
   }
 
-  // ─── Resync (Part 2 §6.4 backfill) ─────────────────────────────────────
+  // ─── Resync (Part 2 §6.4 backfill, recovery) ───────────────────────────
 
   /**
-   * Sync again from an earlier block. When the cursor is after `point`, the
-   * state rolls back to `point.slot` and the cursor moves to `point`, so the
-   * follower reads the later blocks again with the current watched
-   * addresses. A cursor at or before `point` does not move: the follower
-   * reads those blocks anyway. A marker in `meta` makes this happen once per
-   * point. Returns true when the cursor moved back.
+   * Sync again from an earlier block of the current chain. When the cursor
+   * is after `point`, the state rolls back to `point` (rollbackTo: all
+   * tables), so the follower reads the later blocks again with the current
+   * watched addresses. A cursor at or before `point` does not move: the
+   * follower reads those blocks anyway. A marker in `meta` makes this happen
+   * once per point. Returns true when the cursor moved back.
+   *
+   * Throws when the database holds another block at the slot of `point`:
+   * that block is not on the chain of `point`, so its state cannot stay.
    */
-  applyResync(point: { slot: number; blockHash: string }): boolean {
+  applyResync(point: CursorRow): boolean {
     const marker = `${point.slot}:${point.blockHash}`;
-    return this.db.transaction((): boolean => {
+    return this.transaction((): boolean => {
       const done = this.db.prepare(`SELECT value FROM meta WHERE key = 'resync_point'`).get() as
         | { value: string }
         | undefined;
       if (done?.value === marker) return false;
       const cursor = this.getCursor();
-      const rewind = cursor !== null && cursor.slot > point.slot;
-      if (rewind) {
-        this.rollbackToSlot(point.slot);
-        this.saveCursor(point.slot, point.blockHash);
+      const saved = this.db.prepare(`SELECT block_hash FROM chain_points WHERE slot = ?`).get(point.slot) as
+        | { block_hash: string }
+        | undefined;
+      const stored = cursor?.slot === point.slot ? cursor.blockHash : saved?.block_hash;
+      if (stored !== undefined && stored !== point.blockHash) {
+        throw new Error(
+          `resync point ${marker}: the database holds block ${stored} at slot ${point.slot}, ` +
+          `so the point is not on the indexed chain. Choose a block of the current chain before slot ${point.slot}.`,
+        );
       }
+      const rewind = cursor !== null && cursor.slot > point.slot;
+      if (rewind) this.rollbackTo(point);
       this.db.prepare(`INSERT OR REPLACE INTO meta (key, value) VALUES ('resync_point', ?)`).run(marker);
       return rewind;
-    })();
+    });
   }
 
   // ─── Lifecycle ─────────────────────────────────────────────────────────

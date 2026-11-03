@@ -116,6 +116,29 @@ describe("schema migration v1 → v2", () => {
   });
 });
 
+describe("schema migration → v3 (intersection points)", () => {
+  it("adds chain_points to a database from before schema versioning; its cursor is the first point", () => {
+    const path = tempDb();
+    legacyDatabase(path);
+    const old = new Database(path);
+    old.prepare(`INSERT INTO cursor (id, slot, block_hash) VALUES (1, 36987164, ?)`).run("a7".repeat(32));
+    old.close();
+
+    const cache = new SqliteCache(path);
+    expect(cache.getIntersectionPoints()).toEqual([{ slot: 36987164, blockHash: "a7".repeat(32) }]);
+    cache.saveCursor(36987170, "a8".repeat(32));
+    expect(cache.getIntersectionPoints()).toEqual([
+      { slot: 36987170, blockHash: "a8".repeat(32) },
+    ]);
+    cache.close();
+
+    expect(columns(path, "chain_points")).toEqual(["slot", "block_hash"]);
+    const db = new Database(path);
+    expect(db.pragma("user_version", { simple: true })).toBe(3);
+    db.close();
+  });
+});
+
 // ─── Resync ───────────────────────────────────────────────────────────────────
 
 describe("SqliteCache.applyResync", () => {
@@ -151,11 +174,25 @@ describe("SqliteCache.applyResync", () => {
     expect(behind.getCursor()).toEqual({ slot: 100, blockHash: "e".repeat(64) });
     behind.close();
   });
+
+  it("refuses a point whose slot holds another block in the database", () => {
+    const cache = new SqliteCache(":memory:");
+    cache.saveCursor(150, "8".repeat(64));
+    cache.saveCursor(300, "c".repeat(64));
+    expect(() => cache.applyResync(POINT)).toThrow(/holds block 8{64} at slot 150/);
+    expect(cache.getCursor()).toEqual({ slot: 300, blockHash: "c".repeat(64) });
+
+    const atCursor = new SqliteCache(":memory:");
+    atCursor.saveCursor(150, "8".repeat(64));
+    expect(() => atCursor.applyResync(POINT)).toThrow(/not on the indexed chain/);
+    atCursor.close();
+    cache.close();
+  });
 });
 
 // ─── Rollback and identity records ────────────────────────────────────────────
 
-describe("SqliteCache.rollbackToSlot — identity records", () => {
+describe("SqliteCache.rollbackTo — identity records", () => {
   it("returns the agents whose record outputs the rollback removes or restores", () => {
     const cache = new SqliteCache(":memory:", { listing: { identityAddress: IDENTITY_ADDRESS } });
     const other = "7c".repeat(32);
@@ -163,7 +200,7 @@ describe("SqliteCache.rollbackToSlot — identity records", () => {
     cache.insertUtxo("r2#0", IDENTITY_ADDRESS, "d87980", 100, "r2", AGENT_ID);
     cache.spendUtxo("r2#0", 200, "r3");
     cache.insertUtxo("r3#0", IDENTITY_ADDRESS, "d87980", 200, "r3", AGENT_ID);
-    expect(cache.rollbackToSlot(150)).toEqual([AGENT_ID]);
+    expect(cache.rollbackTo({ slot: 150, blockHash: "9".repeat(64) })).toEqual([AGENT_ID]);
     expect(cache.getUnspentUtxos(IDENTITY_ADDRESS).map((u) => [u.ref, u.agent_id])).toEqual([
       ["r1#0", other],
       ["r2#0", AGENT_ID],

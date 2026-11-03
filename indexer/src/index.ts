@@ -4,9 +4,10 @@
  * Wires:
  *   - Config from process.env (validated)
  *   - SqliteCache (opens or creates DB, applies schema migrations, listing policy)
- *   - Backfill (Part 2 §6.4): one-time resync point and/or the start-up load
- *     of the outputs at the identity address
- *   - OgmiosSource (real WebSocket — exercised in M1-F lifecycle)
+ *   - Resync: one-time resync point (identity backfill, Part 2 §6.4, or the
+ *     recovery after a lost intersection) and/or the start-up load of the
+ *     outputs at the identity address
+ *   - OgmiosSource (Ogmios WebSocket; intersection with the saved block points)
  *   - ChainSyncWorker (drives source → cache + emits chain-event/sync-progress/identity-change)
  *   - StatusPoller (periodic supplier /status fetcher)
  *   - IdentityRefresher (identity gateway answers for the new adverts)
@@ -20,6 +21,7 @@ import { loadConfig } from "./config.js";
 import { SqliteCache } from "./db/cache.js";
 import { OgmiosSource } from "./follower/ogmiosSource.js";
 import { ChainSyncWorker } from "./follower/worker.js";
+import type { RollbackPoint } from "./follower/types.js";
 import { loadIdentityOutputs } from "./identity/backfill.js";
 import { createGatewayClient } from "./identity/gateway.js";
 import { IdentityRefresher } from "./identity/refresher.js";
@@ -50,7 +52,7 @@ async function main(): Promise<void> {
     const { slot, blockHash } = config.resyncFrom;
     console.log(
       cache.applyResync(config.resyncFrom)
-        ? `[indexer] resync: state rolled back to slot ${slot}; reading the later blocks again`
+        ? `[indexer] resync: the state after block ${slot}:${blockHash} is removed; reading the later blocks again`
         : `[indexer] resync point ${slot}:${blockHash} already applied or not behind the cursor`,
     );
   }
@@ -95,11 +97,18 @@ async function main(): Promise<void> {
 
   const app = createApp(
     { cache, worker },
-    config.uiDistDir ? { uiDistDir: config.uiDistDir } : undefined,
+    { uiDistDir: config.uiDistDir, maxSyncLagSlots: config.maxSyncLagSlots },
   );
 
   worker.on("error", (err: { message: string; stale: boolean }) => {
     console.error(`[indexer] worker error: ${err.message}${err.stale ? " (stale)" : ""}`);
+  });
+  source.on("intersection", ({ point }: { point: RollbackPoint }) => {
+    console.log(
+      point === "origin"
+        ? "[indexer] chain-sync: starting at the origin"
+        : `[indexer] chain-sync: intersection at slot ${point.slot} (block ${point.id})`,
+    );
   });
   worker.on("identity-change", (agentIds: string[]) => refresher?.invalidate(agentIds));
 

@@ -68,6 +68,12 @@ describe("loadConfig — happy path", () => {
     const config = loadConfig({ ...VALID_ENV, NETWORK_ID: "1" });
     expect(config.networkId).toBe(1);
   });
+
+  it("MAX_SYNC_LAG_SLOTS defaults to 600 and is parsed from env", () => {
+    expect(loadConfig(VALID_ENV).maxSyncLagSlots).toBe(600);
+    expect(loadConfig({ ...VALID_ENV, MAX_SYNC_LAG_SLOTS: "" }).maxSyncLagSlots).toBe(600);
+    expect(loadConfig({ ...VALID_ENV, MAX_SYNC_LAG_SLOTS: "120" }).maxSyncLagSlots).toBe(120);
+  });
 });
 
 // ─── Missing required fields — these tests work regardless ────────────────────
@@ -143,5 +149,10 @@ describe("loadConfig — malformed values", () => {
     expect(() => {
       loadConfig({ ...VALID_ENV, NETWORK_ID: "2" });
     }).toThrow(/NETWORK_ID/);
+  });
+
+  it("throws when MAX_SYNC_LAG_SLOTS is not a non-negative integer", () => {
+    expect(() => loadConfig({ ...VALID_ENV, MAX_SYNC_LAG_SLOTS: "-1" })).toThrow(/MAX_SYNC_LAG_SLOTS/);
+    expect(() => loadConfig({ ...VALID_ENV, MAX_SYNC_LAG_SLOTS: "ten" })).toThrow(/MAX_SYNC_LAG_SLOTS/);
   });
 });

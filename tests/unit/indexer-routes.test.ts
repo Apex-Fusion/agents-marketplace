@@ -30,6 +30,8 @@ import {
   type EscrowLineage,
   type EscrowRow,
 } from "../../indexer/src/db/cache.js";
+import type { FollowerHealth } from "../../indexer/src/follower/worker.js";
+import { MAX_TIP_AGE_MS } from "../../indexer/src/routes/healthz.js";
 
 // ─── Mock helpers ─────────────────────────────────────────────────────────────
 
@@ -84,15 +86,21 @@ function sampleEscrow(overrides: Partial<EscrowRow> = {}): EscrowRow {
 function makeMockDeps(overrides: Partial<{
   adverts: AdvertRow[];
   escrows: EscrowRow[];
-  currentSlot: number;
   lineage?: EscrowLineage | null;
   lineageError?: Error;
-  tipSlot: number;
+  health: Partial<FollowerHealth>;
 }>): IndexerDeps {
   const adverts = overrides.adverts ?? [sampleAdvert()];
   const escrows = overrides.escrows ?? [];
-  const currentSlot = overrides.currentSlot ?? 1_000_000;
-  const tipSlot = overrides.tipSlot ?? 1_001_000;
+  const health: FollowerHealth = {
+    state: "following",
+    connected: true,
+    syncSlot: 1_000_000,
+    tip: { slot: 1_000_500, id: "f".repeat(64) },
+    tipAgeMs: 1_000,
+    error: null,
+    ...overrides.health,
+  };
 
   const cache = {
     listActiveAdvertisements: vi.fn((filter?: { capability_id?: string; supplier_pkh?: string }) => {
@@ -123,8 +131,7 @@ function makeMockDeps(overrides: Partial<{
   } as unknown as IndexerDeps["cache"];
 
   const worker = {
-    getCurrentSlot: vi.fn(() => currentSlot),
-    getTipSlot: vi.fn(() => tipSlot),
+    getHealth: vi.fn(() => health),
     on: vi.fn(),
     off: vi.fn(),
   } as unknown as IndexerDeps["worker"];
@@ -141,11 +148,17 @@ describe("GET /healthz", () => {
     const app = createApp(makeMockDeps({}));
     const res = await request(app).get("/healthz");
     expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({
+    expect(res.body).toEqual({
       ok: true,
       sync_slot: 1_000_000,
-      tip_slot: 1_001_000,
+      tip_slot: 1_000_500,
+      ogmios_status: "connected",
       db_size_bytes: 4096,
+      lag_slots: 500,
+      max_sync_lag_slots: 600,
+      tip_age_ms: 1_000,
+      follower: "following",
+      error: null,
     });
   });
 
@@ -156,16 +169,60 @@ describe("GET /healthz", () => {
     expect(res.body).toHaveProperty("ogmios_status");
   });
 
-  it("sync_slot reflects worker.getCurrentSlot() value of 999999", async () => {
-    const app = createApp(makeMockDeps({ currentSlot: 999_999 }));
+  it("sync_slot reflects the slot of the last applied block (999999)", async () => {
+    const app = createApp(makeMockDeps({ health: { syncSlot: 999_999 } }));
     const res = await request(app).get("/healthz"); // SPEC FIX 2026-04-27: standardize to /healthz
     expect(res.body.sync_slot).toBe(999_999);
   });
 
-  it("tip_slot reflects worker.getTipSlot() value of 1234567", async () => {
-    const app = createApp(makeMockDeps({ tipSlot: 1_234_567 }));
+  it("tip_slot reflects the chain tip that Ogmios reported (1234567)", async () => {
+    const app = createApp(makeMockDeps({ health: { tip: { slot: 1_234_567, id: "f".repeat(64) } } }));
     const res = await request(app).get("/healthz"); // SPEC FIX 2026-04-27: standardize to /healthz
     expect(res.body.tip_slot).toBe(1_234_567);
+  });
+
+  it("health lag: ok is false when the indexer is more than MAX_SYNC_LAG_SLOTS behind the tip", async () => {
+    const behind = (lag: number) => makeMockDeps({ health: { syncSlot: 36_987_164, tip: { slot: 36_987_164 + lag, id: "f".repeat(64) } } });
+    const atLimit = await request(createApp(behind(600))).get("/healthz");
+    expect(atLimit.body).toMatchObject({ ok: true, lag_slots: 600, max_sync_lag_slots: 600 });
+    const over = await request(createApp(behind(601))).get("/healthz");
+    expect(over.status).toBe(200);
+    expect(over.body).toMatchObject({ ok: false, lag_slots: 601, sync_slot: 36_987_164, tip_slot: 36_987_765 });
+    // The live incident: the indexer stopped at 36,987,164 while the chain went on.
+    const stuck = await request(createApp(behind(193_485))).get("/healthz");
+    expect(stuck.body).toMatchObject({ ok: false, lag_slots: 193_485 });
+  });
+
+  it("health lag: MAX_SYNC_LAG_SLOTS sets the limit", async () => {
+    const deps = makeMockDeps({ health: { syncSlot: 1_000, tip: { slot: 1_100, id: "f".repeat(64) } } });
+    expect((await request(createApp(deps, { maxSyncLagSlots: 99 })).get("/healthz")).body)
+      .toMatchObject({ ok: false, lag_slots: 100, max_sync_lag_slots: 99 });
+    expect((await request(createApp(deps, { maxSyncLagSlots: 100 })).get("/healthz")).body)
+      .toMatchObject({ ok: true, lag_slots: 100, max_sync_lag_slots: 100 });
+  });
+
+  it("ok is false when the follower failed, even with no lag", async () => {
+    const app = createApp(makeMockDeps({
+      health: { state: "no_intersection", syncSlot: 1_000_500, error: "no intersection: ... RESYNC_FROM_SLOT ..." },
+    }));
+    const res = await request(app).get("/healthz");
+    expect(res.body).toMatchObject({
+      ok: false, lag_slots: 0, follower: "no_intersection", error: "no intersection: ... RESYNC_FROM_SLOT ...",
+    });
+  });
+
+  it("ok is false before the first tip report, before the first intersection, and with an old tip", async () => {
+    const noTip = await request(createApp(makeMockDeps({ health: { tip: null, tipAgeMs: null } }))).get("/healthz");
+    expect(noTip.body).toMatchObject({ ok: false, tip_slot: 0, lag_slots: null, tip_age_ms: null });
+    const starting = await request(createApp(makeMockDeps({ health: { state: "starting" } }))).get("/healthz");
+    expect(starting.body).toMatchObject({ ok: false, follower: "starting" });
+    const old = await request(createApp(makeMockDeps({ health: { tipAgeMs: MAX_TIP_AGE_MS + 1 } }))).get("/healthz");
+    expect(old.body).toMatchObject({ ok: false, lag_slots: 500 });
+  });
+
+  it("ogmios_status follows the chain-sync connection", async () => {
+    const res = await request(createApp(makeMockDeps({ health: { connected: false } }))).get("/healthz");
+    expect(res.body.ogmios_status).toBe("disconnected");
   });
 });
 

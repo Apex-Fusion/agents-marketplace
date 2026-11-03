@@ -318,7 +318,7 @@ Every field traces back to chain through `advert_ref` or `escrow_ref`. The index
 - Status poller: background loop polling each Active supplier's `/status` every 20 s; writes to `supplier_status` table (off-chain).
 - Aggregator: per-capability active-supplier counts, p95 wallclock from receipts.
 
-Rollback semantics inherited: soft-delete + UTxO resurrection, per apex-dashboard `sqlite-cache.ts:328-360`.
+Rollback semantics: a RollBackward (or a `RESYNC_FROM_*` resync) to a block removes all state that the later blocks wrote: events (soft delete), UTxOs (delete created, restore spent), adverts and escrows created after the block, and the supplier status of those adverts. An advert that a rolled-back block retired gets the status of its datum again. The cursor and the saved intersection points (the last 100 blocks, sent newest first to `findIntersection`) move to the exact block.
 
 ## 7. Test architecture
 

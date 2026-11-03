@@ -43,6 +43,11 @@ function cleanupTemp(): void {
   try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 
+/** A block point whose hash is derived from the slot. */
+function blockAt(slot: number): { slot: number; blockHash: string } {
+  return { slot, blockHash: slot.toString(16).padStart(64, "0") };
+}
+
 function sampleAdvertRow(overrides: Partial<AdvertRow> = {}): Omit<AdvertRow, "id"> {
   return {
     utxo_ref: "a".repeat(64) + "#0",
@@ -407,7 +412,7 @@ describe("SqliteCache — escrow lineage", () => {
       tx_hash: acceptTx,
     });
 
-    cache.rollbackToSlot(250);
+    cache.rollbackTo(blockAt(250));
     const rewound = cache.getEscrowLineage(openRef);
     expect(rewound?.rows.map((row) => row.utxo_ref)).toEqual([openRef, claimedRef]);
     expect(rewound?.rows[1].spent_tx).toBeNull();
@@ -541,14 +546,14 @@ describe("SqliteCache — events", () => {
 
 // ─── Rollback ─────────────────────────────────────────────────────────────────
 
-describe("SqliteCache — rollbackToSlot", () => {
+describe("SqliteCache — rollbackTo", () => {
   afterEach(cleanupTemp);
 
-  it("rollbackToSlot soft-deletes only events strictly after the rollback slot", () => {
+  it("rollbackTo soft-deletes only events strictly after the rollback slot", () => {
     const cache = new SqliteCache(tempDb());
     cache.appendEvent({ type: "PostAdvert", slot: 100, tx_hash: "a".repeat(64), utxo_ref: "a".repeat(64) + "#0", datum_hex: "", metadata_json: "{}", rolled_back: 0 });
     cache.appendEvent({ type: "PostEscrow", slot: 200, tx_hash: "b".repeat(64), utxo_ref: "b".repeat(64) + "#0", datum_hex: "", metadata_json: "{}", rolled_back: 0 });
-    cache.rollbackToSlot(100);
+    cache.rollbackTo(blockAt(100));
     const events = cache.listEventsAfterSlot(0);
     // Events at slot 100 survive; slot 200 is soft-deleted
     expect(events.some(e => e.slot === 100)).toBe(true);
@@ -556,36 +561,119 @@ describe("SqliteCache — rollbackToSlot", () => {
     cache.close();
   });
 
-  it("rollbackToSlot restores UTxOs spent after rollback slot", () => {
+  it("rollbackTo restores UTxOs spent after rollback slot", () => {
     const cache = new SqliteCache(tempDb());
     const ref = "a".repeat(64) + "#0";
     cache.insertUtxo(ref, "addr_test1wADDR", "datum1", 100, "a".repeat(64));
     cache.spendUtxo(ref, 200, "b".repeat(64));
-    cache.rollbackToSlot(150);
+    cache.rollbackTo(blockAt(150));
     const unspent = cache.getUnspentUtxos("addr_test1wADDR");
     expect(unspent.some(u => u.ref === ref)).toBe(true);
     cache.close();
   });
 
-  it("rollbackToSlot removes UTxOs created after rollback slot", () => {
+  it("rollbackTo removes UTxOs created after rollback slot", () => {
     const cache = new SqliteCache(tempDb());
     cache.insertUtxo("a".repeat(64) + "#0", "addr_test1wADDR", "datum1", 100, "a".repeat(64));
     cache.insertUtxo("b".repeat(64) + "#0", "addr_test1wADDR", "datum2", 200, "b".repeat(64));
-    cache.rollbackToSlot(150);
+    cache.rollbackTo(blockAt(150));
     const unspent = cache.getUnspentUtxos("addr_test1wADDR");
     expect(unspent.length).toBe(1);
     expect(unspent[0].ref).toBe("a".repeat(64) + "#0");
     cache.close();
   });
 
-  it("rollbackToSlot to before Submit: SubmitEscrow event is soft-deleted, ClaimEscrow survives", () => {
+  it("rollbackTo to before Submit: SubmitEscrow event is soft-deleted, ClaimEscrow survives", () => {
     const cache = new SqliteCache(tempDb());
     cache.appendEvent({ type: "ClaimEscrow", slot: 150, tx_hash: "b".repeat(64), utxo_ref: "b".repeat(64) + "#0", datum_hex: "", metadata_json: "{}", rolled_back: 0 });
     cache.appendEvent({ type: "SubmitEscrow", slot: 200, tx_hash: "c".repeat(64), utxo_ref: "c".repeat(64) + "#0", datum_hex: "", metadata_json: "{}", rolled_back: 0 });
-    cache.rollbackToSlot(150);
+    cache.rollbackTo(blockAt(150));
     const events = cache.listEventsAfterSlot(0);
     expect(events.some(e => e.type === "SubmitEscrow")).toBe(false);
     expect(events.some(e => e.type === "ClaimEscrow")).toBe(true);
+    cache.close();
+  });
+
+  it("rollbackTo removes the adverts, escrows and supplier status that later blocks wrote", () => {
+    const cache = new SqliteCache(tempDb());
+    const otherSupplier = "dd".repeat(28);
+    const kept = sampleAdvertRow({ utxo_ref: `${"1".repeat(64)}#0`, created_slot: 100 });
+    const later = sampleAdvertRow({ utxo_ref: `${"2".repeat(64)}#0`, supplier_pkh: otherSupplier, created_slot: 200 });
+    cache.upsertAdvertisement(kept);
+    cache.upsertAdvertisement(later);
+    cache.upsertEscrow(sampleEscrowRow({ utxo_ref: `${"3".repeat(64)}#0`, created_slot: 100 }));
+    cache.upsertEscrow(sampleEscrowRow({ utxo_ref: `${"4".repeat(64)}#0`, created_slot: 200 }));
+    const status = (supplierPkh: string, advertRef: string): SupplierStatusRow => ({
+      supplier_pkh: supplierPkh, advert_ref: advertRef, status: "free",
+      last_seen_iso: "2026-11-01T00:00:00.000Z", current_escrow_ref: null, polled_at: 1,
+    });
+    cache.upsertSupplierStatus(status(INDEXER_SUPPLIER_PKH, kept.utxo_ref));
+    cache.upsertSupplierStatus(status(otherSupplier, later.utxo_ref));
+
+    cache.rollbackTo(blockAt(150));
+
+    expect(cache.getAdvertisementByRef(kept.utxo_ref)).not.toBeNull();
+    expect(cache.getAdvertisementByRef(later.utxo_ref)).toBeNull();
+    expect(cache.getEscrowByRef(`${"3".repeat(64)}#0`)).not.toBeNull();
+    expect(cache.getEscrowByRef(`${"4".repeat(64)}#0`)).toBeNull();
+    expect(cache.getSupplierStatus(INDEXER_SUPPLIER_PKH)?.advert_ref).toBe(kept.utxo_ref);
+    expect(cache.getSupplierStatus(otherSupplier)).toBeNull();
+    cache.close();
+  });
+
+  it("rollbackTo gives an advert that a later block retired the status of its datum again", () => {
+    const cache = new SqliteCache(tempDb());
+    const retire = (advert: Omit<AdvertRow, "id">, slot: number): void => {
+      cache.appendEvent({
+        type: "RetireAdvert", slot, tx_hash: slot.toString(16).padStart(64, "0"), utxo_ref: advert.utxo_ref,
+        datum_hex: advert.datum_hex, metadata_json: "{}", rolled_back: 0,
+      });
+      cache.markAdvertisementRetired(advert.utxo_ref);
+    };
+    const early = sampleAdvertRow({ utxo_ref: `${"1".repeat(64)}#0`, created_slot: 100 });
+    const late = sampleAdvertRow({ utxo_ref: `${"2".repeat(64)}#0`, created_slot: 100 });
+    cache.upsertAdvertisement(early);
+    cache.upsertAdvertisement(late);
+    retire(early, 120);
+    retire(late, 200);
+    expect(cache.listActiveAdvertisements()).toEqual([]);
+
+    cache.rollbackTo(blockAt(150));
+
+    expect(cache.getAdvertisementByRef(early.utxo_ref)?.status).toBe("Retired");
+    expect(cache.getAdvertisementByRef(late.utxo_ref)?.status).toBe("Active");
+    expect(cache.listActiveAdvertisements().map((a) => a.utxo_ref)).toEqual([late.utxo_ref]);
+    cache.close();
+  });
+
+  it("rollbackTo moves the cursor and the intersection points to the exact block (slot and hash)", () => {
+    const cache = new SqliteCache(tempDb());
+    for (const slot of [100, 200, 300]) cache.saveCursor(slot, blockAt(slot).blockHash);
+
+    cache.rollbackTo(blockAt(200));
+    expect(cache.getCursor()).toEqual(blockAt(200));
+    expect(cache.getIntersectionPoints()).toEqual([blockAt(200), blockAt(100)]);
+
+    const between = { slot: 150, blockHash: "e".repeat(64) };
+    cache.rollbackTo(between);
+    expect(cache.getCursor()).toEqual(between);
+    expect(cache.getIntersectionPoints()).toEqual([between, blockAt(100)]);
+    cache.close();
+  });
+
+  it("rollbackTo the origin removes all chain data", () => {
+    const cache = new SqliteCache(tempDb());
+    const advert = sampleAdvertRow({ created_slot: 0 });
+    cache.upsertAdvertisement(advert);
+    cache.insertUtxo(advert.utxo_ref, "addr_test1wADDR", advert.datum_hex, 0, "a".repeat(64));
+    cache.saveCursor(0, blockAt(0).blockHash);
+
+    cache.rollbackTo(null);
+
+    expect(cache.getCursor()).toBeNull();
+    expect(cache.getIntersectionPoints()).toEqual([]);
+    expect(cache.getUnspentUtxos("addr_test1wADDR")).toEqual([]);
+    expect(cache.getAdvertisementByRef(advert.utxo_ref)).toBeNull();
     cache.close();
   });
 

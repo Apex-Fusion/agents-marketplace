@@ -21,6 +21,8 @@
  *   SKIP_BEFORE_SLOT            — skip blocks before this slot (default 0)
  *   OGMIOS_RESPONSE_TIMEOUT_MS  — watchdog timeout; reconnect Ogmios WS if no
  *                                 response in this window (default 90000, 0 = off)
+ *   MAX_SYNC_LAG_SLOTS          — GET /healthz reports ok: false when the indexer is
+ *                                 more slots than this behind the chain tip (default 600)
  *   ADVERT_SCRIPT_ADDRESS       — legacy advert address (unset: not watched)
  *   ESCROW_SCRIPT_ADDRESS       — legacy escrow address (unset: not watched)
  *
@@ -37,15 +39,19 @@
  *   IDENTITY_LOAD_AT_START  — "1": load the current outputs at the identity address
  *                             from Ogmios at each start (backfill, default off)
  *   SWITCH_SLOT             — switch slot (§9.6): from it on, legacy adverts are not listed
- * Backfill by resync (one time per point):
- *   RESYNC_FROM_SLOT, RESYNC_FROM_BLOCK_HASH — a block before the identity
- *                             deployment; the follower reads the later blocks again
+ * Resync (one time per point):
+ *   RESYNC_FROM_SLOT, RESYNC_FROM_BLOCK_HASH — a block of the current chain. The
+ *                             state after it goes, and the follower reads the later
+ *                             blocks again. Uses: the backfill before the identity
+ *                             deployment, and the recovery when the node has none of
+ *                             the saved blocks (GET /healthz follower "no_intersection").
  */
 
 import type { NetworkId } from "@marketplace/shared";
 import { plutusAddressFromBech32, plutusAddressToBech32, type PlutusAddress } from "@marketplace/shared/cbor";
 import { DEFAULT_REFRESH_MS } from "./identity/refresher.js";
 import { IDENTITY_RESULT_MAX_AGE_MS } from "./listing/rule.js";
+import { DEFAULT_MAX_SYNC_LAG_SLOTS } from "./routes/healthz.js";
 
 export interface IdentityConfig {
   policyId: string;
@@ -66,6 +72,8 @@ export interface IndexerConfig {
   statusPollMs: number;
   skipBeforeSlot: number;
   ogmiosResponseTimeoutMs: number;
+  /** GET /healthz reports ok: false above this lag (slots behind the chain tip). */
+  maxSyncLagSlots: number;
   /**
    * Optional path to the bundled indexer-ui dist directory. When set, the
    * Express app mounts static assets + SPA catch-all so the same process
@@ -231,6 +239,11 @@ export function loadConfig(env: Record<string, string | undefined>): IndexerConf
     ? parseNonNegativeInt("OGMIOS_RESPONSE_TIMEOUT_MS", env.OGMIOS_RESPONSE_TIMEOUT_MS)
     : 90_000;
 
+  const maxSyncLagRaw = value(env, "MAX_SYNC_LAG_SLOTS");
+  const maxSyncLagSlots = maxSyncLagRaw === undefined
+    ? DEFAULT_MAX_SYNC_LAG_SLOTS
+    : parseNonNegativeInt("MAX_SYNC_LAG_SLOTS", maxSyncLagRaw);
+
   // Optional INDEXER_UI_DIST: any non-empty string is accepted; directory
   // existence is checked at startup, not here. Absent → undefined (API-only).
   const uiDistDir = typeof env.INDEXER_UI_DIST === "string" && env.INDEXER_UI_DIST.length > 0
@@ -275,6 +288,7 @@ export function loadConfig(env: Record<string, string | undefined>): IndexerConf
     statusPollMs,
     skipBeforeSlot,
     ogmiosResponseTimeoutMs,
+    maxSyncLagSlots,
     uiDistDir,
     advertAddress,
     escrowAddress,

@@ -571,7 +571,7 @@ describe("blockProcessor — spend-driven detection", () => {
 describe("blockProcessor — rollback integration note", () => {
   it("rollback to before a Submit: escrow returns to Claimed state (via cache rollback)", () => {
     // This test documents rollback semantics at the worker level.
-    // The actual mechanic is tested in sqlite-cache.test.ts (rollbackToSlot).
+    // The actual mechanic is tested in sqlite-cache.test.ts (rollbackTo).
     // Here we verify processBlock correctly tracks which events were at which slots.
     const claimTxId = "d".repeat(64);
     const knownUtxos = new Map([

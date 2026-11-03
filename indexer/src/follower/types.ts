@@ -44,30 +44,47 @@ export interface IndexerBlock {
   transactions?: IndexerTx[] | null;
 }
 
-export interface RollbackPoint {
+/** A block on the chain: its slot and block header hash (Ogmios v6 `Point`). */
+export interface ChainPoint {
   slot: number;
   id: string;
 }
+
+/** A chain-sync point: a block, or the origin (before the first block). */
+export type RollbackPoint = ChainPoint | "origin";
+
+/** The last block of the node's chain, as Ogmios reports it. */
+export type ChainTip = ChainPoint;
 
 /**
  * ChainSyncSource — the mockable seam for the chain follower.
  *
  * Implementations emit:
- *   "block"     — { block: IndexerBlock, tip: { slot: number } }
- *   "rollback"  — { point: RollbackPoint }
- *   "connected" — ()
- *   "error"     — (err: Error)
+ *   "connected"       — ()  the connection to the node is open
+ *   "disconnected"    — ()  the connection closed; the source connects again
+ *   "intersection"    — { point: RollbackPoint, tip: ChainTip | null }
+ *                       the node found one of the points; a rollback to it comes next
+ *   "no-intersection" — { tip: ChainTip | null }
+ *                       the node found none of the points; the source asks again later
+ *   "block"           — { block: IndexerBlock, tip: ChainTip | null }
+ *   "rollback"        — { point: RollbackPoint, tip: ChainTip | null }
+ *   "tip"             — ChainTip  a tip report outside chain-sync (queryNetwork/tip)
+ *   "error"           — (err: Error)
  *
  * The worker calls start() to begin streaming, stop() to tear down.
  * requestNextBlock() is called after each block to pipeline requests.
  */
 export interface ChainSyncSource extends EventEmitter {
-  start(intersectAt?: { slot: number; id: string } | null): Promise<void>;
+  /**
+   * Start streaming. At each connect, the source sends the points that
+   * `points` returns (newest first) to findIntersection, so a reconnect
+   * resumes from the blocks that the worker saved last. An empty list is a
+   * new database: the source starts at the origin. A non-empty list never
+   * falls back to the origin.
+   */
+  start(points: () => ChainPoint[]): Promise<void>;
   stop(): void;
   requestNextBlock(): void;
-  /** Update the cached intersect point used on reconnect. Without this,
-   * Ogmios WebSocket disconnects rewind the cursor to the startup point. */
-  updateIntersect(point: { slot: number; id: string }): void;
 }
 
 /**

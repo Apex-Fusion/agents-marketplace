@@ -507,11 +507,17 @@ The indexer serves `GET /escrows/:ref/lineage` with exact transaction links.
 Settlement does not identify jobs by timestamps or by a lone Submitted output.
 Deploy this indexer endpoint before or with the concurrent gateway.
 
-The indexer resumes from its saved chain checkpoint.
-A rejected checkpoint does not clear its cached history.
-The default watchdog retries that checkpoint instead of falling back to genesis.
+The indexer resumes from its saved chain position.
+It saves the slot and hash of the last 100 applied blocks and sends all of them, newest first, to Ogmios `findIntersection`.
+A rollback of fewer than 100 blocks, also during a disconnect, resumes by itself.
+A rollback removes all state of the rolled-back blocks: events, UTxOs, adverts, escrows and the supplier status of those adverts.
+If the node has none of the saved blocks, the indexer keeps its data and does not fall back to genesis.
+It logs one error that names `RESYNC_FROM_SLOT` and `RESYNC_FROM_BLOCK_HASH`, and asks the node again every 30 seconds.
+To recover, set both variables to a block of the current chain before the logged slot, then restart the indexer.
+`GET /healthz` reports the chain tip from Ogmios (`tip_slot`), `lag_slots`, `follower` and `error`.
+`ok` is false when the follower failed, when the tip report is older than 2 minutes, or when the lag is over `MAX_SYNC_LAG_SLOTS` (default 600).
+The HTTP status stays 200, so monitors must read `ok`.
 Back up the indexer database before a release.
-Investigate repeated checkpoint rejections before changing or rebuilding the database.
 
 After a restart, recovery takes ownership only after the previous owner's
 heartbeat is stale for 60 seconds.

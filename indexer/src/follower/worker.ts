@@ -6,12 +6,18 @@
  * Each block is written in one SQLite transaction; listeners hear about it
  * after the commit.
  *
+ * The source asks for the intersection with the points of the last applied
+ * blocks (SqliteCache.getIntersectionPoints), read again at each connect.
+ * getHealth() reports the follower state, the slot of the last applied block
+ * and the chain tip that the node reported last (GET /healthz).
+ *
  * Emitted events:
  *   "chain-event"     — { type, ref, slot, txHash, address }  (on each MarketplaceEvent)
  *   "sync-progress"   — { currentSlot, tipSlot }
  *   "identity-change" — string[]: agent ids whose identity record changed
  *                       (outputs at the identity address, or a rollback of them)
- *   "error"           — { message, stale }
+ *   "error"           — { message, stale }. A lost intersection gives one error
+ *                       until the follower finds an intersection again.
  */
 
 import { EventEmitter } from "events";
@@ -24,7 +30,13 @@ import {
   plutusAddressToBech32,
   type PlutusAddress,
 } from "@marketplace/shared/cbor";
-import type { ChainSyncSource, IndexerBlock, RollbackPoint, MarketplaceEvent } from "./types.js";
+import type {
+  ChainSyncSource,
+  ChainTip,
+  IndexerBlock,
+  MarketplaceEvent,
+  RollbackPoint,
+} from "./types.js";
 import type { SqliteCache } from "../db/cache.js";
 import { processBlock, type ScriptAddresses, type KnownUtxoInfo } from "./blockProcessor.js";
 
@@ -35,8 +47,30 @@ export interface ChainSyncWorkerOpts {
   /** Network of the escrow refund addresses (bech32 prefix). */
   networkId: NetworkId;
   skipBeforeSlot?: number;
-  /** Clock for identity invalidation times (tests). */
+  /** Clock for identity invalidation times and tip report times (tests). */
   now?: () => number;
+}
+
+/**
+ * starting: no intersection yet. following: the node found an intersection
+ * and the follower applies its blocks. no_intersection: the node found none
+ * of the saved points; the follower failed until RESYNC_FROM_* is set or the
+ * node gets the blocks.
+ */
+export type FollowerState = "starting" | "following" | "no_intersection";
+
+export interface FollowerHealth {
+  state: FollowerState;
+  /** The connection to the node is open. */
+  connected: boolean;
+  /** Slot of the last applied block or rollback point; 0 for a new database. */
+  syncSlot: number;
+  /** The chain tip that the node reported last; null before the first report. */
+  tip: ChainTip | null;
+  /** Time since the node reported `tip` (ms, worker clock); null before the first report. */
+  tipAgeMs: number | null;
+  /** Why the follower failed (state no_intersection); null otherwise. */
+  error: string | null;
 }
 
 interface ChainEventPayload {
@@ -65,8 +99,12 @@ export class ChainSyncWorker extends EventEmitter {
   private now: () => number;
   private watched: Set<string>;
 
-  private currentSlot: number = 0;
-  private tipSlot: number = 0;
+  private syncSlot: number = 0;
+  private tip: ChainTip | null = null;
+  private tipObservedAt: number | null = null;
+  private state: FollowerState = "starting";
+  private connected: boolean = false;
+  private failure: string | null = null;
   private stopped: boolean = false;
 
   constructor(opts: ChainSyncWorkerOpts) {
@@ -88,35 +126,49 @@ export class ChainSyncWorker extends EventEmitter {
       ].filter((x): x is string => typeof x === "string" && x.length > 0),
     );
 
-    const cursor = this.cache.getCursor();
-    if (cursor) {
-      this.currentSlot = cursor.slot;
-    }
+    this.syncSlot = this.cache.getCursor()?.slot ?? 0;
 
-    this.source.on("block", (data: { block: IndexerBlock; tip?: { slot: number } }) => {
+    this.source.on("block", (data: { block: IndexerBlock; tip: ChainTip | null }) => {
       this.handleBlock(data);
     });
-    this.source.on("rollback", (data: { point: RollbackPoint }) => {
+    this.source.on("rollback", (data: { point: RollbackPoint; tip: ChainTip | null }) => {
       this.handleRollback(data);
+    });
+    this.source.on("intersection", (data: { tip: ChainTip | null }) => {
+      this.observeTip(data.tip);
+      this.follow();
+    });
+    this.source.on("no-intersection", (data: { tip: ChainTip | null }) => {
+      this.handleNoIntersection(data.tip);
+    });
+    this.source.on("tip", (tip: ChainTip) => this.observeTip(tip));
+    this.source.on("connected", () => {
+      this.connected = true;
+    });
+    this.source.on("disconnected", () => {
+      this.connected = false;
     });
     this.source.on("error", (err: Error) => {
       this.emit("error", { message: err.message ?? String(err), stale: true });
     });
   }
 
-  getCurrentSlot(): number {
-    return this.currentSlot;
-  }
-
-  getTipSlot(): number {
-    return this.tipSlot;
+  getHealth(): FollowerHealth {
+    return {
+      state: this.state,
+      connected: this.connected,
+      syncSlot: this.syncSlot,
+      tip: this.tip,
+      tipAgeMs: this.tipObservedAt === null ? null : Math.max(0, this.now() - this.tipObservedAt),
+      error: this.failure,
+    };
   }
 
   async start(): Promise<void> {
     this.stopped = false;
-    const cursor = this.cache.getCursor();
-    const intersect = cursor ? { slot: cursor.slot, id: cursor.blockHash } : null;
-    await this.source.start(intersect);
+    await this.source.start(() =>
+      this.cache.getIntersectionPoints().map((p) => ({ slot: p.slot, id: p.blockHash })),
+    );
   }
 
   stop(): void {
@@ -140,14 +192,45 @@ export class ChainSyncWorker extends EventEmitter {
     return map;
   }
 
-  private handleBlock(data: { block: IndexerBlock; tip?: { slot: number } }): void {
+  private observeTip(tip: ChainTip | null): void {
+    if (!tip) return;
+    this.tip = tip;
+    this.tipObservedAt = this.now();
+  }
+
+  /** The node found an intersection, or sent a block or rollback after one. */
+  private follow(): void {
+    this.state = "following";
+    this.failure = null;
+  }
+
+  /**
+   * The node found none of the saved points. The indexed state stays (no
+   * fallback to the origin) and the source asks the node again. The error is
+   * emitted once, until the follower finds an intersection again.
+   */
+  private handleNoIntersection(tip: ChainTip | null): void {
+    if (this.stopped) return;
+    this.observeTip(tip);
+    if (this.state === "no_intersection") return;
+    const points = this.cache.getIntersectionPoints();
+    const newest = points[0]?.slot ?? 0;
+    this.state = "no_intersection";
+    this.failure =
+      `no intersection: the node has none of the saved blocks (${points.length} points; ` +
+      `newest: slot ${newest}, block ${points[0]?.blockHash ?? "none"}). ` +
+      "The indexer keeps its data, does not sync again from the origin, and asks the node again. " +
+      "If the node's chain does not hold these blocks, set RESYNC_FROM_SLOT and RESYNC_FROM_BLOCK_HASH " +
+      `to a block of the current chain before slot ${newest}, then restart the indexer.`;
+    this.emit("error", { message: this.failure, stale: true });
+  }
+
+  private handleBlock(data: { block: IndexerBlock; tip: ChainTip | null }): void {
     if (this.stopped) return;
     const block = data.block;
     if (!block) return;
-
-    if (data.tip?.slot && data.tip.slot > this.tipSlot) {
-      this.tipSlot = data.tip.slot;
-    }
+    this.observeTip(data.tip);
+    this.follow();
 
     // Byron Epoch-Boundary Blocks (EBBs) and some pre-Shelley blocks have no `slot`.
     // We can't save a NULL cursor (SQLite NOT NULL). When chain-syncing from origin
@@ -161,8 +244,8 @@ export class ChainSyncWorker extends EventEmitter {
     // Fast-forward path
     if (slot < this.skipBeforeSlot) {
       this.cache.saveCursor(slot, block.id);
-      this.currentSlot = slot;
-      this.emit("sync-progress", { currentSlot: slot, tipSlot: this.tipSlot });
+      this.syncSlot = slot;
+      this.emit("sync-progress", { currentSlot: slot, tipSlot: this.tip?.slot ?? 0 });
       this.source.requestNextBlock();
       return;
     }
@@ -196,12 +279,8 @@ export class ChainSyncWorker extends EventEmitter {
     }
     if (identityChanges.length > 0) this.emit("identity-change", identityChanges);
 
-    // Mirror the saved cursor into the source's reconnect-intersect so that
-    // a WebSocket drop+reconnect resumes from here rather than rewinding to
-    // the startup intersect point.
-    this.source.updateIntersect({ slot, id: block.id });
-    this.currentSlot = slot;
-    this.emit("sync-progress", { currentSlot: slot, tipSlot: this.tipSlot });
+    this.syncSlot = slot;
+    this.emit("sync-progress", { currentSlot: slot, tipSlot: this.tip?.slot ?? 0 });
 
     this.source.requestNextBlock();
   }
@@ -287,21 +366,23 @@ export class ChainSyncWorker extends EventEmitter {
     }
   }
 
-  private handleRollback(data: { point: RollbackPoint }): void {
+  /**
+   * RollBackward: the blocks after `point` left the node's chain. All their
+   * state goes (SqliteCache.rollbackTo), and the cursor and the intersection
+   * points move to `point` (slot and hash), so a reconnect resumes there.
+   */
+  private handleRollback(data: { point: RollbackPoint; tip: ChainTip | null }): void {
     if (this.stopped) return;
-    const slot = data.point?.slot ?? 0;
-    const touched = this.cache.rollbackToSlot(slot);
+    this.observeTip(data.tip);
+    this.follow();
+    const point = data.point === "origin" ? null : { slot: data.point.slot, blockHash: data.point.id };
+    const touched = this.cache.rollbackTo(point);
     if (touched.length > 0) {
       this.cache.invalidateIdentityFacts(touched, this.now());
       this.emit("identity-change", touched);
     }
-    this.currentSlot = slot;
-    // Also slide the source's reconnect-intersect back so a subsequent WS
-    // drop doesn't resume past the rollback point.
-    if (data.point && typeof data.point.id === "string") {
-      this.source.updateIntersect({ slot, id: data.point.id });
-    }
-    this.emit("sync-progress", { currentSlot: slot, tipSlot: this.tipSlot });
+    this.syncSlot = point?.slot ?? 0;
+    this.emit("sync-progress", { currentSlot: this.syncSlot, tipSlot: this.tip?.slot ?? 0 });
     this.source.requestNextBlock();
   }
 }

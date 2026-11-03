@@ -83,8 +83,10 @@ function makeDeps(opts: {
   } as unknown as IndexerDeps["cache"];
 
   const worker = {
-    getCurrentSlot: vi.fn(() => 1_000_000),
-    getTipSlot: vi.fn(() => 1_001_000),
+    getHealth: vi.fn(() => ({
+      state: "following", connected: true, syncSlot: 1_000_000,
+      tip: { slot: 1_000_500, id: "f".repeat(64) }, tipAgeMs: 1_000, error: null,
+    })),
     on: workerEmitter.on.bind(workerEmitter),
     emit: workerEmitter.emit.bind(workerEmitter),
     off: workerEmitter.off.bind(workerEmitter),
