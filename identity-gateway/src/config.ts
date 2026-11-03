@@ -9,6 +9,8 @@ export interface GatewayConfig {
   readonly port: number;
   readonly koiosUrl: string;
   readonly koiosToken: string | undefined;
+  /** Koios calls per second on average (KOIOS_RATE_PER_SECOND); bursts of twice that many. */
+  readonly koiosRatePerSecond: number;
   readonly ogmiosUrl: string;
   readonly resolver: ResolverSettings;
 }
@@ -53,6 +55,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): GatewayConfig {
     port: integer(env, "PORT", 8080, 0, 65535),
     koiosUrl: env.KOIOS_URL || "https://v2.koios.vector.mainnet.apexfusion.org/api/v1",
     koiosToken: env.KOIOS_TOKEN || undefined,
+    koiosRatePerSecond: integer(env, "KOIOS_RATE_PER_SECOND", 10, 1, 100),
     ogmiosUrl: env.OGMIOS_URL || "wss://ogmios.vector.mainnet.apexfusion.org",
     resolver,
   };

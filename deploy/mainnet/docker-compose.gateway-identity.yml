@@ -39,6 +39,8 @@
 #
 # Settings in identity-gateway/.env (gitignored, mode 0600):
 #   KOIOS_TOKEN=<Koios bearer token, if the Koios instance needs one>
+#   KOIOS_RATE_PER_SECOND=<Koios calls per second, default 10; Koios refuses
+#     about 300 requests in 10 s, see identity-gateway/README.md "Chain data">
 #   ACCESS_LOG_RETENTION=<the retention text of Traefik's access log, §13.4>
 #   The values published at the identity deployment (Part 2 §11 step 3):
 #   IDENTITY_POLICY_ID, CUTOFF_SLOT and DELEGATION_POLICY_ID. Without

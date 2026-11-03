@@ -3,6 +3,7 @@
 
 import type {
   KoiosAsset,
+  KoiosAssetUtxoRow,
   KoiosBlockRow,
   KoiosClient,
   KoiosDatumRow,
@@ -13,10 +14,12 @@ import type {
   KoiosTxRefRow,
 } from "./koios.js";
 import { fetchBlocksAfter } from "./ogmios.js";
-import type { Asset, BlockWitnesses, ChainSource, ChainTip, GenesisParameters, LedgerTx, PolicyAsset } from "./types.js";
+import { assetKey, type Asset, type AssetId, type BlockWitnesses, type ChainSource, type ChainTip, type GenesisParameters, type LedgerTx, type PolicyAsset } from "./types.js";
 
 const TX_INFO_BATCH = 50;
 const DATUM_BATCH = 50;
+/** Assets in one asset_utxos request: 1,000 assets are a body of about 130 kB (measured: 1,588 assets answered in 0.3 s). */
+const HOLDERS_BATCH = 1000;
 
 export interface KoiosOgmiosSourceOptions {
   koios: KoiosClient;
@@ -150,5 +153,27 @@ export class KoiosOgmiosChainSource implements ChainSource {
       lastMintTx: r.minting_tx_hash,
       createdAt: typeof r.creation_time === "number" && Number.isSafeInteger(r.creation_time) ? r.creation_time : null,
     }));
+  }
+
+  async assetHolders(assets: readonly AssetId[]): Promise<Map<string, string[]>> {
+    const wanted = new Set(assets.map(assetKey));
+    const holders = new Map<string, string[]>();
+    for (let i = 0; i < assets.length; i += HOLDERS_BATCH) {
+      const rows = await this.koios.postAll<KoiosAssetUtxoRow>(
+        "asset_utxos?select=tx_hash,tx_index,block_height,asset_list",
+        { _asset_list: assets.slice(i, i + HOLDERS_BATCH).map((a) => [a.policyId, a.assetName]), _extended: true },
+        "tx_hash.asc,tx_index.asc",
+      );
+      for (const row of rows) {
+        for (const asset of row.asset_list ?? []) {
+          const key = `${asset.policy_id}.${asset.asset_name ?? ""}`;
+          if (!wanted.has(key) || BigInt(asset.quantity) <= 0n) continue;
+          const refs = holders.get(key) ?? [];
+          refs.push(`${row.tx_hash}#${row.tx_index}@${row.block_height}`);
+          holders.set(key, refs);
+        }
+      }
+    }
+    return holders;
   }
 }

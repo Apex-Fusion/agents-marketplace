@@ -1,3 +1,4 @@
+import { KoiosLimiter } from "./chain/limiter.js";
 import { KoiosOgmiosChainSource } from "./chain/koios-ogmios-source.js";
 import { KoiosClient } from "./chain/koios.js";
 import { loadConfig } from "./config.js";
@@ -13,8 +14,10 @@ import { renderRoutes } from "./server/routes-render.js";
 
 const config = loadConfig(process.env);
 const renderConfig = loadRenderConfig(process.env);
+// One limiter for every Koios call: requests go before the background passes (chain/limiter.ts).
+const limiter = new KoiosLimiter({ ratePerSecond: config.koiosRatePerSecond, burst: 2 * config.koiosRatePerSecond });
 const chain = new KoiosOgmiosChainSource({
-  koios: new KoiosClient({ baseUrl: config.koiosUrl, token: config.koiosToken }),
+  koios: new KoiosClient({ baseUrl: config.koiosUrl, token: config.koiosToken, limiter }),
   ogmiosUrl: config.ogmiosUrl,
 });
 const facts = new FactsStore();
@@ -22,13 +25,13 @@ const facts = new FactsStore();
 // concurrent Ogmios sessions.
 const legacyKeys = new LegacyKeySearch(chain);
 const resolver = new VectorResolver(chain, config.resolver, { fetchedFacts: facts.provider, legacyKeys });
-// The scan reads every record; its own resolver keeps the request path's history cache intact.
-const jobs = renderConfig.fetchJobs
-  ? startBackgroundJobs(new VectorResolver(chain, config.resolver, { legacyKeys }), facts, config.resolver, { scanIntervalMs: renderConfig.scanIntervalMs })
-  : null;
-// M4 services (Part 2 Section 8.6) start when both gateway key files are set. Status-list builds read
-// every record, so they also get their own resolver.
-const m4 = m4ServicesFromEnv(process.env, { baseUrl: renderConfig.baseUrl, records: new VectorResolver(chain, config.resolver, { legacyKeys }), chain });
+// The background scan and the M4 services share a second resolver: the scan and the status-list
+// builds are passes over every record, and passes share their ledger reads (resolve/history-store.ts).
+// The request path's history cache stays apart.
+const records = new VectorResolver(chain, config.resolver, { legacyKeys });
+const jobs = renderConfig.fetchJobs ? startBackgroundJobs(records, facts, config.resolver, { scanIntervalMs: renderConfig.scanIntervalMs }) : null;
+// M4 services (Part 2 Section 8.6) start when both gateway key files are set.
+const m4 = m4ServicesFromEnv(process.env, { baseUrl: renderConfig.baseUrl, records, chain });
 const server = createResolverServer(resolver, {
   routes: [
     renderRoutes({
@@ -49,7 +52,7 @@ server.listen(config.port, config.host, () => {
   console.error(
     `identity-gateway listening on http://${config.host}:${config.port}/1.0/identifiers/{did} ` +
       `(identity registry ${identity ? identity.policyId : "not configured"}, legacy registry ${config.resolver.registries.legacy.policyId}, ` +
-      `background fetch jobs ${renderConfig.fetchJobs ? "on" : "off"}, M4 services ${m4 ? "on" : "off"})`,
+      `background fetch jobs ${renderConfig.fetchJobs ? "on" : "off"}, M4 services ${m4 ? "on" : "off"}, Koios at most ${config.koiosRatePerSecond} calls/s)`,
   );
 });
 for (const signal of ["SIGINT", "SIGTERM"] as const) {

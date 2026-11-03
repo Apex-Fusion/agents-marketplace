@@ -1,6 +1,9 @@
 // Minimal Koios REST client (https://api.koios.rest). Koios answers at most 1000 rows per call;
 // postAll and getAll page with offset/limit under an explicit order so that pages neither overlap
-// nor skip. Error messages name the endpoint only, never the requested values.
+// nor skip. Error messages name the endpoint only, never the requested values. Every call goes
+// through the client's KoiosLimiter (limiter.ts): its rate, its lanes and its pauses after HTTP 429.
+
+import { KoiosLimiter, RateLimited, retryAfterMs } from "./limiter.js";
 
 export const KOIOS_PAGE = 1000;
 
@@ -11,6 +14,8 @@ export interface KoiosClientOptions {
   token?: string;
   fetch?: typeof fetch;
   timeoutMs?: number;
+  /** The limit of every Koios call of the process; default: a limiter with the default limits for this client alone. */
+  limiter?: KoiosLimiter;
 }
 
 export class KoiosClient {
@@ -18,6 +23,7 @@ export class KoiosClient {
   private readonly headers: Record<string, string>;
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMs: number;
+  private readonly limiter: KoiosLimiter;
 
   constructor(options: KoiosClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
@@ -25,6 +31,7 @@ export class KoiosClient {
     if (options.token) this.headers.authorization = `Bearer ${options.token}`;
     this.fetchImpl = options.fetch ?? fetch;
     this.timeoutMs = options.timeoutMs ?? 20_000;
+    this.limiter = options.limiter ?? new KoiosLimiter();
   }
 
   async get<T>(path: string): Promise<T> {
@@ -35,11 +42,12 @@ export class KoiosClient {
     return this.request<T>(path, { method: "POST", body: JSON.stringify(body) });
   }
 
-  /** Every row of a POST endpoint. `order` must name a unique key of the rows (PostgREST syntax). */
+  /** Every row of a POST endpoint. `order` must name a unique key of the rows (PostgREST syntax); `path` may carry query parameters. */
   async postAll<T>(path: string, body: unknown, order: string): Promise<T[]> {
     const rows: T[] = [];
+    const separator = path.includes("?") ? "&" : "?";
     for (let offset = 0; ; offset += KOIOS_PAGE) {
-      const page = await this.post<T[]>(`${path}?order=${order}&offset=${offset}&limit=${KOIOS_PAGE}`, body);
+      const page = await this.post<T[]>(`${path}${separator}order=${order}&offset=${offset}&limit=${KOIOS_PAGE}`, body);
       rows.push(...page);
       if (page.length < KOIOS_PAGE) return rows;
     }
@@ -55,17 +63,23 @@ export class KoiosClient {
     }
   }
 
-  private async request<T>(path: string, init: { method: string; body?: string }): Promise<T> {
+  private request<T>(path: string, init: { method: string; body?: string }): Promise<T> {
     const endpoint = path.split("?")[0];
-    const res = await this.fetchImpl(`${this.baseUrl}/${path}`, {
-      ...init,
-      headers: this.headers,
-      signal: AbortSignal.timeout(this.timeoutMs),
+    return this.limiter.run(async () => {
+      const res = await this.fetchImpl(`${this.baseUrl}/${path}`, {
+        ...init,
+        headers: this.headers,
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+      if (res.status === 429) {
+        await res.body?.cancel();
+        throw new RateLimited(`Koios ${init.method} ${endpoint} answered HTTP 429`, retryAfterMs(res.headers.get("retry-after"), Date.now()));
+      }
+      if (!res.ok) throw new Error(`Koios ${init.method} ${endpoint} answered HTTP ${res.status}`);
+      const body: unknown = await res.json();
+      if (!Array.isArray(body)) throw new Error(`Koios ${init.method} ${endpoint} did not answer a JSON array`);
+      return body as T;
     });
-    if (!res.ok) throw new Error(`Koios ${init.method} ${endpoint} answered HTTP ${res.status}`);
-    const body: unknown = await res.json();
-    if (!Array.isArray(body)) throw new Error(`Koios ${init.method} ${endpoint} did not answer a JSON array`);
-    return body as T;
   }
 }
 
@@ -140,4 +154,12 @@ export interface KoiosPolicyAssetMintRow {
   mint_cnt: number;
   /** Block time of the first mint, POSIX seconds. */
   creation_time: number | null;
+}
+
+/** A row of `asset_utxos` with `_extended`: an unspent output and every asset in it. */
+export interface KoiosAssetUtxoRow {
+  tx_hash: string;
+  tx_index: number;
+  block_height: number;
+  asset_list: KoiosAsset[] | null;
 }

@@ -239,6 +239,49 @@ describe("KoiosOgmiosChainSource", () => {
     );
   });
 
+  test("assetHolders asks asset_utxos for many assets at once and keys each holder by asset", async () => {
+    const calls: Call[] = [];
+    const other = "ab".repeat(32);
+    const source = new KoiosOgmiosChainSource({
+      koios: koiosWith(
+        () => [
+          {
+            tx_hash: MINT_TX,
+            tx_index: 0,
+            block_height: MINT_BLOCK.height,
+            asset_list: [
+              { policy_id: POLICY, asset_name: ASSET, quantity: "1" },
+              { policy_id: "cd".repeat(28), asset_name: "x", quantity: "5" },
+            ],
+          },
+        ],
+        calls,
+      ),
+      ogmiosUrl: "ws://unused",
+    });
+    const held = await source.assetHolders([
+      { policyId: POLICY, assetName: ASSET },
+      { policyId: POLICY, assetName: other },
+    ]);
+    expect([...held]).toEqual([[`${POLICY}.${ASSET}`, [`${MINT_TX}#0@${MINT_BLOCK.height}`]]]);
+    expect(calls.map((c) => c.url)).toEqual([
+      `https://koios.test/api/v1/asset_utxos?select=tx_hash,tx_index,block_height,asset_list&order=tx_hash.asc,tx_index.asc&offset=0&limit=${KOIOS_PAGE}`,
+    ]);
+    expect(calls[0]!.body).toEqual({ _asset_list: [[POLICY, ASSET], [POLICY, other]], _extended: true });
+  });
+
+  test("assetHolders sends at most 1,000 assets in one request", async () => {
+    const calls: Call[] = [];
+    const source = new KoiosOgmiosChainSource({ koios: koiosWith(() => [], calls), ogmiosUrl: "ws://unused" });
+    const assets = Array.from({ length: 1_500 }, (_, i) => ({ policyId: POLICY, assetName: i.toString(16).padStart(64, "0") }));
+    expect(await source.assetHolders(assets)).toEqual(new Map());
+    const listed = assets.map((a) => [a.policyId, a.assetName]);
+    expect(calls.map((c) => c.body)).toEqual([
+      { _asset_list: listed.slice(0, 1_000), _extended: true },
+      { _asset_list: listed.slice(1_000), _extended: true },
+    ]);
+  });
+
   test("blockWitnesses reads the block after the previous one through Ogmios, with its hash, without bootstrap witnesses", async () => {
     const ogmiosUrl = await fakeOgmios([
       { id: PREVIOUS_BLOCK.hash, height: PREVIOUS_BLOCK.height, slot: PREVIOUS_BLOCK.slot, transactions: [] },

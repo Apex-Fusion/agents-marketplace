@@ -32,7 +32,7 @@ export interface M4Services {
   readonly statusLists: StatusLists;
   readonly spiffe: SpiffeService;
   readonly delegations: DelegationSource | null;
-  /** Starts the status watcher, which revokes the tokens of agents whose effective status is no longer Active. */
+  /** Starts the first status-list build and the status watcher, which revokes the tokens of agents whose effective status is no longer Active. */
   start(): void;
   stop(): void;
 }
@@ -61,6 +61,7 @@ export function createM4Services(options: M4ServicesOptions): M4Services {
     delegations,
     start() {
       if (timer !== undefined) return;
+      statusLists.start();
       timer = setInterval(() => void tokens.checkStatuses(), STATUS_WATCH_INTERVAL_MS);
       timer.unref();
     },

@@ -6,6 +6,7 @@ import { gunzipSync, inflateSync } from "node:zlib";
 import { afterEach, describe, expect, test } from "vitest";
 import { LIST_SIZE, STATUS, bitstring, tokenStatusBytes } from "../../src/m4/status-lists.js";
 import { formatTime } from "../../src/resolve/time.js";
+import type { ChainMethod } from "../support/chain.js";
 import { CONTROLLER_2, LedgerBuilder, identityDatum, idOf, keySigner, legacyDatum, PARTY_KEY, timeAt } from "../support/ledger.js";
 import { tombstoneOf } from "../support/resolve.js";
 import { BASE, GATEWAY_ID, at, bodyOf, decodeJwt, gatewayKeys, nowS, startGateway, stopGateways, text, verifiedByGateway, type Harness } from "./support.js";
@@ -88,6 +89,9 @@ function ledger(): LedgerBuilder {
 async function indices(h: Harness): Promise<Map<string, number | null>> {
   return new Map((await h.resolver.listRecords()).entries.map((e) => [e.vectorId, e.statusListIndex]));
 }
+
+/** Ledger reads of one kind so far. */
+const reads = (h: Harness, method: ChainMethod): number => h.builder.chain.calls.filter((c) => c === method).length;
 
 async function tokenStatusList(h: Harness, n = 0): Promise<{ jwt: string; values: (i: number) => number; payload: Record<string, unknown> }> {
   const res = await fetch(`${h.url}/status/tsl/${n}`);
@@ -201,22 +205,75 @@ describe("GET /status/tsl/{n}", () => {
     expect(head.status).toBe(200);
   });
 
-  test("a failed ledger read: 503 without lists, the last lists while they are valid", async () => {
+  test("a failed build: 503 without lists, and no new build within the refresh interval; the last lists while they are valid", async () => {
     const b = ledger();
     const h = await startGateway(b);
     b.chain.failing.add("policyAssets");
     const failed = await fetch(`${h.url}/status/tsl/0`);
     expect(failed.status).toBe(503);
     expect((await bodyOf(failed)).error).toBe("temporarily_unavailable");
+    const attempts = reads(h, "policyAssets");
+    // Within the refresh interval after the failed build, requests are 503 at once and read nothing.
     b.chain.failing.delete("policyAssets");
+    h.now += 59_000;
+    const refused = await Promise.all(Array.from({ length: 30 }, () => fetch(`${h.url}/status/tsl/0`)));
+    expect(refused.map((r) => r.status)).toEqual(Array(30).fill(503));
+    expect(reads(h, "policyAssets")).toBe(attempts);
+    // One refresh interval after the failed build, a request starts the next one.
+    h.now += 1_000;
     const built = (await tokenStatusList(h)).jwt;
     b.chain.failing.add("policyAssets");
     h.now += 120_000;
     expect((await tokenStatusList(h)).jwt).toBe(built);
-    await expect.poll(() => h.logs.some((m) => m.includes("status lists not rebuilt"))).toBe(true);
+    await expect.poll(() => h.logs.filter((m) => m.includes("status lists not rebuilt")).length).toBe(2);
     // After the lists' hour, a request waits for a build again, and a failed build is 503.
     h.now += 3_600_000;
     expect((await fetch(`${h.url}/status/tsl/0`)).status).toBe(503);
+  });
+});
+
+describe("builds", () => {
+  test("30 requests at once share one build; requests within the refresh interval start none", async () => {
+    const h = await startGateway(ledger());
+    const first = await Promise.all(Array.from({ length: 30 }, (_, i) => fetch(`${h.url}/status/${i % 2 ? "bsl" : "tsl"}/0`)));
+    expect(first.map((r) => r.status)).toEqual(Array(30).fill(200));
+    // One build: one list of the records, which reads the asset index of both registries.
+    expect(reads(h, "policyAssets")).toBe(2);
+    h.now += 59_000;
+    const again = await Promise.all(Array.from({ length: 30 }, () => fetch(`${h.url}/status/bsl/0`)));
+    expect(again.map((r) => r.status)).toEqual(Array(30).fill(200));
+    expect(reads(h, "policyAssets")).toBe(2);
+  });
+
+  test("a build reads the tip once; the next build reads again only records whose tokens moved or whose newest transaction has fewer than 30 confirmations", async () => {
+    const b = ledger();
+    const h = await startGateway(b);
+    await h.services.statusLists.refresh();
+    expect([reads(h, "tip"), reads(h, "assetHolders")]).toEqual([1, 1]);
+    // Each indexed record once (the parents of the subagents are indexed records); two token histories each.
+    expect(reads(h, "assetTxHashes")).toBe(2 * EXPECTED.length);
+
+    // A new block without a record change: only R.pending is read again (its revocation at height 990 has 11 confirmations).
+    b.tip(1001);
+    h.now += 61_000;
+    await h.services.statusLists.refresh();
+    expect([reads(h, "tip"), reads(h, "assetHolders"), reads(h, "assetTxHashes")]).toEqual([2, 2, 2 * EXPECTED.length + 2]);
+
+    // R.active is revoked. The next build reads it again, and R.unconfirmed for the first time: with
+    // 50 confirmations, its mint gets an index. R.pending (50 confirmations too) is not read again.
+    b.update(R.active, tombstoneOf(identityDatum(), revocation(1002)), { height: 1002 });
+    b.tip(1040);
+    h.now += 61_000;
+    await h.services.statusLists.refresh();
+    expect(reads(h, "assetTxHashes")).toBe(2 * EXPECTED.length + 6);
+    const index = await indices(h);
+    const tsl = await tokenStatusList(h);
+    expect([tsl.values(index.get(R.active)!), tsl.values(index.get(R.unconfirmed)!), tsl.values(index.get(R.pending)!)]).toEqual([
+      STATUS.invalid,
+      STATUS.valid,
+      STATUS.invalid,
+    ]);
+    expect((await bitstringList(h)).bit(index.get(R.active)!)).toBe(1);
   });
 });
 

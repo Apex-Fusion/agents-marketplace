@@ -1,12 +1,14 @@
 // The history of one record (Part 1 Sections 7.1 and 7.2): the token transactions of both
 // registries, the versions they make, and the outputs each version owns. Everything is read as of
 // one ledger tip; transactions in later blocks are left out, so a result depends only on that tip.
+// `readHistoryInputs` reads the ledger; `historyAt` builds the history as of a tip from such a read
+// and reads nothing, so a read can serve several tips (history-store.ts).
 
 import type { Asset, ChainSource, ChainTip, LedgerTx, TxOutput } from "../chain/types.js";
 import { identityDatumFromData, type IdentityDatum } from "../codec/identity-datum.js";
 import { legacyDatumFromData, type LegacyDatum } from "../codec/legacy-datum.js";
 import { plutusDataEqual, plutusDataFromHex, type PlutusData } from "../codec/plutus-data.js";
-import type { Registry, ResolverSettings } from "./settings.js";
+import type { Registry, RegistrySettings, ResolverSettings } from "./settings.js";
 import { blockTimeMs } from "./time.js";
 
 export type RegistryKind = "identity" | "legacy";
@@ -133,9 +135,25 @@ function identityContent(output: TxOutput, value: DatumValue): VersionContent {
   return { kind: "identity", datum: identityDatumFromData(value.data) };
 }
 
-/** Reads and orders the transactions of both tokens; checks that the source returned every listed transaction. */
-async function readTokenTxs(chain: ChainSource, snapshot: LedgerSnapshot, vectorId: string): Promise<{ legacy: Set<string>; identity: Set<string>; txs: LedgerTx[] }> {
-  const { identity, legacy } = snapshot.settings.registries;
+/**
+ * What the history of one identifier is built from: the token transactions of both registries
+ * (also those after any tip) and the datums by hash of their legacy record outputs, as the ledger
+ * source showed them at one read.
+ */
+export interface HistoryInputs {
+  /** Transactions of the legacy token. */
+  readonly legacy: ReadonlySet<string>;
+  /** Transactions of the identity token. */
+  readonly identity: ReadonlySet<string>;
+  /** Every transaction of both tokens, in ledger order. */
+  readonly txs: readonly LedgerTx[];
+  /** Datum CBOR by hash, for legacy record outputs that carry only a datum hash. */
+  readonly datums: ReadonlyMap<string, string>;
+}
+
+/** Reads the transactions of both tokens and the datums by hash that their legacy record outputs need; checks that the source returned every listed transaction. */
+export async function readHistoryInputs(chain: ChainSource, registries: RegistrySettings, vectorId: string): Promise<HistoryInputs> {
+  const { identity, legacy } = registries;
   const [legacyHashes, identityHashes] = await Promise.all([
     chain.assetTxHashes(legacy.policyId, vectorId),
     identity ? chain.assetTxHashes(identity.policyId, vectorId) : Promise.resolve([]),
@@ -144,16 +162,28 @@ async function readTokenTxs(chain: ChainSource, snapshot: LedgerSnapshot, vector
   const fetched = wanted.length ? await chain.transactions(wanted) : [];
   const byHash = new Map(fetched.map((t) => [t.txHash, t]));
   if (wanted.some((h) => !byHash.has(h))) throw new Error("the ledger source listed token transactions that it cannot return");
-  // Transactions after the tip came in after the tip was read; the result describes the tip.
-  const txs = [...byHash.values()].filter((t) => t.blockHeight <= snapshot.tip.blockHeight).sort(ledgerOrder);
-  return { legacy: new Set(legacyHashes), identity: new Set(identityHashes), txs };
+  const txs = [...byHash.values()].sort(ledgerOrder);
+  const legacyTxs = new Set(legacyHashes);
+  const missing = txs.flatMap((tx) =>
+    legacyTxs.has(tx.txHash)
+      ? tx.outputs.filter((o) => isAuthentic(o, legacy, vectorId) && o.inlineDatum === null && o.datumHash !== null).map((o) => o.datumHash!)
+      : [],
+  );
+  const datums = missing.length ? await chain.datums([...new Set(missing)]) : new Map<string, string>();
+  return { legacy: legacyTxs, identity: new Set(identityHashes), txs, datums };
 }
 
-/** Part 1 Section 7.1 steps 4-6 and Section 7.2, for one identifier. */
+/** Part 1 Section 7.1 steps 4-6 and Section 7.2, for one identifier: reads the ledger, then builds the history as of the snapshot's tip. */
 export async function loadHistory(chain: ChainSource, snapshot: LedgerSnapshot, vectorId: string): Promise<HistoryLookup> {
+  return historyAt(snapshot, vectorId, await readHistoryInputs(chain, snapshot.settings.registries, vectorId));
+}
+
+/** The history as of the snapshot's tip, from a read of the ledger made after the tip was read. */
+export function historyAt(snapshot: LedgerSnapshot, vectorId: string, inputs: HistoryInputs): HistoryLookup {
   const { tip, settings } = snapshot;
   const { identity, legacy } = settings.registries;
-  const tokenTxs = await readTokenTxs(chain, snapshot, vectorId);
+  // Transactions after the tip came in after the tip was read; the result describes the tip.
+  const tokenTxs = { legacy: inputs.legacy, identity: inputs.identity, txs: inputs.txs.filter((t) => t.blockHeight <= tip.blockHeight) };
   const place = (tx: LedgerTx): PlacedTx => ({
     tx,
     timeMs: blockTimeMs(tx.slot, settings.network),
@@ -192,12 +222,7 @@ export async function loadHistory(chain: ChainSource, snapshot: LedgerSnapshot, 
   }
 
   // Datums by hash for legacy record outputs that carry only a datum hash.
-  const missing = steps.flatMap(({ tx, registry }) =>
-    registry === "legacy"
-      ? tx.outputs.filter((o) => isAuthentic(o, legacy, vectorId) && o.inlineDatum === null && o.datumHash !== null).map((o) => o.datumHash!)
-      : [],
-  );
-  const known = missing.length ? await chain.datums([...new Set(missing)]) : new Map<string, string>();
+  const known = inputs.datums;
 
   const versions: Array<Version & { owned: RecordOutput[] }> = [];
   const tokenMoves: TokenMove[] = [];

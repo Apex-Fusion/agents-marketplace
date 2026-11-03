@@ -4,7 +4,7 @@
 import { describe, expect, test } from "vitest";
 import { FactsStore, factInputs } from "../../src/fetch/facts.js";
 import { FetchScheduler, type RecordSource } from "../../src/fetch/scheduler.js";
-import { VectorResolver } from "../../src/resolve/resolver.js";
+import { PassFailed, VectorResolver } from "../../src/resolve/resolver.js";
 import { formatTime } from "../../src/resolve/time.js";
 import {
   CONTROLLER,
@@ -112,6 +112,26 @@ describe("background checks", () => {
     const scheduler = new FetchScheduler(new VectorResolver(b.chain, b.settings), store, { fetcher: net.fetcher(), txt: net.txt, clock: net.clock, legacyPolicyId: LEGACY.policyId });
     expect(await scheduler.scan()).toEqual({ records: 2, started: [] });
     expect(net.lookups).toEqual([]);
+  });
+
+  test("a scan is one pass over the records: one tip read, every record as of it", async () => {
+    const { b, scheduler } = setup();
+    b.register(idOf("second scheduled agent"), identityDatum(), { height: 110 });
+    expect((await scheduler.scan()).records).toBe(2);
+    await scheduler.idle();
+    expect(b.chain.calls.filter((c) => c === "tip")).toHaveLength(1);
+  });
+
+  test("when the pass fails, the scan fails and the records of the last scan stay", async () => {
+    const { b, scheduler, logs } = setup();
+    await scheduler.scan();
+    await scheduler.idle();
+    const last = scheduler.snapshot;
+    expect(last.records.map((r) => r.vectorId)).toEqual([ID]);
+    b.chain.failing.add("assetHolders");
+    await expect(scheduler.scan()).rejects.toBeInstanceOf(PassFailed);
+    expect(scheduler.snapshot).toBe(last);
+    expect(logs).toEqual([]);
   });
 
   test("a record that the scan cannot read is logged without its DID; the others are checked", async () => {

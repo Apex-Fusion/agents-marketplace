@@ -1,18 +1,22 @@
 // did:vector resolution (Part 1 Section 7.1): one ledger tip for each request; the record and its
 // ancestors read as of that tip; view, effective status, document and metadata built from them.
 // A failed or inconsistent ledger read gives INTERNAL_ERROR, never NOT_FOUND or a partial document.
+// A pass over every record (the background scan, status-list builds) gives the list of
+// `listRecords` to `currentRecord` and `currentStatus`: every record of the pass is read as of the
+// list's tip, and the ledger reads are kept between passes (history-store.ts).
 
-import type { ChainSource, ChainTip } from "../chain/types.js";
+import { assetKey, type ChainSource, type ChainTip } from "../chain/types.js";
 import { parseDid } from "./did.js";
 import { buildDocument, type DidDocument } from "./document.js";
 import { ERROR_HTTP_STATUS, ResolutionError, errorTypeUri } from "./errors.js";
-import { loadHistory, type HistoryLookup, type LedgerSnapshot, type Origin, type RecordHistory, type Version } from "./history.js";
+import { historyAt, loadHistory, type HistoryLookup, type LedgerSnapshot, type Origin, type RecordHistory, type Version } from "./history.js";
+import { HistoryStore } from "./history-store.js";
 import { LegacyKeySearch } from "./legacy-key.js";
 import { baseLedger, buildMetadata, type DidDocumentMetadata, type VectorLedger, type VectorMetadataError } from "./metadata.js";
 import { parseResolutionOptions, type ResolutionOptionsInput } from "./options.js";
 import type { FetchedFactsProvider } from "./fetched.js";
 import { listRecords, type FirstMintCache, type RecordList } from "./records.js";
-import { CONFIRMATION_DEPTH, MAX_ANCESTORS, checkRegistrySettings, type ResolverSettings } from "./settings.js";
+import { CONFIRMATION_DEPTH, MAX_ANCESTORS, checkRegistrySettings, type RegistrySettings, type ResolverSettings } from "./settings.js";
 import { evaluate, lineageOf, type Effective, type Evaluation, type Selection } from "./status.js";
 import { blockTimeMs } from "./time.js";
 import type { RecordView } from "./view.js";
@@ -87,6 +91,34 @@ export interface VectorResolverOptions {
 
 const VECTOR_ID = /^[0-9a-f]{64}$/;
 
+/** The read that a whole pass needs failed: every record of the pass fails with it, without new reads. */
+export class PassFailed extends Error {
+  constructor(cause: unknown) {
+    super(`the pass could not read the token holders: ${cause instanceof Error ? cause.message : String(cause)}`);
+    this.name = "PassFailed";
+  }
+}
+
+/** A pass over the records of one list (`listRecords`): its tip, its records and their token holders. */
+interface Pass {
+  readonly snapshot: LedgerSnapshot;
+  /** The store's sequence number after the pass had read its tip. */
+  readonly tipMark: number;
+  readonly vectorIds: readonly string[];
+  /** The token holders of the records, read before the pass's first history; a failed read fails the pass. */
+  holders: Promise<ReadonlyMap<string, string>> | null;
+  /** Each record's history in this pass. */
+  readonly histories: Map<string, Promise<HistoryLookup>>;
+}
+
+/** The holders of a record's tokens in both registries, as one sorted text; empty when no output holds them. */
+function holdersKey(held: ReadonlyMap<string, readonly string[]>, registries: RegistrySettings, vectorId: string): string {
+  return [registries.legacy, registries.identity]
+    .flatMap((r) => (r === null ? [] : (held.get(assetKey({ policyId: r.policyId, assetName: vectorId })) ?? []).map((ref) => `${r.policyId}:${ref}`)))
+    .sort()
+    .join(" ");
+}
+
 export class VectorResolver {
   private readonly log: (message: string) => void;
   private readonly historyCacheSize: number;
@@ -96,6 +128,9 @@ export class VectorResolver {
   private histories: { tipHash: string; entries: Map<string, Promise<HistoryLookup>> } = { tipHash: "", entries: new Map() };
   /** First mints with 30 confirmations, kept between `listRecords` calls. */
   private readonly firstMints: FirstMintCache = new Map();
+  /** Ledger reads that passes share. */
+  private readonly store = new HistoryStore();
+  private readonly passes = new WeakMap<RecordList, Pass>();
 
   constructor(
     private readonly chain: ChainSource,
@@ -125,10 +160,11 @@ export class VectorResolver {
 
   /**
    * The current view and effective status of one identifier (no resolution options). Not found:
-   * `{ found: false }`. A failed ledger read throws.
+   * `{ found: false }`. A failed ledger read throws. With `at`, a list of `listRecords`: as of the
+   * list's tip, with the reads of the pass (history-store.ts).
    */
-  async currentRecord(vectorId: string): Promise<CurrentLookup> {
-    const now = await this.currentEvaluation(vectorId);
+  async currentRecord(vectorId: string, at?: RecordList): Promise<CurrentLookup> {
+    const now = await this.currentEvaluation(vectorId, at);
     if (!now.found) return now;
     const { snapshot, history, evaluation, selection } = now;
     const { base, pending, view } = evaluation.state;
@@ -153,29 +189,36 @@ export class VectorResolver {
     };
   }
 
-  /** The effective status without options, as `currentRecord` gives it, without the legacy key search. A failed ledger read throws. */
-  async currentStatus(vectorId: string): Promise<StatusLookup> {
-    const now = await this.currentEvaluation(vectorId);
+  /** The effective status without options, as `currentRecord` gives it (also `at`), without the legacy key search. A failed ledger read throws. */
+  async currentStatus(vectorId: string, at?: RecordList): Promise<StatusLookup> {
+    const now = await this.currentEvaluation(vectorId, at);
     return now.found ? { found: true, effective: now.evaluation.effective } : now;
   }
 
   /** Every identifier that resolves, with its first mint and status-list index (Part 2 Section 8.6). A failed read throws. */
   async listRecords(): Promise<RecordList> {
-    return listRecords(this.chain, await this.snapshot(), this.firstMints);
+    const snapshot = await this.snapshot();
+    const tipMark = this.store.mark();
+    const list = await listRecords(this.chain, snapshot, this.firstMints);
+    this.passes.set(list, { snapshot, tipMark, vectorIds: list.entries.map((e) => e.vectorId), holders: null, histories: new Map() });
+    return list;
   }
 
-  /** The record and its ancestors at the current tip, evaluated without options. */
+  /** The record and its ancestors at the current tip (or the tip of the list `at`), evaluated without options. */
   private async currentEvaluation(
     vectorId: string,
+    at: RecordList | undefined,
   ): Promise<
     | { readonly found: true; readonly snapshot: LedgerSnapshot; readonly history: RecordHistory; readonly evaluation: Evaluation; readonly selection: Selection }
     | { readonly found: false; readonly reason: string }
   > {
     if (!VECTOR_ID.test(vectorId)) throw new Error("an identifier is 64 lowercase hex characters");
-    const snapshot = await this.snapshot();
-    const lookup = await this.history(snapshot, vectorId);
+    // A list that this resolver did not make (or a copy of one) gives only its tip, not the reads of a pass.
+    const pass = at === undefined ? undefined : this.passes.get(at);
+    const snapshot = pass?.snapshot ?? (at === undefined ? await this.snapshot() : { tip: at.tip, settings: this.settings });
+    const lookup = await this.history(snapshot, vectorId, pass);
     if (!lookup.found) return lookup;
-    const chain = await this.lineage(snapshot, lookup.history);
+    const chain = await this.lineage(snapshot, lookup.history, pass);
     const selection = this.currentSelection(snapshot);
     const evaluation = evaluate(chain, selection, selection, this.settings);
     if (!evaluation) return { found: false, reason: "the record has no confirmed version" };
@@ -300,8 +343,9 @@ export class VectorResolver {
     return { tip, settings: this.settings };
   }
 
-  /** Record histories, kept while the tip stays the same. */
-  private history(snapshot: LedgerSnapshot, vectorId: string): Promise<HistoryLookup> {
+  /** Record histories: in a pass, once per pass from the store; else kept while the tip stays the same. */
+  private history(snapshot: LedgerSnapshot, vectorId: string, pass?: Pass): Promise<HistoryLookup> {
+    if (pass !== undefined) return this.passHistory(pass, vectorId);
     if (this.histories.tipHash !== snapshot.tip.blockHash) this.histories = { tipHash: snapshot.tip.blockHash, entries: new Map() };
     const entries = this.histories.entries;
     let lookup = entries.get(vectorId);
@@ -317,15 +361,53 @@ export class VectorResolver {
     return lookup;
   }
 
+  /** A record's history as of the pass's tip, from kept or new ledger reads (history-store.ts). */
+  private passHistory(pass: Pass, vectorId: string): Promise<HistoryLookup> {
+    let lookup = pass.histories.get(vectorId);
+    if (!lookup) {
+      const loading = (async () => {
+        const holders = await this.holdersOf(pass);
+        const view = { tipMark: pass.tipMark, tipHeight: pass.snapshot.tip.blockHeight, holders: holders.get(vectorId) };
+        return historyAt(pass.snapshot, vectorId, await this.store.inputs(this.chain, this.settings.registries, vectorId, view));
+      })();
+      lookup = loading;
+      pass.histories.set(vectorId, loading);
+      loading.catch(() => {
+        if (pass.histories.get(vectorId) === loading) pass.histories.delete(vectorId);
+      });
+    }
+    return lookup;
+  }
+
+  /** The token holders of the pass's records: one read, before the pass's first history. */
+  private holdersOf(pass: Pass): Promise<ReadonlyMap<string, string>> {
+    if (pass.holders === null) {
+      const registries = this.settings.registries;
+      const assets = pass.vectorIds.flatMap((assetName) =>
+        [registries.legacy, registries.identity].flatMap((r) => (r === null ? [] : [{ policyId: r.policyId, assetName }])),
+      );
+      pass.holders = this.chain.assetHolders(assets).then(
+        (held) => {
+          this.store.retain(new Set(pass.vectorIds));
+          return new Map(pass.vectorIds.map((id): [string, string] => [id, holdersKey(held, registries, id)]));
+        },
+        (e: unknown) => {
+          throw new PassFailed(e);
+        },
+      );
+    }
+    return pass.holders;
+  }
+
   /** The record and its ancestors: chain[i + 1] is the parent of chain[i]. */
-  private async lineage(snapshot: LedgerSnapshot, subject: RecordHistory): Promise<RecordHistory[]> {
+  private async lineage(snapshot: LedgerSnapshot, subject: RecordHistory, pass?: Pass): Promise<RecordHistory[]> {
     const chain = [subject];
     for (;;) {
       const lineage = lineageOf(chain[chain.length - 1]!);
       if (lineage.type === "Root") return chain;
       if (chain.length > MAX_ANCESTORS) throw new Error("a lineage is deeper than the method allows");
       if (chain.some((h) => h.vectorId === lineage.parent)) throw new Error("a lineage names one of its own records");
-      const parent = await this.history(snapshot, lineage.parent);
+      const parent = await this.history(snapshot, lineage.parent, pass);
       if (!parent.found) throw new Error("the parent record of a subagent does not resolve");
       chain.push(parent.history);
     }

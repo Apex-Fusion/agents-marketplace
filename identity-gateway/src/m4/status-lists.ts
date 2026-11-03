@@ -9,8 +9,13 @@
 // In the Token Status List, the entry of an agent also reads SUSPENDED while an access token whose
 // status claim names it was revoked by a status change and can still be accepted (TokenRegistry
 // `heldEntries`): else a revoked token would be valid again once a hold ends.
-// A list older than the refresh interval is built again in the background; until that build ends,
-// requests get the previous lists, which stay valid (`exp`, `validUntil`) for an hour.
+// Builds: at most one runs at a time, and at most one starts in each refresh interval
+// (STATUS_LIST_REFRESH_SECONDS), also after a failed build. The first starts with the services. A
+// build is one pass over the records (one tip, kept ledger reads; resolver.ts), and its Koios reads
+// go in the background lane (chain/limiter.ts), after the reads of requests. A list older than the
+// refresh interval is built again in the background; until that build ends, requests get the
+// previous lists, which stay valid (`exp`, `validUntil`) for an hour. Without valid lists, a request
+// waits up to 10 s for a running build.
 // Two formats, both signed with ES256 by the gateway's P-256 key:
 // - W3C Bitstring Status List v1.0 (W3C Recommendation, 15 May 2025,
 //   https://www.w3.org/TR/2025/REC-vc-bitstring-status-list-20250515/): one list with both purposes
@@ -25,6 +30,8 @@
 //   7.1); DEFLATE with the ZLIB format, base64url; a `statuslist+jwt` token (Section 5.1).
 
 import { deflateSync, gzipSync } from "node:zlib";
+import { inBackground } from "../chain/limiter.js";
+import type { RecordList } from "../resolve/records.js";
 import type { EffectiveStatus } from "../resolve/status.js";
 import { formatTime } from "../resolve/time.js";
 import { gatewayDid, type M4Context } from "./context.js";
@@ -70,6 +77,8 @@ export const bitstringIndex = (purpose: "revocation" | "suspension", p: number):
 interface IndexCache {
   readonly builtAt: number;
   readonly indices: ReadonlyMap<string, number>;
+  /** The list of the index: a build reads the statuses as of its tip. */
+  readonly list: RecordList;
 }
 
 interface Lists {
@@ -86,12 +95,30 @@ const MIN_INDEX_REBUILD_MS = 10_000;
 const BUILD_CONCURRENCY = 8;
 /** Signed lists expire one hour after they are built (TSL `exp`, BSL `validUntil`). */
 export const LIST_VALIDITY_MS = 3_600_000;
+/** How long a request without valid lists waits for a running build. */
+export const BUILD_WAIT_MS = 10_000;
+
+/** The value of `promise`; an error when it takes longer than `ms`. */
+async function within<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  // Node 20 has no Promise.withResolvers.
+  const late = new Promise<never>((_, fail) => {
+    timer = setTimeout(() => fail(new Error(`${what} takes longer than ${ms / 1000} s`)), ms);
+  });
+  try {
+    return await Promise.race([promise, late]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 export class StatusLists {
   private index: IndexCache | null = null;
   private indexBuild: Promise<IndexCache> | null = null;
   private lists: Lists | null = null;
   private listsBuild: Promise<Lists> | null = null;
+  /** When the last build started (POSIX ms). */
+  private lastBuildAt = -Infinity;
 
   constructor(
     private readonly ctx: M4Context,
@@ -121,9 +148,14 @@ export class StatusLists {
     return this.signedList("bsl", n);
   }
 
-  /** Builds the lists again now, as the refresh interval would. */
+  /** Builds the lists again now (or joins the running build), whenever the last build started. */
   async refresh(): Promise<void> {
     await this.buildLists();
+  }
+
+  /** Starts the first build in the background, so that the first requests find lists. */
+  start(): void {
+    if (this.lists === null && this.listsBuild === null) this.buildInBackground();
   }
 
   private buildIndex(): Promise<IndexCache> {
@@ -132,7 +164,7 @@ export class StatusLists {
         const list = await this.ctx.records.listRecords();
         const indices = new Map<string, number>();
         for (const e of list.entries) if (e.statusListIndex !== null) indices.set(e.vectorId, e.statusListIndex);
-        this.index = { builtAt: this.ctx.now(), indices };
+        this.index = { builtAt: this.ctx.now(), indices, list };
         return this.index;
       } finally {
         this.indexBuild = null;
@@ -142,17 +174,18 @@ export class StatusLists {
   }
 
   private buildLists(): Promise<Lists> {
-    this.listsBuild ??= (async () => {
+    this.listsBuild ??= inBackground(async () => {
+      this.lastBuildAt = this.ctx.now();
       try {
-        const index = await this.buildIndex();
-        const entries = [...index.indices];
+        const { indices, list } = await this.buildIndex();
+        const entries = [...indices];
         const listCount = entries.reduce((count, [, i]) => Math.max(count, listPosition(i).n + 1), 1);
         const values = Array.from({ length: listCount }, () => new Uint8Array(LIST_SIZE));
         let next = 0;
         const worker = async (): Promise<void> => {
           while (next < entries.length) {
             const [vectorId, i] = entries[next++]!;
-            const lookup = await this.ctx.records.currentStatus(vectorId);
+            const lookup = await this.ctx.records.currentStatus(vectorId, list);
             // An indexed identifier always resolves; if it does not, suspension is the reversible answer.
             const value = lookup.found ? statusValue(lookup.effective.status) : STATUS.suspended;
             const { n, p } = listPosition(i);
@@ -171,22 +204,29 @@ export class StatusLists {
       } finally {
         this.listsBuild = null;
       }
-    })();
+    });
     return this.listsBuild;
   }
 
-  /** The lists to serve: the previous lists while a build runs and they are valid; else the result of a build. */
+  private buildInBackground(): void {
+    this.buildLists().catch((e: unknown) => this.ctx.log(`identity-gateway: status lists not rebuilt: ${e instanceof Error ? e.message : String(e)}`));
+  }
+
+  /**
+   * The lists to serve: lists younger than the refresh interval; else, while they are valid, the
+   * previous lists, and a build starts in the background when the last one started a refresh
+   * interval ago; without valid lists, the result of the running build.
+   */
   private current(): Lists | Promise<Lists> {
+    const now = this.ctx.now();
+    const refreshMs = this.ctx.settings.statusListRefreshMs;
     const lists = this.lists;
-    const age = lists === null ? Infinity : this.ctx.now() - lists.builtAt;
-    if (lists !== null && age < this.ctx.settings.statusListRefreshMs) return lists;
-    if (lists !== null && age < LIST_VALIDITY_MS) {
-      if (this.listsBuild === null) {
-        this.buildLists().catch((e: unknown) => this.ctx.log(`identity-gateway: status lists not rebuilt: ${e instanceof Error ? e.message : String(e)}`));
-      }
-      return lists;
-    }
-    return this.buildLists();
+    const age = lists === null ? Infinity : now - lists.builtAt;
+    if (lists !== null && age < refreshMs) return lists;
+    if (this.listsBuild === null && now - this.lastBuildAt >= refreshMs) this.buildInBackground();
+    if (lists !== null && age < LIST_VALIDITY_MS) return lists;
+    if (this.listsBuild !== null) return within(this.listsBuild, BUILD_WAIT_MS, "the status-list build");
+    throw new Error("no valid status lists: the last build failed, and the next one starts one refresh interval after it");
   }
 
   private async signedList(kind: "tsl" | "bsl", n: number): Promise<string | null> {

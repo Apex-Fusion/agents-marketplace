@@ -23,9 +23,10 @@ export interface M4Settings {
 
 /** The resolver core functions that the M4 services use. `VectorResolver` implements them. */
 export interface RecordSource {
-  currentRecord(vectorId: string): Promise<CurrentLookup>;
+  /** With `at`, a list of `listRecords`: as of the list's tip, in one pass over the records. */
+  currentRecord(vectorId: string, at?: RecordList): Promise<CurrentLookup>;
   /** The effective status alone, without the legacy key search (status lists, token checks). */
-  currentStatus(vectorId: string): Promise<StatusLookup>;
+  currentStatus(vectorId: string, at?: RecordList): Promise<StatusLookup>;
   listRecords(): Promise<RecordList>;
 }
 

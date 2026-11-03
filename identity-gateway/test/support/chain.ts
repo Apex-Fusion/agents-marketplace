@@ -1,7 +1,8 @@
 // An in-memory ChainSource. It answers like the Koios + Ogmios source: asset histories from outputs
-// and mints, transactions by hash, datums by hash, block witnesses by height, the policy asset index.
+// and mints, transactions by hash, datums by hash, block witnesses by height, the policy asset index,
+// the outputs that hold an asset now.
 
-import type { BlockWitnesses, ChainSource, ChainTip, GenesisParameters, LedgerTx, PolicyAsset } from "../../src/chain/types.js";
+import { assetKey, type AssetId, type BlockWitnesses, type ChainSource, type ChainTip, type GenesisParameters, type LedgerTx, type PolicyAsset } from "../../src/chain/types.js";
 import { ledgerOrder } from "../../src/resolve/history.js";
 import { VECTOR_MAINNET } from "../../src/resolve/settings.js";
 
@@ -82,5 +83,23 @@ export class FakeChain implements ChainSource {
     return [...mints]
       .sort(([a], [b]) => (a < b ? -1 : 1))
       .map(([assetName, txs]) => ({ assetName, mintCount: txs.length, lastMintTx: txs[txs.length - 1]!.txHash, createdAt: systemStart + txs[0]!.slot * slotLength }));
+  }
+
+  async assetHolders(assets: readonly AssetId[]): Promise<Map<string, string[]>> {
+    this.enter("assetHolders");
+    const wanted = new Set(assets.map(assetKey));
+    const spent = new Set(this.txs.flatMap((t) => t.inputs.map((i) => `${i.txHash}#${i.outputIndex}`)));
+    const holders = new Map<string, string[]>();
+    for (const t of this.txs) {
+      for (const o of t.outputs) {
+        const ref = `${t.txHash}#${o.outputIndex}`;
+        if (spent.has(ref)) continue;
+        for (const a of o.assets) {
+          const key = assetKey(a);
+          if (wanted.has(key) && a.quantity > 0n) holders.set(key, [...(holders.get(key) ?? []), `${ref}@${t.blockHeight}`]);
+        }
+      }
+    }
+    return holders;
   }
 }

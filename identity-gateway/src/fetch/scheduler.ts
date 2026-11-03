@@ -2,10 +2,12 @@
 // without options) of every identifier, and starts a check for each record whose effective status
 // is Active when it has no facts yet, after each record change, and when its facts are a day old.
 // A check detects the endpoint's protocol and verifies the record's domains. Requests never start a
-// check; they read the facts store.
+// check; they read the facts store. A scan is one pass over the records (one tip; resolver.ts), and
+// its Koios reads go in the background lane (chain/limiter.ts), after the reads of requests.
 
+import { inBackground } from "../chain/limiter.js";
 import type { RecordList } from "../resolve/records.js";
-import type { CurrentLookup, CurrentRecord } from "../resolve/resolver.js";
+import { PassFailed, type CurrentLookup, type CurrentRecord } from "../resolve/resolver.js";
 import type { Clock } from "./clock.js";
 import { detectProtocol } from "./detect.js";
 import { FactsStore, changeKey, factInputs, type FactInputs, type RecordFacts } from "./facts.js";
@@ -15,7 +17,8 @@ import { checkDomain, type DomainCheck, type TxtLookup } from "./linkage.js";
 /** The resolver calls that the scan needs (VectorResolver implements them). */
 export interface RecordSource {
   listRecords(): Promise<RecordList>;
-  currentRecord(vectorId: string): Promise<CurrentLookup>;
+  /** With `at`: as of the tip of that list, in one pass over its records. */
+  currentRecord(vectorId: string, at?: RecordList): Promise<CurrentLookup>;
 }
 
 export interface CheckDeps {
@@ -90,7 +93,7 @@ export class FetchScheduler {
     this.loop = (async () => {
       while (this.running) {
         try {
-          await this.scan();
+          await inBackground(() => this.scan());
         } catch (e) {
           this.log(`identity-gateway: background scan failed: ${e instanceof Error ? e.message : String(e)}`);
         }
@@ -110,17 +113,22 @@ export class FetchScheduler {
     while (this.jobs.size) await Promise.all(this.jobs.values());
   }
 
-  /** One scan: reads every current record and starts the checks that are due. */
+  /**
+   * One scan: reads every current record and starts the checks that are due. When the pass itself
+   * fails (PassFailed), the scan fails and the records of the last scan stay.
+   */
   async scan(): Promise<{ readonly records: number; readonly started: readonly string[] }> {
-    const { entries } = await this.source.listRecords();
+    const list = await this.source.listRecords();
+    const { entries } = list;
     const found: Array<CurrentRecord | null> = new Array<CurrentRecord | null>(entries.length).fill(null);
     let next = 0;
     const worker = async (): Promise<void> => {
       for (let i = next++; i < entries.length; i = next++) {
         try {
-          const lookup = await this.source.currentRecord(entries[i]!.vectorId);
+          const lookup = await this.source.currentRecord(entries[i]!.vectorId, list);
           if (lookup.found) found[i] = lookup.record;
         } catch (e) {
+          if (e instanceof PassFailed) throw e;
           this.log(`identity-gateway: background scan could not read a record: ${e instanceof Error ? e.message : String(e)}`);
         }
       }

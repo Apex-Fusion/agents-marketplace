@@ -50,6 +50,7 @@ Every variable is optional, except that a deployed identity registry needs both
 | `GENESIS_SECURITY_PARAM` | `2160` | Expected security parameter k. |
 | `KOIOS_URL` | `https://v2.koios.vector.mainnet.apexfusion.org/api/v1` | Koios API root. |
 | `KOIOS_TOKEN` | none | Optional Koios bearer token. Do not commit it. |
+| `KOIOS_RATE_PER_SECOND` | `10` | Koios calls per second on average, in bursts of at most twice as many (1 to 100). The Koios of Vector refuses a client above about 300 requests in 10 s (see "Chain data"). |
 | `OGMIOS_URL` | `wss://ogmios.vector.mainnet.apexfusion.org` | Ogmios WebSocket, for vkey witnesses (legacy key search). |
 | `HOST` / `PORT` | `127.0.0.1` / `8080` (the image: `0.0.0.0` / `8080`) | Listen address. |
 | `GATEWAY_BASE_URL` | `https://id.vector.apexfusion.org` | Public HTTPS origin of the gateway (no path); the only base-URL variable. It names the `did:web` aliases, the URLs in the catalogs and the MCP server names. It is also the RFC 8414 issuer, `<base>/token` is the audience of agent JWTs, and its host is the SPIFFE trust domain. |
@@ -132,10 +133,14 @@ and the status lists are public and cacheable.
 | `GET /status/tsl/{n}` | | `application/statuslist+jwt`: 2 bits per entry, 0 valid, 1 invalid (Revoked or Retired), 2 suspended. An entry also reads 2 while an access token that names it was revoked by a status change and can still be accepted (until its `exp` plus 30 s), also after the agent is Active again; new tokens of that agent read 2 for that time too. |
 | `GET /agents/{id}/credential` | | `application/vc+jwt`: a VC 2.0 credential of the gateway's DID with the subject DID, `created`, `origin` and, for a subagent, `parent`; two `BitstringStatusListEntry` items. 409 when the agent is not Active, 410 when deactivated. |
 
-Index i of `listRecords()` is in list n = floor(i / 131,072) at position i mod 131,072. Lists older
-than `STATUS_LIST_REFRESH_SECONDS` are built again in the background; until the build ends, requests
-get the previous lists, which stay valid for one hour (`exp`, `validUntil`). A build reads only the
-effective status of each record (`currentStatus`, no legacy key search). A status other than Active
+Index i of `listRecords()` is in list n = floor(i / 131,072) at position i mod 131,072. The first
+build starts with the services. Lists older than `STATUS_LIST_REFRESH_SECONDS` are built again in
+the background; until the build ends, requests get the previous lists, which stay valid for one hour
+(`exp`, `validUntil`). At most one build runs at a time, and at most one starts in each refresh
+interval, also after a failed build: until then, a request without valid lists is 503 at once.
+Without valid lists, a request waits up to 10 s for the running build, then it is 503. A build is
+one pass over the records (see "Chain data") and reads only the effective status of each record
+(`currentStatus`, no legacy key search). A status other than Active
 that the gateway sees (at introspection, or in the status watcher every 30 s) revokes every token of
 that agent issued up to then. A token revoked on its own (`/revoke`, or a delegation that no longer
 passes) shows only in introspection. Replay stores, nonces and issued tokens are in memory: a restart
@@ -158,8 +163,9 @@ scan; the per-agent renderings read the record at the current tip.
 
 ## Background jobs (Part 1 Section 9, Part 2 Sections 8.5 and 8.6)
 
-A scan runs at start and every `FETCH_SCAN_INTERVAL_S`. It reads the current record of every
-identifier and starts a check for each Active record that has no facts yet, that changed (a new base
+A scan runs at start and every `FETCH_SCAN_INTERVAL_S`; it is one pass over the records (see "Chain
+data"). It reads the current record of every identifier and starts a check for each Active record
+that has no facts yet, that changed (a new base
 or pending version), or whose facts are a day old. Requests never fetch: they read the stored facts,
 and a fact counts only while its inputs still apply to the view that the answer shows (the same
 endpoint, a domain that the view still names, a signing key that is still an assertion key of the
@@ -192,9 +198,10 @@ time.
 
 - `new VectorResolver(chain, settings, options?)`;
 - `resolveDid(did, options?)`: the resolution result; it never throws;
-- `currentRecord(vectorId)`: the view and the effective status without options (Part 2 Section 8.4);
-- `currentStatus(vectorId)`: the effective status alone, without the legacy key search (status
-  lists and token checks);
+- `currentRecord(vectorId, list?)`: the view and the effective status without options (Part 2
+  Section 8.4); with a list of `listRecords()`, as of the tip of that list (a pass, see "Chain data");
+- `currentStatus(vectorId, list?)`: the effective status alone, without the legacy key search
+  (status lists and token checks);
 - `listRecords()`: every identifier that resolves, in the ledger order of its first mint, with its
   status-list index (Part 2 Section 8.6);
 - `options.fetchedFacts(subject, legacyPolicyId)`: the stored facts that apply to the view of a
@@ -203,19 +210,49 @@ time.
 ## Chain data
 
 Koios supplies the asset histories, the transactions (with inline datum bytes), datums by hash,
-blocks, the policy asset index and the genesis values. Koios on Vector exposes no witnesses, so the
-legacy key search reads blocks through Ogmios chain synchronisation. The resolver depends only on the
-`ChainSource` interface (`src/chain/types.ts`).
+blocks, the policy asset index, the outputs that hold an asset now (`asset_utxos`) and the genesis
+values. Koios on Vector exposes no witnesses, so the legacy key search reads blocks through Ogmios
+chain synchronisation. The resolver depends only on the `ChainSource` interface
+(`src/chain/types.ts`).
 
 Each resolution reads the tip first and ignores transactions in later blocks. A record history is
 kept while the tip stays the same.
+
+**Koios limit (`src/chain/limiter.ts`).** The Koios of Vector (HAProxy behind Cloudflare) answers
+HTTP 429 when it gets about 300 requests in 10 s: a `text/html` page without `Retry-After` and
+without rate-limit headers. It refuses while the requests go on, and other clients get refusals at
+the same time. One limiter takes every Koios call of the process: `KOIOS_RATE_PER_SECOND` calls per
+second on average (bursts of twice as many), at most 4 at the same time. Calls for requests start
+before background calls (the scan, status-list builds). After an HTTP 429, no call starts until the
+pause ends: `Retry-After` when the answer has it, else 10 s, doubled after each further 429 up to
+60 s. Then the refused call is made again (at most 5 attempts), and calls run one at a time until one
+succeeds. A request does not wait for a pause longer than 15 s: it fails at once (500
+`INTERNAL_ERROR`).
+
+**Passes.** The scan and the status-list builds are passes over every record: `listRecords()` reads
+the tip once, and `currentRecord(id, list)` or `currentStatus(id, list)` reads each record as of the
+tip of that list. Passes keep their ledger reads (`src/resolve/history-store.ts`). Before its first
+history, a pass reads the outputs that hold the tokens of all its records (`asset_utxos`, 1,000
+assets in one request). A transaction that mints, moves or burns a token spends or makes such an
+output, so a pass reads a record again only when the holders of its tokens changed, when its newest
+transaction has fewer than 30 confirmations, or when no output holds its tokens. A read that started
+before a pass read its tip serves that pass only when the holders vouch for it. `main.ts` gives the
+scan and the M4 services one resolver, so they share these reads; the request path has its own
+resolver and cache.
+
+Measured on mainnet (826 records, 2026-11-03). Before: the start scan made 4,110 Koios calls (one
+tip, two asset histories, one transaction read and one block read for each record) in about 10 s,
+and each status-list build 3,333. Now: the start (the first scan and the first status-list build
+together) makes 3,328 calls at 10 calls per second; a later scan or build makes 5 calls (1 tip, 2
+asset indexes, 2 holder pages) and 3 more for each record that it reads again. A resolution makes
+4 calls at a new tip and 1 at the same tip, as before.
 
 The legacy key search reads the blocks of a record's transactions newest first, in windows of 1, 2,
 4 and so on up to 64 blocks. A window is one Koios read and one Ogmios session; in the session, a
 block that follows the previous one needs no new intersection. The search keeps the witnesses of each
 transaction that it read (by block hash and transaction ID) and, once the last output of the base
 version has 30 confirmations, its result. At most 4 sessions run at the same time. `main.ts` gives
-its three resolvers one search, so they share these caches.
+its two resolvers one search, so they share these caches.
 
 `listRecords()` keeps each first mint with 30 confirmations between builds. It does not read the
 mint of a legacy asset that Koios shows as created at or after the cutoff slot (`creation_time` of
@@ -239,6 +276,8 @@ of `contracts/identity-marketplace/fixtures/`.
 | Symptom | Cause and action |
 |---|---|
 | Every request is 500 `INTERNAL_ERROR` | The log line names the failed read. Koios or Ogmios is down or slow, or the genesis values differ from the configuration (wrong `KOIOS_URL`, or testnet). |
+| The log shows "Koios … answered HTTP 429" | Koios refused the gateway or another client of the same Koios: the gateway pauses all Koios calls (10 s, then 20, 40 and 60 s) and makes the refused calls again. Requests in a pause longer than 15 s are 500. If it happens without other clients, lower `KOIOS_RATE_PER_SECOND`. |
+| Status lists are 503 after a start | The first build reads every record once (minutes at 10 Koios calls per second). Requests are 503 until it ends; then they are 200. |
 | Legacy DIDs have no keys and `controllerKeyNotFound` | No vkey witness of the record's own token transactions has the owner hash (Part 1 Section 8.1). The key appears after the owner key signs a transaction of the record. |
 | 500 only for legacy DIDs | Ogmios is not reachable from the container. Check `OGMIOS_URL`. |
 | `NOT_FOUND` for a new record | A version shows after 30 confirmations. Wait, or check the mint with Koios. |

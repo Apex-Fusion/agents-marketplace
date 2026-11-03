@@ -81,6 +81,15 @@ export interface PolicyAsset {
   readonly createdAt: number | null;
 }
 
+/** A token: an asset name under a policy ID. */
+export interface AssetId {
+  readonly policyId: string;
+  readonly assetName: string;
+}
+
+/** The key of an asset in `assetHolders` results: `<policy ID>.<asset name>`. */
+export const assetKey = (asset: AssetId): string => `${asset.policyId}.${asset.assetName}`;
+
 export interface ChainSource {
   /** The current tip of the selected chain. */
   tip(): Promise<ChainTip>;
@@ -99,4 +108,9 @@ export interface ChainSource {
   blockWitnesses(blockHeights: readonly number[]): Promise<BlockWitnesses[]>;
   /** Every asset that the policy ever minted. */
   policyAssets(policyId: string): Promise<PolicyAsset[]>;
+  /**
+   * The unspent outputs that hold each asset now, as `<transaction hash>#<output index>@<block
+   * height>`, by `assetKey`; an asset that no output holds has no entry. One read serves many assets.
+   */
+  assetHolders(assets: readonly AssetId[]): Promise<Map<string, string[]>>;
 }
