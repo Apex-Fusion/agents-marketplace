@@ -4,7 +4,8 @@
  * shared builder types and the harness types, and the offline evaluation with
  * `aiken tx simulate` of the shared builders' transactions: an unsigned
  * transaction of the identity builders (identity/tx) or a signed transaction
- * of the lucid builders (tx/).
+ * of any builder (the lucid builders of tx/, the reference-script publisher,
+ * the deployment tool).
  *
  * The test deployment follows Part 2 §3.8: `config_holder`, then
  * `config_seal(seed, holder)`, then `identity(legacy_hash, legacy_root,
@@ -21,7 +22,7 @@ import type { Utxo } from "../../../packages/shared/src/chain/ChainProvider.js";
 import { decodePlutusDataHex, type PlutusData } from "../../../packages/shared/src/cbor/plutus-data.js";
 import { readCbor, type CborItem } from "../../../packages/shared/src/identity/tx/cbor.js";
 import {
-  addressBytes, buildConfigSeal, buildRegister, paymentCredential, validityWindow, VECTOR_MAINNET_SLOT_CONFIG,
+  addressBytes, buildConfigSeal, buildRegister, validityWindow, VECTOR_MAINNET_SLOT_CONFIG,
   type AdoptionScripts, type AttestationScripts, type CreatedRecordTx, type DelegationScripts, type IdentityScripts,
   type Profile, type ProtocolParameters, type ScriptSource, type TxContext, type UnsignedTx, type ValidityWindow,
   type VaultScripts,
@@ -33,7 +34,7 @@ import * as cbor from "./cbor.js";
 import { encodeData, type Data } from "./data.js";
 import {
   address, bech32Address, blake2b256, chainUtxo, fromHex, minUtxo, scriptHash, testKeyPair, toHex,
-  type BuiltTx, type KeyPair, type PlutusV3Script, type TxOut, type Utxo as HarnessUtxo,
+  type BuiltTx, type KeyPair, type PlutusV3Script, type RedeemerTag, type TxOut, type Utxo as HarnessUtxo,
 } from "./ledger.js";
 import { identifierOf, LEGACY_HASH, LEGACY_SCRIPT, outRefData } from "./legacy.js";
 import { simulate, type Simulation } from "./simulate.js";
@@ -221,31 +222,61 @@ export function simulateUnsigned(tx: UnsignedTx, utxos: Iterable<Utxo>, keys: re
   return simulate(builtFromUnsigned(tx, utxos, keys));
 }
 
+/** The ledger tags of the redeemer purposes that the harness evaluates (Conway CDDL `redeemer_tag`). */
+const WITNESS_TAGS: Readonly<Record<string, RedeemerTag>> = { "0": "spend", "1": "mint", "3": "withdraw" };
+
 /**
- * Runs `aiken tx simulate` on a signed transaction of the lucid builders
- * (tx/), with its bytes and key witnesses as built. The transaction spends
- * exactly one script input; `label` names its spend redeemer, whose index is
- * the input's position in the sorted inputs. `utxos` resolves the spent and
- * reference inputs (a superset is fine).
+ * The redeemer pointers of a Conway witness set (field 5) in written order:
+ * the map form `{ [tag, index] => [data, ex_units] }` and the legacy list form
+ * `[[tag, index, data, ex_units]]`. None when the field is absent.
+ */
+function witnessRedeemers(witnessSet: CborItem): Array<{ tag: RedeemerTag; index: number }> {
+  if (witnessSet.kind !== "map") throw new Error("the witness set is not a map");
+  const field = witnessSet.entries.find(([key]) => key.kind === "uint" && key.value === 5n)?.[1];
+  if (field === undefined) return [];
+  if (field.kind !== "map" && field.kind !== "array") throw new Error("the redeemers are neither a map nor a list");
+  const keys = field.kind === "map" ? field.entries.map(([key]) => key) : field.items;
+  return keys.map((key) => {
+    if (key.kind !== "array" || key.items[0]?.kind !== "uint" || key.items[1]?.kind !== "uint") throw new Error("bad redeemer pointer");
+    const tag = WITNESS_TAGS[String(key.items[0].value)];
+    if (tag === undefined) throw new Error(`redeemer tag ${key.items[0].value} is not spend, mint or withdraw`);
+    return { tag, index: Number(key.items[1].value) };
+  });
+}
+
+/**
+ * Runs `aiken tx simulate` on a signed transaction of any builder (the lucid
+ * builders of tx/, or a signed unsigned-builder transaction), with its bytes
+ * and key witnesses as built. The redeemers come from the witness set, in
+ * their written order; `label` names them (with the purpose when there are
+ * several). A transaction without redeemers runs no script and passes when
+ * aiken accepts it. `utxos` resolves the spent, reference and collateral
+ * inputs (a superset is fine: only the outputs that the body references go
+ * to aiken, which counts a reference script of any given output as a
+ * script of the transaction).
  */
 export function evaluateBuiltTx(txCborHex: string, utxos: Iterable<Utxo>, label: string): Simulation {
   const bytes = fromHex(txCborHex);
-  const { body, bodyBytes, id } = conwayParts(bytes);
+  const { body, witnessSet, bodyBytes, id } = conwayParts(bytes);
   const known = new Map<string, Utxo>();
   for (const u of utxos) known.set(refKey(u.ref), u);
-  const inputs = bodyRefs(body, 0n)
-    .sort((a, b) => (a.txHash === b.txHash ? a.index - b.index : a.txHash < b.txHash ? -1 : 1));
-  const scriptInputs = inputs.flatMap((ref, index) => {
+  const resolved = new Map<string, HarnessUtxo>();
+  for (const ref of [...bodyRefs(body, 0n), ...bodyRefs(body, 18n)]) {
     const u = known.get(refKey(ref));
-    return u !== undefined && paymentCredential(u.address)?.type === "Script" ? [index] : [];
-  });
-  if (scriptInputs.length !== 1) throw new Error(`expected one script input, found ${scriptInputs.length}`);
+    if (u === undefined) throw new Error(`unknown UTxO ${refKey(ref)}`);
+    resolved.set(refKey(ref), harnessUtxo(u));
+  }
+  for (const ref of bodyRefs(body, 13n)) {
+    const u = known.get(refKey(ref));
+    if (u !== undefined) resolved.set(refKey(ref), harnessUtxo(u));
+  }
+  const pointers = witnessRedeemers(witnessSet);
   return simulate({
     spec: { inputs: [], outputs: [], fee: 0n },
     id,
     body: bodyBytes,
-    redeemers: [{ tag: "spend", index: scriptInputs[0]!, data: 0n, label }],
-    resolved: [...known.values()].map(harnessUtxo),
+    redeemers: pointers.map((p) => ({ ...p, data: 0n, label: pointers.length === 1 ? label : `${label} ${p.tag}[${p.index}]` })),
+    resolved: [...resolved.values()],
     encode: () => bytes,
     utxo: () => {
       throw new Error("not a harness transaction");

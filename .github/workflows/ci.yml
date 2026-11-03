@@ -89,3 +89,9 @@ jobs:
 
       - name: Vitest vectors, benchmarks and resolver properties
         run: pnpm exec vitest run --config tests/identity-vectors/vitest.config.ts
+
+      - name: Typecheck the deployment tool
+        run: pnpm exec tsc -p tests/identity-deploy/tsconfig.json
+
+      - name: Vitest deployment tool (plan, seal and publish transactions, allowlist, resume)
+        run: pnpm exec vitest run --config tests/identity-deploy/vitest.config.ts

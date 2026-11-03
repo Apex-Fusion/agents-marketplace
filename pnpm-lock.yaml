@@ -16,6 +16,9 @@ importers:
 
   .:
     devDependencies:
+      '@lucid-evolution/uplc':
+        specifier: 0.2.20
+        version: 0.2.20
       '@marketplace/shared':
         specifier: workspace:*
         version: link:packages/shared

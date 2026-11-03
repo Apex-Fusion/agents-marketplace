@@ -23,6 +23,13 @@ wallet-monitor/wallets.json
 # — these contain privateKeyHex. Never commit.
 *-wallet.json
 
+# Identity deployment tool (contracts/identity-marketplace/deploy): the state
+# directories (deployment.json, allowlist, transaction files), a local key
+# directory and every cardano-cli signing key. Never commit them.
+contracts/identity-marketplace/deploy/state/
+contracts/identity-marketplace/deploy/keys/
+*.skey
+
 # Operator local file backups (e.g. docker-compose.buyer.yml.bak-20260609)
 *.bak
 *.bak-*

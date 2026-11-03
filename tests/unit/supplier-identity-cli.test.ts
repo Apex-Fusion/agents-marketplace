@@ -238,7 +238,7 @@ describe("tx:publish-reference-scripts", () => {
   it("publishes the new pair by default and the legacy pair with --legacy", () => {
     const identity = referenceScriptSet([], { IDENTITY_POLICY_ID: IDENTITY.identityHash });
     expect(identity).toMatchObject({ escrowEnv: "IDENTITY_ESCROW_REF_UTXO", advertEnv: "IDENTITY_ADVERT_REF_UTXO",
-      escrow: { hash: IDENTITY.escrowScriptHash, script: { type: "PlutusV3", script: IDENTITY.escrowCompiledCode } },
+      escrow: { hash: IDENTITY.escrowScriptHash, compiledCode: IDENTITY.escrowCompiledCode },
       advert: { hash: IDENTITY.advertScriptHash } });
     const legacy = referenceScriptSet(["--legacy"], {});
     expect(legacy).toMatchObject({ escrowEnv: "ESCROW_REF_UTXO", advertEnv: "ADVERT_REF_UTXO",
