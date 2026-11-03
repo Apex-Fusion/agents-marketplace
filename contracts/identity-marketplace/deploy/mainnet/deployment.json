@@ -120,7 +120,11 @@
     "escrow": "4c2d09858dab0cc22cc77dcb99efed570d909a66e0beb512041dea91005b5e82#0",
     "advert": "5efd18a1d90a6b87f1fd4b6fe93acfbe5be082260fd52be194b1088ade7c2758#0"
   },
-  "seal": null,
+  "seal": {
+    "tx": "dea7fd5baef73c0216e1098fe9db7a86561666ff4f6f3a44738df8f666cd379b",
+    "module1_hash": "f6b094a89b58d5e196a53d6e5ebedcbb837db4a1b16a1477cf98305d",
+    "config_record": "dea7fd5baef73c0216e1098fe9db7a86561666ff4f6f3a44738df8f666cd379b#0"
+  },
   "steps": {
     "seed": {
       "tx": "6c9856c70b1101f1a4e9ceb373188608013416eff48c51f5bb62706a65d41a2a",
@@ -149,6 +153,10 @@
     "publish-advert": {
       "tx": "5efd18a1d90a6b87f1fd4b6fe93acfbe5be082260fd52be194b1088ade7c2758",
       "time": "2026-11-03T11:10:35.681Z"
+    },
+    "seal": {
+      "tx": "dea7fd5baef73c0216e1098fe9db7a86561666ff4f6f3a44738df8f666cd379b",
+      "time": "2026-11-03T15:08:20.780Z"
     }
   },
   "pending": {}

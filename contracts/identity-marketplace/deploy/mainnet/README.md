@@ -19,7 +19,9 @@ This folder publishes the identity side of the release (Part 2 §11 step 2, [`do
 | Configuration policy (`config_seal`) | `c6a8cd37643ec0fffab66807bb53be5903d7ecda887d8af4a085f55a` |
 | Configuration holder (`config_holder`) | `288fea77a0f674c6080aadd8ed3ca42cd5a920bf1f00c0d3e63306e4` |
 | Configuration seed | `6c9856c70b1101f1a4e9ceb373188608013416eff48c51f5bb62706a65d41a2a#0` |
-| Module-1 hash (M1) | Published after the module side (the seal) |
+| Module-1 hash (M1) | `f6b094a89b58d5e196a53d6e5ebedcbb837db4a1b16a1477cf98305d` (Module-1 `identity_party`, oracle mode) |
+| Configuration record (the seal) | `dea7fd5baef73c0216e1098fe9db7a86561666ff4f6f3a44738df8f666cd379b#0` at `addr1wy5gl6nh5rm8f3sgp2ka3mfu5skdt2fqhu0spsxnucesdeqatlhxl`, never spendable |
+| Module-1 `identity_party` reference output | `319d39dbe94fce88ab5ec5526ba3127c6d97c1f9c4a44abe02e6a2949c54770b#0` |
 | `attestation` | `f07c644e042ead094cc501f443e03a8955dc1f4d0dcd5b387863e042` |
 | `delegation` | `bdc16990b844a8860f28c51bb0e6a469c84bebcd57db699ce204785a` |
 | `escrow` | `bdd86d9ac1e6f2ef6bcf81c14522f86ada1b438ca7ae0c90c8459deb` |

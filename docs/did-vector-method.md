@@ -118,7 +118,7 @@ The deployment of the identity registry also publishes these values ([`contracts
 
 - **Cutoff slot.** It is fixed before the identity contract is compiled: slot 37,218,553 (2026-11-03T11:09:13Z).
 - **Allowlist.** Every identifier that the legacy registry minted in a slot before the cutoff slot: 794 identifiers ([`allowlist.json`](../contracts/identity-marketplace/deploy/mainnet/allowlist.json)). Only these identifiers can adopt. Their Merkle root `e4b6b17ce4a8f83aa17d3181ea140d2bd76c0cfa8a7c44ad69543800b4a0df01` is a parameter of the identity contract (Section 3 of the implementation plan).
-- **Dispute contract.** The policy ID of the configuration token, `c6a8cd37643ec0fffab66807bb53be5903d7ecda887d8af4a085f55a`, and the script hash of the approved dispute contract (Module-1) that the token names. The Module-1 hash is published when the configuration token exists.
+- **Dispute contract.** The policy ID of the configuration token, `c6a8cd37643ec0fffab66807bb53be5903d7ecda887d8af4a085f55a`, and the script hash of the approved dispute contract (Module-1) that the token names: `f6b094a89b58d5e196a53d6e5ebedcbb837db4a1b16a1477cf98305d`. The configuration record `dea7fd5baef73c0216e1098fe9db7a86561666ff4f6f3a44738df8f666cd379b#0` holds the token and this hash. Nobody can spend it.
 
 A record is authentic only when both conditions are true:
 
