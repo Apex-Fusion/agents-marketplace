@@ -1,232 +1,26 @@
-import { afterEach, describe, expect, it, vi, type Mock } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import request from "supertest";
-import { createServer, type Server } from "node:http";
-import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import type { Express } from "express";
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { inspect } from "node:util";
-import tar from "tar-stream";
+import Database from "better-sqlite3";
 import { MockChainProvider } from "@marketplace/shared/chain";
-import { encodeAdvertDatum } from "@marketplace/shared/cbor";
-import { loadBlueprint } from "@marketplace/shared/tx";
-import { PAPER2AGENT_CAPABILITY_ID, paper2AgentManifestHash, paper2AgentModel, parsePaper2AgentManifest,
-  type Paper2AgentManifest } from "@marketplace/shared/paper2agent";
+import { decodeAdvertDatum, decodeIdentityAdvertDatum, encodeAdvertDatum, encodeIdentityAdvertDatum,
+  type AdvertDatum } from "@marketplace/shared/cbor";
+import { PAPER2AGENT_CAPABILITY_ID } from "@marketplace/shared/paper2agent";
 import type { PaperPackageArtifact, PaperPublishTerms } from "@marketplace/shared/paper2agent/workflow";
-import { encodeTxBody, sha256Hex } from "../../packages/shared/src/tx/internal/testTxBody.js";
 import { deriveSupplierKey } from "../../supplier/src/paper2agent/identity.js";
-import { PublisherTarget, loadPaperPublisherConfig, type PaperPublisherConfig } from "../src/publisher-config.js";
-import { PaperPublisherService, createPaperPublisherApp, type PaperPublisherDeps, type RuntimeImages,
-  type SupplierLauncher } from "../src/publisher.js";
-import { PaperPublisherStore, type AdvertTransaction } from "../src/publisher-store.js";
+import { PublisherTarget, loadPaperPublisherConfig } from "../src/publisher-config.js";
+import type { PaperPublisherDeps, SlotAdvertView } from "../src/publisher.js";
+import { PaperPublisherStore, type SignedAdvert } from "../src/publisher-store.js";
 import { AGENT_ID, CONTROLLER, IDENTITY, recordUtxo, supplierAgentRecord, testIdentity } from "../../tests/fixtures/supplier-side/identity.js";
+import {
+  AUTH, BASE_IMAGE, JOB_ID, KEY_A, KEY_B, PUBLIC_URL, RUNTIME_IMAGE, TOKEN, TOOL_TOKEN, cleanup, fakeImages, fundWallet, preparation,
+  publisher, reviewedPackage, target, temporary, terms, tick, until, walletFundedAdvert,
+} from "./publisher-fixtures.js";
 
-const TOKEN = "publisher-token-".repeat(3);
-const TOOL_TOKEN = "tool-call-token-".repeat(3);
-const BASE_IMAGE = `sha256:${"b".repeat(64)}`;
-const RUNTIME_IMAGE = `sha256:${"c".repeat(64)}`;
-const PUBLIC_URL = "https://publisher.example";
-const KEY_A = "11".repeat(32);
-const KEY_B = "22".repeat(32);
-const AUTH = { Authorization: `Bearer ${TOKEN}` };
-const JOB_ID = "0b4b7c2e-3f5d-4a8e-9c1d-2e3f4a5b6c7d";
-const schema = { type: "object", properties: { value: { type: "string" } }, required: ["value"], additionalProperties: false };
-
-const directories: string[] = [];
-const services: PaperPublisherService[] = [];
-const servers: Server[] = [];
-
-afterEach(async () => {
-  await Promise.all(services.splice(0).map((service) => service.close()));
-  for (const server of servers.splice(0)) server.closeAllConnections();
-  for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
-  vi.restoreAllMocks();
-});
-
-function temporary(): string {
-  const directory = mkdtempSync(join(tmpdir(), "p2a-publisher-"));
-  directories.push(directory);
-  return directory;
-}
-
-async function tick(): Promise<void> {
-  await new Promise<void>((resolve) => setImmediate(resolve));
-}
-
-/** Bounded event-loop polling: no timers, no real sleeps. */
-async function until(condition: () => boolean): Promise<void> {
-  for (let turn = 0; turn < 20_000 && !condition(); turn++) await tick();
-  expect(condition()).toBe(true);
-}
-
-async function reviewedPackage(): Promise<{ archive: Buffer; artifact: PaperPackageArtifact; manifest: Paper2AgentManifest }> {
-  const files: Record<string, string> = { "server.py": "print('reviewed wrapper')\n", "source/model.py": "SCALE = 2\n" };
-  const pack = tar.pack();
-  const chunks: Buffer[] = [];
-  pack.on("data", (chunk: Buffer) => chunks.push(chunk));
-  const ended = new Promise<void>((resolve, reject) => { pack.on("end", resolve); pack.on("error", reject); });
-  for (const [name, content] of Object.entries(files)) pack.entry({ name, mode: 0o644 }, content);
-  pack.finalize();
-  await ended;
-  const archive = Buffer.concat(chunks);
-  const sha256 = createHash("sha256").update(archive).digest("hex");
-  const manifest = parsePaper2AgentManifest({ schema_version: 1, name: "echo_record", description: "Test tool", package_sha256: sha256,
-    input_schema: schema, output_schema: schema, limits: { max_input_bytes: 4096, max_output_bytes: 4096, max_runtime_ms: 10_000 } });
-  const artifact: PaperPackageArtifact = {
-    sha256, manifest_hash: paper2AgentManifestHash(manifest), manifest, paper_sha256: createHash("sha256").update("Paper: line fitting, section 2.").digest("hex"), runtime_image: BASE_IMAGE,
-    files: Object.entries(files).map(([path, content]) => ({ path, bytes: Buffer.byteLength(content),
-      sha256: createHash("sha256").update(content).digest("hex") })).sort((a, b) => a.path.localeCompare(b.path)),
-    verification: { builder_run_id: "build-1", verifier_run_id: "verify-1", paper_references: ["Section 2: line fitting"], checks: [], test_source: "",
-      test_stdout: "", cases: [], model_calls: 1, input_tokens: null, output_tokens: null },
-  };
-  return { archive, artifact, manifest };
-}
-
-function terms(artifact: PaperPackageArtifact, targetId = "slot-a", price = "2000000"): PaperPublishTerms {
-  return { target_id: targetId, artifact_sha256: artifact.sha256, price_lovelace: price, buyer_bond_lovelace: "1000000",
-    supplier_bond_lovelace: "1000000" };
-}
-
-function preparation(pkg: { archive: Buffer; artifact: PaperPackageArtifact }, publicationTerms: PaperPublishTerms, id = JOB_ID) {
-  return { job_id: id, terms: publicationTerms, artifact: pkg.artifact, archive_base64: pkg.archive.toString("base64") };
-}
-
-/**
- * The mock chain builds synthetic transactions at the NETWORK_ID 0 advert address, so service tests
- * construct slots directly. Configuration loading rejects live testnet slots (tested below).
- */
-function target(id: string, key: string, live = true): PublisherTarget {
-  return new PublisherTarget(id, `Slot ${id}`,
-    { SUPPLIER_PRIV_KEY_HEX: key, NETWORK_ID: "0", OGMIOS_URL: "http://127.0.0.1:1337", LIVE_CHAIN: live ? "1" : "0" }, PUBLIC_URL);
-}
-
-function fakeImages(failedBuilds = 0): RuntimeImages & { build: Mock } {
-  const images = new Map([[BASE_IMAGE, { id: BASE_IMAGE, layers: ["sha256:base"] }]]);
-  let failures = failedBuilds;
-  return {
-    inspect: async (reference: string) => images.get(reference) ?? null,
-    build: vi.fn(async () => {
-      if (failures-- > 0) throw new Error("pip install failed");
-      images.set(RUNTIME_IMAGE, { id: RUNTIME_IMAGE, layers: ["sha256:base", "sha256:bundle"] });
-      return RUNTIME_IMAGE;
-    }),
-  };
-}
-
-interface Launch {
-  env: Record<string, string>;
-  signals: string[];
-  statusPolls: number;
-  admissions: number;
-  activeSessions: number;
-  /** Unpaid calls the child received, with the headers the proxy sent. */
-  calls: Array<{ headers: Record<string, string | string[] | undefined>; body: string }>;
-  /** While set, the child holds each unpaid call until it resolves. */
-  callGate?: Promise<void>;
-}
-
-/** A local stand-in for the supplier child that answers from its trusted launch environment. */
-function supplierLauncher(launches: Launch[], price: string): SupplierLauncher {
-  return ({ port, env }) => {
-    const launch: Launch = { env, signals: [], statusPolls: 0, admissions: 0, activeSessions: 0, calls: [] };
-    launches.push(launch);
-    const key = deriveSupplierKey(env.SUPPLIER_PRIV_KEY_HEX, env.NETWORK_ID === "1" ? 1 : 0);
-    const manifest = JSON.parse(readFileSync(env.PAPER2AGENT_MANIFEST, "utf8")) as Paper2AgentManifest;
-    const server = createServer((req, res) => {
-      res.setHeader("content-type", "application/json");
-      if (req.url === "/healthz") res.end(JSON.stringify({ ok: true }));
-      else if (req.url === "/capability") {
-        res.end(JSON.stringify({ capability_id: PAPER2AGENT_CAPABILITY_ID, model: paper2AgentModel(manifest), advert_ref: env.ADVERT_REF,
-          supplier_pkh: key.pubKeyHash, pub_key_hex: key.pubKeyHex, price_lovelace: price,
-          paper2agent: { manifest, manifest_hash: paper2AgentManifestHash(manifest) } }));
-      } else if (req.url === "/status") {
-        launch.statusPolls++;
-        res.end(JSON.stringify({ status: "free", active_sessions: launch.activeSessions }));
-      } else if (req.method === "POST" && req.url === "/v1/paper2agent/run") {
-        launch.admissions++;
-        res.statusCode = 202;
-        res.end(JSON.stringify({ job_id: "6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b", status: "accepted" }));
-      } else if (req.method === "POST" && req.url === "/v1/paper2agent/call") {
-        const chunks: Buffer[] = [];
-        req.on("data", (chunk: Buffer) => { chunks.push(chunk); });
-        req.on("end", () => {
-          launch.calls.push({ headers: req.headers, body: Buffer.concat(chunks).toString("utf8") });
-          void (launch.callGate ?? Promise.resolve()).then(() => {
-            res.end(JSON.stringify({ manifest_hash: paper2AgentManifestHash(manifest), result: { value: "x" }, wallclock_ms: 5 }));
-          });
-        });
-      } else {
-        res.statusCode = 404;
-        res.end("{}");
-      }
-    });
-    servers.push(server);
-    server.listen(port, "127.0.0.1");
-    let exitCode: number | null = null;
-    let exit: () => void = () => undefined;
-    const exited = new Promise<void>((resolve) => { exit = resolve; });
-    return {
-      get exitCode() { return exitCode; },
-      exited,
-      kill(signal) {
-        launch.signals.push(signal);
-        server.close();
-        server.closeAllConnections();
-        exitCode = 0;
-        exit();
-      },
-      output: () => "",
-    };
-  };
-}
-
-async function publisher(options: { dataDir?: string; targets?: PublisherTarget[]; chain?: MockChainProvider; images?: RuntimeImages;
-  postAdvert?: PaperPublisherDeps["postAdvert"]; price?: string; toolCallToken?: string;
-  identityController?: PaperPublisherConfig["identityController"]; registrar?: PaperPublisherDeps["registrar"];
-  identity?: PaperPublisherDeps["identity"] } = {}) {
-  const dataDir = options.dataDir ?? temporary();
-  const chain = options.chain ?? new MockChainProvider();
-  const images = options.images ?? fakeImages();
-  const launches: Launch[] = [];
-  const publisherConfig: PaperPublisherConfig = { dataDir, port: 8096, host: "127.0.0.1", token: TOKEN,
-    toolCallToken: options.toolCallToken ?? null, publicUrl: PUBLIC_URL,
-    runtimeImage: BASE_IMAGE, dockerPath: "/usr/bin/docker", dockerHost: null, repoRoot: process.cwd(),
-    supplierEntry: join(process.cwd(), "supplier/src/index.ts"), targets: options.targets ?? [target("slot-a", KEY_A)],
-    identityController: options.identityController ?? null };
-  const service = await PaperPublisherService.open(publisherConfig, {
-    chain: () => chain, images, launchSupplier: supplierLauncher(launches, options.price ?? "2000000"), postAdvert: options.postAdvert,
-    sleep: tick, log: () => undefined, registrar: options.registrar, identity: options.identity,
-  });
-  services.push(service);
-  return { service, app: createPaperPublisherApp(service), chain, images, launches, dataDir };
-}
-
-/** The shared builder contract with real wallet movements: sign, run beforeSubmit, then broadcast. */
-function walletFundedAdvert(walletInput: { txHash: string; index: number }, change: bigint, validUntilMs?: number): PaperPublisherDeps["postAdvert"] {
-  return async (params) => {
-    const txCborHex = encodeTxBody({
-      type: "post-advert", inputs: [walletInput], requiredSigners: [params.walletKey.pubKeyHash],
-      outputs: [
-        { ref: { txHash: "$self", index: 0 }, address: loadBlueprint().advertScriptAddress(0),
-          lovelace: params.advertDatum.supplier_bond_lovelace, datumHex: encodeAdvertDatum(params.advertDatum) },
-        { ref: { txHash: "$self", index: 1 }, address: params.walletKey.address, lovelace: change },
-      ],
-      ...(validUntilMs === undefined ? {} : { validityRange: { lowerBoundMs: null, upperBoundMs: validUntilMs } }),
-    });
-    const expectedTxHash = sha256Hex(txCborHex);
-    const built = { txCborHex, expectedTxHash, advertOutputRef: { txHash: expectedTxHash, index: 0 } };
-    await params.beforeSubmit?.(built);
-    await params.chain.submitTx(txCborHex);
-    await params.chain.awaitTx(expectedTxHash, 1_000);
-    return { txHash: expectedTxHash, advertRef: built.advertOutputRef, formattedRef: `${expectedTxHash}#0` };
-  };
-}
-
-function fundWallet(chain: MockChainProvider, key: string, lovelace: bigint): { txHash: string; index: number } {
-  const ref = { txHash: "dd".repeat(32), index: 0 };
-  chain.seed({ ref, address: deriveSupplierKey(key, 0).address, lovelace, assets: {}, datumHex: null, scriptRef: null });
-  return ref;
-}
+afterEach(cleanup);
 
 describe("publisher management boundary", () => {
   it("checks the bearer token before reading a body and never returns wallet keys", async () => {
@@ -493,9 +287,9 @@ describe("publisher journal invariants", () => {
     const record = (id: string, targetId: string) => ({ id, target_id: targetId, request_hash: "0".repeat(64),
       terms: {} as PaperPublishTerms, artifact: {} as PaperPackageArtifact, work_dir: `/data/${id}`, supplier_pkh: "aa".repeat(28),
       deposit_address: "addr_test1", endpoint_url: `${PUBLIC_URL}/tools/${targetId}` });
-    const transaction = (id: string, targetId: string, hash: string): AdvertTransaction => ({ publication_id: id, target_id: targetId,
-      tx_hash: hash, tx_cbor: "00", advert_ref: `${hash}#0`, advert_address: "addr_test1", advert_datum_hex: "00", wallet_inputs: [],
-      fee_lovelace: "0", wallet_debit_lovelace: "0", max_debit_lovelace: "1", valid_until_slot: null, signed_at: 1, confirmed_at: null });
+    const transaction = (id: string, targetId: string, hash: string): SignedAdvert => ({ publication_id: id, layout: "legacy",
+      target_id: targetId, tx_hash: hash, tx_cbor: "00", advert_ref: `${hash}#0`, advert_address: "addr_test1", advert_datum_hex: "00",
+      wallet_inputs: [], fee_lovelace: "0", wallet_debit_lovelace: "0", max_debit_lovelace: "1", valid_until_slot: null, signed_at: 1 });
     for (const [id, targetId] of [["unsigned", "slot-a"], ["signed", "slot-b"]]) {
       store.create(record(id, targetId), 1);
       store.update(id, ["preparing"], { phase: "prepared" }, 2);
@@ -557,21 +351,22 @@ describe("publisher configuration", () => {
   });
 });
 
-describe("slot identity records (Part 2 §9.2)", () => {
-  const identitySlot = (agentId?: string) => new PublisherTarget("slot-a", "Slot slot-a", { SUPPLIER_PRIV_KEY_HEX: KEY_A, NETWORK_ID: "0",
-    OGMIOS_URL: "http://127.0.0.1:1337", LIVE_CHAIN: "1", IDENTITY_POLICY_ID: IDENTITY.identityHash,
-    ...(agentId === undefined ? {} : { AGENT_ID: agentId }) }, PUBLIC_URL);
-  const controller = { controller: CONTROLLER.pubKeyHex, accountable: { type: "ControllerSet" as const } };
-  /** A stand-in Register builder: the slot key and the controller must sign. */
-  const registrar: PaperPublisherDeps["registrar"] = () => ({
-    async build(args) {
-      const signers = [args.wallet.pubKeyHash, deriveSupplierKey(CONTROLLER.privateKeyHex, 0).pubKeyHash].sort();
-      return { txCborHex: "84a0a0f5f6", txHash: "ab".repeat(32), agentId: AGENT_ID, requiredSigners: signers };
-    },
-    sign: async (tx) => tx,
-    txId: () => "ab".repeat(32),
-  });
+/** Slot slot-a of the identity release: IDENTITY_POLICY_ID, and AGENT_ID when given. */
+const identitySlot = (agentId?: string) => new PublisherTarget("slot-a", "Slot slot-a", { SUPPLIER_PRIV_KEY_HEX: KEY_A, NETWORK_ID: "0",
+  OGMIOS_URL: "http://127.0.0.1:1337", LIVE_CHAIN: "1", IDENTITY_POLICY_ID: IDENTITY.identityHash,
+  ...(agentId === undefined ? {} : { AGENT_ID: agentId }) }, PUBLIC_URL);
+const controller = { controller: CONTROLLER.pubKeyHex, accountable: { type: "ControllerSet" as const } };
+/** A stand-in Register builder: the slot key and the controller must sign. */
+const registrar: PaperPublisherDeps["registrar"] = () => ({
+  async build(args) {
+    const signers = [args.wallet.pubKeyHash, deriveSupplierKey(CONTROLLER.privateKeyHex, 0).pubKeyHash].sort();
+    return { txCborHex: "84a0a0f5f6", txHash: "ab".repeat(32), agentId: AGENT_ID, requiredSigners: signers };
+  },
+  sign: async (tx) => tx,
+  txId: () => "ab".repeat(32),
+});
 
+describe("slot identity records (Part 2 §9.2)", () => {
   async function prepared(options: Parameters<typeof publisher>[0]) {
     const fixture = await publisher(options);
     const pkg = await reviewedPackage();
@@ -629,5 +424,403 @@ describe("slot identity records (Part 2 §9.2)", () => {
     expect(postAdvert).toHaveBeenCalledTimes(1);
     expect(postAdvert.mock.calls[0]![0].advertDatum).toMatchObject({ agent_id: AGENT_ID, supplier_pkh: deriveSupplierKey(KEY_A, 0).pubKeyHash });
     expect(postAdvert.mock.calls[0]![0].identity).toBeDefined();
+  });
+});
+
+/** The publication and advert journal schema of the deployed publisher (commit 90b7a56): one advert per publication and per slot. */
+const DEPLOYED_SCHEMA = `
+CREATE TABLE publications (
+  id TEXT PRIMARY KEY, target_id TEXT NOT NULL,
+  phase TEXT NOT NULL CHECK (phase IN ('preparing', 'prepared', 'publishing', 'confirmation_pending', 'published', 'failed')),
+  request_hash TEXT NOT NULL, terms_json TEXT NOT NULL, artifact_json TEXT NOT NULL, work_dir TEXT NOT NULL, runtime_image_id TEXT,
+  supplier_pkh TEXT NOT NULL, deposit_address TEXT NOT NULL, endpoint_url TEXT NOT NULL, advert_ref TEXT, tx_hash TEXT,
+  actual_debit_lovelace TEXT, error TEXT, prepared_at INTEGER, published_at INTEGER, created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE UNIQUE INDEX publications_one_per_slot ON publications (target_id) WHERE phase <> 'failed' OR tx_hash IS NOT NULL;
+CREATE TABLE advert_transactions (
+  publication_id TEXT PRIMARY KEY REFERENCES publications (id), target_id TEXT NOT NULL UNIQUE, tx_hash TEXT NOT NULL UNIQUE,
+  tx_cbor TEXT NOT NULL, advert_ref TEXT NOT NULL, advert_address TEXT NOT NULL, advert_datum_hex TEXT NOT NULL,
+  wallet_inputs_json TEXT NOT NULL, fee_lovelace TEXT NOT NULL, wallet_debit_lovelace TEXT NOT NULL,
+  max_debit_lovelace TEXT NOT NULL, valid_until_slot INTEGER, signed_at INTEGER NOT NULL, confirmed_at INTEGER
+) WITHOUT ROWID;
+CREATE TRIGGER advert_transactions_append_only BEFORE DELETE ON advert_transactions
+BEGIN SELECT RAISE(ABORT, 'the advert transaction journal is append-only'); END;
+CREATE TRIGGER advert_transactions_immutable BEFORE UPDATE ON advert_transactions
+WHEN NEW.publication_id IS NOT OLD.publication_id OR NEW.tx_hash IS NOT OLD.tx_hash OR NEW.tx_cbor IS NOT OLD.tx_cbor
+  OR (OLD.confirmed_at IS NOT NULL AND NEW.confirmed_at IS NOT OLD.confirmed_at)
+BEGIN SELECT RAISE(ABORT, 'a journaled advert transaction is immutable'); END;
+CREATE TRIGGER publications_retained BEFORE DELETE ON publications
+BEGIN SELECT RAISE(ABORT, 'publication records are retained'); END;
+`;
+
+describe("advert journal migration", () => {
+  it("keeps every journaled advert as generation 1, one publication per slot, and the journal rules", () => {
+    const path = join(temporary(), "publisher.db");
+    const offer: AdvertDatum = { supplier_pkh: "aa".repeat(28), capability_id: PAPER2AGENT_CAPABILITY_ID, model: "paper2agent:test",
+      max_output_tokens: 0, max_processing_ms: 280_000, price_lovelace: 200_000n, supplier_bond_lovelace: 1_000_000n,
+      buyer_bond_lovelace: 1_000_000n, endpoint_url: `${PUBLIC_URL}/tools/slot-a`, detail_uri: "", detail_hash: "ab".repeat(32),
+      advertised_at: 1_760_000_000_000, status: "Active" };
+    const legacyDatum = encodeAdvertDatum(offer);
+    const identityDatum = encodeIdentityAdvertDatum({ ...offer, agent_id: AGENT_ID });
+    const inputs = JSON.stringify([{ ref: `${"dd".repeat(32)}#0`, lovelace: "10000000" }]);
+    const old = new Database(path);
+    old.exec(DEPLOYED_SCHEMA);
+    const publication = old.prepare(`INSERT INTO publications (id, target_id, phase, request_hash, terms_json, artifact_json, work_dir,
+      supplier_pkh, deposit_address, endpoint_url, advert_ref, tx_hash, actual_debit_lovelace, created_at, updated_at)
+      VALUES (?, ?, ?, ?, '{}', '{}', ?, ?, 'addr_test1', ?, ?, ?, ?, 1, ?)`);
+    const advert = old.prepare(`INSERT INTO advert_transactions (publication_id, target_id, tx_hash, tx_cbor, advert_ref, advert_address,
+      advert_datum_hex, wallet_inputs_json, fee_lovelace, wallet_debit_lovelace, max_debit_lovelace, valid_until_slot, signed_at,
+      confirmed_at) VALUES (?, ?, ?, ?, ?, 'addr_test1wadvert', ?, ?, '182488', '2682488', '3000000', 600, 2, ?)`);
+    const rows = [["live", "slot-a", "published", "a1", legacyDatum, 3], ["identity", "slot-b", "published", "b1", identityDatum, 3],
+      ["expired", "slot-c", "failed", "c1", legacyDatum, null]] as const;
+    for (const [id, slot, phase, byte, datum, confirmed] of rows) {
+      const hash = byte.repeat(32);
+      publication.run(id, slot, phase, "0".repeat(64), `/data/${id}`, "aa".repeat(28), `${PUBLIC_URL}/tools/${slot}`, `${hash}#0`, hash,
+        "2682488", phase === "failed" ? 9 : 4);
+      advert.run(id, slot, hash, `cbor-${id}`, `${hash}#0`, datum, inputs, confirmed);
+    }
+    publication.run("unsigned", "slot-d", "prepared", "0".repeat(64), "/data/unsigned", "aa".repeat(28), `${PUBLIC_URL}/tools/slot-d`,
+      null, null, null, 4);
+    old.close();
+
+    const store = PaperPublisherStore.open(path);
+    expect(store.adverts("live")).toEqual([{ publication_id: "live", generation: 1, layout: "legacy", target_id: "slot-a",
+      tx_hash: "a1".repeat(32), tx_cbor: "cbor-live", advert_ref: `${"a1".repeat(32)}#0`, advert_address: "addr_test1wadvert",
+      advert_datum_hex: legacyDatum, wallet_inputs: JSON.parse(inputs), fee_lovelace: "182488", wallet_debit_lovelace: "2682488",
+      max_debit_lovelace: "3000000", valid_until_slot: 600, signed_at: 2, confirmed_at: 3, switched_at: null, ended_at: null,
+      end_reason: null }]);
+    expect(store.publishAdvert("identity")).toMatchObject({ generation: 1, layout: "identity", ended_at: null });
+    expect(store.publishAdvert("expired")).toMatchObject({ generation: 1, layout: "legacy", ended_at: 9, end_reason: "expired" });
+    expect(store.adverts("unsigned")).toEqual([]);
+    expect(store.get("live")).toMatchObject({ phase: "published", tx_hash: "a1".repeat(32), advert_ref: `${"a1".repeat(32)}#0` });
+
+    expect(store.heldTargets()).toEqual(new Set(["slot-a", "slot-b", "slot-c", "slot-d"]));
+    expect(() => store.create({ id: "second", target_id: "slot-a", request_hash: "1".repeat(64), terms: {} as PaperPublishTerms,
+      artifact: {} as PaperPackageArtifact, work_dir: "/data/second", supplier_pkh: "aa".repeat(28), deposit_address: "addr_test1",
+      endpoint_url: `${PUBLIC_URL}/tools/slot-a` }, 10)).toThrow("target_slot_in_use");
+    const raw = new Database(path);
+    expect(() => raw.prepare("DELETE FROM advert_transactions WHERE publication_id = 'live'").run()).toThrow(/append-only/);
+    expect(() => raw.prepare("UPDATE advert_transactions SET tx_cbor = 'x' WHERE publication_id = 'live'").run()).toThrow(/immutable/);
+    expect(() => raw.prepare("UPDATE advert_transactions SET end_reason = 'retired' WHERE publication_id = 'expired'").run())
+      .toThrow(/immutable/);
+    raw.close();
+
+    // A published slot takes one live advert per layout; a re-advertisement is the next generation.
+    const signed = (byte: string, layout: "legacy" | "identity", publicationId = "live", slot = "slot-a"): SignedAdvert => ({
+      publication_id: publicationId, layout, target_id: slot, tx_hash: byte.repeat(32), tx_cbor: `cbor-${byte}`,
+      advert_ref: `${byte.repeat(32)}#0`, advert_address: "addr_test1wnew", advert_datum_hex: identityDatum, wallet_inputs: [],
+      fee_lovelace: "0", wallet_debit_lovelace: "0", max_debit_lovelace: "1", valid_until_slot: null, signed_at: 11 });
+    expect(store.journalReadvert(signed("e1", "identity"))).toMatchObject({ generation: 2, layout: "identity", target_id: "slot-a" });
+    expect(() => store.journalReadvert(signed("e2", "identity"))).toThrow("advert_layout_live");
+    expect(() => store.journalReadvert(signed("e3", "legacy"))).toThrow("advert_layout_live");
+    expect(() => store.journalReadvert(signed("e4", "identity", "unsigned", "slot-d"))).toThrow("publication_state_changed");
+    // Retirements need a live advert of the journal; foreign keys are on again after the migration.
+    const attempt = { tx_hash: "f1".repeat(32), publication_id: "expired", generation: 1, tx_cbor: "00", wallet_inputs: [],
+      fee_lovelace: "0", wallet_debit_lovelace: "0", max_debit_lovelace: "1", valid_until_slot: null, signed_at: 12 };
+    expect(() => store.journalRetirement(attempt)).toThrow(/not retired again/);
+    expect(() => store.journalRetirement({ ...attempt, publication_id: "live", generation: 9 })).toThrow(/FOREIGN KEY/);
+    store.close();
+
+    const reopened = PaperPublisherStore.open(path);
+    expect(reopened.adverts("live").map((row) => [row.generation, row.layout])).toEqual([[1, "legacy"], [2, "identity"]]);
+    reopened.close();
+  });
+});
+
+describe("identity re-advertisement of a published slot (Part 2 §9.6)", () => {
+  const JOB_B = "7d6c5b4a-3e2f-4a1b-8c9d-0e1f2a3b4c5d";
+  const approval = { confirm: true, max_debit_lovelace: "5000000" };
+  const readvert = (app: Express, body: object = approval) => request(app).post("/targets/slot-a/readvert").set(AUTH).send(body);
+  const switchAdvert = (app: Express) => request(app).post("/targets/slot-a/switch").set(AUTH);
+  const retireLegacy = (app: Express, body: object = approval) => request(app).post("/targets/slot-a/retire-legacy").set(AUTH).send(body);
+  const adverts = (app: Express) => request(app).get("/targets/slot-a/adverts").set(AUTH);
+  const outputOf = (ref: string) => ({ txHash: ref.split("#")[0]!, index: Number(ref.split("#")[1]) });
+  const states = (rows: SlotAdvertView[]) => rows.map((row) => [row.generation, row.layout, row.state, row.serving]);
+
+  /**
+   * slot-a (and slot-b with secondSlot) published with legacy adverts by the
+   * legacy release; then the publisher restarts with the identity settings of
+   * slot-a. `record` (default) puts the record of AGENT_ID on chain; `register`
+   * builds the slot's record registration first (a slot without AGENT_ID).
+   */
+  async function republished(options: { chain?: MockChainProvider; slot?: PublisherTarget; record?: boolean; register?: boolean;
+    secondSlot?: boolean; postAdvert?: PaperPublisherDeps["postAdvert"] } = {}) {
+    const chain = options.chain ?? new MockChainProvider();
+    const dataDir = temporary();
+    const legacySlots = [target("slot-a", KEY_A), ...(options.secondSlot ? [target("slot-b", KEY_B)] : [])];
+    const legacy = await publisher({ dataDir, chain, targets: legacySlots });
+    const pkg = await reviewedPackage();
+    const legacyRefs: string[] = [];
+    for (const [slot, job] of [["slot-a", JOB_ID], ["slot-b", JOB_B]].slice(0, legacySlots.length)) {
+      expect((await request(legacy.app).post("/publications").set(AUTH).send(preparation(pkg, terms(pkg.artifact, slot), job))).status)
+        .toBe(200);
+      const published = await request(legacy.app).post(`/publications/${job}/publish`).set(AUTH)
+        .send({ artifact_sha256: pkg.artifact.sha256, confirm: true, max_debit_lovelace: "5000000" });
+      expect(published.body.state).toBe("published");
+      legacyRefs.push(published.body.advert_ref);
+    }
+    await legacy.service.close();
+    const settings = { dataDir, chain, images: legacy.images, targets: [options.slot ?? identitySlot(AGENT_ID), ...legacySlots.slice(1)],
+      identity: () => testIdentity(chain), identityController: controller, registrar };
+    const fixture = await publisher({ ...settings, postAdvert: options.postAdvert });
+    await fixture.service.idle();
+    if (options.register) expect((await request(fixture.app).post("/targets/slot-a/record").set(AUTH)).body.agent_id).toBe(AGENT_ID);
+    if (options.record !== false) chain.seed(recordUtxo(supplierAgentRecord(deriveSupplierKey(KEY_A, 0), [PAPER2AGENT_CAPABILITY_ID])));
+    /** A publisher restart on the same state and chain. */
+    const restart = async (deps: Pick<Parameters<typeof publisher>[0] & object, "postAdvert" | "retireAdvert"> = {}) => {
+      await fixture.service.close();
+      const next = await publisher({ ...settings, ...deps });
+      await next.service.idle();
+      return next;
+    };
+    return { ...fixture, chain, pkg, legacyRef: legacyRefs[0]!, restart };
+  }
+
+  it("refuses an unpublished slot, a slot without identity settings or a listed record, and an unapproved request", async () => {
+    const chain = new MockChainProvider();
+    const unpublished = await publisher({ chain, targets: [identitySlot(AGENT_ID)], identity: () => testIdentity(chain) });
+    expect((await readvert(unpublished.app)).body.error).toBe("slot_not_published");
+    const pkg = await reviewedPackage();
+    await request(unpublished.app).post("/publications").set(AUTH).send(preparation(pkg, terms(pkg.artifact)));
+    const prepared = await readvert(unpublished.app);
+    expect([prepared.status, prepared.body.error]).toEqual([409, "slot_not_published"]);
+    expect((await adverts(unpublished.app)).status).toBe(404);
+    for (const call of [switchAdvert(unpublished.app), retireLegacy(unpublished.app)]) expect((await call).body.error).toBe("slot_not_published");
+
+    const legacyOnly = await republished({ slot: target("slot-a", KEY_A) });
+    const noRecord = await republished({ slot: identitySlot(), record: false });
+    const unlisted = await republished({ record: false });
+    const submits = [legacyOnly, noRecord, unlisted].map((fixture) => vi.spyOn(fixture.chain, "submitTx"));
+    expect((await readvert(legacyOnly.app)).body.error).toBe("identity_not_configured");
+    const required = await readvert(noRecord.app);
+    expect([required.status, required.body.error]).toEqual([409, "slot_record_required"]);
+    const invalid = await readvert(unlisted.app);
+    expect([invalid.status, invalid.body.error]).toEqual([409, "slot_record_invalid"]);
+    expect(invalid.body.message).toMatch(/agent record not found/);
+    expect((await readvert(unlisted.app, { confirm: false, max_debit_lovelace: "5000000" })).body.error).toBe("confirmation_required");
+    expect((await readvert(unlisted.app, { confirm: true })).status).toBe(400);
+    expect((await adverts(unlisted.app)).body.adverts.map((row: SlotAdvertView) => row.layout)).toEqual(["legacy"]);
+    for (const submit of submits) expect(submit).not.toHaveBeenCalled();
+  });
+
+  it("posts one identity advert with the publish advert's offer and keeps serving the legacy advert until the switch", async () => {
+    const fixture = await republished();
+    const submit = vi.spyOn(fixture.chain, "submitTx");
+    const first = await readvert(fixture.app);
+    expect(first.status).toBe(200);
+    expect(first.body).toMatchObject({ target_id: "slot-a", publication_id: JOB_ID, agent_id: AGENT_ID,
+      serving_advert_ref: fixture.legacyRef, child_advert_ref: fixture.legacyRef, error: null });
+    expect(states(first.body.adverts)).toEqual([[1, "legacy", "live", true], [2, "identity", "live", false]]);
+    const [legacy, identity] = first.body.adverts as SlotAdvertView[];
+    expect(legacy).toMatchObject({ advert_ref: fixture.legacyRef, agent_id: null, retire_tx_hash: null });
+    expect(identity).toMatchObject({ agent_id: AGENT_ID, advert_ref: `${identity!.tx_hash}#0`, switched_at: null });
+    expect(submit).toHaveBeenCalledTimes(1);
+    const legacyOutput = await fixture.chain.queryUtxo(outputOf(legacy!.advert_ref));
+    const identityOutput = await fixture.chain.queryUtxo(outputOf(identity!.advert_ref));
+    expect(identityOutput?.address).toBe(IDENTITY.advertScriptAddress(0));
+    const posted = decodeIdentityAdvertDatum(identityOutput!.datumHex!);
+    expect(posted).toEqual({ ...decodeAdvertDatum(legacyOutput!.datumHex!), advertised_at: posted.advertised_at, agent_id: AGENT_ID });
+
+    // Repeats never sign again. The child still serves the legacy advert, and it was not restarted.
+    const again = await readvert(fixture.app);
+    expect(again.body.adverts).toEqual(first.body.adverts);
+    expect((await adverts(fixture.app)).body.adverts).toEqual(first.body.adverts);
+    expect(submit).toHaveBeenCalledTimes(1);
+    expect(fixture.launches).toHaveLength(1);
+    expect(fixture.launches[0]!.signals).toEqual([]);
+    expect((await request(fixture.app).get("/tools/slot-a/capability")).body.advert_ref).toBe(fixture.legacyRef);
+  });
+
+  it("reads a readvert lost between broadcast and confirmation from the chain after a restart, without signing again", async () => {
+    const fixture = await republished();
+    const broadcast = fixture.chain.submitTx.bind(fixture.chain);
+    const atBroadcast: unknown[] = [];
+    vi.spyOn(fixture.chain, "submitTx").mockImplementation(async (cbor) => {
+      atBroadcast.push(states((await adverts(fixture.app)).body.adverts));
+      return broadcast(cbor);
+    });
+    vi.spyOn(fixture.chain, "awaitTx").mockRejectedValue(new Error("awaitTx_timeout: not observed"));
+    const lost = await readvert(fixture.app);
+    expect(lost.status).toBe(200);
+    expect(lost.body.error).toMatch(/outcome is unknown.*never signed again/);
+    expect(states(lost.body.adverts)).toEqual([[1, "legacy", "live", true], [2, "identity", "pending", false]]);
+    expect(atBroadcast).toEqual([[[1, "legacy", "live", true], [2, "identity", "pending", false]]]);
+    vi.restoreAllMocks();
+
+    const postAdvert = vi.fn<NonNullable<PaperPublisherDeps["postAdvert"]>>();
+    const restarted = await fixture.restart({ postAdvert });
+    const submit = vi.spyOn(fixture.chain, "submitTx");
+    const resumed = await readvert(restarted.app);
+    expect(resumed.body.error).toBeNull();
+    expect(states(resumed.body.adverts)).toEqual([[1, "legacy", "live", true], [2, "identity", "live", false]]);
+    expect(resumed.body.adverts[1].tx_hash).toBe(lost.body.adverts[1].tx_hash);
+    expect(postAdvert).not.toHaveBeenCalled();
+    expect(submit).not.toHaveBeenCalled();
+  });
+
+  it("checks the readvert debit, ends an unconfirmed readvert only after the finality margin, then signs the next generation", async () => {
+    const chain = new MockChainProvider();
+    const input = fundWallet(chain, KEY_A, 10_000_000n);
+    const fixture = await republished({ chain, postAdvert: walletFundedAdvert(input, 7_000_000n, 600_000) });
+    const over = await readvert(fixture.app, { confirm: true, max_debit_lovelace: "2999999" });
+    expect([over.status, over.body.error]).toEqual([409, "debit_exceeds_approval"]);
+    expect(over.body.message).toContain("debits 3000000 lovelace");
+    expect(states((await adverts(fixture.app)).body.adverts)).toEqual([[1, "legacy", "live", true]]);
+
+    vi.spyOn(chain, "submitTx").mockRejectedValueOnce(new Error("socket hang up"));
+    const lost = await readvert(fixture.app);
+    expect(lost.body.adverts[1]).toMatchObject({ generation: 2, state: "pending", wallet_debit_lovelace: "3000000" });
+    chain.advanceSlot(600 + 43_200);
+    const within = await adverts(fixture.app);
+    expect(within.body.adverts[1].state).toBe("pending");
+    expect(within.body.error).toContain("cannot confirm after slot 600");
+    expect((await readvert(fixture.app)).body.adverts).toHaveLength(2);
+
+    chain.advanceSlot(1);
+    const expired = await adverts(fixture.app);
+    expect(expired.body.adverts[1]).toMatchObject({ generation: 2, state: "expired" });
+    expect(expired.body.error).toMatch(/no funds moved/);
+    const next = await readvert(fixture.app);
+    expect(states(next.body.adverts)).toEqual([[1, "legacy", "live", true], [2, "identity", "expired", false],
+      [3, "identity", "live", false]]);
+    expect(await chain.queryUtxo(input)).toBeNull();
+  });
+
+  it("switches only that slot's child to the identity advert after its active work, durably", async () => {
+    const fixture = await republished({ slot: identitySlot(), register: true, secondSlot: true });
+    const identityRef = (await readvert(fixture.app)).body.adverts[1].advert_ref as string;
+    const legacyChild = fixture.launches.find((launch) => launch.targetId === "slot-a")!;
+    const otherChild = fixture.launches.find((launch) => launch.targetId === "slot-b")!;
+    expect(legacyChild.env.ADVERT_REF).toBe(fixture.legacyRef);
+    expect(legacyChild.env.AGENT_ID).toBeUndefined();
+
+    legacyChild.activeSessions = 1;
+    const switching = switchAdvert(fixture.app).then((reply) => reply);
+    await until(() => legacyChild.statusPolls >= 2);
+    const payload = { manifest_hash: fixture.pkg.artifact.manifest_hash, input: { value: "x" } };
+    const refused = await request(fixture.app).post("/tools/slot-a/v1/paper2agent/run").set("X-Escrow-Ref", `${"e".repeat(64)}#0`).send(payload);
+    expect([refused.status, refused.body.reason]).toEqual([503, "supplier_draining"]);
+    expect((await request(fixture.app).get("/tools/slot-a/status")).status).toBe(200);
+    expect((await request(fixture.app).post("/tools/slot-b/v1/paper2agent/run").set("X-Escrow-Ref", `${"e".repeat(64)}#1`)
+      .send(payload)).status).toBe(202);
+    expect(legacyChild.signals).toEqual([]);
+    legacyChild.activeSessions = 0;
+    const switched = await switching;
+    expect(switched.status).toBe(200);
+    expect(switched.body).toMatchObject({ serving_advert_ref: identityRef, child_advert_ref: identityRef, error: null });
+    expect(states(switched.body.adverts)).toEqual([[1, "legacy", "live", false], [2, "identity", "live", true]]);
+    expect(legacyChild.signals).toEqual(["SIGTERM"]);
+    const identityChild = fixture.launches.at(-1)!;
+    expect(identityChild.targetId).toBe("slot-a");
+    expect(identityChild.env).toMatchObject({ ADVERT_REF: identityRef, AGENT_ID, IDENTITY_POLICY_ID: IDENTITY.identityHash,
+      CAPABILITY_KIND: "paper2agent" });
+    expect(otherChild.signals).toEqual([]);
+    expect(fixture.launches.filter((launch) => launch.targetId === "slot-b")).toHaveLength(1);
+    expect((await request(fixture.app).get("/tools/slot-a/capability")).body).toMatchObject({ advert_ref: identityRef, agent_id: AGENT_ID });
+
+    // A repeated switch restarts nothing; a publisher restart serves the identity advert.
+    const launched = fixture.launches.length;
+    expect((await switchAdvert(fixture.app)).body.child_advert_ref).toBe(identityRef);
+    expect(fixture.launches).toHaveLength(launched);
+    const restarted = await fixture.restart();
+    expect(restarted.launches.find((launch) => launch.targetId === "slot-a")!.env).toMatchObject({ ADVERT_REF: identityRef, AGENT_ID });
+    expect(restarted.launches.find((launch) => launch.targetId === "slot-b")!.env.ADVERT_REF).not.toBe(identityRef);
+  });
+
+  it("refuses a switch before the identity advert is confirmed", async () => {
+    const fixture = await republished();
+    const missing = await switchAdvert(fixture.app);
+    expect([missing.status, missing.body.error]).toEqual([409, "identity_advert_missing"]);
+    vi.spyOn(fixture.chain, "submitTx").mockRejectedValueOnce(new Error("socket hang up"));
+    await readvert(fixture.app);
+    const pending = await switchAdvert(fixture.app);
+    expect([pending.status, pending.body.error]).toEqual([409, "identity_advert_pending"]);
+    expect(fixture.launches).toHaveLength(1);
+  });
+
+  it("retires the legacy advert only while the identity advert is live, once", async () => {
+    const fixture = await republished();
+    const submit = vi.spyOn(fixture.chain, "submitTx");
+    const early = await retireLegacy(fixture.app);
+    expect([early.status, early.body.error]).toEqual([409, "identity_advert_not_live"]);
+    expect(early.body.message).toMatch(/no confirmed identity advert/);
+    await readvert(fixture.app);
+    const unswitched = await retireLegacy(fixture.app);
+    expect([unswitched.status, unswitched.body.error]).toEqual([409, "identity_advert_not_live"]);
+    expect(unswitched.body.message).toMatch(/has not switched/);
+    await switchAdvert(fixture.app);
+    expect(submit).toHaveBeenCalledTimes(1);
+    expect(await fixture.chain.queryUtxo(outputOf(fixture.legacyRef))).not.toBeNull();
+
+    const retired = await retireLegacy(fixture.app);
+    expect(retired.status).toBe(200);
+    expect(retired.body.error).toBeNull();
+    expect(states(retired.body.adverts)).toEqual([[1, "legacy", "retired", false], [2, "identity", "live", true]]);
+    const retireTx = retired.body.adverts[0].retire_tx_hash as string;
+    expect(await fixture.chain.queryUtxo(outputOf(fixture.legacyRef))).toBeNull();
+    expect(await fixture.chain.queryUtxo({ txHash: retireTx, index: 0 }))
+      .toMatchObject({ address: deriveSupplierKey(KEY_A, 0).address, lovelace: 1_000_000n });
+    expect(submit).toHaveBeenCalledTimes(2);
+    const again = await retireLegacy(fixture.app);
+    expect(again.body.adverts).toEqual(retired.body.adverts);
+    expect(submit).toHaveBeenCalledTimes(2);
+    expect((await request(fixture.app).get("/tools/slot-a/capability")).body.advert_ref).toBe(retired.body.adverts[1].advert_ref);
+  });
+
+  it("refuses to retire while no ready child serves the identity advert", async () => {
+    const fixture = await republished();
+    await readvert(fixture.app);
+    await switchAdvert(fixture.app);
+    const submit = vi.spyOn(fixture.chain, "submitTx");
+    // The identity child exits; no request has started it again yet.
+    fixture.launches.at(-1)!.crash();
+    const refused = await retireLegacy(fixture.app);
+    expect([refused.status, refused.body.error]).toEqual([409, "identity_advert_not_live"]);
+    expect(refused.body.message).toMatch(/no ready supplier serves identity advert/);
+    expect(refused.body.message).toContain("Nothing was broadcast");
+    expect(submit).not.toHaveBeenCalled();
+    expect(await fixture.chain.queryUtxo(outputOf(fixture.legacyRef))).not.toBeNull();
+  });
+
+  it("reads a lost RetireAdvert outcome from the chain, sends the same bytes again while they can confirm, and never signs anew", async () => {
+    const retireCalls: unknown[] = [];
+    const fixture = await republished();
+    await readvert(fixture.app);
+    await switchAdvert(fixture.app);
+    // The node rejects the first broadcast: the journaled attempt stays valid (the mock body has no expiry).
+    vi.spyOn(fixture.chain, "submitTx").mockRejectedValueOnce(new Error("socket hang up"));
+    const lost = await retireLegacy(fixture.app);
+    expect(lost.status).toBe(200);
+    expect(lost.body.error).toMatch(/outcome is unknown/);
+    expect(states(lost.body.adverts)[0]).toEqual([1, "legacy", "retiring", false]);
+    const attempt = lost.body.adverts[0].retire_tx_hash as string;
+    expect(await fixture.chain.queryUtxo(outputOf(fixture.legacyRef))).not.toBeNull();
+    vi.restoreAllMocks();
+
+    const restarted = await fixture.restart({ retireAdvert: async (params) => { retireCalls.push(params); throw new Error("not again"); } });
+    const submit = vi.spyOn(fixture.chain, "submitTx");
+    const resent = await retireLegacy(restarted.app);
+    expect(resent.body.error).toBeNull();
+    expect(states(resent.body.adverts)).toEqual([[1, "legacy", "retired", false], [2, "identity", "live", true]]);
+    expect(resent.body.adverts[0].retire_tx_hash).toBe(attempt);
+    expect(submit).toHaveBeenCalledTimes(1);
+    expect(retireCalls).toEqual([]);
+  });
+
+  it("settles a RetireAdvert that confirmed while the publisher was down", async () => {
+    const fixture = await republished();
+    await readvert(fixture.app);
+    await switchAdvert(fixture.app);
+    vi.spyOn(fixture.chain, "awaitTx").mockRejectedValueOnce(new Error("awaitTx_timeout: not observed"));
+    const lost = await retireLegacy(fixture.app);
+    const attempt = lost.body.adverts[0].retire_tx_hash as string;
+    expect(await fixture.chain.queryUtxo(outputOf(fixture.legacyRef))).toBeNull();
+    vi.restoreAllMocks();
+
+    const restarted = await fixture.restart();
+    const settled = await adverts(restarted.app);
+    expect(states(settled.body.adverts)).toEqual([[1, "legacy", "retired", false], [2, "identity", "live", true]]);
+    expect(settled.body.adverts[0].retire_tx_hash).toBe(attempt);
   });
 });

@@ -13,6 +13,14 @@
  * (POST /targets/<id>/record); the offline controller signs it; the publisher
  * journals and broadcasts it (POST /targets/<id>/record/submit). A publication
  * then needs that record to list the slot key and mcp.tool.execute.v1.
+ *
+ * Re-advertisement (Part 2 §9.6): a slot published with a legacy advert gets
+ * an identity-layout advert for the same publication and terms, once its record
+ * exists (POST /targets/<id>/readvert). The journal keeps both as advert
+ * generations of the publication. The supplier keeps serving the legacy advert
+ * until the switch (POST /targets/<id>/switch) restarts only that slot's child
+ * with the identity advert. The legacy advert is then retired explicitly
+ * (POST /targets/<id>/retire-legacy), only while the identity advert is live.
  */
 import { spawn } from "node:child_process";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
@@ -20,11 +28,11 @@ import { mkdir, open, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { dirname, join } from "node:path";
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
-import { LiveOgmiosProvider, ReadOnlyOgmiosProvider, type ChainProvider, type OutputReference } from "@marketplace/shared/chain";
+import { LiveOgmiosProvider, ReadOnlyOgmiosProvider, type ChainProvider, type OutputReference, type Utxo } from "@marketplace/shared/chain";
 import { canonicalize, decodeAdvertDatum, decodeIdentityAdvertDatum, type AdvertDatum, type IdentityAdvertDatum } from "@marketplace/shared/cbor";
 import { vectorDid } from "@marketplace/shared/identity";
 import { transactionId } from "@marketplace/shared";
-import { isIdentityAdvertDatum, loadBlueprint, loadIdentityBlueprint, type PostAdvertBuildResult } from "@marketplace/shared/tx";
+import { isIdentityAdvertDatum, loadBlueprint, loadIdentityBlueprint, type BuildResult, type PostAdvertBuildResult } from "@marketplace/shared/tx";
 import { inspectSignedTransaction, inspectSignedTransactionFinancials } from "@marketplace/shared/tx/server";
 import {
   MAX_TOOL_INPUT_BYTES, PAPER2AGENT_CAPABILITY_ID, PAPER2AGENT_DELIVERY_OVERHEAD_MS,
@@ -32,14 +40,15 @@ import {
 } from "@marketplace/shared/paper2agent";
 import type { PaperPackageArtifact, PaperPublication, PaperPublishTarget, PaperPublishTerms } from "@marketplace/shared/paper2agent/workflow";
 import { runPostAdvert, type PostAdvertFlowParams, type PostAdvertFlowResult } from "../../supplier/src/cli/postAdvertFlow.js";
+import { runRetireAdvert, type RetireAdvertFlowParams, type RetireAdvertFlowResult } from "../../supplier/src/cli/retireAdvertFlow.js";
 import { readManifest } from "../../supplier/src/paper2agent/local.js";
 import { advertRecordProblem, decodeAdvert, supplierIdentity, type SupplierIdentity } from "../../supplier/src/identity/agent.js";
 import { buildRegistration, recordsListingKey, registerWindow, supplierRecord, type RecordRegistrar } from "../../supplier/src/identity/register.js";
 import { chainRegistrar, ogmiosProtocolParameters, vectorSlotConfig } from "../../supplier/src/identity/registrar.js";
 import { MAX_PACKAGE_BYTES, extractPackage, fileSha256, packageRelativePath, verifyPackageFiles } from "./archive.js";
 import type { PaperPublisherConfig, PublisherTarget } from "./publisher-config.js";
-import { PaperPublisherStore, PublicationConflictError, type AdvertTransaction, type PublicationRecord, type SlotRegistration,
-  type WalletInput } from "./publisher-store.js";
+import { PaperPublisherStore, PublicationConflictError, type AdvertLayout, type AdvertRetirement, type AdvertTransaction,
+  type PublicationRecord, type SignedAdvert, type SlotRegistration, type WalletInput } from "./publisher-store.js";
 import { dockerCommand } from "./sandbox.js";
 
 const PUBLICATION_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
@@ -95,6 +104,22 @@ function journaledAgent(transaction: AdvertTransaction): string | null {
   }
 }
 
+/**
+ * The advert that a publication's supplier serves: the switched live advert,
+ * else the publish advert while it lives, else the newest confirmed live advert.
+ */
+function servingAdvert(adverts: readonly AdvertTransaction[]): AdvertTransaction | undefined {
+  const live = adverts.filter((advert) => advert.ended_at === null);
+  const newestFirst = [...live].reverse();
+  return newestFirst.find((advert) => advert.switched_at !== null) ?? live.find((advert) => advert.generation === 1) ??
+    newestFirst.find((advert) => advert.confirmed_at !== null);
+}
+
+/** The live identity-layout advert of a publication, if any. */
+function liveIdentityAdvert(adverts: readonly AdvertTransaction[]): AdvertTransaction | undefined {
+  return adverts.find((advert) => advert.layout === "identity" && advert.ended_at === null);
+}
+
 /** A slot's identity record registration (Part 2 §9.2) as the management API shows it. */
 export interface SlotRecordView {
   target_id: string;
@@ -108,6 +133,45 @@ export interface SlotRecordView {
   required_signers: string[];
   missing_signers: string[];
   valid_until_ms: number | null;
+  error: string | null;
+}
+
+/** One advert of a slot's publication as the management API shows it. */
+export interface SlotAdvertView {
+  /** 1: the publish advert; a re-advertisement takes the next generation. */
+  generation: number;
+  layout: AdvertLayout;
+  agent_id: string | null;
+  advert_ref: string;
+  tx_hash: string;
+  /**
+   * pending: journaled, not confirmed. live: confirmed and not ended. retiring:
+   * a journaled RetireAdvert transaction is not confirmed. retired: the advert
+   * output is spent. expired: the transaction never confirmed and cannot.
+   */
+  state: "pending" | "live" | "retiring" | "retired" | "expired";
+  /** The advert that the publisher configures the slot's supplier with. */
+  serving: boolean;
+  wallet_debit_lovelace: string;
+  signed_at: number;
+  confirmed_at: number | null;
+  switched_at: number | null;
+  ended_at: number | null;
+  /** The confirmed RetireAdvert transaction, else the newest journaled attempt. */
+  retire_tx_hash: string | null;
+}
+
+/** The adverts of a slot's publication (Part 2 §9.6: re-advertisement, switch, legacy retirement). */
+export interface SlotAdvertsView {
+  target_id: string;
+  publication_id: string;
+  /** The slot's agent: AGENT_ID, or the agent of the publisher's record registration. */
+  agent_id: string | null;
+  /** The advert that the publisher configures the slot's supplier with. */
+  serving_advert_ref: string | null;
+  /** The advert that the running, ready supplier child serves; null while no child is ready. */
+  child_advert_ref: string | null;
+  adverts: SlotAdvertView[];
   error: string | null;
 }
 
@@ -164,6 +228,16 @@ function fields(value: unknown, label: string, keys: readonly string[]): Record<
 function outputRef(text: string): OutputReference {
   const [txHash, index] = text.split("#");
   return { txHash, index: Number(index) };
+}
+
+/** The operator's approval of one live transaction: confirm, and the maximum slot-wallet debit. */
+function approvedDebit(approval: Record<string, unknown>): bigint {
+  if (approval.confirm !== true) throw new PublisherError(400, "confirmation_required", "confirm must be true to approve a live debit.");
+  const amount = approval.max_debit_lovelace;
+  if (typeof amount !== "string" || !LOVELACE.test(amount) || BigInt(amount) <= 0n) {
+    throw invalid("max_debit_lovelace must be a positive integer string");
+  }
+  return BigInt(amount);
 }
 
 function parseTerms(value: unknown): PaperPublishTerms {
@@ -414,11 +488,15 @@ function spawnSupplier(config: PaperPublisherConfig, log: (line: string) => void
 
 interface SupervisedSupplier {
   publicationId: string;
+  /** The advert in the child's ADVERT_REF. */
+  advertRef: string;
   port: number;
   process: SupplierProcess;
   ready: boolean;
   /** Proxied admissions (paid or free) still in flight. */
   admissions: number;
+  /** A switch to another advert waits for active work; new admissions are refused meanwhile. */
+  draining: boolean;
 }
 
 export interface ChildReply {
@@ -441,6 +519,8 @@ export interface PaperPublisherDeps {
   launchSupplier?: SupplierLauncher;
   /** The shared PostAdvert flow (supplier runPostAdvert). It must run beforeSubmit before any broadcast. */
   postAdvert?: (params: PostAdvertFlowParams) => Promise<PostAdvertFlowResult>;
+  /** The shared RetireAdvert flow (supplier runRetireAdvert). It must run beforeSubmit before any broadcast. */
+  retireAdvert?: (params: RetireAdvertFlowParams) => Promise<RetireAdvertFlowResult>;
   now?: () => number;
   /** Poll interval wait for supplier readiness and drain. */
   sleep?: (ms: number) => Promise<void>;
@@ -456,6 +536,7 @@ export class PaperPublisherService {
   private readonly images: RuntimeImages;
   private readonly launchSupplier: SupplierLauncher;
   private readonly postAdvert: (params: PostAdvertFlowParams) => Promise<PostAdvertFlowResult>;
+  private readonly retireAdvert: (params: RetireAdvertFlowParams) => Promise<RetireAdvertFlowResult>;
   private readonly now: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly log: (line: string) => void;
@@ -481,6 +562,7 @@ export class PaperPublisherService {
     this.log = deps.log ?? ((line) => { process.stderr.write(`[paper2agent-publisher] ${line}\n`); });
     this.launchSupplier = deps.launchSupplier ?? spawnSupplier(config, this.log);
     this.postAdvert = deps.postAdvert ?? runPostAdvert;
+    this.retireAdvert = deps.retireAdvert ?? runRetireAdvert;
     this.now = deps.now ?? Date.now;
     this.sleep = deps.sleep ?? ((ms) => new Promise<void>((resolve) => { setTimeout(resolve, ms); }));
     this.toolCallDigest = config.toolCallToken ? createHash("sha256").update(config.toolCallToken).digest() : null;
@@ -506,7 +588,7 @@ export class PaperPublisherService {
     const service = new PaperPublisherService(config, store, deps);
     store.recover(service.now());
     for (const record of store.all()) {
-      if (record.phase === "published" || (record.phase === "publishing" && store.transaction(record.id)?.confirmed_at != null)) {
+      if (record.phase === "published" || (record.phase === "publishing" && store.publishAdvert(record.id)?.confirmed_at != null)) {
         void service.activate(record.id);
       }
     }
@@ -588,15 +670,10 @@ export class PaperPublisherService {
   async publish(id: string, body: unknown): Promise<PaperPublication> {
     this.admit();
     const approval = fields(body, "approval", ["artifact_sha256", "confirm", "max_debit_lovelace"]);
-    if (approval.confirm !== true) throw new PublisherError(400, "confirmation_required", "confirm must be true to approve a live debit.");
+    const maxDebit = approvedDebit(approval);
     if (typeof approval.artifact_sha256 !== "string" || !SHA256.test(approval.artifact_sha256)) {
       throw invalid("artifact_sha256 must be 64 lowercase hex characters");
     }
-    if (typeof approval.max_debit_lovelace !== "string" || !LOVELACE.test(approval.max_debit_lovelace) ||
-        BigInt(approval.max_debit_lovelace) <= 0n) {
-      throw invalid("max_debit_lovelace must be a positive integer string");
-    }
-    const maxDebit = BigInt(approval.max_debit_lovelace);
     const started = this.now();
     return this.exclusive(`publication:${id}`, async () => {
       this.admit();
@@ -759,6 +836,155 @@ export class PaperPublisherService {
     });
   }
 
+  /**
+   * The adverts of a slot's publication. A pending re-advertisement and a
+   * pending legacy retirement are read from the chain. Never signs or submits.
+   */
+  async slotAdverts(targetId: string): Promise<SlotAdvertsView> {
+    const target = this.target(targetId);
+    const holder = this.store.slotHolder(target.id);
+    if (!holder || holder.tx_hash === null) {
+      throw new PublisherError(404, "slot_not_published", `Target ${target.id} has no signed publication.`);
+    }
+    // An active operation owns the adverts; report them without waiting for it.
+    if (this.locks.has(`adverts:${target.id}`)) return this.advertsView(target, holder);
+    return this.exclusive(`adverts:${target.id}`, async () => {
+      let observation: string | null = null;
+      for (const advert of this.store.adverts(holder.id)) {
+        if (advert.ended_at !== null) continue;
+        if (advert.generation > 1 && advert.confirmed_at === null) {
+          observation = await this.resolveAdvert(target, advert) ?? observation;
+        } else if (this.store.retirements(holder.id, advert.generation).some((attempt) => attempt.confirmed_at === null)) {
+          try {
+            await this.settleRetirement(target, advert);
+          } catch (error) {
+            observation = bounded(`Chain query failed: ${message(error)}`);
+          }
+        }
+      }
+      return this.advertsView(target, this.record(holder.id), observation);
+    });
+  }
+
+  /**
+   * Re-advertise a published slot in the identity layout (Part 2 §6.2, §9.6):
+   * the offer of the publish advert (artifact, manifest, price, bonds and
+   * endpoint) with agent_id = the slot's record, which must list the slot key
+   * with mcp.tool.execute.v1. One explicitly approved transaction, signed by
+   * the slot key, checked and journaled as the publication's next advert
+   * generation before broadcast. A repeated request never signs again: it
+   * returns the journaled advert and reads a pending outcome from the chain.
+   * The supplier keeps serving the publish advert until the switch.
+   */
+  async readvert(targetId: string, body: unknown): Promise<SlotAdvertsView> {
+    this.admit();
+    const maxDebit = approvedDebit(fields(body, "approval", ["confirm", "max_debit_lovelace"]));
+    const target = this.target(targetId);
+    return this.exclusive(`adverts:${target.id}`, async () => {
+      this.admit();
+      const record = this.publishedSlot(target);
+      if (target.identityPolicyId === null) {
+        throw new PublisherError(409, "identity_not_configured",
+          `Target ${target.id} has no IDENTITY_POLICY_ID: it cannot post an identity advert.`);
+      }
+      if (!target.liveChain) throw new PublisherError(409, "live_chain_disabled", `Target ${target.id} does not set LIVE_CHAIN=1.`);
+      const current = liveIdentityAdvert(this.store.adverts(record.id));
+      if (current) {
+        // Journaled once, never signed again: a pending outcome comes from the chain.
+        return this.advertsView(target, record, current.confirmed_at === null ? await this.resolveAdvert(target, current) : null);
+      }
+      const agentId = await this.listedSlotAgent(target);
+      return this.sendReadvert(record, target, { ...this.publishedOffer(record), agent_id: agentId }, maxDebit);
+    });
+  }
+
+  /**
+   * The switch (Part 2 §9.6): the slot's supplier serves the confirmed identity
+   * advert from now on, with its AGENT_ID and ADVERT_REF. Durable first, so a
+   * publisher restart also serves it. Only this slot's child restarts: it
+   * refuses new work, finishes active work (up to 15 minutes), then starts with
+   * the identity advert. A repeated request restarts nothing once the child
+   * serves it. The reply waits up to 240 seconds for the new child.
+   */
+  async switchAdvert(targetId: string): Promise<SlotAdvertsView> {
+    this.admit();
+    const target = this.target(targetId);
+    const started = this.now();
+    const record = await this.exclusive(`adverts:${target.id}`, async () => {
+      this.admit();
+      const record = this.publishedSlot(target);
+      let identity = liveIdentityAdvert(this.store.adverts(record.id));
+      if (identity?.confirmed_at === null) {
+        await this.resolveAdvert(target, identity);
+        identity = liveIdentityAdvert(this.store.adverts(record.id));
+      }
+      if (!identity) {
+        throw new PublisherError(409, "identity_advert_missing",
+          `Target ${target.id} has no live identity advert. Post it first: POST /targets/${target.id}/readvert.`);
+      }
+      if (identity.confirmed_at === null) {
+        throw new PublisherError(409, "identity_advert_pending",
+          `Identity advert ${identity.advert_ref} is not confirmed. Read GET /targets/${target.id}/adverts.`);
+      }
+      if (identity.switched_at === null) {
+        const problem = await this.advertOnChain(target, identity);
+        if (problem !== null) throw new PublisherError(409, "identity_advert_unavailable", `The supplier keeps its advert: ${problem}.`);
+        this.store.switchAdvert(record.id, identity.generation, this.now());
+      }
+      return record;
+    });
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([this.reactivate(record.id), new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, Math.max(1_000, PUBLISH_REPLY_MS - (this.now() - started)));
+    })]);
+    clearTimeout(timer);
+    const current = this.record(record.id);
+    const view = this.advertsView(target, current);
+    if (view.child_advert_ref === view.serving_advert_ref) return view;
+    return { ...view, error: current.error ?? `The supplier is still switching. Read GET /targets/${target.id}/adverts.` };
+  }
+
+  /**
+   * Retire the slot's legacy advert after the switch (Part 2 §9.6): one
+   * explicitly approved RetireAdvert transaction that returns the advert
+   * deposit to the slot wallet. It refuses unless the identity advert is live:
+   * confirmed, switched, unspent and served by a ready supplier child. Each
+   * attempt is checked and journaled before broadcast; every attempt spends
+   * the same advert output, so at most one confirms. A repeated request reads
+   * the outcome from the chain, sends a journaled attempt again while it can
+   * still confirm, and signs a new attempt only after it expired.
+   */
+  async retireLegacy(targetId: string, body: unknown): Promise<SlotAdvertsView> {
+    this.admit();
+    const maxDebit = approvedDebit(fields(body, "approval", ["confirm", "max_debit_lovelace"]));
+    const target = this.target(targetId);
+    return this.exclusive(`adverts:${target.id}`, async () => {
+      this.admit();
+      const record = this.publishedSlot(target);
+      const legacy = this.store.adverts(record.id).find((advert) => advert.layout === "legacy" && advert.ended_at === null);
+      if (!legacy) return this.advertsView(target, record);
+      if (!target.liveChain) throw new PublisherError(409, "live_chain_disabled", `Target ${target.id} does not set LIVE_CHAIN=1.`);
+      let evidence: { output: Utxo | null; tip: number };
+      try {
+        evidence = await this.settleRetirement(target, legacy);
+      } catch (error) {
+        throw new PublisherError(503, "chain_unavailable", bounded(`The chain could not be read: ${message(error)}. Nothing was broadcast.`));
+      }
+      const { output, tip } = evidence;
+      if (output === null) return this.advertsView(target, record);
+      if (output.address !== legacy.advert_address || output.datumHex?.toLowerCase() !== legacy.advert_datum_hex) {
+        throw new PublisherError(409, "legacy_advert_mismatch",
+          `Output ${legacy.advert_ref} does not match the journaled advert. Nothing was broadcast.`);
+      }
+      await this.assertIdentityLive(target, record);
+      const last = this.store.retirements(record.id, legacy.generation).at(-1);
+      if (last && last.confirmed_at === null && (last.valid_until_slot === null || tip < last.valid_until_slot)) {
+        return this.resendRetirement(target, record, legacy, last);
+      }
+      return this.signRetirement(target, record, legacy, maxDebit);
+    });
+  }
+
   /** Reads chain evidence and supervises the supplier. Never constructs a transaction. */
   async refresh(id: string): Promise<PaperPublication> {
     const record = this.record(id);
@@ -789,8 +1015,8 @@ export class PaperPublisherService {
         return reply(401, "unauthorized");
       }
     }
-    if (this.closing && route.refusedWhileDraining) return reply(503, "supplier_draining");
     const child = this.children.get(targetId);
+    if ((this.closing || child?.draining === true) && route.refusedWhileDraining) return reply(503, "supplier_draining");
     if (!child?.ready || child.process.exitCode !== null) {
       this.restartSoon(targetId);
       return reply(503, "supplier_unavailable");
@@ -890,6 +1116,271 @@ export class PaperPublisherService {
         `independent agent (${problem}). Nothing was broadcast.`);
     }
     return agentId;
+  }
+
+  /** The slot's published publication: re-advertisement, switch and retirement act only on it. */
+  private publishedSlot(target: PublisherTarget): PublicationRecord {
+    const record = this.store.slotHolder(target.id);
+    if (record?.phase !== "published") {
+      throw new PublisherError(409, "slot_not_published",
+        `Target ${target.id} has no published publication${record ? ` (it is ${record.phase})` : ""}.`);
+    }
+    if (target.supplierPkh !== record.supplier_pkh || target.endpointUrl !== record.endpoint_url) {
+      throw new PublisherError(409, "target_changed", `Target ${target.id} no longer has the published wallet and endpoint.`);
+    }
+    return record;
+  }
+
+  /** The offer of the publish advert, unchanged: the same publication in another layout (§9.6). */
+  private publishedOffer(record: PublicationRecord): AdvertDatum {
+    const published = this.store.publishAdvert(record.id);
+    if (!published) throw new PublisherError(409, "slot_not_published", `Publication ${record.id} has no journaled advert.`);
+    const { datum } = decodeAdvert(published.advert_datum_hex);
+    return {
+      supplier_pkh: datum.supplier_pkh, capability_id: datum.capability_id, model: datum.model,
+      max_output_tokens: datum.max_output_tokens, max_processing_ms: datum.max_processing_ms, price_lovelace: datum.price_lovelace,
+      supplier_bond_lovelace: datum.supplier_bond_lovelace, buyer_bond_lovelace: datum.buyer_bond_lovelace,
+      endpoint_url: datum.endpoint_url, detail_uri: datum.detail_uri, detail_hash: datum.detail_hash, advertised_at: 0,
+      status: "Active",
+    };
+  }
+
+  /** One approved identity advert: checked and journaled in beforeSubmit, then broadcast once. */
+  private async sendReadvert(record: PublicationRecord, target: PublisherTarget, advert: IdentityAdvertDatum,
+    maxDebit: bigint): Promise<SlotAdvertsView> {
+    const chain = this.chain(target);
+    const journaled: { advert?: AdvertTransaction } = {};
+    try {
+      await this.postAdvert({
+        chain, walletKey: target.walletKey(), advertDatum: advert, awaitTimeoutMs: ADVERT_AWAIT_MS, log: () => undefined,
+        identity: this.identity(target),
+        beforeSubmit: async (built) => {
+          const signed = await this.checkAdvert(record, target, chain, advert, built, maxDebit);
+          try {
+            journaled.advert = this.store.journalReadvert(signed);
+          } catch (error) {
+            if (!(error instanceof PublicationConflictError)) throw error;
+            throw new PublisherError(409, "advert_state_changed", "The slot's adverts changed during the request. Nothing was broadcast.");
+          }
+        },
+      });
+    } catch (error) {
+      if (!journaled.advert) {
+        // Nothing was journaled, so nothing was broadcast: the approval may be repeated.
+        throw error instanceof PublisherError ? error
+          : new PublisherError(422, "advert_not_sent", bounded(`The identity advert was not sent; nothing was broadcast: ${message(error)}`));
+      }
+      return this.advertsView(target, record, bounded(`The identity advert transaction outcome is unknown (${message(error)}). ` +
+        `Repeat the request or read GET /targets/${target.id}/adverts; it is never signed again.`));
+    }
+    // The shared flow runs beforeSubmit before any broadcast.
+    const sent = journaled.advert;
+    if (!sent) throw new PublisherError(500, "advert_not_journaled", "The advert flow finished without journaling its transaction.");
+    this.store.confirmAdvert(record.id, sent.generation, this.now());
+    return this.advertsView(target, record);
+  }
+
+  /**
+   * Chain evidence for an unconfirmed re-advertisement, as resolve() reads a
+   * publish advert. Read-only: nothing is signed or resubmitted. Returns an
+   * observation, or null once the advert is confirmed.
+   */
+  private async resolveAdvert(target: PublisherTarget, advert: AdvertTransaction): Promise<string | null> {
+    const chain = this.chain(target);
+    try {
+      const evidence = await this.chainRead(async () => {
+        const output = await chain.queryUtxo(outputRef(advert.advert_ref));
+        if (output) return { output, inputsUnspent: false, tip: 0 };
+        const inputs = await Promise.all(advert.wallet_inputs.map((input) => chain.queryUtxo(outputRef(input.ref))));
+        return { output, inputsUnspent: inputs.every((utxo) => utxo !== null), tip: await chain.tip() };
+      });
+      const { output } = evidence;
+      if (output && output.address === advert.advert_address && output.datumHex?.toLowerCase() === advert.advert_datum_hex) {
+        this.store.confirmAdvert(advert.publication_id, advert.generation, this.now());
+        return null;
+      }
+      if (output) return `Output ${advert.advert_ref} does not match the journaled advert.`;
+      if (!evidence.inputsUnspent) {
+        return `Wallet inputs of advert transaction ${advert.tx_hash} are spent, but the advert output is not visible. ` +
+          "Check the transaction on a chain explorer.";
+      }
+      if (advert.valid_until_slot !== null && evidence.tip > advert.valid_until_slot + EXPIRY_FINALITY_SLOTS) {
+        this.store.expireAdvert(advert.publication_id, advert.generation, this.now());
+        return `Advert transaction ${advert.tx_hash} expired at slot ${advert.valid_until_slot} without confirmation. ` +
+          "Its wallet inputs are unspent, so no funds moved. A new readvert signs a new advert.";
+      }
+      return `Advert transaction ${advert.tx_hash} is not confirmed; its wallet inputs are unspent.` +
+        (advert.valid_until_slot === null ? "" : ` It cannot confirm after slot ${advert.valid_until_slot}.`);
+    } catch (error) {
+      return bounded(`Chain query failed: ${message(error)}`);
+    }
+  }
+
+  /** Null when the advert output is unspent with the journaled datum, else why not. A failed chain read is a 503. */
+  private async advertOnChain(target: PublisherTarget, advert: AdvertTransaction): Promise<string | null> {
+    let output: Utxo | null;
+    try {
+      output = await this.chainRead(() => this.chain(target).queryUtxo(outputRef(advert.advert_ref)));
+    } catch (error) {
+      throw new PublisherError(503, "chain_unavailable", bounded(`The chain could not be read: ${message(error)}. Nothing changed.`));
+    }
+    return output && output.address === advert.advert_address && output.datumHex?.toLowerCase() === advert.advert_datum_hex
+      ? null : `advert ${advert.advert_ref} is not an unspent output with the journaled datum`;
+  }
+
+  /** The identity advert is live: confirmed, switched, unspent on chain and served by a ready supplier child. */
+  private async assertIdentityLive(target: PublisherTarget, record: PublicationRecord): Promise<void> {
+    const identity = liveIdentityAdvert(this.store.adverts(record.id));
+    const child = this.children.get(target.id);
+    let problem: string | null;
+    if (!identity || identity.confirmed_at === null) {
+      problem = `target ${target.id} has no confirmed identity advert (POST /targets/${target.id}/readvert)`;
+    } else if (identity.switched_at === null) {
+      problem = `the supplier has not switched to identity advert ${identity.advert_ref} (POST /targets/${target.id}/switch)`;
+    } else if (!child?.ready || child.process.exitCode !== null || child.draining || child.advertRef !== identity.advert_ref) {
+      problem = `no ready supplier serves identity advert ${identity.advert_ref} yet`;
+    } else {
+      problem = await this.advertOnChain(target, identity);
+    }
+    if (problem !== null) {
+      throw new PublisherError(409, "identity_advert_not_live", `The legacy advert stays: ${problem}. Nothing was broadcast.`);
+    }
+  }
+
+  /**
+   * Reads an advert output that has RetireAdvert attempts. A spent output is
+   * retired: only the slot key can spend it. The attempt whose refund output
+   * (output 0) is visible confirmed it. Returns the output if unspent, and the tip.
+   */
+  private async settleRetirement(target: PublisherTarget, advert: AdvertTransaction): Promise<{ output: Utxo | null; tip: number }> {
+    const chain = this.chain(target);
+    const attempts = this.store.retirements(advert.publication_id, advert.generation);
+    const evidence = await this.chainRead(async () => {
+      const [output, tip] = await Promise.all([chain.queryUtxo(outputRef(advert.advert_ref)), chain.tip()]);
+      if (output) return { output, tip, retiredBy: null };
+      const refunds = await Promise.all(attempts.map((attempt) => chain.queryUtxo({ txHash: attempt.tx_hash, index: 0 })));
+      return { output, tip, retiredBy: attempts.find((_attempt, index) => refunds[index] !== null)?.tx_hash ?? null };
+    });
+    if (!evidence.output) this.store.retireAdvert(advert.publication_id, advert.generation, evidence.retiredBy, this.now());
+    return { output: evidence.output, tip: evidence.tip };
+  }
+
+  /** The journaled attempt can still confirm: send the same signed bytes again and wait. */
+  private async resendRetirement(target: PublisherTarget, record: PublicationRecord, advert: AdvertTransaction,
+    attempt: AdvertRetirement): Promise<SlotAdvertsView> {
+    const chain = this.chain(target);
+    let submitError: unknown;
+    try {
+      await chain.submitTx(attempt.tx_cbor);
+    } catch (error) {
+      // It can already be in a block or in the mempool: the wait decides.
+      submitError = error;
+    }
+    try {
+      await chain.awaitTx(attempt.tx_hash, ADVERT_AWAIT_MS);
+    } catch (error) {
+      return this.advertsView(target, record, bounded(`RetireAdvert transaction ${attempt.tx_hash} is not confirmed ` +
+        `(${message(submitError ?? error)}). Repeat the request: it sends the same signed bytes until they expire.`));
+    }
+    this.store.retireAdvert(record.id, advert.generation, attempt.tx_hash, this.now());
+    return this.advertsView(target, record);
+  }
+
+  /** One approved RetireAdvert attempt: checked and journaled in beforeSubmit, then broadcast once. */
+  private async signRetirement(target: PublisherTarget, record: PublicationRecord, advert: AdvertTransaction,
+    maxDebit: bigint): Promise<SlotAdvertsView> {
+    const chain = this.chain(target);
+    const journaled: { attempt?: AdvertRetirement } = {};
+    try {
+      await this.retireAdvert({
+        chain, walletKey: target.walletKey(), advertRef: outputRef(advert.advert_ref), awaitTimeoutMs: ADVERT_AWAIT_MS,
+        log: () => undefined,
+        beforeSubmit: async (built) => {
+          journaled.attempt = this.store.journalRetirement(await this.checkRetirement(target, chain, advert, built, maxDebit));
+        },
+      });
+    } catch (error) {
+      if (!journaled.attempt) {
+        throw error instanceof PublisherError ? error : new PublisherError(422, "retirement_not_sent",
+          bounded(`The RetireAdvert transaction was not sent; nothing was broadcast: ${message(error)}`));
+      }
+      return this.advertsView(target, record, bounded(`RetireAdvert transaction ${journaled.attempt.tx_hash} outcome is unknown ` +
+        `(${message(error)}). Repeat the request: it reads the outcome from the chain.`));
+    }
+    const sent = journaled.attempt;
+    if (!sent) throw new PublisherError(500, "retirement_not_journaled", "The retire flow finished without journaling its transaction.");
+    this.store.retireAdvert(record.id, advert.generation, sent.tx_hash, this.now());
+    return this.advertsView(target, record);
+  }
+
+  /**
+   * Runs inside beforeSubmit: a rejection here prevents the broadcast. The
+   * transaction spends the advert output and slot-wallet inputs only and pays
+   * the slot wallet only; its worst-case debit (collateral, if a script failed)
+   * must be within the approval.
+   */
+  private async checkRetirement(target: PublisherTarget, chain: ChainProvider, advert: AdvertTransaction, built: BuildResult,
+    maxDebit: bigint): Promise<Omit<AdvertRetirement, "confirmed_at">> {
+    const refuse = (reason: string) => new PublisherError(422, "retirement_transaction_invalid", `${reason} Nothing was broadcast.`);
+    const wallet = target.walletKey().address;
+    const info = inspectSignedTransaction(built.txCborHex);
+    if (info.txHash !== built.expectedTxHash.toLowerCase()) throw refuse("The signed RetireAdvert transaction hash disagrees with its bytes.");
+    const facts = inspectSignedTransactionFinancials(built.txCborHex);
+    const isAdvert = (ref: OutputReference) => `${ref.txHash}#${ref.index}` === advert.advert_ref;
+    if (!facts.inputs.some(isAdvert)) throw refuse(`The signed transaction does not spend advert ${advert.advert_ref}.`);
+    if (facts.outputs.length === 0 || facts.outputs.some((output) => output.address !== wallet)) {
+      throw refuse("The signed transaction pays outside the slot wallet.");
+    }
+    const inputs: WalletInput[] = [];
+    let spent = 0n;
+    for (const ref of facts.inputs.filter((input) => !isAdvert(input))) {
+      const utxo = await chain.queryUtxo(ref);
+      if (!utxo || utxo.address !== wallet) throw refuse("The signed transaction spends outside the slot wallet.");
+      spent += utxo.lovelace;
+      inputs.push({ ref: `${ref.txHash}#${ref.index}`, lovelace: utxo.lovelace.toString() });
+    }
+    let pledged = 0n;
+    for (const ref of facts.collateralInputs) {
+      const utxo = await chain.queryUtxo(ref);
+      if (!utxo || utxo.address !== wallet) throw refuse("The signed transaction pledges collateral outside the slot wallet.");
+      pledged += utxo.lovelace;
+    }
+    const collateral = facts.collateralInputs.length === 0 ? 0n : facts.totalCollateralLovelace ?? pledged;
+    // Negative when the returned deposit exceeds the fee.
+    const debit = spent - facts.outputs.reduce((sum, output) => sum + output.lovelace, 0n);
+    const exposure = debit > collateral ? debit : collateral;
+    if (exposure > maxDebit) {
+      throw new PublisherError(409, "debit_exceeds_approval", `The signed RetireAdvert transaction debits ${debit} lovelace from the ` +
+        `slot wallet (worst case ${exposure}); the approved maximum is ${maxDebit}. Nothing was broadcast.`);
+    }
+    return {
+      tx_hash: info.txHash, publication_id: advert.publication_id, generation: advert.generation, tx_cbor: built.txCborHex,
+      wallet_inputs: inputs, fee_lovelace: facts.feeLovelace.toString(), wallet_debit_lovelace: debit.toString(),
+      max_debit_lovelace: maxDebit.toString(), valid_until_slot: info.validUntilSlot, signed_at: this.now(),
+    };
+  }
+
+  private advertsView(target: PublisherTarget, record: PublicationRecord, error: string | null = null): SlotAdvertsView {
+    const adverts = this.store.adverts(record.id);
+    const serving = servingAdvert(adverts);
+    const child = this.children.get(target.id);
+    const childAdvert = child?.ready && child.process.exitCode === null && child.publicationId === record.id ? child.advertRef : null;
+    return {
+      target_id: target.id, publication_id: record.id, agent_id: this.slotAgent(target),
+      serving_advert_ref: serving?.advert_ref ?? null, child_advert_ref: childAdvert,
+      adverts: adverts.map((advert) => {
+        const attempts = this.store.retirements(record.id, advert.generation);
+        const retiring = advert.ended_at === null && attempts.some((attempt) => attempt.confirmed_at === null);
+        return {
+          generation: advert.generation, layout: advert.layout, agent_id: journaledAgent(advert), advert_ref: advert.advert_ref,
+          tx_hash: advert.tx_hash, state: advert.end_reason ?? (advert.confirmed_at === null ? "pending" : retiring ? "retiring" : "live"),
+          serving: advert.generation === serving?.generation, wallet_debit_lovelace: advert.wallet_debit_lovelace,
+          signed_at: advert.signed_at, confirmed_at: advert.confirmed_at, switched_at: advert.switched_at, ended_at: advert.ended_at,
+          retire_tx_hash: (attempts.find((attempt) => attempt.confirmed_at !== null) ?? attempts.at(-1))?.tx_hash ?? null,
+        };
+      }),
+      error,
+    };
   }
 
   private configuredRecordView(target: PublisherTarget, agentId: string): SlotRecordView {
@@ -1023,7 +1514,7 @@ export class PaperPublisherService {
         },
       });
     } catch (error) {
-      if (!this.store.transaction(record.id)) {
+      if (!this.store.publishAdvert(record.id)) {
         // Nothing was journaled, so nothing was broadcast: the approval may be repeated.
         const reason = bounded(`The publish attempt stopped before any broadcast: ${message(error)}`);
         this.store.update(record.id, ["publishing"], { phase: "prepared", error: reason }, this.now());
@@ -1033,7 +1524,7 @@ export class PaperPublisherService {
         error: bounded(`The advert transaction outcome is unknown (${message(error)}). Refresh this publication; it is never signed again.`) },
       this.now()));
     }
-    this.store.confirm(record.id, this.now());
+    this.store.confirmAdvert(record.id, 1, this.now());
     let timer: NodeJS.Timeout | undefined;
     await Promise.race([this.activate(record.id), new Promise<void>((resolve) => {
       timer = setTimeout(resolve, Math.max(1_000, PUBLISH_REPLY_MS - (this.now() - started)));
@@ -1044,7 +1535,7 @@ export class PaperPublisherService {
 
   /** Runs inside beforeSubmit: a rejection here prevents the broadcast. */
   private async checkAdvert(record: PublicationRecord, target: PublisherTarget, chain: ChainProvider,
-    expected: AdvertDatum | IdentityAdvertDatum, built: PostAdvertBuildResult, maxDebit: bigint): Promise<AdvertTransaction> {
+    expected: AdvertDatum | IdentityAdvertDatum, built: PostAdvertBuildResult, maxDebit: bigint): Promise<SignedAdvert> {
     const wallet = target.walletKey().address;
     const info = inspectSignedTransaction(built.txCborHex);
     if (info.txHash !== built.expectedTxHash.toLowerCase() || built.advertOutputRef.txHash !== built.expectedTxHash ||
@@ -1101,16 +1592,17 @@ export class PaperPublisherService {
         `(worst case ${exposure}); the approved maximum is ${maxDebit}. Nothing was broadcast.`);
     }
     return {
-      publication_id: record.id, target_id: target.id, tx_hash: info.txHash, tx_cbor: built.txCborHex,
-      advert_ref: `${info.txHash}#0`, advert_address: advertAddress, advert_datum_hex: advert.datumHex!.toLowerCase(),
-      wallet_inputs: inputs, fee_lovelace: facts.feeLovelace.toString(), wallet_debit_lovelace: debit.toString(),
-      max_debit_lovelace: maxDebit.toString(), valid_until_slot: info.validUntilSlot, signed_at: this.now(), confirmed_at: null,
+      publication_id: record.id, layout: isIdentityAdvertDatum(expected) ? "identity" : "legacy", target_id: target.id,
+      tx_hash: info.txHash, tx_cbor: built.txCborHex, advert_ref: `${info.txHash}#0`, advert_address: advertAddress,
+      advert_datum_hex: advert.datumHex!.toLowerCase(), wallet_inputs: inputs, fee_lovelace: facts.feeLovelace.toString(),
+      wallet_debit_lovelace: debit.toString(), max_debit_lovelace: maxDebit.toString(), valid_until_slot: info.validUntilSlot,
+      signed_at: this.now(),
     };
   }
 
-  /** Chain evidence for a journaled transaction. Read-only: nothing is signed or resubmitted. */
+  /** Chain evidence for a journaled publish advert. Read-only: nothing is signed or resubmitted. */
   private async resolve(record: PublicationRecord): Promise<PublicationRecord> {
-    const transaction = this.store.transaction(record.id);
+    const transaction = this.store.publishAdvert(record.id);
     if (!transaction) {
       return this.store.update(record.id, [record.phase],
         { phase: "prepared", error: "The previous publish attempt stopped before signing. Nothing was broadcast." }, this.now());
@@ -1130,7 +1622,7 @@ export class PaperPublisherService {
       });
       const { advert } = evidence;
       if (advert && advert.address === transaction.advert_address && advert.datumHex?.toLowerCase() === transaction.advert_datum_hex) {
-        this.store.confirm(record.id, this.now());
+        this.store.confirmAdvert(record.id, 1, this.now());
         const confirmed = this.store.update(record.id, [record.phase],
           { phase: "publishing", error: `Advert ${transaction.advert_ref} is confirmed; starting its supplier.` }, this.now());
         void this.activate(record.id);
@@ -1142,6 +1634,7 @@ export class PaperPublisherService {
         observation = `Wallet inputs of advert transaction ${transaction.tx_hash} are spent, but the advert output is not visible. ` +
           "Check the transaction on a chain explorer.";
       } else if (transaction.valid_until_slot !== null && evidence.tip > transaction.valid_until_slot + EXPIRY_FINALITY_SLOTS) {
+        this.store.expireAdvert(record.id, 1, this.now());
         return this.store.update(record.id, [record.phase], { phase: "failed", error: `Advert transaction ${transaction.tx_hash} expired at ` +
           `slot ${transaction.valid_until_slot} without confirmation. Its wallet inputs are unspent, so no funds moved. ` +
           "This target slot cannot publish again." }, this.now());
@@ -1168,6 +1661,12 @@ export class PaperPublisherService {
     return task;
   }
 
+  /** A supplier start that begins after any running one, so it reads the advert that serves now. */
+  private async reactivate(id: string): Promise<void> {
+    await this.activations.get(id);
+    await this.activate(id);
+  }
+
   private restartSoon(targetId: string): void {
     const holder = this.store.slotHolder(targetId);
     const last = this.restartAttempts.get(targetId) ?? -Infinity;
@@ -1180,19 +1679,19 @@ export class PaperPublisherService {
     const record = this.record(id);
     if (record.phase !== "published" && record.phase !== "publishing") return;
     try {
-      const transaction = this.store.transaction(id);
+      const advert = servingAdvert(this.store.adverts(id));
       const target = this.config.targets.find((candidate) => candidate.id === record.target_id);
       if (this.closing) throw new Error("The publisher is stopping");
-      if (!transaction) throw new Error("No advert transaction is journaled");
+      if (!advert) throw new Error("No live advert transaction is journaled");
       if (!target || target.supplierPkh !== record.supplier_pkh) {
         throw new Error(`Target ${record.target_id} is no longer configured with this publication's wallet`);
       }
-      const advert = await this.chainRead(() => this.chain(target).queryUtxo(outputRef(transaction.advert_ref)));
-      if (!advert || advert.address !== transaction.advert_address || advert.datumHex?.toLowerCase() !== transaction.advert_datum_hex) {
-        throw new Error(`Advert ${transaction.advert_ref} is not an unspent output on chain`);
+      const output = await this.chainRead(() => this.chain(target).queryUtxo(outputRef(advert.advert_ref)));
+      if (!output || output.address !== advert.advert_address || output.datumHex?.toLowerCase() !== advert.advert_datum_hex) {
+        throw new Error(`Advert ${advert.advert_ref} is not an unspent output on chain`);
       }
-      this.store.confirm(id, this.now());
-      await this.supervise(record, target, transaction);
+      this.store.confirmAdvert(id, advert.generation, this.now());
+      await this.supervise(record, target, advert);
       const current = this.record(id);
       this.store.update(id, [current.phase], current.phase === "published" ? { error: null }
         : { phase: "published", published_at: this.now(), error: null }, this.now());
@@ -1202,11 +1701,14 @@ export class PaperPublisherService {
     }
   }
 
-  private async supervise(record: PublicationRecord, target: PublisherTarget, transaction: AdvertTransaction): Promise<void> {
+  private async supervise(record: PublicationRecord, target: PublisherTarget, advert: AdvertTransaction): Promise<void> {
     const existing = this.children.get(target.id);
     if (existing) {
-      if (existing.publicationId === record.id && existing.ready && existing.process.exitCode === null &&
+      if (existing.publicationId === record.id && existing.advertRef === advert.advert_ref && existing.ready &&
+          existing.process.exitCode === null &&
           (await this.childRequest(existing, "GET", "/healthz", {}, 5_000).catch(() => undefined))?.status === 200) return;
+      // A switch to another advert lets the running child finish its work first.
+      if (existing.advertRef !== advert.advert_ref && existing.process.exitCode === null) await this.drainChild(existing);
       await this.stopChild(existing);
     }
     const imageId = await this.runtimeImage(record);
@@ -1224,7 +1726,7 @@ export class PaperPublisherService {
       "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=256m,mode=1777",
       "--tmpfs", "/workspace:rw,nosuid,nodev,size=1g,mode=1777",
       "--log-driver", "none", "--label", `vector.paper2agent.publication=${record.id}`, imageId];
-    const agentId = journaledAgent(transaction);
+    const agentId = journaledAgent(advert);
     const env: Record<string, string> = {
       PATH: "/usr/bin:/bin",
       HOME: cwd,
@@ -1233,7 +1735,7 @@ export class PaperPublisherService {
       // The journaled advert names the slot's agent; the supplier works new escrows only for it.
       ...(agentId === null ? {} : { AGENT_ID: agentId }),
       CAPABILITY_KIND: "paper2agent",
-      ADVERT_REF: transaction.advert_ref,
+      ADVERT_REF: advert.advert_ref,
       PORT: String(port),
       SUPPLIER_BIND_HOST: "127.0.0.1",
       // A managed slot never runs automatic consolidation spending.
@@ -1248,7 +1750,8 @@ export class PaperPublisherService {
       ...(this.config.toolCallToken ? { PAPER2AGENT_FREE_CALLS: "1" } : {}),
     };
     const child: SupervisedSupplier = {
-      publicationId: record.id, port, process: this.launchSupplier({ targetId: target.id, port, env }), ready: false, admissions: 0,
+      publicationId: record.id, advertRef: advert.advert_ref, port, process: this.launchSupplier({ targetId: target.id, port, env }),
+      ready: false, admissions: 0, draining: false,
     };
     this.children.set(target.id, child);
     void child.process.exited.then(() => {
@@ -1256,7 +1759,7 @@ export class PaperPublisherService {
       if (!this.closing) this.log(`supplier for target ${target.id} exited with code ${child.process.exitCode}`);
     });
     try {
-      await this.awaitReady(child, record, target, transaction);
+      await this.awaitReady(child, record, target, advert);
       child.ready = true;
     } catch (error) {
       await this.stopChild(child);
@@ -1265,7 +1768,7 @@ export class PaperPublisherService {
   }
 
   /** /healthz, then /capability must prove the published advert, manifest and wallet. */
-  private async awaitReady(child: SupervisedSupplier, record: PublicationRecord, target: PublisherTarget, transaction: AdvertTransaction): Promise<void> {
+  private async awaitReady(child: SupervisedSupplier, record: PublicationRecord, target: PublisherTarget, advert: AdvertTransaction): Promise<void> {
     const deadline = this.now() + READY_TIMEOUT_MS;
     let last = "no response";
     for (;;) {
@@ -1284,8 +1787,8 @@ export class PaperPublisherService {
           } catch {
             signer = "";
           }
-          const expectedAgent = journaledAgent(transaction);
-          if (body.capability_id !== PAPER2AGENT_CAPABILITY_ID || body.advert_ref !== transaction.advert_ref ||
+          const expectedAgent = journaledAgent(advert);
+          if (body.capability_id !== PAPER2AGENT_CAPABILITY_ID || body.advert_ref !== advert.advert_ref ||
               body.supplier_pkh !== target.supplierPkh || signer !== target.supplierPkh ||
               body.model !== paper2AgentModel(record.artifact.manifest) || body.price_lovelace !== record.terms.price_lovelace ||
               tool?.manifest_hash !== record.artifact.manifest_hash ||
@@ -1324,21 +1827,42 @@ export class PaperPublisherService {
   /** Slots with an in-flight admission or an active supplier session. */
   private async busyTargets(): Promise<string[]> {
     const busy: string[] = [];
-    for (const [targetId, child] of this.children) {
-      if (child.process.exitCode !== null) continue;
-      if (child.admissions > 0) {
-        busy.push(targetId);
-        continue;
-      }
-      try {
-        const status = await this.childRequest(child, "GET", "/status", {}, 5_000);
-        const body = JSON.parse(status.body.toString("utf8")) as { active_sessions?: unknown };
-        if (status.status !== 200 || body.active_sessions !== 0) busy.push(targetId);
-      } catch {
-        busy.push(targetId);
-      }
-    }
+    for (const [targetId, child] of this.children) if (await this.childBusy(child)) busy.push(targetId);
     return busy;
+  }
+
+  /** An in-flight admission or an active supplier session. */
+  private async childBusy(child: SupervisedSupplier): Promise<boolean> {
+    if (child.process.exitCode !== null) return false;
+    if (child.admissions > 0) return true;
+    try {
+      const status = await this.childRequest(child, "GET", "/status", {}, 5_000);
+      // The supplier /status body; only active_sessions matters here.
+      const body = JSON.parse(status.body.toString("utf8")) as { active_sessions?: unknown };
+      return status.status !== 200 || body.active_sessions !== 0;
+    } catch {
+      return true;
+    }
+  }
+
+  /**
+   * Before a child switches adverts: refuse its new admissions and wait for its
+   * active work. After DRAIN_TIMEOUT_MS it keeps serving its advert. Publisher
+   * shutdown takes over the drain.
+   */
+  private async drainChild(child: SupervisedSupplier): Promise<void> {
+    child.draining = true;
+    const deadline = this.now() + DRAIN_TIMEOUT_MS;
+    while (await this.childBusy(child)) {
+      if (this.closing) throw new Error("The publisher is stopping");
+      if (this.now() >= deadline) {
+        child.draining = false;
+        throw new Error(`Active supplier work did not finish within ${DRAIN_TIMEOUT_MS / 60_000} minutes; ` +
+          `the supplier still serves ${child.advertRef}. Repeat the switch.`);
+      }
+      await this.sleep(DRAIN_POLL_MS);
+    }
+    if (this.closing) throw new Error("The publisher is stopping");
   }
 
   private async childRequest(child: SupervisedSupplier, method: string, path: string, request: ChildRequest,
@@ -1415,6 +1939,12 @@ export function createPaperPublisherApp(service: PaperPublisherService): Express
   app.post("/targets/:id/record", route((req) => service.registerSlotRecord(req.params.id)));
   app.post("/targets/:id/record/submit", express.json({ limit: MAX_REGISTRATION_JSON_BYTES, strict: true, inflate: false }),
     route((req) => service.submitSlotRecord(req.params.id, req.body)));
+  app.get("/targets/:id/adverts", route((req) => service.slotAdverts(req.params.id)));
+  app.post("/targets/:id/readvert", express.json({ limit: MAX_APPROVAL_JSON_BYTES, strict: true, inflate: false }),
+    route((req) => service.readvert(req.params.id, req.body)));
+  app.post("/targets/:id/switch", route((req) => service.switchAdvert(req.params.id)));
+  app.post("/targets/:id/retire-legacy", express.json({ limit: MAX_APPROVAL_JSON_BYTES, strict: true, inflate: false }),
+    route((req) => service.retireLegacy(req.params.id, req.body)));
   app.post("/publications", (_req, res, next) => {
     if (uploads >= MAX_ACTIVE_UPLOADS) {
       res.status(429).json({ error: "publisher_busy", message: "Another bundle upload is in progress. Try again shortly." });

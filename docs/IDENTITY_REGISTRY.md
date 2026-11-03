@@ -727,7 +727,7 @@ On 2026-11-02, 36 of the 43 Active adverts used supplier keys without a legacy r
   - **Capabilities:** the `capability_id` values of that key's adverts.
 - The deposit is 10 AP3X per record, at most about 360 AP3X in total.
 - The Paper2Agent publisher registers a record for each new slot key before it posts the advert. A new supplier (`docs/DEPLOY_NEW_SUPPLIER.md`) registers a record before it posts an advert.
-- Each Active advert of ours is posted again with the new advert contract and has exactly one agent before the switch.
+- Each Active advert of ours is posted again with the new advert contract and has exactly one agent before the switch. For a published Paper2Agent slot, the publisher posts it (`POST /targets/<id>/readvert`), moves the slot's supplier to it at the switch (`POST /targets/<id>/switch`) and then retires the legacy advert (`POST /targets/<id>/retire-legacy`); see `docs/DEPLOY_NEW_SUPPLIER.md`.
 
 ### 9.3 Outside suppliers
 

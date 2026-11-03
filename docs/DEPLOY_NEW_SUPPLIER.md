@@ -663,6 +663,87 @@ Control startup removes only the containers that belong to its recorded attempts
 If removal fails, restore Docker access and restart control before another build.
 Do not delete the attempt records to bypass cleanup.
 
+#### Re-advertise published slots for the identity release
+
+After the escrow switch (Part 2 §9.6), the gateway and the buyer SDK route only identity-layout adverts.
+A slot that has a legacy advert needs a second advert in the identity layout before the switch.
+The publisher journals each advert as a generation of the same publication.
+Generation 1 is the publish advert. A re-advertisement is the next generation.
+The slot keeps one publication, and it has at most one live advert of each layout.
+The publication view (`GET /publications/<id>`) keeps the publish advert.
+
+Prerequisites for each slot:
+
+- The publisher runs a release with these routes. Its first start migrates the advert journal in place and keeps every row.
+- The slot `env` in the targets file sets `IDENTITY_POLICY_ID`.
+  Also set `IDENTITY_ESCROW_REF_UTXO` and `IDENTITY_ADVERT_REF_UTXO`, so that the supplier uses the reference scripts.
+- The record of the slot lists the slot key with `mcp.tool.execute.v1`.
+  Register it with `POST /targets/<id>/record` and `POST /targets/<id>/record/submit`, or set `AGENT_ID` to an existing record.
+- A change to the targets file or to `paper2agent/.env.publisher` takes effect only after a publisher restart.
+  The three routes below need no restart.
+
+Each route needs the publisher bearer token.
+In production, Traefik accepts `/p2a/targets` only from the build host.
+
+| Route | Body | Result |
+|---|---|---|
+| `GET /targets/<id>/adverts` | none | The slot adverts view. It reads a pending outcome from the chain. It never signs. |
+| `POST /targets/<id>/readvert` | `{"confirm":true,"max_debit_lovelace":"3000000"}` | Posts the identity advert one time. |
+| `POST /targets/<id>/switch` | none | Restarts only the supplier of the slot, with the identity advert. |
+| `POST /targets/<id>/retire-legacy` | `{"confirm":true,"max_debit_lovelace":"5000000"}` | Retires the legacy advert. |
+
+Each route answers with the slot adverts view:
+`target_id`, `publication_id`, `agent_id`, `serving_advert_ref` (the advert that the publisher gives the supplier),
+`child_advert_ref` (the advert of the ready supplier, or `null`), `error`, and `adverts`.
+Each item of `adverts` has `generation`, `layout` (`legacy` or `identity`), `agent_id`, `advert_ref`, `tx_hash`, `state`,
+`serving`, `wallet_debit_lovelace`, `signed_at`, `confirmed_at`, `switched_at`, `ended_at` and `retire_tx_hash`.
+The states are `pending` (journaled, not confirmed), `live`, `retiring` (a journaled RetireAdvert transaction is not confirmed),
+`retired` (the advert output is spent) and `expired` (the transaction did not confirm and cannot confirm).
+
+Readvert:
+
+- It copies the offer of the publish advert: the same manifest hash, model, price, bonds, processing time and endpoint.
+  It adds `agent_id`, the agent of the slot record.
+- It refuses before it signs: `409 slot_not_published`, `identity_not_configured`, `live_chain_disabled`,
+  `slot_record_required` or `slot_record_invalid`.
+- The slot key signs the transaction.
+  The publisher checks the signed wallet debit against `max_debit_lovelace` and journals the signed bytes before broadcast.
+  The debit is the advert deposit (about 2.04 AP3X) and the fee, as for the publish advert (2.68 AP3X on mainnet). Approve 3 AP3X.
+- A repeated request never signs again. It returns the journaled advert, or reads its outcome from the chain.
+  When the answer has an unknown outcome, repeat the request or read the view.
+- An unconfirmed advert becomes `expired` only when its wallet inputs are unspent 43,200 slots after its validity ends.
+  Then the next readvert signs a new generation.
+
+Until the switch, both adverts are on chain and the supplier serves the legacy advert.
+A buyer that selects the identity advert gets an offer mismatch before it posts an escrow, because `/capability` shows the legacy `advert_ref`.
+A new escrow that a buyer posts anyway gets `404 escrow_unavailable` at admission, before any Claim.
+After the switch, the same applies to the legacy advert.
+
+Switch:
+
+- It records the switch first. After a publisher restart, the supplier also starts with the identity advert.
+- The supplier of the slot refuses new paid and free calls (`503 supplier_draining`) and finishes its active work, for at most 15 minutes.
+  Then it stops and starts again with the `ADVERT_REF` and `AGENT_ID` of the identity advert. The other slots do not restart.
+- The answer waits for at most 240 seconds. Then read `GET /targets/<id>/adverts` until `child_advert_ref` is the identity `advert_ref`.
+- When the active work does not finish in 15 minutes, the supplier keeps the legacy advert. Send the switch again.
+- Refusals: `409 identity_advert_missing`, `identity_advert_pending` and `identity_advert_unavailable`.
+
+Retire-legacy:
+
+- It refuses with `409 identity_advert_not_live` unless the identity advert is confirmed, switched, unspent, and served by a ready supplier.
+- It spends the legacy advert output and pays its deposit back to the slot wallet, less the fee.
+  The approval covers the worst case, the 5 AP3X collateral of a failed script. Approve `"5000000"`.
+- The publisher journals each attempt before broadcast. All attempts spend the same advert output, so at most one confirms.
+  A repeated request reads the outcome from the chain. It sends a journaled attempt again while that attempt can confirm.
+  It signs a new attempt only after the earlier attempt expired.
+
+Operator steps for each published slot. Do one slot at a time, because a supplier start uses memory:
+
+1. Before the switch: `POST /targets/<id>/readvert`. Read the view until the identity advert is `live`.
+2. At the escrow switch: `POST /targets/<id>/switch`. Read the view until `child_advert_ref` is the identity `advert_ref`.
+3. Check the tool: `GET /p2a/tools/<id>/capability` shows the identity `advert_ref` and the `agent_id`.
+4. `POST /targets/<id>/retire-legacy`. Read the view until the legacy advert is `retired`.
+
 ### Prepare the local package
 
 Review the code, licenses, data rights, and dependencies first.

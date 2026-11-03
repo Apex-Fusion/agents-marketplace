@@ -12,7 +12,9 @@
  *                                        IDENTITY_POLICY_ID makes the slot post a new advert
  *                                        (Part 2 §6.2, §9.2) for its agent: AGENT_ID, or the
  *                                        record that the publisher registers for the slot key
- *                                        (POST /targets/<id>/record). AGENT_ID and the
+ *                                        (POST /targets/<id>/record). A slot published with a
+ *                                        legacy advert re-advertises in the identity layout
+ *                                        (POST /targets/<id>/readvert). AGENT_ID and the
  *                                        IDENTITY_*_REF_UTXO settings need IDENTITY_POLICY_ID.
  *   PAPER2AGENT_PUBLISHER_PUBLIC_URL   — public base URL; each advert endpoint is
  *                                        <base>/tools/<target id>.
