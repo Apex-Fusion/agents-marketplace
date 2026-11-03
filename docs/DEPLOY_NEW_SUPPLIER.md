@@ -51,12 +51,12 @@ OGMIOS_URL=https://ogmios.vector.mainnet.apexfusion.org
 VECTOR_ZERO_TIME_MS=1756485600000
 ESCROW_REF_UTXO=c8d84c6d67ec67a1efe5e9c6c06d53020e05d1bb96d1c55ecb1eb7d5010c4d54#0
 ADVERT_REF_UTXO=c8d84c6d67ec67a1efe5e9c6c06d53020e05d1bb96d1c55ecb1eb7d5010c4d54#1
-# Identity release (Part 2 §9.6). The identity deployment publishes these:
-IDENTITY_POLICY_ID=<56 hex, the identity registry policy ID>
-IDENTITY_ESCROW_REF_UTXO=<txHash>#0
-IDENTITY_ADVERT_REF_UTXO=<txHash>#1
+# Identity release (Part 2 §9.6). Published by the mainnet identity deployment:
+IDENTITY_POLICY_ID=d958b823faaa76977d0a07bd9622e87d8e2c85f6692f7f8e8db77762
+IDENTITY_ESCROW_REF_UTXO=4c2d09858dab0cc22cc77dcb99efed570d909a66e0beb512041dea91005b5e82#0
+IDENTITY_ADVERT_REF_UTXO=5efd18a1d90a6b87f1fd4b6fe93acfbe5be082260fd52be194b1088ade7c2758#0
 # The reference UTxO of the identity script. Only tx:register-record build reads it (§4.8).
-IDENTITY_REF_UTXO=<txHash>#<index>
+IDENTITY_REF_UTXO=3d4471222e524584180a4358e05517a243effc46d15ef62443a82aaed822de46#0
 ```
 
 During the drain (Part 2 §9.6) a supplier needs both pairs of reference

@@ -39,9 +39,9 @@ Every variable is optional, except that a deployed identity registry needs both
 
 | Variable | Default | Use |
 |---|---|---|
-| `IDENTITY_POLICY_ID` | none | Policy ID (script hash) of the identity registry. Published at deployment. Without it, no identifier is an identity-registry record. |
-| `IDENTITY_ADDRESS` | the enterprise address of `IDENTITY_POLICY_ID` | Must equal that address. The resolver refuses to start otherwise. |
-| `CUTOFF_SLOT` | none | Legacy identifiers minted in this slot or later resolve as `NOT_FOUND`. From this slot on, legacy records are Suspended (`unaccountable`). Without it, no cutoff applies. |
+| `IDENTITY_POLICY_ID` | none | Policy ID (script hash) of the identity registry. Published at deployment. Without it, no identifier is an identity-registry record. Mainnet: `d958b823faaa76977d0a07bd9622e87d8e2c85f6692f7f8e8db77762`. |
+| `IDENTITY_ADDRESS` | the enterprise address of `IDENTITY_POLICY_ID` | Must equal that address. The resolver refuses to start otherwise. Mainnet: `addr1w8v43wprl248d9mapgrmm93zap7cuty97e5j7luw3kmhwcs8vm9vk`. |
+| `CUTOFF_SLOT` | none | Legacy identifiers minted in this slot or later resolve as `NOT_FOUND`. From this slot on, legacy records are Suspended (`unaccountable`). Without it, no cutoff applies. Mainnet: `37218553`. |
 | `LEGACY_POLICY_ID` | `be1a0a2912da180757ed3cd61b56bb8eab0188c19dc3c0e3912d2c01` | Policy ID of the legacy registry. |
 | `LEGACY_ADDRESS` | `addr1wxlp5z3fztdpsp6ha57dvx6khw82kqvgcxwu8s8rjykjcqghprf42` | Must be the enterprise address of `LEGACY_POLICY_ID`. |
 | `GENESIS_NETWORK_MAGIC` | `764824073` | Expected network magic. |
@@ -58,7 +58,7 @@ Every variable is optional, except that a deployed identity registry needs both
 | `FETCH_SCAN_INTERVAL_S` | `600` | Seconds between background scans (60 to 86400). A record change starts a new check at the next scan. |
 | `GATEWAY_ED25519_KEY_FILE` / `GATEWAY_P256_KEY_FILE` | none | PEM private key files of the gateway keys (Part 2 Section 8.2): PKCS#8, or SEC1 for P-256. The gateway refuses a file that its group or other users can read or write (use mode 600 or 400, owned by the container user). Set both or neither; without them the M4 services are off and agent cards answer 503. |
 | `GATEWAY_VECTOR_ID` | none | The gateway's own identifier (64 hex), required with the key files. Key IDs are `did:vector:<id>#<key hash>`, and the gateway's DID issues credentials. |
-| `DELEGATION_POLICY_ID` / `DELEGATION_ADDRESS` | none | The delegation contract (policy ID = script hash; the address must be its enterprise address). Without it, delegation tokens are refused. |
+| `DELEGATION_POLICY_ID` / `DELEGATION_ADDRESS` | none | The delegation contract (policy ID = script hash; the address must be its enterprise address). Without it, delegation tokens are refused. Mainnet: `bdc16990b844a8860f28c51bb0e6a469c84bebcd57db699ce204785a` / `addr1wx7uz6vshpz23ps09rz3hv8x535usjlte4tak6vuugz8sks9wdc5c`. |
 | `STATUS_LIST_REFRESH_SECONDS` | `60` | How long built status lists and the status-list index are used (1 to 3600). It is also the `ttl` of the lists. |
 
 The testnet uses the same network magic as mainnet. So the resolver compares all four genesis values
