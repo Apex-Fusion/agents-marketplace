@@ -110,15 +110,15 @@ A DNS label has at most 63 characters, so 64 hexadecimal characters do not fit. 
 
 | Registry | Policy ID (= script hash) | Address | Use |
 |---|---|---|---|
-| Identity registry | Published at deployment | Published at deployment | New records and adopted records |
+| Identity registry | `d958b823faaa76977d0a07bd9622e87d8e2c85f6692f7f8e8db77762` | `addr1w8v43wprl248d9mapgrmm93zap7cuty97e5j7luw3kmhwcs8vm9vk` | New records and adopted records |
 | Legacy registry | `be1a0a2912da180757ed3cd61b56bb8eab0188c19dc3c0e3912d2c01` | `addr1wxlp5z3fztdpsp6ha57dvx6khw82kqvgcxwu8s8rjykjcqghprf42` | Records minted before the cutoff slot. They resolve as legacy records until they adopt. A deregistration deactivates them. |
 | Test registry | `5dd5118943d5aa7329696181252a6565a27dbf2c6de92b02a6aae361` | — | Not supported. Its DIDs resolve as `NOT_FOUND`. |
 
-The deployment of the identity registry also publishes these values:
+The deployment of the identity registry also publishes these values ([`contracts/identity-marketplace/deploy/mainnet/`](../contracts/identity-marketplace/deploy/mainnet/README.md)):
 
-- **Cutoff slot.** It is fixed before the identity contract is compiled.
-- **Allowlist.** Every identifier that the legacy registry minted in a slot before the cutoff slot. Only these identifiers can adopt. Their Merkle root is a parameter of the identity contract (Section 3 of the implementation plan).
-- **Dispute contract.** The policy ID of the configuration token and the script hash of the approved dispute contract (Module-1) that the token names.
+- **Cutoff slot.** It is fixed before the identity contract is compiled: slot 37,218,553 (2026-11-03T11:09:13Z).
+- **Allowlist.** Every identifier that the legacy registry minted in a slot before the cutoff slot: 794 identifiers ([`allowlist.json`](../contracts/identity-marketplace/deploy/mainnet/allowlist.json)). Only these identifiers can adopt. Their Merkle root `e4b6b17ce4a8f83aa17d3181ea140d2bd76c0cfa8a7c44ad69543800b4a0df01` is a parameter of the identity contract (Section 3 of the implementation plan).
+- **Dispute contract.** The policy ID of the configuration token, `c6a8cd37643ec0fffab66807bb53be5903d7ecda887d8af4a085f55a`, and the script hash of the approved dispute contract (Module-1) that the token names. The Module-1 hash is published when the configuration token exists.
 
 A record is authentic only when both conditions are true:
 
