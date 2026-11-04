@@ -8,6 +8,14 @@
 > mainnet supplier nodes that use **Hetzner Inference**
 > (`https://inference.hetzner.com`) as their **compute backend** for bonded
 > inference work commissioned on Vector. Config only — no code changes.
+>
+> **Hetzner notice (2026-11):** the Inference experiment becomes an official
+> product. The API moved from `https://inference.hetzner.com/api/v1` to
+> `https://inference.hetzner.com/v1`; the old URL fails after 2026-11-10. The
+> four suppliers use the new URL since 2026-11-04. The official product has
+> no Qwen models, and the experiment ends on 2026-12-08. All four suppliers
+> serve Qwen models, so they stop working on that date unless they move to
+> another model or backend.
 
 ---
 
@@ -67,13 +75,13 @@ the OpenRouter fleet serving `deepseek/deepseek-v4-flash`.
 
 ## 3. Verify the backend before spending on-chain
 
-The model ids come from `GET https://inference.hetzner.com/api/v1/models`.
+The model ids come from `GET https://inference.hetzner.com/v1/models`.
 This list changes, so check it before every new advert. The supplier sends
 the advert model verbatim. Probe the configured compatibility API before
 posting:
 
 ```bash
-curl -sS -X POST https://inference.hetzner.com/api/v1/chat/completions \
+curl -sS -X POST https://inference.hetzner.com/v1/chat/completions \
   -H "Authorization: Bearer $HETZNER_KEY" -H "Content-Type: application/json" \
   -d '{"model":"Qwen3.8-27B","messages":[{"role":"user","content":"ping"}]}' \
   | jq '{content:.choices[0].message.content,usage}'
@@ -137,8 +145,9 @@ docker compose -f deploy/mainnet/docker-compose.supplier-<name>.yml up -d
 
 - Keep `OPENAI_UPSTREAM_API=chat-completions`. Hetzner does not use the
   default native Responses path.
-- Set `OPENAI_BASE_URL=https://inference.hetzner.com/api`. Do not add `/v1`;
-  the compatibility adapter appends `/v1/chat/completions`.
+- Set `OPENAI_BASE_URL=https://inference.hetzner.com`. Do not add `/v1` or
+  the old `/api` prefix; the compatibility adapter appends
+  `/v1/chat/completions`.
 - Leave `OPENAI_RESPONSES_URL` and `OPENAI_RESPONSES_STREAM_ONLY` unset.
 - Leave `OPENAI_REASONING` unset. In Chat Completions mode, `off` sends the
   OpenRouter-only `reasoning:{enabled:false}` extension.

@@ -2,7 +2,7 @@
 #   (Hetzner Inference / Qwen/Qwen3.6-35B-A3B-FP8 — one-off `llm.text.generate.v1`)
 #
 # Hetzner-backed supplier. LLM_BACKEND=openai pointed directly at Hetzner's
-# hosted inference API (OpenAI-compatible at https://inference.hetzner.com/api).
+# hosted inference API (OpenAI-compatible at https://inference.hetzner.com/v1).
 # No local proxy container — reachable over public HTTPS.
 #
 # One of 8 Hetzner-backed suppliers (4 models x {one-off, chat-session});
@@ -47,8 +47,8 @@ services:
       LLM_BACKEND: openai
       OPENAI_UPSTREAM_API: chat-completions
       # No /v1 suffix — supplier/src/openai.ts appends /v1/chat/completions
-      # (Hetzner serves at https://inference.hetzner.com/api/v1/...).
-      OPENAI_BASE_URL: https://inference.hetzner.com/api
+      # (Hetzner serves at https://inference.hetzner.com/v1/...).
+      OPENAI_BASE_URL: https://inference.hetzner.com
       # Reasoning-style models can be slow; matches the advert's
       # max_processing_ms (300000).
       OPENAI_TIMEOUT_MS: "300000"

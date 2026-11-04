@@ -56,8 +56,8 @@ services:
       LLM_BACKEND: openai
       OPENAI_UPSTREAM_API: chat-completions
       # No /v1 suffix — supplier/src/openai.ts appends /v1/chat/completions
-      # (Hetzner serves at https://inference.hetzner.com/api/v1/...).
-      OPENAI_BASE_URL: https://inference.hetzner.com/api
+      # (Hetzner serves at https://inference.hetzner.com/v1/...).
+      OPENAI_BASE_URL: https://inference.hetzner.com
       # Reasoning-style models can be slow; mirror the one-off compose.
       OPENAI_TIMEOUT_MS: "300000"
       # Idle end (supplier Submits the transcript): single-slot suppliers must
