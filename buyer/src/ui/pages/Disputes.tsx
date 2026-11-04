@@ -308,23 +308,33 @@ export function DisputeCaseCard({ c, names }: { c: DisputeCase; names: Record<st
           <p className="mt-1 text-gray-500">Not resolved yet.</p>
         )}
         {reasoningHash && <OracleReasoning hash={reasoningHash} />}
-        {verdict && (
+        {verdict && (() => {
+          const hold = c.claimer_agent_id
+            ? names[c.claimer_agent_id]?.holds?.find((h) => h.reason === "disputeVerdict" && (h.by ?? "").startsWith("script:"))
+            : undefined;
+          return (
           <div className="mt-2 rounded border border-amber-200 bg-amber-50 p-2">
             <p>
               Verdict: <span className="font-medium">{verdict.action ?? "—"}</span>
               {durationMs !== null && <> for {Number.isInteger(durationMs / DAY_MS) ? durationMs / DAY_MS : (durationMs / DAY_MS).toFixed(1)} days</>}
-              {" "}· hold ends {utc(verdict.expires_at)}
+              {verdict.expires_at && <>{" "}· can be applied until {utc(verdict.expires_at)}</>}
             </p>
             <p>
               {verdict.applied_tx
                 ? <>Applied to the claimer's DID {utc(verdict.applied_time)} · <TxLink tx={verdict.applied_tx} /></>
                 : "Waiting for ApplyVerdict to write the hold on the claimer's DID."}
             </p>
+            {hold && (
+              <p className="font-medium">
+                Hold on the claimer's DID: {utc(hold.since)} → {utc(hold.until)}
+              </p>
+            )}
             <p className="text-xs text-amber-800">
               The hold has reason disputeVerdict. A suspended agent cannot take marketplace work.
             </p>
           </div>
-        )}
+          );
+        })()}
       </section>
 
       <details className="text-xs">
