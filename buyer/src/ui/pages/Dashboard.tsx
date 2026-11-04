@@ -23,6 +23,7 @@
 import { useEffect, useState } from "react";
 import { useMarketplace } from "../state/MarketplaceContext.js";
 import SupplierCard from "../components/SupplierCard.js";
+import { useSummaries } from "../components/IdentityBits.js";
 import PromptForm from "../components/PromptForm.js";
 import PiperTTSForm from "../components/PiperTTSForm.js";
 import ChatForm from "../components/ChatForm.js";
@@ -97,6 +98,8 @@ export default function Dashboard() {
   const [suppliers, setSuppliers] = useState<SupplierView[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<SupplierView | null>(null);
+  // One summaries call for the DID badges of all cards.
+  const identities = useSummaries(suppliers.map((s) => s.agent_id));
 
   useEffect(() => {
     let cancelled = false;
@@ -154,6 +157,7 @@ export default function Dashboard() {
             <SupplierCard
               key={s.utxo_ref}
               supplier={s}
+              identity={s.agent_id ? identities[s.agent_id] : undefined}
               onUse={(sup) => {
                 setSelected(sup);
                 // The form renders above the grid; bring it into view when a

@@ -45,6 +45,13 @@
  *                             blocks again. Uses: the backfill before the identity
  *                             deployment, and the recovery when the node has none of
  *                             the saved blocks (GET /healthz follower "no_intersection").
+ *                             A point applies once; a new point (other slot or hash) applies again.
+ *
+ * Module-1 disputes (oracle mode). Set all three, or none:
+ *   MODULE1_CLAIM_ADDRESS, MODULE1_CHALLENGE_ADDRESS, MODULE1_PARTY_ADDRESS — the claim,
+ *                             challenge and identity_party (verdict) addresses. None set on
+ *                             NETWORK_ID 1: the mainnet deployment (Module-1/deploy/identity/
+ *                             mainnet/manifest.json). None set on NETWORK_ID 0: not watched.
  */
 
 import type { NetworkId } from "@marketplace/shared";
@@ -63,6 +70,20 @@ export interface IdentityConfig {
   refreshMs: number;
   loadAtStart: boolean;
 }
+
+export interface Module1Config {
+  claimAddress: string;
+  challengeAddress: string;
+  /** identity_party (M1) address: the verdict outputs. */
+  partyAddress: string;
+}
+
+/** Module-1 mainnet addresses (Module-1/deploy/identity/mainnet/manifest.json, `addresses`). */
+const MODULE1_MAINNET: Module1Config = {
+  claimAddress: "addr1w9fldlpkyxdrhs7g4ueusvzgpnlkt2km2xa2hv9lfpd52gcz33v7u",
+  challengeAddress: "addr1wxv88w3nfrh0rsnhhntdecnx4cts76928w4xfnu9n58wczqprfdng",
+  partyAddress: "addr1w8mtp99gndvdtcvk557kuh47mjacxld55xck59rhe7vrqhgjxawlh",
+};
 
 export interface IndexerConfig {
   ogmiosUrl: string;
@@ -92,6 +113,8 @@ export interface IndexerConfig {
   switchSlot: number | null;
   /** Resync point (§6.4 backfill); null: none. */
   resyncFrom: { slot: number; blockHash: string } | null;
+  /** Module-1 dispute addresses; null: not watched. */
+  module1: Module1Config | null;
 }
 
 const POLICY_ID_RE = /^[0-9a-f]{56}$/;
@@ -197,6 +220,17 @@ function loadIdentity(env: Record<string, string | undefined>, networkId: Networ
   };
 }
 
+function loadModule1(env: Record<string, string | undefined>, networkId: NetworkId): Module1Config | null {
+  const names = ["MODULE1_CLAIM_ADDRESS", "MODULE1_CHALLENGE_ADDRESS", "MODULE1_PARTY_ADDRESS"] as const;
+  const set = names.filter((n) => value(env, n) !== undefined);
+  if (set.length === 0) return networkId === 1 ? MODULE1_MAINNET : null;
+  if (set.length !== names.length) throw new Error(`loadConfig: set all of ${names.join(", ")}, or none`);
+  const [claimAddress, challengeAddress, partyAddress] = names.map((n) =>
+    enterpriseScriptAddress(n, value(env, n)!, networkId),
+  ) as [string, string, string];
+  return { claimAddress, challengeAddress, partyAddress };
+}
+
 export function loadConfig(env: Record<string, string | undefined>): IndexerConfig {
   const ogmiosUrl = env.OGMIOS_URL;
   const dbPath = env.DB_PATH;
@@ -253,9 +287,12 @@ export function loadConfig(env: Record<string, string | undefined>): IndexerConf
   const advertAddress = value(env, "ADVERT_SCRIPT_ADDRESS") ?? "";
   const escrowAddress = value(env, "ESCROW_SCRIPT_ADDRESS") ?? "";
   const identity = loadIdentity(env, networkId);
+  const module1 = loadModule1(env, networkId);
 
-  const watched = [advertAddress, escrowAddress, identity?.advertAddress, identity?.escrowAddress, identity?.address]
-    .filter((a): a is string => typeof a === "string" && a.length > 0);
+  const watched = [
+    advertAddress, escrowAddress, identity?.advertAddress, identity?.escrowAddress, identity?.address,
+    module1?.claimAddress, module1?.challengeAddress, module1?.partyAddress,
+  ].filter((a): a is string => typeof a === "string" && a.length > 0);
   if (new Set(watched).size !== watched.length) {
     throw new Error("loadConfig: the watched script addresses must all differ");
   }
@@ -295,5 +332,6 @@ export function loadConfig(env: Record<string, string | undefined>): IndexerConf
     identity,
     switchSlot,
     resyncFrom,
+    module1,
   };
 }

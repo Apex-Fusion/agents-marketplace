@@ -10,6 +10,8 @@
  *   /api-keys → <ApiKeys />             self-serve gateway API key generation
  *   /paper2agent → <Paper2Agent />      build, review, and publish paper tools;
  *                                       ?job=<id> reopens one job
+ *   /disputes → <Disputes />            Module-1 dispute cases, job paths, DID lookup
+ *   /agents/:id → <AgentIdentity />     one agent's DID, status, disputes and jobs
  */
 
 import { Routes, Route, Link } from "react-router-dom";
@@ -21,6 +23,8 @@ import BookSummarizer from "./pages/BookSummarizer.js";
 import ApiKeys from "./pages/ApiKeys.js";
 import ResaleDashboard from "./pages/ResaleDashboard.js";
 import Paper2Agent from "./pages/Paper2Agent.js";
+import Disputes from "./pages/Disputes.js";
+import AgentIdentity from "./pages/AgentIdentity.js";
 
 export default function App() {
   return (
@@ -36,6 +40,7 @@ export default function App() {
         <Link to="/wallet" className="font-medium hover:underline">Wallet</Link>
         <Link to="/api-keys" className="font-medium hover:underline">API Keys</Link>
         <Link to="/paper2agent" className="font-medium hover:underline">Paper2Agent</Link>
+        <Link to="/disputes" className="font-medium hover:underline">Disputes</Link>
       </nav>
       <main className="p-6">
         <Routes>
@@ -47,6 +52,8 @@ export default function App() {
           <Route path="/wallet" element={<Wallet />} />
           <Route path="/api-keys" element={<ApiKeys />} />
           <Route path="/paper2agent" element={<Paper2Agent />} />
+          <Route path="/disputes" element={<Disputes />} />
+          <Route path="/agents/:id" element={<AgentIdentity />} />
         </Routes>
       </main>
     </div>

@@ -17,6 +17,7 @@
  *   identity_facts    — (v2) last identity gateway answer per agent_id
  *   meta              — (v2) key/value markers (resync point)
  *   chain_points      — (v3) slot and hash of the last applied blocks
+ *   module1_spends    — (v4) spends of Module-1 dispute outputs, with the redeemer
  *
  * Version 2 (identity registry, Part 2 §6.4):
  *   advertisements: layout ('legacy' | 'identity'), agent_id, creator_signed
@@ -27,6 +28,10 @@
  * to findIntersection, so a rollback of the last blocks while it is
  * disconnected resumes by itself. The table starts empty; the cursor is
  * always the first point.
+ *
+ * Version 4: module1_spends. The Module-1 claim, challenge and verdict outputs
+ * are rows of utxos (address = the Module-1 address); this table keeps the
+ * spend redeemer of each of them (OracleResolve carries the outcome).
  */
 
 import type Database from "better-sqlite3";
@@ -153,6 +158,17 @@ const CHAIN_POINTS_SQL = `
   );
 `;
 
+const MODULE1_SQL = `
+  CREATE TABLE IF NOT EXISTS module1_spends (
+    ref TEXT PRIMARY KEY,
+    slot INTEGER NOT NULL,
+    tx_hash TEXT NOT NULL,
+    redeemer_hex TEXT
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_module1_spends_slot ON module1_spends(slot);
+`;
+
 function addColumn(db: Database.Database, table: string, column: string, declaration: string): void {
   const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
   if (columns.some((c) => c.name === column)) return;
@@ -177,6 +193,9 @@ const MIGRATIONS: ReadonlyArray<(db: Database.Database) => void> = [
   },
   (db) => {
     db.exec(CHAIN_POINTS_SQL);
+  },
+  (db) => {
+    db.exec(MODULE1_SQL);
   },
 ];
 

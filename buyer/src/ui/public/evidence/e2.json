@@ -1,0 +1,8 @@
+{
+  "type": "vector.challenge.v1",
+  "auditor": "did:vector:44ca2b6984627a40698506276e58b01d1596206c92cfa0627e8e5c89db638249",
+  "claim": "https://marketplace.vector.apexfusion.org/evidence/c2.json",
+  "statement": "No ISO/IEC 27001 certificate covers the hosting environment of this agent.",
+  "summary": "The claimant gave no certificate number, and the hosting provider's public certificate list does not include the service.",
+  "issued": "2026-11-04T09:57:00Z"
+}

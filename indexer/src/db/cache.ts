@@ -15,6 +15,8 @@
  *   - Adverts and escrows: delete created-after; an advert retired after the
  *     block gets the status of its datum again
  *   - Supplier status: delete the rows of the deleted adverts
+ *   - Module-1 spends (module1_spends): delete spent-after (the Module-1
+ *     outputs themselves are utxos rows)
  *   - Cursor and intersection points: move to the block
  *
  * Listing: listActiveAdvertisements returns only the adverts that the indexer
@@ -135,6 +137,18 @@ export interface UtxoRow {
   spent_tx: string | null;
   /** Identity record outputs: the identifier that the token names. */
   agent_id: string | null;
+}
+
+/** A Module-1 output (claim, challenge or verdict) with the redeemer of its spend. */
+export interface Module1OutputRow {
+  ref: string;
+  address: string;
+  datum_hex: string;
+  created_slot: number;
+  created_tx: string;
+  spent_slot: number | null;
+  spent_tx: string | null;
+  redeemer_hex: string | null;
 }
 
 export type EscrowTerminalType = "AcceptEscrow" | "ReclaimEscrow" | "ReleaseEscrow" | "RefundRevokedEscrow";
@@ -294,6 +308,24 @@ export class SqliteCache {
       `SELECT ref, address, datum_hex, created_slot, created_tx, spent_slot, spent_tx, agent_id
        FROM utxos WHERE address = ? AND spent_slot IS NULL`
     ).all(address) as UtxoRow[];
+  }
+
+  /** The follower saw a spend of a Module-1 output; keep its redeemer. */
+  recordModule1Spend(ref: string, slot: number, txHash: string, redeemerHex: string | null): void {
+    this.db.prepare(
+      `INSERT OR REPLACE INTO module1_spends (ref, slot, tx_hash, redeemer_hex) VALUES (?, ?, ?, ?)`
+    ).run(ref, slot, txHash, redeemerHex);
+  }
+
+  /** All outputs at the Module-1 addresses (spent or not), oldest first, with their spend redeemers. */
+  listModule1Outputs(addresses: readonly string[]): Module1OutputRow[] {
+    if (addresses.length === 0) return [];
+    return this.db.prepare(
+      `SELECT u.ref, u.address, u.datum_hex, u.created_slot, u.created_tx, u.spent_slot, u.spent_tx, s.redeemer_hex
+       FROM utxos u LEFT JOIN module1_spends s ON s.ref = u.ref
+       WHERE u.address IN (${addresses.map(() => "?").join(", ")})
+       ORDER BY u.created_slot ASC, u.ref ASC`
+    ).all(...addresses) as Module1OutputRow[];
   }
 
   /** The unspent UTxOs among `refs` (any address). */
@@ -512,6 +544,15 @@ export class SqliteCache {
     return this.db.prepare(
       `SELECT * FROM escrows WHERE supplier_pkh = ? ORDER BY created_slot DESC`
     ).all(supplierPkh) as EscrowRow[];
+  }
+
+  /** The first rows (state Open) of the identity-layout escrows of `agentId`, newest first. */
+  listIdentityEscrowOrigins(agentId: string): EscrowRow[] {
+    return this.db.prepare(
+      `SELECT * FROM escrows
+       WHERE layout = 'identity' AND agent_id = ? AND state = 'Open' AND rolled_back = 0
+       ORDER BY created_slot DESC, utxo_ref DESC`
+    ).all(agentId) as EscrowRow[];
   }
 
   /**
@@ -742,6 +783,7 @@ export class SqliteCache {
       this.db.prepare(`DELETE FROM advertisements WHERE created_slot > ?`).run(after);
       this.db.prepare(`DELETE FROM escrows WHERE created_slot > ?`).run(after);
       this.db.prepare(`UPDATE events SET rolled_back = 1 WHERE slot > ? AND rolled_back = 0`).run(after);
+      this.db.prepare(`DELETE FROM module1_spends WHERE slot > ?`).run(after);
       this.db.prepare(`DELETE FROM utxos WHERE created_slot > ?`).run(after);
       this.db.prepare(
         `UPDATE utxos SET spent_slot = NULL, spent_tx = NULL WHERE spent_slot > ?`

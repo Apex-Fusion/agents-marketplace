@@ -134,7 +134,7 @@ describe("schema migration → v3 (intersection points)", () => {
 
     expect(columns(path, "chain_points")).toEqual(["slot", "block_hash"]);
     const db = new Database(path);
-    expect(db.pragma("user_version", { simple: true })).toBe(3);
+    expect(db.pragma("user_version", { simple: true })).toBe(4);
     db.close();
   });
 });

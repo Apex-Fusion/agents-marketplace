@@ -12,6 +12,10 @@
  *                                    Paper2Agent build service (see paper2agent/model.ts)
  *   /v1/paper2agent/*              → operator proxy to the Paper2Agent control
  *                                    service (see paper2agent/routes.ts)
+ *   GET  /v1/identity/*            → cached same-origin proxy to the identity
+ *                                    gateway (see identity/routes.ts)
+ *   GET  /evidence/*               → Module-1 claim/evidence documents from
+ *                                    the bundle (src/ui/public/evidence)
  *   *                              → static SPA bundle from `distPath`, with
  *                                    SPA fallback to index.html
  *
@@ -23,8 +27,10 @@
  */
 
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
-import { existsSync, readFileSync, statSync } from "fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "fs";
 import { bech32 } from "bech32";
+import { blake2b } from "@noble/hashes/blake2b";
+import { bytesToHex } from "@noble/hashes/utils";
 import type { ChainProvider } from "@marketplace/shared/chain";
 import type { WalletKey } from "@marketplace/shared/tx";
 import type { Marketplace } from "./sdk/Marketplace.js";
@@ -46,6 +52,7 @@ import { registerPaper2AgentModelRoute } from "./paper2agent/model.js";
 import { defaultPdfCaps } from "./pdf/caps.js";
 import type { PdfCaps } from "./pdf/types.js";
 import type { JobStore } from "./pdf/summarize-job.js";
+import { DEFAULT_IDENTITY_GATEWAY_URL, registerIdentityRoutes } from "./identity/routes.js";
 
 const ESCROW_REF_RE = /^([0-9a-f]{64})#(\d+)$/;
 
@@ -127,6 +134,8 @@ export interface AppDeps {
   paper2agentModelAutoExclude?: readonly string[];
   /** Background work (Accepts of paid build model calls) that shutdown waits for. */
   backgroundTasks?: Set<Promise<unknown>>;
+  /** Identity gateway base URL for /v1/identity/*. Defaults to the public gateway. */
+  identityGatewayUrl?: string;
 }
 
 interface ResolvedDeps {
@@ -188,6 +197,33 @@ function unsupportedResponseFields(
     ...metadataFields,
   ];
   return Object.keys(body).filter((field) => !allowed.includes(field));
+}
+
+/** The evidence documents of the bundle (`<distPath>/evidence/*.json`) by the
+ * blake2b-256 hex of their exact bytes. The chain holds only such hashes (for
+ * example the oracle's `reasoning_hash`). Read once at start-up. */
+function indexEvidence(distPath: string | undefined): Map<string, { uri: string; document: unknown }> {
+  const index = new Map<string, { uri: string; document: unknown }>();
+  if (!distPath) return index;
+  const dir = `${distPath}/evidence`;
+  let files: string[];
+  try {
+    files = readdirSync(dir).filter((file) => file.endsWith(".json"));
+  } catch {
+    return index;
+  }
+  for (const file of files) {
+    try {
+      const bytes = readFileSync(`${dir}/${file}`);
+      index.set(bytesToHex(blake2b(bytes, { dkLen: 32 })), {
+        uri: `/evidence/${file}`,
+        document: JSON.parse(bytes.toString("utf8")) as unknown,
+      });
+    } catch {
+      // Not readable or not JSON: the document is not served by hash.
+    }
+  }
+  return index;
 }
 
 /** Mainnet enterprise (vkh) bech32 address for a given 28-byte PKH hex. The
@@ -1343,6 +1379,24 @@ export function createApp(deps: AppDeps): Express {
     fetchImpl: deps.fetchImpl ?? globalThis.fetch,
   });
 
+  // ── Identity gateway proxy (/v1/identity/*) ──────────────────────────
+  // The gateway resolver sends no CORS headers; the SPA reads it here.
+  registerIdentityRoutes(app, {
+    gatewayUrl: deps.identityGatewayUrl || DEFAULT_IDENTITY_GATEWAY_URL,
+    fetchImpl: deps.fetchImpl ?? globalThis.fetch,
+  });
+
+  // ── GET /v1/evidence/by-hash/:hash — evidence document by its blake2b-256.
+  const evidenceByHash = indexEvidence(deps.distPath);
+  app.get("/v1/evidence/by-hash/:hash", (req: Request, res: Response) => {
+    const hash = String(req.params.hash ?? "").toLowerCase();
+    const hit = /^[0-9a-f]{64}$/.test(hash) ? evidenceByHash.get(hash) : undefined;
+    if (hit === undefined) {
+      return jsonError(res, 404, "not_found", "no evidence document has this blake2b-256 hash");
+    }
+    return res.status(200).json(hit);
+  });
+
   if (deps.distPath) {
     let isDir = false;
     try {
@@ -1354,6 +1408,10 @@ export function createApp(deps: AppDeps): Express {
       // Serve hashed asset files via static (CSS, JS chunks, images).
       // index.html is intercepted below so we can inject __BUYER_BOOT__.
       app.use(express.static(deps.distPath, { index: false }));
+      // A missing evidence document is a 404, not the SPA page.
+      app.get(/^\/evidence\//, (_req: Request, res: Response) => {
+        res.status(404).json({ error: "not_found" });
+      });
 
       // Inject window.__BUYER_BOOT__ into index.html before serving. Only
       // PUBLIC fields are sent — pubKeyHash + display address — so the SPA

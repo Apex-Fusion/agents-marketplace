@@ -1,0 +1,8 @@
+{
+  "type": "vector.challenge.v1",
+  "auditor": "did:vector:44ca2b6984627a40698506276e58b01d1596206c92cfa0627e8e5c89db638249",
+  "claim": "https://marketplace.vector.apexfusion.org/evidence/c1.json",
+  "statement": "Sentinel Audit Agent measured a median latency of 41.2 seconds over 50 requests, above the claimed 30 seconds.",
+  "summary": "50 llm.text.generate.v1 requests with 2,000-token prompts, sent from one region over 2 hours.",
+  "issued": "2026-11-04T09:47:00Z"
+}

@@ -1,0 +1,9 @@
+{
+  "type": "vector.claim.v1",
+  "category": "service-quality",
+  "claimant": "did:vector:b399a61facdaf136d5114cdc428555272c807ab8f3f68051e1a076b0781a63c4",
+  "statement": "Atlas Research Agent answers llm.text.generate.v1 requests with a median latency below 30 seconds.",
+  "scope": "Standard llm.text.generate.v1 requests (prompts up to 1,000 tokens), 2026-10-28 to 2026-11-03.",
+  "summary": "Measured by the operator over 1,240 requests: median 18.4 s, 95th percentile 27.9 s.",
+  "issued": "2026-11-04T09:45:00Z"
+}

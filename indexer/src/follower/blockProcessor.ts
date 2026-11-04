@@ -36,6 +36,11 @@
  * The output is the record of `agentId` when it holds exactly one token, with
  * quantity 1, whose asset name is a 32-byte identifier (Part 1 §4).
  *
+ * Module-1 disputes. Outputs with an inline datum at the Module-1 claim,
+ * challenge and verdict (identity_party) addresses are created watched
+ * outputs; a spend of one of them gives a module1Spends entry with its spend
+ * redeemer. The dispute view (disputes/module1.ts) decodes them.
+ *
  * Outputs created earlier in the same block are known to later transactions.
  */
 
@@ -76,6 +81,8 @@ export interface ScriptAddresses {
   identityAddress?: string;
   /** Identity registry policy ID (56 lowercase hex). */
   identityPolicyId?: string;
+  /** Module-1 claim, challenge and identity_party addresses (empty or absent: not watched). */
+  module1Addresses?: string[];
 }
 
 /** A watched output that the block creates. */
@@ -87,6 +94,14 @@ export interface CreatedUtxo {
   agentId: string | null;
 }
 
+/** A spend of a Module-1 output, with its spend redeemer (Plutus Data CBOR hex) when the transaction has one. */
+export interface Module1Spend {
+  ref: string;
+  slot: number;
+  txHash: string;
+  redeemerHex: string | null;
+}
+
 export interface ProcessBlockResult {
   events: MarketplaceEvent[];
   spentRefs: Array<{ ref: string; slot: number; txHash: string }>;
@@ -94,6 +109,8 @@ export interface ProcessBlockResult {
   created: CreatedUtxo[];
   /** Identifiers whose identity record the block changed (sorted, unique). */
   identityChanges: string[];
+  /** Spends of Module-1 outputs. Apply them with the other spends. */
+  module1Spends: Module1Spend[];
 }
 
 interface Family {
@@ -323,6 +340,19 @@ function processTx(
     agentId: null,
   }));
 
+  // 2b) Module-1 dispute outputs (claim, challenge, verdict) and their spends.
+  const module1 = new Set(addresses.module1Addresses ?? []);
+  if (module1.size > 0) {
+    for (const s of spent) {
+      if (!module1.has(s.prior.address)) continue;
+      result.module1Spends.push({ ref: s.ref, slot, txHash: tx.id, redeemerHex: tx.spendRedeemers?.[s.ref] ?? null });
+    }
+    for (const { o, index } of outputs) {
+      if (!o.datum || !module1.has(o.address)) continue;
+      created.push({ ref: `${tx.id}#${index}`, address: o.address, datumHex: o.datum, txHash: tx.id, agentId: null });
+    }
+  }
+
   // 3) Identity records: spent record outputs and new outputs that hold identity tokens.
   if (identityAddress) {
     for (const s of spent) {
@@ -350,7 +380,7 @@ export function processBlock(
   knownUtxos: Map<string, KnownUtxoInfo>,
   addresses: ScriptAddresses,
 ): ProcessBlockResult {
-  const result: ProcessBlockResult = { events: [], spentRefs: [], created: [], identityChanges: [] };
+  const result: ProcessBlockResult = { events: [], spentRefs: [], created: [], identityChanges: [], module1Spends: [] };
 
   // Byron / null transactions → graceful no-op
   if (!block || !block.transactions) {

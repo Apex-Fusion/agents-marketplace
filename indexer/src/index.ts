@@ -82,6 +82,9 @@ async function main(): Promise<void> {
       identityEscrowAddress: identity?.escrowAddress,
       identityAddress: identity?.address,
       identityPolicyId: identity?.policyId,
+      module1Addresses: config.module1
+        ? [config.module1.claimAddress, config.module1.challengeAddress, config.module1.partyAddress]
+        : [],
     },
     networkId: config.networkId,
     skipBeforeSlot: config.skipBeforeSlot,
@@ -97,7 +100,12 @@ async function main(): Promise<void> {
 
   const app = createApp(
     { cache, worker },
-    { uiDistDir: config.uiDistDir, maxSyncLagSlots: config.maxSyncLagSlots },
+    {
+      uiDistDir: config.uiDistDir,
+      maxSyncLagSlots: config.maxSyncLagSlots,
+      module1: config.module1,
+      networkId: config.networkId,
+    },
   );
 
   worker.on("error", (err: { message: string; stale: boolean }) => {
@@ -117,7 +125,8 @@ async function main(): Promise<void> {
     console.log(
       `[indexer] listening on :${config.indexerPort} ` +
       `(NETWORK_ID=${config.networkId} — ${networkLabel}; ` +
-      `identity ${identity ? `on, switch slot ${config.switchSlot ?? "none"}` : "off"})`,
+      `identity ${identity ? `on, switch slot ${config.switchSlot ?? "none"}` : "off"}; ` +
+      `Module-1 disputes ${config.module1 ? "on" : "off"})`,
     );
   });
 

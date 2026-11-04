@@ -13,6 +13,7 @@
  *   GET /capabilities/:id/suppliers
  *   GET /escrows/:ref
  *   GET /escrows
+ *   GET /disputes, GET /agents/:agent_id/jobs
  *   GET /events
  *
  * Optional UI mount (M1-F-5):
@@ -29,13 +30,16 @@
 
 import express, { type Application } from "express";
 import type { EventEmitter } from "events";
+import type { NetworkId } from "@marketplace/shared";
 import type { SqliteCache } from "./db/cache.js";
+import type { Module1Addresses } from "./disputes/module1.js";
 import type { ChainSyncWorker } from "./follower/worker.js";
 
 import { DEFAULT_MAX_SYNC_LAG_SLOTS, healthzRouter } from "./routes/healthz.js";
 import { suppliersRouter } from "./routes/suppliers.js";
 import { capabilitiesRouter } from "./routes/capabilities.js";
 import { escrowsRouter } from "./routes/escrows.js";
+import { disputesRouter } from "./routes/disputes.js";
 import { eventsRouter } from "./routes/events.js";
 
 export interface IndexerDeps {
@@ -64,6 +68,12 @@ export interface IndexerAppOptions {
    * behind the chain tip (MAX_SYNC_LAG_SLOTS). Default: 600.
    */
   maxSyncLagSlots?: number;
+
+  /** Module-1 dispute addresses for GET /disputes; absent or null: no cases. */
+  module1?: Module1Addresses | null;
+
+  /** Network of the slot times in GET /disputes. Default: 1 (Vector mainnet). */
+  networkId?: NetworkId;
 }
 
 export function createApp(deps: IndexerDeps, options?: IndexerAppOptions): Application {
@@ -77,6 +87,11 @@ export function createApp(deps: IndexerDeps, options?: IndexerAppOptions): Appli
   app.use(suppliersRouter({ cache: deps.cache }));
   app.use(capabilitiesRouter({ cache: deps.cache }));
   app.use(escrowsRouter({ cache: deps.cache }));
+  app.use(disputesRouter({
+    cache: deps.cache,
+    module1: options?.module1 ?? null,
+    networkId: options?.networkId ?? 1,
+  }));
 
   // Long-lived multiplexed SSE: per-connection listeners on the worker
   // EventEmitter, replay-then-live ordering, heartbeat keepalive.

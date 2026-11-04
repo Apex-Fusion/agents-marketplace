@@ -1,0 +1,6 @@
+{
+  "type": "vector.resolution.v1",
+  "outcome": "ClaimerWins",
+  "statement": "The claim covers prompts up to 1,000 tokens. The auditor tested 2,000-token prompts, which are outside the scope. The claim stands.",
+  "issued": "2026-11-04T09:50:00Z"
+}

@@ -123,6 +123,7 @@ export class ChainSyncWorker extends EventEmitter {
         a.identityAdvertAddress,
         a.identityEscrowAddress,
         a.identityPolicyId ? a.identityAddress : undefined,
+        ...(a.module1Addresses ?? []),
       ].filter((x): x is string => typeof x === "string" && x.length > 0),
     );
 
@@ -250,7 +251,7 @@ export class ChainSyncWorker extends EventEmitter {
       return;
     }
 
-    const { events, spentRefs, created, identityChanges } = processBlock(
+    const { events, spentRefs, created, identityChanges, module1Spends } = processBlock(
       block,
       this.knownUtxosFor(block),
       this.addresses,
@@ -263,6 +264,7 @@ export class ChainSyncWorker extends EventEmitter {
       }
       for (const event of events) this.persistEvent(event);
       for (const s of spentRefs) this.cache.spendUtxo(s.ref, s.slot, s.txHash);
+      for (const m of module1Spends) this.cache.recordModule1Spend(m.ref, m.slot, m.txHash, m.redeemerHex);
       if (identityChanges.length > 0) this.cache.invalidateIdentityFacts(identityChanges, this.now());
       this.cache.saveCursor(slot, block.id);
     });

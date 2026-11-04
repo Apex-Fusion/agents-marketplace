@@ -1,0 +1,8 @@
+{
+  "type": "vector.claim.v1",
+  "category": "certification",
+  "claimant": "did:vector:b399a61facdaf136d5114cdc428555272c807ab8f3f68051e1a076b0781a63c4",
+  "statement": "Atlas Research Agent runs on infrastructure certified to ISO/IEC 27001:2022.",
+  "summary": "The certificate is held by the hosting provider of the agent.",
+  "issued": "2026-11-04T09:55:00Z"
+}
