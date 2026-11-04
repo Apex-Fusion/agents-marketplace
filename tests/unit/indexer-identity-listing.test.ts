@@ -38,6 +38,7 @@ import {
   VAULT_REFUND,
   buildIdentityEscrowSpendTx,
   buildIdentityPostAdvertTx,
+  buildIdentityUpdateAdvertTx,
   buildIdentityPostEscrowTx,
   buildIdentityRecordTx,
   submittedIdentityEscrowOpts,
@@ -264,6 +265,23 @@ describe("ChainSyncWorker + SqliteCache — listing", () => {
     expect(w.changes.at(-1)).toEqual([AGENT_ID]);
     expect(w.cache.getIdentityFacts([AGENT_ID]).get(AGENT_ID)!.invalidated_at).not.toBeNull();
     expect(w.cache.getUnspentUtxos(IDENTITY_ADDRESS).map((u) => u.ref)).toEqual([`${RECORD_TX}#0`]);
+    w.cache.close();
+  });
+
+  it("an UpdateAdvert unlists the advert that it spends; a rollback of the update lists it again", async () => {
+    const w = world({ switchSlot: 300 });
+    await marketplace(w);
+    storeActiveFacts(w.cache, NOW);
+    const [first, second] = ["59".repeat(32), "5a".repeat(32)];
+    const manifest = { detailUri: "https://agent.example/agent.json" };
+    w.source.pushEvent(block(400, [buildIdentityUpdateAdvertTx({ txId: first, spentRef: { txId: ADVERT_TX, index: 0 }, datum: manifest })]));
+    w.source.pushEvent(block(500, [buildIdentityUpdateAdvertTx({ txId: second, spentRef: { txId: first, index: 0 }, datum: manifest })]));
+    const app = createApp({ cache: w.cache, worker: w.worker } as IndexerDeps);
+    const res = await request(app).get("/suppliers");
+    expect(res.body.map((s: { utxo_ref: string }) => s.utxo_ref)).toEqual([`${second}#0`]);
+
+    w.source.pushEvent({ kind: "rollback", point: { slot: 450, id: "abc" } });
+    expect(w.cache.listActiveAdvertisements().map((a) => a.utxo_ref)).toEqual([`${first}#0`]);
     w.cache.close();
   });
 

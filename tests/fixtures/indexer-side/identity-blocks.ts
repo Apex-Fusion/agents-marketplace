@@ -152,6 +152,19 @@ export function buildIdentityPostAdvertTx(opts: {
   };
 }
 
+/** UpdateAdvert at the new advert address: spends `spentRef`, writes the new datum, signed by the supplier key. */
+export function buildIdentityUpdateAdvertTx(opts: {
+  txId?: string;
+  spentRef: { txId: string; index: number };
+  datum?: AdvertDatumOpts & { agentId?: string };
+}): MockTx {
+  const txId = opts.txId ?? nextTxId();
+  return {
+    ...buildIdentityPostAdvertTx({ txId, datum: opts.datum }),
+    inputs: [{ transaction: { id: opts.spentRef.txId }, index: opts.spentRef.index }, fundingInput(txId)],
+  };
+}
+
 /** PostEscrow at the new escrow address (state Open). */
 export function buildIdentityPostEscrowTx(opts: { txId?: string; datum?: IdentityEscrowDatumOpts } = {}): MockTx {
   const txId = opts.txId ?? nextTxId();

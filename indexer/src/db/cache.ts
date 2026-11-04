@@ -22,6 +22,7 @@
  * Listing: listActiveAdvertisements returns only the adverts that the indexer
  * lists (listing/rule.ts): the legacy adverts before the switch slot, the new
  * adverts that pass the identity listing rule, and none above the value cap.
+ * An advert whose output is spent is not listed (CURRENT_ADVERT).
  *
  * WAL mode is enabled on open for concurrent readers.
  */
@@ -170,6 +171,14 @@ export interface SqliteCacheOptions {
 
 /** Rows per `IN (...)` query; below the SQLite host-parameter limit. */
 const IN_CHUNK = 500;
+
+/**
+ * SQL condition on the advertisements row `a`: the advert is current. An
+ * UpdateAdvert spends the advert output and keeps its row Active, so the row
+ * must also have no recorded spend. A rollback removes the spend again.
+ */
+const CURRENT_ADVERT = `a.status = 'Active' AND a.rolled_back = 0
+  AND NOT EXISTS (SELECT 1 FROM utxos s WHERE s.ref = a.utxo_ref AND s.spent_slot IS NOT NULL)`;
 
 /**
  * Saved intersection points: the last applied blocks. After a rollback of
@@ -381,22 +390,23 @@ export class SqliteCache {
   }
 
   /**
-   * The adverts that the indexer lists, newest first (listing/rule.ts): Active,
-   * not rolled back, within the value cap; legacy adverts only before the
-   * switch slot; new adverts only when they pass the identity listing rule.
+   * The adverts that the indexer lists, newest first (listing/rule.ts): current
+   * (CURRENT_ADVERT: Active, not rolled back, output not spent), within the
+   * value cap; legacy adverts only before the switch slot; new adverts only
+   * when they pass the identity listing rule.
    */
   listActiveAdvertisements(filter?: { capability_id?: string; supplier_pkh?: string }): AdvertRow[] {
-    let sql = `SELECT * FROM advertisements WHERE status = 'Active' AND rolled_back = 0`;
+    let sql = `SELECT a.* FROM advertisements a WHERE ${CURRENT_ADVERT}`;
     const params: unknown[] = [];
     if (filter?.capability_id) {
-      sql += ` AND capability_id = ?`;
+      sql += ` AND a.capability_id = ?`;
       params.push(filter.capability_id);
     }
     if (filter?.supplier_pkh) {
-      sql += ` AND supplier_pkh = ?`;
+      sql += ` AND a.supplier_pkh = ?`;
       params.push(filter.supplier_pkh);
     }
-    sql += ` ORDER BY created_slot DESC`;
+    sql += ` ORDER BY a.created_slot DESC`;
     const adverts = this.db.prepare(sql).all(...params) as AdvertRow[];
 
     const agentIds = [...new Set(adverts.flatMap((a) => (a.layout === "identity" && a.agent_id ? [a.agent_id] : [])))];
@@ -438,15 +448,16 @@ export class SqliteCache {
 
   /**
    * Agents whose identity facts the refresher keeps current: the agent_id of
-   * each Active new advert whose creating transaction lists the supplier key
-   * and whose record is an unspent output at the identity address.
+   * each current new advert (CURRENT_ADVERT) whose creating transaction lists
+   * the supplier key and whose record is an unspent output at the identity
+   * address.
    */
   listIdentityAgentsToResolve(): string[] {
     const identityAddress = this.listing.identityAddress;
     if (!identityAddress) return [];
     const rows = this.db.prepare(
       `SELECT DISTINCT a.agent_id FROM advertisements a
-       WHERE a.layout = 'identity' AND a.status = 'Active' AND a.rolled_back = 0
+       WHERE a.layout = 'identity' AND ${CURRENT_ADVERT}
          AND a.creator_signed = 1 AND a.agent_id IS NOT NULL
          AND EXISTS (SELECT 1 FROM utxos u
                      WHERE u.address = ? AND u.agent_id = a.agent_id AND u.spent_slot IS NULL)
