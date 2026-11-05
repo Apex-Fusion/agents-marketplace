@@ -6,7 +6,7 @@
 | Status | Draft for registration in the W3C DID Extensions registry |
 | Implementation plan | [`IDENTITY_REGISTRY.md`](IDENTITY_REGISTRY.md) |
 | Contact | Apex Fusion Foundation, https://apexfusion.org |
-| Licence of this text | Open item. It is set before registration. |
+| Licence of this text | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Attribution: Apex Fusion Foundation. |
 
 ## 1. Overview
 
@@ -56,7 +56,7 @@ The key words MUST, MUST NOT, SHOULD and MAY are as in RFC 2119 and RFC 8174.
 | Cutoff slot | The ledger slot that separates the legacy records that can adopt from the legacy records that do not resolve (Section 4). |
 | Confirmations | The number of blocks after the block of a transaction: tip block height − block height. A transaction with 30 or more confirmations is confirmed. |
 | Version | One state of a record (Section 7.2). |
-| AP3X | The currency of the Vector ledger. 1 AP3X = 1,000,000 base units. |
+| AP3X | The native token of the Vector ledger. 1 AP3X = 1,000,000 base units. |
 
 ## 3. Method name and syntax
 
@@ -506,20 +506,6 @@ A profile and an organisation name are statements of the record's controller and
 | Contracts (Aiken) | `contracts/identity-marketplace/` in https://github.com/Apex-Fusion/agents-marketplace |
 | Resolver and gateway | `identity-gateway/` in the same repository. Licence: Apache-2.0, pending Foundation approval. |
 | Public resolver | `https://id.vector.apexfusion.org/1.0/identifiers/{did}` |
-| Universal Resolver driver | `ghcr.io/apex-fusion/uni-resolver-driver-did-vector:<version>` |
+| Universal Resolver driver | Not published yet. It follows the registration. |
 
-Registration entry for `w3c/did-extensions`:
-
-```json
-{
-  "name": "vector",
-  "status": "registered",
-  "specification": "<permalink to this file at a fixed commit>",
-  "verifiableDataRegistry": "Vector (Apex Fusion) eUTXO ledger",
-  "contactName": "Apex Fusion Foundation",
-  "contactEmail": "<open item>",
-  "contactWebsite": "https://apexfusion.org"
-}
-```
-
-After the deployment, a second pull request changes the permalink to a commit that contains the values of Section 4.
+Registration entry: `methods/vector.json` in `w3c/did-extensions`, proposed in [pull request 769](https://github.com/w3c/did-extensions/pull/769).
