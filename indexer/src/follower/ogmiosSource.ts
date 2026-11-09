@@ -29,6 +29,7 @@
 import { EventEmitter } from "events";
 import type { ChainPoint, ChainSyncSource, ChainTip, RollbackPoint } from "./types.js";
 import { fromOgmiosBlock } from "./ogmiosBlock.js";
+import { parseOgmiosMessage } from "./ogmiosJson.js";
 
 const INITIAL_BACKOFF = 1_000;
 const MAX_BACKOFF = 30_000;
@@ -214,7 +215,7 @@ export class OgmiosSource extends EventEmitter implements ChainSyncSource {
   private handleMessage(data: string): void {
     let msg: OgmiosMessage;
     try {
-      msg = JSON.parse(data);
+      msg = parseOgmiosMessage(data) as OgmiosMessage;
     } catch (err) {
       // Watchdog stays armed — a stream of unparseable garbage triggers reconnect.
       this.emit("error", err);

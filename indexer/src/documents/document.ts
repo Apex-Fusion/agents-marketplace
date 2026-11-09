@@ -10,8 +10,10 @@
  * document only when `v` is the integer 1, `t`, `m` and every chunk are texts,
  * no chunk is longer than 64 bytes, and no chunk, `t` or `m` starts with "0x"
  * (some chain indexers show byte strings as 0x… text). Other keys of the map
- * are ignored; a key that occurs twice makes the value ambiguous, so it is no
- * document either.
+ * are ignored. §10.1 is silent about a key that occurs twice. The reference
+ * reader (vector_jury documents.py) reads the map into a dictionary, so the
+ * last value of a key counts. This reader does the same: both read the same
+ * document bytes.
  *
  * URI of a document: `vector-tx:` followed by the unpadded base64url of the
  * 32-byte transaction id (43 characters).
@@ -45,11 +47,10 @@ const textEncoder = new TextEncoder();
 /** The document in a label 22084 value, or the reason why the value is not one. */
 export function parseDocument(value: Metadatum): DocumentParse {
   if (value.kind !== "map") return { ok: false, reason: "the value is not a map" };
+  // A key that occurs twice: the last value counts (Map.set replaces the earlier value).
   const fields = new Map<string, Metadatum>();
   for (const [key, item] of value.entries) {
-    if (key.kind !== "text") continue;
-    if (fields.has(key.value)) return { ok: false, reason: `the key "${key.value}" occurs twice` };
-    fields.set(key.value, item);
+    if (key.kind === "text") fields.set(key.value, item);
   }
   const v = fields.get("v");
   if (v?.kind !== "int" || v.value !== 1n) return { ok: false, reason: "v is not 1" };

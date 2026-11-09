@@ -465,7 +465,6 @@ describe("§11.2 rule 2 — the challenge_out of a case is genuine and holds the
         { label: "jury-1", address: JURY_ADDRESS, scriptHash: JURY_SCRIPT_HASH, params: JURY_PARAMS, casesFrom: 0, casesUntil: null },
       ],
       documents: () => new Map(),
-      records: () => new Map(),
       outputs: () => new Map([[row.ref, row]]),
       tipHeight: 1_000,
       networkId: 0,

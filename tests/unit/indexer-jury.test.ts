@@ -347,7 +347,6 @@ describe("jury view — cases, ballots, jurors, canonical case", () => {
       rows,
       deployments: extra.deployments ?? DEPLOYMENTS,
       documents: () => new Map(),
-      records: () => new Map(),
       outputs: () => new Map((extra.outputs ?? []).map((u) => [u.ref, u])),
       tipHeight: extra.tipHeight ?? 1_000_000,
       networkId: 0,
@@ -541,7 +540,7 @@ describe("from the claim to the OracleResolve — worker, /jury and /disputes", 
   const blockAt = (slot: number, height: number, transactions: IndexerTx[]): IndexerBlock =>
     ({ slot, id: slot.toString(16).padStart(64, "0"), height: height * 10, transactions });
   const withChallengeToken = (o: TxOutput): TxOutput => ({ ...o, value: { ...o.value, [M1_CHALLENGE_HASH]: { [CHALLENGE_TOKEN]: 1 } } });
-  const withoutRecord = (t: IndexerTx): IndexerTx => ({ ...t, metadata: undefined });
+  const withRecordRef = (t: IndexerTx, recordTx: string): IndexerTx => ({ ...t, metadata: doc("juror-record-ref", vectorTxUri(recordTx)) });
 
   const commitTx = (id: string, who: keyof typeof AGENT, jurorIn: string, caseIn: string, ballots: BallotOpts[]) => tx(id, {
     inputs: [input(jurorIn), input(caseIn)],
@@ -601,9 +600,9 @@ describe("from the claim to the OracleResolve — worker, /jury and /disputes", 
     blockAt(SLOTS.reveal1, 8, [
       revealTx(TX.revealA, "A", "AuditorWins", `${TX.commitA}#0`, `${TX.commitD}#1`,
         [ballot("D"), ballot("C"), ballot("B"), ballot("A", { revealed: "AuditorWins" })], [0, 1, 0]),
-      withoutRecord(revealTx(TX.revealC, "C", "AuditorWins", `${TX.commitC}#0`, `${TX.revealA}#1`,
-        [ballot("D"), ballot("C", { revealed: "AuditorWins" }), ballot("B"), ballot("A", { revealed: "AuditorWins" })], [0, 2, 0])),
-      // Overflow (SPEC §10.4): C's record is in a separate transaction of the reveal window.
+      withRecordRef(revealTx(TX.revealC, "C", "AuditorWins", `${TX.commitC}#0`, `${TX.revealA}#1`,
+        [ballot("D"), ballot("C", { revealed: "AuditorWins" }), ballot("B"), ballot("A", { revealed: "AuditorWins" })], [0, 2, 0]), TX.recordC),
+      // Overflow (SPEC §10.4): C's record is in a separate transaction of the reveal window, and the reveal refers to it.
       tx(TX.recordC, { metadata: doc("juror-record", record(AGENT.C, "AuditorWins")) }),
     ]),
     blockAt(SLOTS.reveal2, 9, [

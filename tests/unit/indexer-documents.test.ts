@@ -90,6 +90,13 @@ describe("metadata converter — Ogmios v6 json and cbor forms", () => {
     expect(metadatumFromJson(2 ** 60)).toBeNull();
   });
 
+  it("converts an integer outside the safe range that arrives as a bigint with its exact value", () => {
+    const big = (value: bigint): Metadatum => ({ kind: "int", value });
+    expect(metadatumFromJson({ v: 1, high: 2n ** 64n - 1n, low: -(2n ** 64n), list: [2n ** 53n] })).toEqual(
+      docMap([["v", one], ["high", big(2n ** 64n - 1n)], ["low", big(-(2n ** 64n))], ["list", { kind: "list", items: [big(2n ** 53n)] }]]),
+    );
+  });
+
   it("converts the CBOR form, with definite and indefinite lengths, byte strings and big integers", () => {
     const value = docMap([["v", one], ["t", text("claim")], ["d", chunkList(["hé", "llo"])]]);
     expect(metadatumFromCbor(cbor(value))).toEqual(value);
@@ -175,15 +182,37 @@ describe("parseDocument — label 22084 (SPEC §10.1)", () => {
     expect(parseDocument(bytes)).toEqual({ ok: false, reason: "chunk 0 is not a text" });
   });
 
-  it("refuses other versions, missing fields and a key that occurs twice; ignores other keys", () => {
+  it("refuses other versions and missing fields; ignores other keys", () => {
     const base: Array<[string, Metadatum]> = [["v", one], ["t", text("claim")], ["m", text("text/plain")], ["d", chunkList(["x"])]];
     expect(parseDocument(docMap([["v", { kind: "int", value: 2n }], ...base.slice(1)])).ok).toBe(false);
     expect(parseDocument(docMap(base.filter(([k]) => k !== "t"))).ok).toBe(false);
     expect(parseDocument(docMap(base.filter(([k]) => k !== "m"))).ok).toBe(false);
     expect(parseDocument(docMap([...base.slice(0, 3), ["d", text("x")]])).ok).toBe(false);
-    expect(parseDocument(docMap([...base, ["t", text("evidence")]]))).toEqual({ ok: false, reason: 'the key "t" occurs twice' });
     expect(parseDocument(docMap([...base, ["note", text("ignored")]])).ok).toBe(true);
     expect(parseDocument(chunkList(["x"])).ok).toBe(false);
+  });
+
+  it("a key that occurs twice: the last value counts, as the Python reader reads the map into a dictionary", () => {
+    const base: Array<[string, Metadatum]> = [["v", one], ["t", text("claim")], ["m", text("text/plain")], ["d", chunkList(["old"])]];
+    const bytesOf = (value: Metadatum): [string, string] | string => {
+      const parsed = parseDocument(value);
+      return parsed.ok ? [parsed.document.type, Buffer.from(parsed.document.bytes).toString("utf8")] : parsed.reason;
+    };
+
+    // Accepted: the last t and the last d count, in the Metadatum, in the CBOR form and in the JSON form (JSON.parse keeps the last key).
+    const twice = docMap([...base, ["t", text("evidence")], ["d", chunkList(["ne", "w"])]]);
+    const viaCbor = metadatumFromOgmios({ cbor: cbor(twice) });
+    const viaJson = metadatumFromOgmios({ json: JSON.parse('{"v":1,"t":"claim","m":"text/plain","d":["old"],"t":"evidence","d":["ne","w"]}') });
+    expect(viaCbor).toEqual(twice);
+    for (const value of [twice, viaCbor!, viaJson!]) expect(bytesOf(value)).toEqual(["evidence", "new"]);
+    // An earlier value that is not valid does not matter when the last value is valid.
+    expect(bytesOf(docMap([["v", { kind: "int", value: 2n }], ...base]))).toEqual(["claim", "old"]);
+    expect(bytesOf(docMap([["d", { kind: "list", items: [{ kind: "bytes", hex: "00" }] }], ...base]))).toEqual(["claim", "old"]);
+
+    // Refused: the last value is not valid, whatever an earlier value was.
+    expect(bytesOf(docMap([...base, ["v", { kind: "int", value: 2n }]]))).toBe("v is not 1");
+    expect(bytesOf(docMap([...base, ["m", { kind: "bytes", hex: "00" }]]))).toBe('m is not a text or starts with "0x"');
+    expect(bytesOf(docMap([...base, ["d", chunkList(["0xab"])]]))).toBe('chunk 0 starts with "0x"');
   });
 
   it("an empty chunk list is an empty document", () => {

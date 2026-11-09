@@ -1,12 +1,14 @@
 /**
- * tests/unit/indexer-jury-records.test.ts — ballots with an empty commit and the link from a reveal to
- * its juror record (Module-1/jury/SPEC.md §5.3, §6.10 rule 6, §10.4).
+ * tests/unit/indexer-jury-records.test.ts — ballots with an empty commit, the link from a reveal to
+ * its juror record, and the prompt of a registration (Module-1/jury/SPEC.md §5.3, §6.10 rule 6, §10.3, §10.4).
  *
  * CaseReveal replaces the commit of a ballot with empty bytes and sets Revealed { vote }. CaseClaim
  * keeps the empty commit and sets Paid { vote }. A reveal carries its record in its own metadata
  * (type juror-record), or it refers to it: the juror publishes the record first in another transaction,
  * and the reveal carries a document of type juror-record-ref whose text is the vector-tx: URI of that
- * transaction. The record is checked against record_hash of the reveal redeemer.
+ * transaction. The record is checked against record_hash of the reveal redeemer. A record of that hash in
+ * any other transaction is not the record: the reference reader (vector_jury find_record) looks only in
+ * these two places. The prompt of a juror is the juror-prompt document of its registration transaction.
  */
 
 import { describe, it, expect } from "vitest";
@@ -25,12 +27,22 @@ import {
   caseDatumHex,
   caseToken,
   challengeDatumHex,
+  jurorDatumHex,
   jurorToken,
   textHash,
 } from "../fixtures/indexer-side/jury-blocks.js";
 
 const AGENT = "b1".repeat(32);
 const JUROR = jurorToken(1);
+
+const DEPLOYMENT = {
+  label: "jury-1",
+  address: JURY_ADDRESS,
+  scriptHash: JURY_SCRIPT_HASH,
+  params: JURY_PARAMS,
+  casesFrom: 0,
+  casesUntil: null,
+};
 
 describe("ballots with an empty commit (§6.10 rule 6)", () => {
   it("a Revealed or Paid ballot may have an empty commit", () => {
@@ -92,14 +104,6 @@ describe("the record of a reveal (§10.4)", () => {
   const T1 = "a1".repeat(32); // the reveal
   const TR = "a2".repeat(32); // a separate transaction with the record
   const TX_OUT = "a3".repeat(32); // makes the challenge output that the case read
-  const DEPLOYMENT = {
-    label: "jury-1",
-    address: JURY_ADDRESS,
-    scriptHash: JURY_SCRIPT_HASH,
-    params: JURY_PARAMS,
-    casesFrom: 0,
-    casesUntil: null,
-  };
 
   interface SeedDocument {
     txHash: string;
@@ -191,11 +195,9 @@ describe("the record of a reveal (§10.4)", () => {
     expect(ballotOf([documents[0]!, { ...documents[1]!, text: `${vectorTxUri(TR)}\n` }])).toMatchObject({ record_status: "separate" });
   });
 
-  it("a record that another transaction holds is found by its hash, also without a reference", () => {
-    expect(ballotOf([{ txHash: TR, type: "juror-record", text: RECORD }])).toMatchObject({
-      record_status: "separate",
-      record: { tx: TR, matches: true },
-    });
+  it("a record that another transaction holds does not count when the reveal does not refer to it", () => {
+    // The same bytes and the same hash, but nothing in the reveal leads to that transaction.
+    expect(ballotOf([{ txHash: TR, type: "juror-record", text: RECORD }])).toMatchObject({ record_status: "missing", record: null });
   });
 
   it("the record is missing without a record, with a record of another hash, and with a reference that gives none", () => {
@@ -207,9 +209,66 @@ describe("the record of a reveal (§10.4)", () => {
       ["a reference to a document of another type", [{ txHash: TR, type: "claim", text: RECORD }, ref(vectorTxUri(TR))]],
       ["a reference to a transaction without a document", [ref(vectorTxUri(TR))]],
       ["a reference that is not a vector-tx URI", [ref("https://example.org/record.json")]],
+      // The record is on chain, but the reveal does not lead to it.
+      ["a reference to another transaction, and the record elsewhere", [{ txHash: TR, type: "juror-record", text: RECORD }, ref(vectorTxUri(TX_OUT))]],
+      [
+        "a record of another hash in the reveal, and the record elsewhere",
+        [{ txHash: T1, type: "juror-record", text: OTHER_RECORD }, { txHash: TR, type: "juror-record", text: RECORD }],
+      ],
     ];
     for (const [name, documents] of cases) {
       expect(ballotOf(documents), name).toMatchObject({ record_status: "missing", record: null });
     }
+  });
+});
+
+describe("the prompt of a registration (§10.3)", () => {
+  const PROMPT = `{"type":"vector-jury-prompt/1","juror":"did:vector:${AGENT}"}`;
+  const OTHER_PROMPT = `{"type":"vector-jury-prompt/1","juror":"did:vector:${"b2".repeat(32)}"}`;
+  const REGISTER = "b0".repeat(32);
+
+  /** The only juror of a database whose registration transaction carries this document (null: no document). */
+  function jurorWith(document: { type: string; text: string } | null) {
+    const cache = new SqliteCache(":memory:");
+    try {
+      const datum = jurorDatumHex({ agent: AGENT, promptHash: textHash(PROMPT), registeredAt: 1_793_577_600_000 });
+      cache.insertUtxo(`${REGISTER}#0`, JURY_ADDRESS, datum, 500, REGISTER);
+      cache.insertJuryOutput({ ref: `${REGISTER}#0`, deployment: JURY_SCRIPT_HASH, token: JUROR, lovelace: "250000000", slot: 500, blockHeight: 50 });
+      if (document) {
+        cache.insertDocument({
+          txHash: REGISTER,
+          slot: 500,
+          blockHeight: 50,
+          type: document.type,
+          mediaType: "application/json",
+          hash: textHash(document.text),
+          bytes: new TextEncoder().encode(document.text),
+        });
+      }
+      cache.saveCursor(700, "7".repeat(64), 100);
+      return loadJuryView(cache, [DEPLOYMENT], 0).jurors[0]!;
+    } finally {
+      cache.close();
+    }
+  }
+
+  it("is the juror-prompt document of the registration transaction", () => {
+    expect(jurorWith({ type: "juror-prompt", text: PROMPT })).toMatchObject({
+      prompt_hash: textHash(PROMPT),
+      prompt: { tx: REGISTER, type: "juror-prompt", hash: textHash(PROMPT), matches: true },
+    });
+  });
+
+  it("a juror-prompt document with another hash is shown, and it does not match the prompt hash", () => {
+    expect(jurorWith({ type: "juror-prompt", text: OTHER_PROMPT })).toMatchObject({
+      prompt: { tx: REGISTER, type: "juror-prompt", hash: textHash(OTHER_PROMPT), matches: false },
+    });
+  });
+
+  it("a document of another type in the registration transaction is no prompt, also with the prompt hash", () => {
+    for (const type of ["juror-record", "juror-record-ref", "claim", "evidence", "resolution"]) {
+      expect(jurorWith({ type, text: PROMPT }), type).toMatchObject({ prompt_hash: textHash(PROMPT), prompt: null });
+    }
+    expect(jurorWith(null)).toMatchObject({ prompt: null });
   });
 });

@@ -11,10 +11,12 @@
  *     no `json`. With `--include-metadata-cbor` it always sends `cbor`.
  *
  * The converter prefers `cbor`, because it holds the exact value. From `json`,
- * each string is a text and each object key is a text key; a number that is
- * not a safe integer lost its precision in JSON.parse, so its label is left
- * out. A label that does not convert is logged and left out: the converter
- * never throws.
+ * each string is a text and each object key is a text key. An integer is a
+ * number, or a bigint when it is outside the safe range: parseOgmiosMessage
+ * (ogmiosJson.ts) keeps such an integer of `metadata.labels` exact. A number
+ * that is not a safe integer lost its precision in JSON.parse, so its label is
+ * left out. A label that does not convert is logged and left out: the
+ * converter never throws.
  */
 
 import { readCbor, type CborItem } from "@marketplace/shared";
@@ -28,6 +30,7 @@ const LABEL_RE = /^(?:0|[1-9][0-9]*)$/;
 function fromJson(value: unknown, depth: number): Metadatum | null {
   if (depth > MAX_DEPTH) return null;
   if (typeof value === "string") return { kind: "text", value };
+  if (typeof value === "bigint") return { kind: "int", value };
   if (typeof value === "number") return Number.isSafeInteger(value) ? { kind: "int", value: BigInt(value) } : null;
   if (Array.isArray(value)) {
     const items: Metadatum[] = [];

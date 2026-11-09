@@ -178,8 +178,6 @@ export interface JuryViewInput {
   tipHeight: number | null;
   /** Module-1 outputs (spent or not) by reference: challenge_out and claim_out. */
   outputs: (refs: string[]) => Map<string, UtxoRow>;
-  /** juror-record documents (without bytes) by hash, oldest first: a record that another transaction holds, found without a reference. */
-  records: (hashes: string[]) => Map<string, DocumentSummary[]>;
   /**
    * The record transaction that the juror-record-ref document of a reveal transaction names (SPEC §10.4,
    * overflow): reveal transaction → record transaction. Absent: no reference is followed.
@@ -296,15 +294,8 @@ export function buildJuryView(input: JuryViewInput): JuryView {
     }
   }
   const documents = documentTxs.length > 0 ? input.documents(documentTxs) : new Map<string, DocumentSummary>();
-  const recordHashes: string[] = [];
   const outputRefs: string[] = [];
-  for (const { steps: s } of caseLines) {
-    outputRefs.push(s[0]!.datum.challengeOut, s[0]!.datum.claimOut);
-    for (const step of s) {
-      if (step.action?.on === "Case" && step.action.action.kind === "CaseReveal") recordHashes.push(step.action.action.recordHash);
-    }
-  }
-  const records = recordHashes.length > 0 ? input.records(recordHashes) : new Map<string, DocumentSummary[]>();
+  for (const { steps: s } of caseLines) outputRefs.push(s[0]!.datum.challengeOut, s[0]!.datum.claimOut);
   const outputs = outputRefs.length > 0 ? input.outputs(outputRefs) : new Map<string, UtxoRow>();
   // §10.4 overflow: a reveal that carries a juror-record-ref names the transaction that holds the record.
   const refCandidates = documentTxs.filter((tx) => documents.get(tx)?.type === "juror-record-ref");
@@ -322,7 +313,9 @@ export function buildJuryView(input: JuryViewInput): JuryView {
     const open = exited ? [] : last.datum.open;
     const status = exited ? "exited" : last.datum.exitAfter !== null ? "exit_requested" : "registered";
     const eligibleFrom = first.datum.registeredAt + p.eligibility_delay;
-    const prompt = documents.get(first.row.created_tx);
+    // §10.3: the registration carries the prompt as a document of type juror-prompt. A document of another type is no prompt.
+    const registration = documents.get(first.row.created_tx);
+    const prompt = registration?.type === "juror-prompt" ? registration : undefined;
     return {
       deployment: deployment.label,
       script_hash: deployment.scriptHash,
@@ -377,15 +370,15 @@ export function buildJuryView(input: JuryViewInput): JuryView {
     const ballots = [...current.ballots].reverse().map((b): BallotView => {
       const reveal = reveals.get(b.juror) ?? null;
       const slashed = slashes.get(`${deployment.scriptHash}:${b.juror}:${caseName}`) ?? null;
-      // §10.4: the record is in the reveal transaction, or the reveal refers to the transaction that holds it
-      // (overflow). A record that another transaction holds is found by its hash as well.
+      // §10.4: the record is the juror-record document of the reveal transaction, or the juror-record document of the
+      // transaction that the juror-record-ref of the reveal names (overflow). It must have the record_hash of the reveal.
+      // A record of that hash in any other transaction is not the record: the ballot shows it as missing.
       const recordHash = reveal?.recordHash ?? null;
       const isJurorRecord = (d: DocumentSummary | undefined): d is DocumentSummary => d?.type === "juror-record" && d.hash === recordHash;
       const inReveal = reveal ? documents.get(reveal.at.tx) : undefined;
       const refTx = reveal ? recordRefs.get(reveal.at.tx) : undefined;
       const viaRef = refTx ? referenced.get(refTx) : undefined;
-      const byHash = recordHash !== null ? records.get(recordHash)?.find((d) => d.tx_hash !== reveal?.at.tx) : undefined;
-      const found = isJurorRecord(inReveal) ? inReveal : isJurorRecord(viaRef) ? viaRef : byHash;
+      const found = isJurorRecord(inReveal) ? inReveal : isJurorRecord(viaRef) ? viaRef : undefined;
       const status: BallotStatusName =
         b.status.kind === "Revealed" ? "revealed"
           : b.status.kind === "Paid" ? "paid"
@@ -488,7 +481,7 @@ export function chainTimeMs(cache: Pick<SqliteCache, "getCursor">, networkId: Ne
 export function loadJuryView(
   cache: Pick<
     SqliteCache,
-    "listJuryOutputs" | "getDocument" | "getDocumentSummaries" | "getDocumentSummariesByHash" | "getUtxosByRefs" | "getCursor" | "getTipHeight"
+    "listJuryOutputs" | "getDocument" | "getDocumentSummaries" | "getUtxosByRefs" | "getCursor" | "getTipHeight"
   >,
   deployments: readonly JuryDeployment[],
   networkId: NetworkId,
@@ -501,7 +494,6 @@ export function loadJuryView(
     chainTimeMs: chainTimeMs(cache, networkId),
     tipHeight: cache.getTipHeight(),
     outputs: (refs) => new Map(cache.getUtxosByRefs(refs).map((u) => [u.ref, u])),
-    records: (hashes) => cache.getDocumentSummariesByHash(hashes, "juror-record"),
     recordRefs: (revealTxs) => {
       const refs = new Map<string, string>();
       for (const tx of revealTxs) {

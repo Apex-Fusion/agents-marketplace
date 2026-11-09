@@ -455,22 +455,6 @@ export class SqliteCache {
     return out;
   }
 
-  /** The documents of this type with these hashes, without their bytes: hash → documents, oldest first. */
-  getDocumentSummariesByHash(hashes: readonly string[], type: string): Map<string, DocumentSummary[]> {
-    const out = new Map<string, DocumentSummary[]>();
-    const unique = [...new Set(hashes)];
-    for (let i = 0; i < unique.length; i += IN_CHUNK) {
-      const chunk = unique.slice(i, i + IN_CHUNK);
-      const rows = this.db.prepare(
-        `SELECT tx_hash, slot, block_height, type, media_type, hash, length(bytes) AS size
-         FROM documents WHERE type = ? AND hash IN (${chunk.map(() => "?").join(", ")})
-         ORDER BY slot ASC, tx_hash ASC`
-      ).all(type, ...chunk) as DocumentSummary[];
-      for (const r of rows) out.set(r.hash, [...(out.get(r.hash) ?? []), r]);
-    }
-    return out;
-  }
-
   /** The jury part of a jury output; its utxos row holds the address and the datum. */
   insertJuryOutput(output: {
     ref: string;
