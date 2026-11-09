@@ -193,6 +193,23 @@ describe("<DisputeCaseCard /> — jury and documents on chain", () => {
     expect(disputeAgentIds(juryCase())).toEqual([CLAIMER, AUDITOR, JUROR_A, JUROR_B]);
   });
 
+  it("says where the record of each ballot is; a missing record is one that the reveal does not carry or name (SPEC §10.4)", async () => {
+    stubFetch();
+    const c = juryCase();
+    const ballot = { status: "revealed", vote: "AuditorWins", record_hash: hash(RECORD) };
+    c.jury!.ballots = [
+      { ...ballot, agent_id: JUROR_A, revealed: { tx: TX.revealA }, record_status: "reveal", record: { tx: TX.revealA } },
+      { ...ballot, agent_id: JUROR_B, revealed: { tx: "3b".repeat(32) }, record_status: "separate", record: { tx: TX.revealA } },
+      { ...ballot, agent_id: "b3".repeat(32), revealed: { tx: "3c".repeat(32) }, record_status: "missing", record: null },
+    ];
+    await renderCard(c);
+    const ballots = screen.getAllByTestId("jury-ballot");
+    expect(within(ballots[0]!).getByText("Record in the reveal transaction.")).toBeInTheDocument();
+    expect(within(ballots[1]!).getByText(/^Record in a separate transaction \(overflow\)\./)).toBeInTheDocument();
+    expect(within(ballots[2]!).getByText("The reveal does not carry or name a juror record with this hash.")).toBeInTheDocument();
+    expect(screen.queryByText("No record with this hash on chain.")).toBeNull();
+  });
+
   it("opens a juror record: reads the reveal transaction and checks the record hash", async () => {
     const fetchSpy = stubFetch();
     await renderCard(juryCase());

@@ -498,7 +498,7 @@ function BallotRow({ b, names }: { b: JuryBallot; names: Record<string, Identity
   const status = b.status ?? "unknown";
   const revealTx = b.revealed?.tx ?? null;
   const recordTx = b.record?.tx ?? null;
-  const recordLine = { reveal: "Record in the reveal transaction.", separate: "Record in a separate transaction (overflow).", missing: "No record with this hash on chain." }[b.record_status ?? ""];
+  const recordLine = { reveal: "Record in the reveal transaction.", separate: "Record in a separate transaction (overflow).", missing: "The reveal does not carry or name a juror record with this hash." }[b.record_status ?? ""];
   return (
     <li className="rounded border border-gray-100 p-2" data-testid="jury-ballot">
       <div className="flex flex-wrap items-center gap-2">
