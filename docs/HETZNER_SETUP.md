@@ -34,7 +34,7 @@ One supplier per (model × capability) — both the one-off
 
 | Supplier name | Model (on-chain + API param, verbatim) | Capability | Advert max_output_tokens |
 |---|---|---|---|
-| `qwen35b` | `Qwen/Qwen3.6-35B-A3B-FP8` | `llm.text.generate.v1` | 262144 |
+| `qwen35b` | `Qwen/Qwen3.6-35B-A3B-FP8` | `llm.text.generate.v1` | 65536 (see below) |
 | `qwen35b-chat` | `Qwen/Qwen3.6-35B-A3B-FP8` | `llm.chat.v1` | 262144 |
 | `qwen38` | `Qwen3.8-27B` | `llm.text.generate.v1` | 262144 |
 | `qwen38-chat` | `Qwen3.8-27B` | `llm.chat.v1` | 262144 |
@@ -48,7 +48,8 @@ still hold funds and their env files remain on the host.
 Shared advert parameters: price **200000 lovelace (0.2 AP3X)** flat per job,
 bonds **1000000 lovelace (1 AP3X)** both sides, `max_processing_ms` **300000**
 for one-off / **1800000** for chat (the session spans the whole conversation).
-`max_output_tokens` is set to the model context length. With
+`max_output_tokens` is set to the model context length, except for `qwen35b`
+(see "Long calls"). With
 `OPENAI_MAX_TOKENS` unset, the supplier forwards a buyer
 `max_output_tokens` request as Chat Completions `max_tokens`, clamped to the
 advert cap. When the buyer omits it, no token limit is sent upstream.
@@ -65,7 +66,12 @@ output tokens`). Such a supplier sets `OPENAI_CONTEXT_TOKENS` to the
 `max_model_len` of `GET /v1/models` (262144 for the Qwen models). It then caps an
 output limit to the window minus an upper bound of the input (3 + 8 per Item,
 plus the UTF-8 bytes of the request JSON). Since 2026-11-09 `qwen35b` runs with
-both switches, `max_processing_ms` 3600000 and `OPENAI_TIMEOUT_MS` 3600000.
+both switches, `max_processing_ms` 3600000, `OPENAI_TIMEOUT_MS` 3600000 and
+advert `max_output_tokens` 65536. Hetzner stops every call of
+`Qwen/Qwen3.6-35B-A3B-FP8` at 65536 output tokens (`finish_reason: length`), also
+when the request asks for more: a direct stream with `max_tokens` 100000 ended at
+65536 tokens, and so did a gateway call with 262144 committed (2026-11-09). So
+65536 is the advert limit. A call of that size runs 11 to 19 minutes.
 
 Names follow the brand-by-model convention; the retired `ds-flash-htz`
 carried a `-htz` suffix only because `deepseek-flash-*` was already taken by

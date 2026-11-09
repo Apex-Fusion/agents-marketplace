@@ -61,7 +61,7 @@ services:
       OPENAI_CONTEXT_TOKENS: "262144"
       # OPENAI_MAX_TOKENS intentionally unset: no operator ceiling. Without a buyer
       # limit no max_tokens goes upstream and the provider grants context − prompt.
-      # Advert cap = model context length.
+      # Advert cap = 65536, the output limit of Hetzner for this model (docs/HETZNER_SETUP.md).
       PORT: "8080"
       # Enable LiveOgmiosProvider so submitTx/awaitTx actually broadcast.
       LIVE_CHAIN: "1"
