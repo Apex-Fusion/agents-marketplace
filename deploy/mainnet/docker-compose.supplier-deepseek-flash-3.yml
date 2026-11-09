@@ -4,8 +4,12 @@
 # OpenAI-compatible API. Same shape as the kimi replicas; distinct only in
 # instance name, container, env file, Traefik host/router, and advert model.
 # Shares the same OpenRouter API key as the kimi suppliers (accepted ceiling;
-# supplier has no 429/backoff). Advert caps: max_output_tokens=262144,
-# max_processing_ms=3600000; OPENAI_TIMEOUT_MS matched.
+# supplier has no 429/backoff). Advert caps: max_output_tokens=943717 (the
+# OpenRouter maximum for the model), max_processing_ms=3600000;
+# OPENAI_TIMEOUT_MS matched. OPENAI_MAX_TOKENS stays empty in the host env
+# file: OpenRouter skips providers that declare a lower limit than the value of
+# a call, so an operator default at the maximum would send every call without a
+# buyer limit to 6 of 14 providers (docs/DEPLOY_NEW_SUPPLIER.md, section 7).
 #
 # Pre-flight:
 #   1. DNS (proxied): mp-suppliers-deepseek-flash-3.vector.apexfusion.org → host

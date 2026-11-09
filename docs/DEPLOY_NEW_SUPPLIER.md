@@ -410,6 +410,17 @@ requires `tx:retire-advert` (refunds the advert bond) + a fresh post-advert
    (`OPENAI_RESPONSES_STREAM_ONLY=1`). Hetzner Chat Completions sends the header
    when the answer is complete: set `OPENAI_CHAT_STREAM_ONLY=1`, and
    `OPENAI_CONTEXT_TOKENS` for the window, as `docs/HETZNER_SETUP.md` says.
+10. OpenRouter routes a call that carries `max_output_tokens` only to providers
+    that declare at least that limit (`GET /api/v1/models/<id>/endpoints`, field
+    `max_completion_tokens`), and relaxes this only when no provider qualifies.
+    A prompt plus the output limit must also fit the context window, or
+    OpenRouter answers HTTP 400. `OPENAI_MAX_TOKENS` is the default of every call
+    without a buyer limit. A value at the model maximum shrinks the provider
+    pool of those calls (2026-11-09, `deepseek/deepseek-v4-flash`: 14 providers
+    at 131072, 6 at 943717) and leaves little room for the prompt (kimi-k2.6 at
+    235929: 26,215 tokens). For an OpenRouter supplier with a high advert cap,
+    leave `OPENAI_MAX_TOKENS` empty. A buyer limit still passes through, capped
+    to the advert.
 
 ## 8. Key references in this repo
 
