@@ -7,7 +7,8 @@
  *
  * IndexerBlock is the indexer's own block shape. OgmiosSource converts each
  * Ogmios v6 block into it (ogmiosBlock.ts): transactions that failed script
- * validation are left out, and spend redeemers are keyed by the spent output.
+ * validation are left out, spend redeemers are keyed by the spent output, and
+ * the transaction metadata becomes Metadatum values (follower/metadata.ts).
  */
 import { EventEmitter } from "events";
 
@@ -23,6 +24,17 @@ export interface TxInput {
   index: number;
 }
 
+/**
+ * Transaction metadatum (Conway CDDL `transaction_metadatum`). A text value
+ * keeps its exact characters, so its UTF-8 bytes are the bytes on chain.
+ */
+export type Metadatum =
+  | { kind: "int"; value: bigint }
+  | { kind: "bytes"; hex: string }
+  | { kind: "text"; value: string }
+  | { kind: "list"; items: Metadatum[] }
+  | { kind: "map"; entries: Array<[Metadatum, Metadatum]> };
+
 export interface IndexerTx {
   id: string;
   inputs: TxInput[];
@@ -35,11 +47,17 @@ export interface IndexerTx {
    * the redeemers of escrow inputs with the escrow redeemer codec.
    */
   spendRedeemers?: Record<string, string>;
+  /** Transaction metadata. Key: the label in decimal (for example "22084"). */
+  metadata?: Record<string, Metadatum>;
+  /** Minted (+) and burned (−) quantities: policy id → asset name → quantity (lowercase hex). */
+  mint?: Record<string, Record<string, number>>;
 }
 
 export interface IndexerBlock {
   slot: number;
   id: string;           // block hash
+  /** Block number (Ogmios `height`); absent for blocks without one. */
+  height?: number;
   ancestor?: string;
   transactions?: IndexerTx[] | null;
 }

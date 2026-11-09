@@ -17,6 +17,7 @@
  */
 
 import { ReadOnlyOgmiosProvider } from "@marketplace/shared/chain";
+import { plutusAddressFromBech32 } from "@marketplace/shared/cbor";
 import { loadConfig } from "./config.js";
 import { SqliteCache } from "./db/cache.js";
 import { OgmiosSource } from "./follower/ogmiosSource.js";
@@ -85,6 +86,13 @@ async function main(): Promise<void> {
       module1Addresses: config.module1
         ? [config.module1.claimAddress, config.module1.challengeAddress, config.module1.partyAddress]
         : [],
+      module1Challenge: config.module1
+        ? {
+            address: config.module1.challengeAddress,
+            policyId: plutusAddressFromBech32(config.module1.challengeAddress).paymentCredential.hash.toLowerCase(),
+          }
+        : undefined,
+      jury: config.jury.map((d) => ({ address: d.address, scriptHash: d.scriptHash })),
     },
     networkId: config.networkId,
     skipBeforeSlot: config.skipBeforeSlot,
@@ -104,6 +112,7 @@ async function main(): Promise<void> {
       uiDistDir: config.uiDistDir,
       maxSyncLagSlots: config.maxSyncLagSlots,
       module1: config.module1,
+      jury: config.jury,
       networkId: config.networkId,
     },
   );
@@ -126,7 +135,8 @@ async function main(): Promise<void> {
       `[indexer] listening on :${config.indexerPort} ` +
       `(NETWORK_ID=${config.networkId} — ${networkLabel}; ` +
       `identity ${identity ? `on, switch slot ${config.switchSlot ?? "none"}` : "off"}; ` +
-      `Module-1 disputes ${config.module1 ? "on" : "off"})`,
+      `Module-1 disputes ${config.module1 ? "on" : "off"}; ` +
+      `jury ${config.jury.length > 0 ? config.jury.map((d) => d.label).join(", ") : "off"})`,
     );
   });
 

@@ -132,9 +132,38 @@ describe("schema migration → v3 (intersection points)", () => {
     ]);
     cache.close();
 
-    expect(columns(path, "chain_points")).toEqual(["slot", "block_hash"]);
+    expect(columns(path, "chain_points")).toEqual(["slot", "block_hash", "block_height"]);
     const db = new Database(path);
-    expect(db.pragma("user_version", { simple: true })).toBe(4);
+    expect(db.pragma("user_version", { simple: true })).toBe(SCHEMA_VERSION);
+    db.close();
+  });
+});
+
+describe("schema migration v4 → v5 (documents on chain and the jury)", () => {
+  it("adds documents, jury_outputs and jury_spends to a version 4 database and keeps its rows", () => {
+    const path = tempDb();
+    legacyDatabase(path);
+    new SqliteCache(path).close();
+    const v4 = new Database(path);
+    v4.exec("DROP TABLE documents; DROP TABLE jury_outputs; DROP TABLE jury_spends;");
+    v4.pragma("user_version = 4");
+    v4.close();
+
+    const cache = new SqliteCache(path);
+    expect(cache.getAdvertisementByRef(`${"a".repeat(64)}#0`)).not.toBeNull();
+    cache.insertDocument({
+      txHash: "d".repeat(64), slot: 7, blockHeight: 3, type: "claim", mediaType: "text/plain", hash: "e".repeat(64),
+      bytes: new TextEncoder().encode("hello"),
+    });
+    expect(cache.getDocument("d".repeat(64))).toMatchObject({ slot: 7, block_height: 3, type: "claim", hash: "e".repeat(64) });
+    cache.close();
+
+    expect(SCHEMA_VERSION).toBe(5);
+    expect(columns(path, "documents")).toEqual(["tx_hash", "slot", "block_height", "type", "media_type", "hash", "bytes"]);
+    expect(columns(path, "jury_outputs")).toEqual(["ref", "deployment", "token", "lovelace", "created_slot", "created_height"]);
+    expect(columns(path, "jury_spends")).toEqual(["ref", "slot", "block_height", "tx_hash", "redeemer_hex"]);
+    const db = new Database(path);
+    expect(db.pragma("user_version", { simple: true })).toBe(SCHEMA_VERSION);
     db.close();
   });
 });

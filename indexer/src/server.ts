@@ -14,6 +14,8 @@
  *   GET /escrows/:ref
  *   GET /escrows
  *   GET /disputes, GET /agents/:agent_id/jobs
+ *   GET /documents/:tx, GET /documents/by-hash/:hash
+ *   GET /jury, GET /jury/jurors, GET /jury/cases
  *   GET /events
  *
  * Optional UI mount (M1-F-5):
@@ -31,6 +33,7 @@
 import express, { type Application } from "express";
 import type { EventEmitter } from "events";
 import type { NetworkId } from "@marketplace/shared";
+import type { JuryDeployment } from "./config.js";
 import type { SqliteCache } from "./db/cache.js";
 import type { Module1Addresses } from "./disputes/module1.js";
 import type { ChainSyncWorker } from "./follower/worker.js";
@@ -40,6 +43,8 @@ import { suppliersRouter } from "./routes/suppliers.js";
 import { capabilitiesRouter } from "./routes/capabilities.js";
 import { escrowsRouter } from "./routes/escrows.js";
 import { disputesRouter } from "./routes/disputes.js";
+import { documentsRouter } from "./routes/documents.js";
+import { juryRouter } from "./routes/jury.js";
 import { eventsRouter } from "./routes/events.js";
 
 export interface IndexerDeps {
@@ -72,7 +77,10 @@ export interface IndexerAppOptions {
   /** Module-1 dispute addresses for GET /disputes; absent or null: no cases. */
   module1?: Module1Addresses | null;
 
-  /** Network of the slot times in GET /disputes. Default: 1 (Vector mainnet). */
+  /** Followed jury deployments for GET /jury* and the jury cases of GET /disputes; absent: none. */
+  jury?: readonly JuryDeployment[];
+
+  /** Network of the slot times in GET /disputes, /documents and /jury. Default: 1 (Vector mainnet). */
   networkId?: NetworkId;
 }
 
@@ -87,11 +95,16 @@ export function createApp(deps: IndexerDeps, options?: IndexerAppOptions): Appli
   app.use(suppliersRouter({ cache: deps.cache }));
   app.use(capabilitiesRouter({ cache: deps.cache }));
   app.use(escrowsRouter({ cache: deps.cache }));
+  const networkId = options?.networkId ?? 1;
+  const jury = options?.jury ?? [];
   app.use(disputesRouter({
     cache: deps.cache,
     module1: options?.module1 ?? null,
-    networkId: options?.networkId ?? 1,
+    networkId,
+    jury,
   }));
+  app.use(documentsRouter({ cache: deps.cache, networkId }));
+  app.use(juryRouter({ cache: deps.cache, deployments: jury, networkId }));
 
   // Long-lived multiplexed SSE: per-connection listeners on the worker
   // EventEmitter, replay-then-live ordering, heartbeat keepalive.

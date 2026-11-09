@@ -124,6 +124,7 @@ export class ChainSyncWorker extends EventEmitter {
         a.identityEscrowAddress,
         a.identityPolicyId ? a.identityAddress : undefined,
         ...(a.module1Addresses ?? []),
+        ...(a.jury ?? []).map((d) => d.address),
       ].filter((x): x is string => typeof x === "string" && x.length > 0),
     );
 
@@ -188,7 +189,13 @@ export class ChainSyncWorker extends EventEmitter {
     const map = new Map<string, KnownUtxoInfo>();
     for (const utxo of this.cache.getUnspentUtxosByRefs([...refs])) {
       if (!this.watched.has(utxo.address)) continue;
-      map.set(utxo.ref, { address: utxo.address, datumHex: utxo.datum_hex || undefined, agentId: utxo.agent_id });
+      map.set(utxo.ref, {
+        address: utxo.address,
+        datumHex: utxo.datum_hex || undefined,
+        agentId: utxo.agent_id,
+        token: utxo.token ?? null,
+        genuine: utxo.genuine === null || utxo.genuine === undefined ? null : utxo.genuine === 1,
+      });
     }
     return map;
   }
@@ -244,29 +251,33 @@ export class ChainSyncWorker extends EventEmitter {
 
     // Fast-forward path
     if (slot < this.skipBeforeSlot) {
-      this.cache.saveCursor(slot, block.id);
+      this.cache.saveCursor(slot, block.id, block.height ?? null);
       this.syncSlot = slot;
       this.emit("sync-progress", { currentSlot: slot, tipSlot: this.tip?.slot ?? 0 });
       this.source.requestNextBlock();
       return;
     }
 
-    const { events, spentRefs, created, identityChanges, module1Spends } = processBlock(
+    const { events, spentRefs, created, identityChanges, module1Spends, juryOutputs, jurySpends, documents } = processBlock(
       block,
       this.knownUtxosFor(block),
       this.addresses,
     );
+    const height = block.height ?? null;
 
     this.cache.transaction(() => {
       // Outputs first: a later transaction of the same block may spend one.
       for (const c of created) {
-        this.cache.insertUtxo(c.ref, c.address, c.datumHex, slot, c.txHash, c.agentId);
+        this.cache.insertUtxo(c.ref, c.address, c.datumHex, slot, c.txHash, c.agentId, c.token ?? null, c.genuine ?? null);
       }
+      for (const o of juryOutputs) this.cache.insertJuryOutput({ ...o, slot, blockHeight: height });
       for (const event of events) this.persistEvent(event);
       for (const s of spentRefs) this.cache.spendUtxo(s.ref, s.slot, s.txHash);
       for (const m of module1Spends) this.cache.recordModule1Spend(m.ref, m.slot, m.txHash, m.redeemerHex);
+      for (const j of jurySpends) this.cache.recordJurySpend(j.ref, j.slot, height, j.txHash, j.redeemerHex);
+      for (const d of documents) this.cache.insertDocument({ ...d, slot, blockHeight: height });
       if (identityChanges.length > 0) this.cache.invalidateIdentityFacts(identityChanges, this.now());
-      this.cache.saveCursor(slot, block.id);
+      this.cache.saveCursor(slot, block.id, height);
     });
 
     for (const event of events) {

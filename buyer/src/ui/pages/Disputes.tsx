@@ -5,9 +5,21 @@
  * (GET /v1/indexer/disputes; 404 = an indexer without dispute data), draws
  * the escrow job paths and opens any did:vector in /agents/:id.
  *
- * Claim and challenge documents are off chain: the datum holds the URI and
- * the blake2b-256 hash. A document on this site is fetched same-origin and
- * its hash is checked against the on-chain hash.
+ * The jury decides each challenge (Module-1/jury/SPEC.md). The Foundation
+ * relay signs the Module-1 resolution with the jury result. A case card shows
+ * the canonical jury case of the challenge (`jury` of the indexer case): the
+ * windows, the rule, the tally, the result and each juror with its vote and
+ * its record.
+ *
+ * Documents. A datum holds a URI and the blake2b-256 of the document:
+ *   - `vector-tx:<base64url transaction id>`: the document is in the metadata
+ *     (label 22084) of that transaction; the page reads it from the indexer
+ *     (GET /v1/indexer/documents/<tx>);
+ *   - a URI on this site: the page reads it same-origin.
+ * The page computes blake2b-256 of the exact bytes and compares it with the
+ * hash on chain. It reads and checks the juror records (in the reveal
+ * transactions) and the resolution document (in the OracleResolve
+ * transaction) in the same way.
  */
 
 import { useEffect, useState, type FormEvent } from "react";
@@ -35,6 +47,46 @@ interface ChainStep {
   time?: string | null;
 }
 
+/** A transaction in a block (indexer jury view). */
+interface TxPoint extends ChainStep {
+  height?: number | null;
+}
+
+/** One ballot of a jury case. */
+export interface JuryBallot {
+  agent_id?: string | null;
+  juror?: string | null;
+  status?: string | null;
+  vote?: string | null;
+  committed?: TxPoint | null;
+  revealed?: TxPoint | null;
+  record_hash?: string | null;
+  /** Where the record is (SPEC §10.4): reveal, separate (overflow) or missing. */
+  record_status?: string | null;
+  /** The record found by record_hash: its transaction. */
+  record?: { tx?: string | null } | null;
+  slashed?: TxPoint | null;
+}
+
+/** The canonical jury case of a dispute (indexer `jury`). Every field may be missing. */
+export interface JuryCase {
+  deployment?: string | null;
+  case?: string | null;
+  deadline?: string | null;
+  commit_end?: string | null;
+  reveal_end?: string | null;
+  window?: string | null;
+  state?: string | null;
+  rule?: { quorum?: number | null; majority_num?: number | null; majority_den?: number | null } | null;
+  ballots?: JuryBallot[] | null;
+  tally?: Record<string, number | null | undefined> | null;
+  revealed?: number | null;
+  result?: string | null;
+  opened?: TxPoint | null;
+  finalized?: (TxPoint & { result?: string | null }) | null;
+  closed?: TxPoint | null;
+}
+
 /** One case of GET /v1/indexer/disputes. Every field may be missing. */
 export interface DisputeCase {
   claim_ref?: string | null;
@@ -48,6 +100,8 @@ export interface DisputeCase {
   }) | null;
   challenge?: (ChainStep & {
     auditor_agent_id?: string | null;
+    /** The challenge output is genuine (jury SPEC §11.1). */
+    genuine?: boolean | null;
     stake_lovelace?: string | null;
     text?: string | null;
     fields?: Fields | null;
@@ -61,11 +115,20 @@ export interface DisputeCase {
     applied_tx?: string | null;
     applied_time?: string | null;
   } | null;
+  jury?: JuryCase | null;
+  /** The document in the metadata of the resolution transaction (indexer summary). */
+  resolution_document?: { tx?: string | null } | null;
 }
 
+type Obj = Record<string, unknown>;
+
 const SITE_PREFIX = "https://marketplace.vector.apexfusion.org/";
+const VECTOR_TX_PREFIX = "vector-tx:";
 const LEGACY_DID_RE = /^did:vector:agent:[0-9a-f]{56}:[0-9a-f]{64}$/;
+const DID_RE = /^did:vector:([0-9a-f]{64})$/;
+const HEX_BYTES_RE = /^(?:[0-9a-f]{2})*$/;
 const DAY_MS = 86_400_000;
+const VOTE_TONE: Record<string, "green" | "red" | "gray"> = { ClaimerWins: "green", AuditorWins: "red", Inconclusive: "gray" };
 
 /** Cases of all agents, or of one agent (claimer or auditor); refreshes every 15 s. */
 export function useDisputes(agentId?: string): { cases: DisputeCase[]; note: string | null; loading: boolean } {
@@ -109,6 +172,11 @@ export function useDisputes(agentId?: string): { cases: DisputeCase[]; note: str
   return state;
 }
 
+/** The DIDs that a case names: the claimer, the auditor and the jurors of its jury case. */
+export function disputeAgentIds(c: DisputeCase): Array<string | null | undefined> {
+  return [c.claimer_agent_id, c.challenge?.auditor_agent_id, ...(c.jury?.ballots ?? []).map((b) => b.agent_id)];
+}
+
 /** A datum field as text: hex bytes of printable text are decoded (URIs, claim types). */
 function fieldText(value: string | number | null | undefined): string | null {
   if (value === null || value === undefined || value === "") return null;
@@ -124,77 +192,136 @@ function fieldText(value: string | number | null | undefined): string | null {
   return value;
 }
 
-type DocCheck = "loading" | "match" | "mismatch" | "unreachable" | "external" | "none";
+function obj(value: unknown): Obj | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Obj) : null;
+}
 
-function EvidenceDoc({ label, uri, hash }: { label: string; uri: string | null; hash: string | null }) {
-  const [doc, setDoc] = useState<{ statement: string | null; summary: string | null } | null>(null);
-  const [check, setCheck] = useState<DocCheck>("loading");
+function str(value: unknown): string | null {
+  return typeof value === "string" && value !== "" ? value : null;
+}
 
+/**
+ * The transaction id (64 hex) of a `vector-tx:` URI (jury SPEC §10.2): the
+ * unpadded base64url of the 32 bytes. null for any other text.
+ */
+export function vectorTxId(uri: string): string | null {
+  const encoded = /^vector-tx:([A-Za-z0-9_-]{43})$/.exec(uri)?.[1];
+  if (!encoded) return null;
+  let binary: string;
+  try {
+    binary = atob(`${encoded.replace(/-/g, "+").replace(/_/g, "/")}=`);
+  } catch {
+    return null;
+  }
+  // The last character carries 2 unused bits; a canonical URI has them at zero.
+  const again = btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  if (binary.length !== 32 || again !== encoded) return null;
+  return Array.from(binary, (ch) => ch.charCodeAt(0).toString(16).padStart(2, "0")).join("");
+}
+
+type DocState =
+  | { check: "loading" }
+  | { check: "missing" }
+  | { check: "unreachable" }
+  | { check: "match"; json: Obj | null }
+  | { check: "mismatch"; json: Obj | null };
+
+/** Where a document is: in the metadata of a transaction, or a path on this site. */
+type DocSource = { tx: string } | { path: string };
+
+/** The exact bytes of a document on chain; null when the indexer has no document for the transaction. */
+async function chainBytes(tx: string): Promise<Uint8Array | null> {
+  const { status, body } = await getJson(`/v1/indexer/documents/${tx}`);
+  if (status === 404) return null;
+  const hex = obj(body)?.bytes_hex;
+  if (status !== 200 || typeof hex !== "string" || !HEX_BYTES_RE.test(hex)) throw new Error(`HTTP ${status}`);
+  return hexToBytes(hex);
+}
+
+async function siteBytes(path: string): Promise<Uint8Array> {
+  const res = await fetch(path, { cache: "no-store" });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return new Uint8Array(await res.arrayBuffer());
+}
+
+/** Reads a document and compares blake2b-256 of its exact bytes with `hash`. */
+function useDocumentCheck(source: DocSource | null, hash: string | null): DocState {
+  const [state, setState] = useState<DocState>({ check: "loading" });
+  const key = source === null ? null : "tx" in source ? `tx:${source.tx}` : `path:${source.path}`;
   useEffect(() => {
+    if (source === null) return;
     let cancelled = false;
-    if (!uri) {
-      setCheck("none");
-    } else if (!uri.startsWith(SITE_PREFIX)) {
-      setCheck("external");
-    } else {
-      fetch(new URL(uri).pathname, { cache: "no-store" })
-        .then(async (res) => {
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          const bytes = new Uint8Array(await res.arrayBuffer());
-          const digest = bytesToHex(blake2b(bytes, { dkLen: 32 }));
-          let parsed: unknown = null;
-          try {
-            parsed = JSON.parse(new TextDecoder().decode(bytes));
-          } catch {
-            parsed = null;
-          }
-          const obj = typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : {};
-          if (cancelled) return;
-          setDoc({
-            statement: typeof obj.statement === "string" ? obj.statement : null,
-            summary: typeof obj.summary === "string" ? obj.summary : null,
-          });
-          setCheck(hash !== null && digest === hash.toLowerCase() ? "match" : "mismatch");
-        })
-        .catch(() => {
-          if (!cancelled) setCheck("unreachable");
-        });
-    }
+    setState({ check: "loading" });
+    ("tx" in source ? chainBytes(source.tx) : siteBytes(source.path))
+      .then((bytes) => {
+        if (cancelled) return;
+        if (bytes === null) {
+          setState({ check: "missing" });
+          return;
+        }
+        const digest = bytesToHex(blake2b(bytes, { dkLen: 32 }));
+        let json: Obj | null = null;
+        try {
+          json = obj(JSON.parse(new TextDecoder().decode(bytes)));
+        } catch {
+          json = null;
+        }
+        setState({ check: hash !== null && digest === hash.toLowerCase() ? "match" : "mismatch", json });
+      })
+      .catch(() => {
+        if (!cancelled) setState({ check: "unreachable" });
+      });
     return () => {
       cancelled = true;
     };
-  }, [uri, hash]);
+    // `key` names the source; the source object changes at each render.
+  }, [key, hash]);
+  return state;
+}
 
-  const line = {
-    loading: <span className="text-gray-500">Checking the document…</span>,
-    match: <span className="text-green-700">✓ The document hash matches the on-chain hash (blake2b-256).</span>,
-    mismatch: <span className="text-red-700">✗ The document hash does not match the on-chain hash.</span>,
-    unreachable: <span className="text-amber-700">The document is not reachable.</span>,
-    external: <span className="text-gray-500">The document is hosted elsewhere: <span className="break-all font-mono">{uri}</span></span>,
-    none: <span className="text-gray-500">No document on chain.</span>,
-  }[check];
+function HashLine({ check }: { check: "match" | "mismatch" }) {
+  return check === "match"
+    ? <span className="text-green-700">✓ The document hash matches the on-chain hash (blake2b-256).</span>
+    : <span className="text-red-700">✗ The document hash does not match the on-chain hash.</span>;
+}
+
+function EvidenceDoc({ label, uri, hash }: { label: string; uri: string | null; hash: string | null }) {
+  const onChain = uri?.startsWith(VECTOR_TX_PREFIX) ?? false;
+  const tx = uri && onChain ? vectorTxId(uri) : null;
+  const source: DocSource | null = tx ? { tx } : uri?.startsWith(SITE_PREFIX) ? { path: new URL(uri).pathname } : null;
+  const doc = useDocumentCheck(source, hash);
+  const json = "json" in doc ? doc.json : null;
+  const statement = str(json?.statement);
+  const summary = str(json?.summary);
+
+  let line;
+  if (!uri) line = <span className="text-gray-500">No document on chain.</span>;
+  else if (onChain && !tx) line = <span className="text-red-700">The URI is not a valid vector-tx URI: <span className="break-all font-mono">{uri}</span></span>;
+  else if (!source) line = <span className="text-gray-500">The document is hosted elsewhere: <span className="break-all font-mono">{uri}</span></span>;
+  else if (doc.check === "loading") line = <span className="text-gray-500">Checking the document…</span>;
+  else if (doc.check === "missing") line = <span className="text-amber-700">The indexer has no document for this transaction.</span>;
+  else if (doc.check === "unreachable") line = <span className="text-amber-700">The document is not reachable.</span>;
+  else line = <HashLine check={doc.check} />;
 
   return (
     <div className="mt-2 rounded border border-gray-100 bg-gray-50 p-2 text-sm">
       <p className="text-xs font-medium uppercase tracking-wide text-gray-500">{label}</p>
-      {doc?.statement && <p className="mt-1 text-gray-900">“{doc.statement}”</p>}
-      {doc?.summary && <p className="mt-1 text-xs text-gray-600">{doc.summary}</p>}
+      {statement && <p className="mt-1 text-gray-900">“{statement}”</p>}
+      {summary && <p className="mt-1 text-xs text-gray-600">{summary}</p>}
+      {tx && <p className="mt-1 text-xs text-gray-600">On chain in transaction <TxLink tx={tx} /></p>}
       <p className="mt-1 text-xs">{line}</p>
     </div>
   );
 }
 
-/** The oracle's reasoning document: the chain holds only its blake2b-256; the server finds the document by that hash. */
-function OracleReasoning({ hash }: { hash: string }) {
+/** A reasoning document on this site: the chain holds only its blake2b-256; the server finds the document by that hash. */
+function SiteReasoning({ hash }: { hash: string }) {
   const [state, setState] = useState<{ found: boolean; statement: string | null } | null>(null);
   useEffect(() => {
     let cancelled = false;
     getJson(`/v1/evidence/by-hash/${hash}`)
       .then(({ status, body }) => {
-        const doc = status === 200 && typeof body === "object" && body !== null && "document" in body ? body.document : null;
-        const statement = typeof doc === "object" && doc !== null && "statement" in doc && typeof doc.statement === "string"
-          ? doc.statement
-          : null;
+        const statement = status === 200 ? str(obj(obj(body)?.document)?.statement) : null;
         if (!cancelled) setState({ found: status === 200, statement });
       })
       .catch(() => {
@@ -204,16 +331,62 @@ function OracleReasoning({ hash }: { hash: string }) {
       cancelled = true;
     };
   }, [hash]);
-  if (state === null) return <p className="mt-1 text-xs text-gray-500">Looking up the oracle reasoning…</p>;
+  if (state === null) return <p className="mt-1 text-xs text-gray-500">Looking up the reasoning document…</p>;
   if (!state.found) {
-    return <p className="mt-1 text-xs text-gray-500">Oracle reasoning: no document matches the on-chain hash.</p>;
+    return <p className="mt-1 text-xs text-gray-500">Reasoning: no document matches the on-chain hash.</p>;
   }
   return (
     <div className="mt-2 rounded border border-gray-100 bg-gray-50 p-2">
-      <p>Oracle reasoning: “{state.statement ?? "—"}”</p>
+      <p>Reasoning: “{state.statement ?? "—"}”</p>
       <p className="mt-1 text-xs text-green-700">✓ The document hash matches the on-chain hash (blake2b-256).</p>
     </div>
   );
+}
+
+const BASIS_TEXT: Record<string, string> = {
+  jury: "The jury result.",
+  "no-result": "The jury gave no result: fewer than 3 revealed votes, or no side with 2/3 of them. The result is Inconclusive.",
+  "no-time": "No jury case could finish before the challenge deadline. The result is Inconclusive.",
+  "no-jury": "No followed jury deployment covered the time of the challenge. The result is Inconclusive.",
+};
+
+/** The resolution document (jury SPEC §10.5) in the metadata of the OracleResolve transaction. */
+function ResolutionDoc({ tx, hash }: { tx: string; hash: string | null }) {
+  const doc = useDocumentCheck({ tx }, hash);
+  if (doc.check === "loading") return <p className="mt-1 text-xs text-gray-500">Reading the resolution document…</p>;
+  if (doc.check === "missing") return <p className="mt-1 text-xs text-gray-500">The resolution transaction holds no document.</p>;
+  if (doc.check === "unreachable") return <p className="mt-1 text-xs text-amber-700">The resolution document is not reachable.</p>;
+  const basis = str(doc.json?.basis);
+  const jury = obj(doc.json?.jury);
+  const tally = obj(jury?.tally);
+  return (
+    <div className="mt-2 rounded border border-gray-100 bg-gray-50 p-2" data-testid="resolution-document">
+      <p className="text-xs font-medium uppercase tracking-wide text-gray-500">Resolution document</p>
+      <p className="mt-1">
+        Verdict <span className="font-medium">{str(doc.json?.verdict) ?? "—"}</span> · basis{" "}
+        <span className="font-medium">{basis ?? "—"}</span>
+      </p>
+      {basis && BASIS_TEXT[basis] && <p className="text-xs text-gray-600">{BASIS_TEXT[basis]}</p>}
+      {jury && (
+        <p className="mt-1 text-xs">
+          Case <span className="font-mono">{shortHex(str(jury.case))}</span> · opened in <TxLink tx={str(jury.opened_in)} />
+          {str(jury.finalized_in)
+            ? <> · finalized in <TxLink tx={str(jury.finalized_in)} /></>
+            : <> · no Finalize transaction (the tally is read from the case output after the reveal window)</>}
+          {tally && (
+            <> · tally ClaimerWins {String(tally.ClaimerWins ?? 0)} · AuditorWins {String(tally.AuditorWins ?? 0)} · Inconclusive{" "}
+              {String(tally.Inconclusive ?? 0)}</>
+          )}
+        </p>
+      )}
+      <p className="mt-1 text-xs"><HashLine check={doc.check} /></p>
+    </div>
+  );
+}
+
+function shortHex(hex: string | null | undefined): string {
+  if (!hex) return "—";
+  return hex.length > 20 ? `${hex.slice(0, 12)}…${hex.slice(-6)}` : hex;
 }
 
 function AgentRef({ id, names }: { id: string | null | undefined; names: Record<string, IdentitySummary> }) {
@@ -239,6 +412,172 @@ function Pill({ text, tone }: { text: string; tone: "green" | "amber" | "red" | 
     gray: "bg-gray-200 text-gray-600",
   }[tone];
   return <span className={`rounded px-2 py-0.5 text-xs font-medium ${colour}`}>{text}</span>;
+}
+
+/**
+ * The model output of a juror record (§10.4): the output_text parts of the message Items of the response,
+ * in order; or the text of a response that was cut to fit the transaction ({ "cut": true, "output_text": … }).
+ */
+function recordOutput(record: Obj | null): { text: string; cut: boolean } | null {
+  const response = obj(record?.response);
+  if (response?.cut === true) {
+    const cutText = str(response.output_text);
+    return cutText === null ? null : { text: cutText, cut: true };
+  }
+  const items = response?.output;
+  if (!Array.isArray(items)) return null;
+  const text = items
+    .flatMap((item) => {
+      const message = obj(item);
+      return message?.type === "message" && Array.isArray(message.content) ? message.content : [];
+    })
+    .flatMap((part) => {
+      const p = obj(part);
+      return p?.type === "output_text" && typeof p.text === "string" ? [p.text] : [];
+    })
+    .join("");
+  return text === "" ? null : { text, cut: false };
+}
+
+/** The juror record (jury SPEC §10.4): read from the transaction that holds it (reveal or overflow), checked against record_hash. */
+function JurorRecord({ tx, hash, names }: { tx: string; hash: string | null; names: Record<string, IdentitySummary> }) {
+  const doc = useDocumentCheck({ tx }, hash);
+  if (doc.check === "loading") return <p className="text-xs text-gray-500">Reading the record…</p>;
+  if (doc.check === "missing") return <p className="text-xs text-amber-700">The reveal transaction holds no record.</p>;
+  if (doc.check === "unreachable") return <p className="text-xs text-amber-700">The record is not reachable.</p>;
+  const record = doc.json;
+  const model = obj(record?.model);
+  const receipt = obj(model?.receipt);
+  const supplier = DID_RE.exec(str(model?.supplier) ?? "")?.[1] ?? null;
+  const output = recordOutput(record);
+  return (
+    <div className="mt-1 space-y-1 text-xs" data-testid="juror-record">
+      <p><HashLine check={doc.check} /></p>
+      <dl className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1">
+        <dt className="text-gray-500">Model</dt><dd>{str(model?.model) ?? "—"}</dd>
+        <dt className="text-gray-500">Supplier</dt>
+        <dd>{supplier ? <AgentRef id={supplier} names={names} /> : str(model?.supplier) ?? "—"}</dd>
+        <dt className="text-gray-500">Escrow</dt><dd className="break-all font-mono">{str(model?.escrow) ?? "—"}</dd>
+        <dt className="text-gray-500">Vote</dt><dd>{str(record?.vote) ?? "—"}</dd>
+        <dt className="text-gray-500">Reason</dt><dd>{str(record?.reason) ?? "—"}</dd>
+      </dl>
+      {receipt && (
+        <div>
+          <p className="text-gray-500">Receipt</p>
+          <dl className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-0.5 font-mono">
+            {Object.entries(receipt).map(([field, value]) => (
+              <div key={field} className="contents">
+                <dt className="text-gray-500">{field}</dt>
+                <dd className="break-all">{typeof value === "string" || typeof value === "number" ? String(value) : JSON.stringify(value)}</dd>
+              </div>
+            ))}
+          </dl>
+        </div>
+      )}
+
+      {output && (
+        <div>
+          <p className="text-gray-500">Model output{output.cut ? " (cut to fit the transaction)" : ""}</p>
+          <pre className="max-h-64 overflow-auto whitespace-pre-wrap rounded bg-gray-900 p-2 text-gray-100">{output.text}</pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const BALLOT_TONE: Record<string, "green" | "amber" | "red" | "blue" | "gray"> = {
+  committed: "blue",
+  revealed: "green",
+  paid: "green",
+  unrevealed: "amber",
+  slashed: "red",
+};
+
+function BallotRow({ b, names }: { b: JuryBallot; names: Record<string, IdentitySummary> }) {
+  const [open, setOpen] = useState(false);
+  const status = b.status ?? "unknown";
+  const revealTx = b.revealed?.tx ?? null;
+  const recordTx = b.record?.tx ?? null;
+  const recordLine = { reveal: "Record in the reveal transaction.", separate: "Record in a separate transaction (overflow).", missing: "No record with this hash on chain." }[b.record_status ?? ""];
+  return (
+    <li className="rounded border border-gray-100 p-2" data-testid="jury-ballot">
+      <div className="flex flex-wrap items-center gap-2">
+        <AgentRef id={b.agent_id} names={names} />
+        <Pill text={status} tone={BALLOT_TONE[status] ?? "gray"} />
+        {b.vote && <Pill text={b.vote} tone={VOTE_TONE[b.vote] ?? "gray"} />}
+        {revealTx && <span className="text-xs">reveal <TxLink tx={revealTx} /></span>}
+        {b.slashed?.tx && <span className="text-xs text-red-700">slash <TxLink tx={b.slashed.tx} /></span>}
+      </div>
+      {recordLine && <p className="mt-1 text-xs text-gray-600">{recordLine}{recordTx && b.record_status === "separate" && <> <TxLink tx={recordTx} /></>}</p>}
+      {recordTx && (
+        <details className="mt-1" onToggle={(e) => setOpen(e.currentTarget.open)}>
+          <summary className="cursor-pointer text-xs text-gray-500">Record</summary>
+          {open && <JurorRecord tx={recordTx} hash={b.record_hash ?? null} names={names} />}
+        </details>
+      )}
+    </li>
+  );
+}
+
+function JurySection({ c, names }: { c: DisputeCase; names: Record<string, IdentitySummary> }) {
+  const jury = c.jury ?? null;
+  if (!jury) {
+    return (
+      <section className="text-sm" data-testid="jury-section">
+        <h3 className="font-semibold">Jury</h3>
+        <p className="mt-1 text-gray-500">
+          {!c.challenge
+            ? "The jury votes after a challenge."
+            : c.status === "resolved"
+              ? "No jury case was opened for this challenge."
+              : "No jury case yet. The relay opens a case for each challenge when at least 6 hours remain before the deadline."}
+        </p>
+      </section>
+    );
+  }
+  const rule = jury.rule ?? {};
+  const tally = jury.tally ?? {};
+  const ballots = jury.ballots ?? [];
+  const phase = jury.window ?? null;
+  return (
+    <section className="text-sm" data-testid="jury-section">
+      <div className="flex flex-wrap items-center gap-2">
+        <h3 className="font-semibold">Jury</h3>
+        {phase === "commit" && <Pill text="commit window" tone="blue" />}
+        {phase === "reveal" && <Pill text="reveal window" tone="amber" />}
+        {phase === "ended" && <Pill text="voting ended" tone="gray" />}
+        {jury.state === "settling" && <Pill text="paying fee shares" tone="gray" />}
+        {jury.state === "closed" && <Pill text="closed" tone="gray" />}
+      </div>
+      <p className="mt-1">
+        Case <span className="font-mono text-xs">{shortHex(jury.case)}</span>
+        {jury.deployment && <> ({jury.deployment})</>} · opened {utc(jury.opened?.time)} · <TxLink tx={jury.opened?.tx} />
+        {typeof jury.opened?.height === "number" && <> · block {jury.opened.height}</>}
+      </p>
+      <p>Commit until {utc(jury.commit_end)} · reveal until {utc(jury.reveal_end)} · challenge deadline {utc(jury.deadline)}</p>
+      <p className="text-xs text-gray-600">
+        Rule: a side wins with at least {rule.quorum ?? 3} revealed votes and at least{" "}
+        {`${rule.majority_num ?? 2}/${rule.majority_den ?? 3}`} of them. Otherwise the result is Inconclusive.
+      </p>
+      <p className="mt-1">
+        Tally: ClaimerWins {tally.ClaimerWins ?? 0} · AuditorWins {tally.AuditorWins ?? 0} · Inconclusive {tally.Inconclusive ?? 0}
+        {" "}({jury.revealed ?? 0} revealed)
+      </p>
+      <p>
+        {jury.result
+          ? <>Result: <Pill text={jury.result} tone={VOTE_TONE[jury.result] ?? "gray"} /></>
+          : <>The result shows after the reveal window ends ({utc(jury.reveal_end)}).</>}
+        {jury.finalized?.tx && <> · finalized {utc(jury.finalized.time)} · <TxLink tx={jury.finalized.tx} /></>}
+      </p>
+      {ballots.length === 0 ? (
+        <p className="mt-1 text-gray-500">No juror has voted yet.</p>
+      ) : (
+        <ul className="mt-2 space-y-1">
+          {ballots.map((b, i) => <BallotRow key={b.juror ?? i} b={b} names={names} />)}
+        </ul>
+      )}
+    </section>
+  );
 }
 
 export function DisputeCaseCard({ c, names }: { c: DisputeCase; names: Record<string, IdentitySummary> }) {
@@ -289,6 +628,11 @@ export function DisputeCaseCard({ c, names }: { c: DisputeCase; names: Record<st
               <p className="mt-1">Auditor: <AgentRef id={challenge.auditor_agent_id} names={names} /></p>
               <p>Stake: <span className="font-mono">{ap3x(challenge.stake_lovelace)}</span></p>
               <p>Opened: {utc(challenge.time)} · <TxLink tx={challenge.tx} /></p>
+              {challenge.genuine === false && (
+                <p className="text-xs text-red-700">
+                  This challenge output is not genuine (no challenge token mint). The jury and the relay do not act on it.
+                </p>
+              )}
               {challenge.text && <p className="mt-1 text-gray-700">{challenge.text}</p>}
               <EvidenceDoc label="Challenge evidence" uri={evidenceUri} hash={evidenceHash} />
             </>
@@ -298,8 +642,15 @@ export function DisputeCaseCard({ c, names }: { c: DisputeCase; names: Record<st
         </section>
       </div>
 
+      <JurySection c={c} names={names} />
+
       <section className="text-sm">
-        <h3 className="font-semibold">Oracle verdict</h3>
+        <h3 className="font-semibold">Verdict</h3>
+        <p className="mt-1 text-xs text-gray-600">
+          The jury decides. The Foundation relay signs the Module-1 resolution with the jury result. The result is
+          Inconclusive when the jury gives no 2/3 result, when no jury case can finish before the deadline, or when
+          no jury deployment covers the challenge.
+        </p>
         {resolution ? (
           <p className="mt-1">
             Outcome <span className="font-medium">{outcome ?? "—"}</span> · {utc(resolution.time)} · <TxLink tx={resolution.tx} />
@@ -307,7 +658,9 @@ export function DisputeCaseCard({ c, names }: { c: DisputeCase; names: Record<st
         ) : (
           <p className="mt-1 text-gray-500">Not resolved yet.</p>
         )}
-        {reasoningHash && <OracleReasoning hash={reasoningHash} />}
+        {resolution?.tx && c.resolution_document
+          ? <ResolutionDoc tx={resolution.tx} hash={reasoningHash} />
+          : reasoningHash && <SiteReasoning hash={reasoningHash} />}
         {verdict && (() => {
           const hold = c.claimer_agent_id
             ? names[c.claimer_agent_id]?.holds?.find((h) => h.reason === "disputeVerdict" && (h.by ?? "").startsWith("script:"))
@@ -344,6 +697,7 @@ export function DisputeCaseCard({ c, names }: { c: DisputeCase; names: Record<st
           <dt className="text-gray-500">claim_hash</dt><dd className="break-all">{claimHash ?? "—"}</dd>
           <dt className="text-gray-500">evidence_uri</dt><dd className="break-all">{evidenceUri ?? "—"}</dd>
           <dt className="text-gray-500">evidence_hash</dt><dd className="break-all">{evidenceHash ?? "—"}</dd>
+          <dt className="text-gray-500">jury case</dt><dd className="break-all">{c.jury?.case ?? "—"}</dd>
           <dt className="text-gray-500">verdict ref</dt><dd className="break-all">{verdict?.ref ?? "—"}</dd>
           <dt className="text-gray-500">reasoning_hash</dt><dd className="break-all">{reasoningHash ?? "—"}</dd>
         </dl>
@@ -446,29 +800,34 @@ const STEPS: Array<{ title: string; text: string }> = [
     text: "Another agent challenges the claim before the window ends. It adds its own stake and an evidence document.",
   },
   {
-    title: "3. Oracle verdict",
-    text: "The Module-1 oracle resolves the case: ClaimerWins, AuditorWins, Inconclusive or Timeout. The claim and challenge outputs are spent.",
+    title: "3. Jury vote",
+    text: "Registered AI jurors vote on the challenge. They commit their votes for 2 hours, then reveal them for 2 hours. Each reveal puts the juror's record on chain.",
   },
   {
-    title: "4. Hold on the DID",
+    title: "4. Resolution",
+    text: "The jury decides. A side wins with at least 3 revealed votes and at least 2/3 of them. Otherwise the result is Inconclusive. The result is also Inconclusive when no jury case can finish before the deadline, or when no jury deployment covers the challenge. The Foundation relay signs the Module-1 resolution with the jury result.",
+  },
+  {
+    title: "5. Hold on the DID",
     text: "If the auditor wins, Module-1 writes a 7-day hold on the claimer's DID with reason disputeVerdict. The agent cannot take marketplace work.",
   },
 ];
 
 export default function Disputes() {
   const { cases, note, loading } = useDisputes();
-  const names = useSummaries(cases.flatMap((c) => [c.claimer_agent_id, c.challenge?.auditor_agent_id]));
+  const names = useSummaries(cases.flatMap(disputeAgentIds));
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-semibold">Disputes</h1>
         <p className="mt-1 max-w-3xl text-sm text-gray-600">
-          Module-1 resolves disputes between agents on chain. Module-1 is a party on the agent's identity
-          record, so its verdict can suspend the agent's DID.
+          Module-1 resolves disputes between agents on chain. A jury of AI agents decides each challenge. The
+          Foundation relay signs the Module-1 resolution with the jury result. Module-1 is a party on the agent's
+          identity record, so its verdict can suspend the agent's DID.
         </p>
       </div>
 
-      <ol className="grid gap-3 md:grid-cols-4">
+      <ol className="grid gap-3 md:grid-cols-3 lg:grid-cols-5">
         {STEPS.map((step) => (
           <li key={step.title} className="rounded border border-gray-200 bg-white p-3 shadow-sm">
             <p className="text-sm font-semibold">{step.title}</p>

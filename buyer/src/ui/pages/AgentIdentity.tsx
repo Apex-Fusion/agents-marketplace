@@ -3,7 +3,8 @@
  *
  * `:id` is a 64-hex vector id, a canonical did:vector or the legacy
  * did:vector:agent:<policy>:<vector-id>. Reads the gateway through the
- * same-origin /v1/identity/* proxy and the indexer through /v1/indexer/*.
+ * same-origin /v1/identity/* proxy and the indexer through /v1/indexer/*
+ * (disputes, jobs and the juror registrations of the agent: /jury/jurors).
  */
 
 import { useEffect, useState, type ReactNode } from "react";
@@ -17,7 +18,7 @@ import {
   useSummaries,
   utc,
 } from "../components/IdentityBits.js";
-import { DisputeCaseCard, useDisputes } from "./Disputes.js";
+import { DisputeCaseCard, disputeAgentIds, useDisputes } from "./Disputes.js";
 
 type Obj = Record<string, unknown>;
 
@@ -133,9 +134,10 @@ function AgentView({ did, vectorId }: { did: string; vectorId: string }) {
   const [bits, setBits] = useState<StatusBits | null>(null);
   const [bitsError, setBitsError] = useState<string | null>(null);
   const [jobs, setJobs] = useState<{ status: number; body: Obj | null } | null>(null);
+  const [jurors, setJurors] = useState<{ status: number; list: Obj[] } | null>(null);
   const [copied, setCopied] = useState(false);
   const disputes = useDisputes(vectorId);
-  const names = useSummaries(disputes.cases.flatMap((c) => [c.claimer_agent_id, c.challenge?.auditor_agent_id]));
+  const names = useSummaries(disputes.cases.flatMap(disputeAgentIds));
 
   useEffect(() => {
     let cancelled = false;
@@ -159,6 +161,7 @@ function AgentView({ did, vectorId }: { did: string; vectorId: string }) {
     setBits(null);
     setBitsError(null);
     setJobs(null);
+    setJurors(null);
     getJson(`/v1/identity/credential/${vectorId}`)
       .then(async ({ status, body }) => {
         const b = obj(body);
@@ -185,6 +188,13 @@ function AgentView({ did, vectorId }: { did: string; vectorId: string }) {
       })
       .catch(() => {
         if (!cancelled) setJobs({ status: 0, body: null });
+      });
+    getJson(`/v1/indexer/jury/jurors?agent_id=${vectorId}`)
+      .then(({ status, body }) => {
+        if (!cancelled) setJurors({ status, list: list(obj(body)?.jurors) });
+      })
+      .catch(() => {
+        if (!cancelled) setJurors({ status: 0, list: [] });
       });
     return () => {
       cancelled = true;
@@ -417,6 +427,56 @@ function AgentView({ did, vectorId }: { did: string; vectorId: string }) {
         ) : (
           <div className="space-y-3">
             {disputes.cases.map((c, i) => <DisputeCaseCard key={c.claim_ref ?? i} c={c} names={names} />)}
+          </div>
+        )}
+      </Section>
+
+      <Section title="Jury">
+        {jurors === null ? (
+          <p className="text-sm text-gray-500">Loading…</p>
+        ) : jurors.status === 404 ? (
+          <p className="text-sm text-gray-500">No jury data yet</p>
+        ) : jurors.status !== 200 ? (
+          <p className="text-sm text-gray-500">Jury data is unavailable{jurors.status ? ` (HTTP ${jurors.status})` : ""}.</p>
+        ) : jurors.list.length === 0 ? (
+          <p className="text-sm text-gray-500">This agent is not a registered juror.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="text-sm">
+              <thead>
+                <tr>
+                  <th className={TH}>Status</th>
+                  <th className={TH}>Bond</th>
+                  <th className={TH}>Can vote from</th>
+                  <th className={TH}>Exit after</th>
+                  <th className={TH}>Open votes</th>
+                  <th className={TH}>Slashes</th>
+                  <th className={TH}>Registered</th>
+                </tr>
+              </thead>
+              <tbody>
+                {jurors.list.map((j, i) => (
+                  <tr key={text(j.juror) ?? i} data-testid="juror-registration">
+                    <td className={TD}>
+                      {text(j.status) ?? "—"}
+                      {j.eligible === true && <span className="ml-1 text-xs text-green-700">· can vote now</span>}
+                    </td>
+                    <td className={`${TD} font-mono`}>{ap3x(text(j.bond_lovelace))}</td>
+                    <td className={TD}>{utc(text(j.eligible_from))}</td>
+                    <td className={TD}>{utc(text(j.exit_after))}</td>
+                    <td className={TD}>{Array.isArray(j.open) ? j.open.length : "—"}</td>
+                    <td className={TD}>{Array.isArray(j.slashes) ? j.slashes.length : "—"}</td>
+                    <td className={TD}>
+                      {utc(text(obj(j.registered)?.time))} · <TxLink tx={text(obj(j.registered)?.tx)} />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p className="mt-2 text-xs text-gray-500">
+              A juror can vote on each jury case, except the cases where it is a party. A juror that commits and does
+              not reveal loses 25 AP3X of its bond.
+            </p>
           </div>
         )}
       </Section>

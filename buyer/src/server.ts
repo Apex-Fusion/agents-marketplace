@@ -14,6 +14,10 @@
  *                                    service (see paper2agent/routes.ts)
  *   GET  /v1/identity/*            → cached same-origin proxy to the identity
  *                                    gateway (see identity/routes.ts)
+ *   GET  /v1/indexer/*             → GET passthrough to the indexer: suppliers,
+ *                                    escrows, disputes, the documents on chain
+ *                                    (/documents/:tx, /documents/by-hash/:hash)
+ *                                    and the jury (/jury, /jury/jurors, /jury/cases)
  *   GET  /evidence/*               → Module-1 claim/evidence documents from
  *                                    the bundle (src/ui/public/evidence)
  *   *                              → static SPA bundle from `distPath`, with
@@ -201,7 +205,7 @@ function unsupportedResponseFields(
 
 /** The evidence documents of the bundle (`<distPath>/evidence/*.json`) by the
  * blake2b-256 hex of their exact bytes. The chain holds only such hashes (for
- * example the oracle's `reasoning_hash`). Read once at start-up. */
+ * example the `reasoning_hash` of a Module-1 OracleResolve). Read once at start-up. */
 function indexEvidence(distPath: string | undefined): Map<string, { uri: string; document: unknown }> {
   const index = new Map<string, { uri: string; document: unknown }>();
   if (!distPath) return index;

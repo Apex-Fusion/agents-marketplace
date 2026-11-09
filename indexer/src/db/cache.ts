@@ -2,8 +2,8 @@
  * indexer/src/db/cache.ts — SqliteCache for the indexer.
  *
  * Wraps better-sqlite3 with domain-specific methods for advertisements,
- * escrows, supplier_status, events, cursor, intersection points, UTxOs and
- * identity facts.
+ * escrows, supplier_status, events, cursor, intersection points, UTxOs,
+ * identity facts, documents on chain and jury outputs.
  *
  * Intersection points: saveCursor also keeps the slot and hash of the last
  * INTERSECTION_POINTS applied blocks (chain_points). The follower sends them,
@@ -14,9 +14,9 @@
  *   - UTxOs: delete created-after, restore spent-after
  *   - Adverts and escrows: delete created-after; an advert retired after the
  *     block gets the status of its datum again
- *   - Supplier status: delete the rows of the deleted adverts
  *   - Module-1 spends (module1_spends): delete spent-after (the Module-1
  *     outputs themselves are utxos rows)
+ *   - Documents, jury outputs and jury spends: delete after
  *   - Cursor and intersection points: move to the block
  *
  * Listing: listActiveAdvertisements returns only the adverts that the indexer
@@ -138,6 +138,10 @@ export interface UtxoRow {
   spent_tx: string | null;
   /** Identity record outputs: the identifier that the token names. */
   agent_id: string | null;
+  /** Module-1 challenge outputs: the challenge token name (some queries only). */
+  token?: string | null;
+  /** Module-1 challenge outputs: 1 when genuine (jury SPEC §11.1), 0 when not (some queries only). */
+  genuine?: number | null;
 }
 
 /** A Module-1 output (claim, challenge or verdict) with the redeemer of its spend. */
@@ -148,6 +152,40 @@ export interface Module1OutputRow {
   created_slot: number;
   created_tx: string;
   spent_slot: number | null;
+  spent_tx: string | null;
+  redeemer_hex: string | null;
+  /** Challenge outputs: the challenge token name and the §11.1 genuineness (1/0); null for other outputs. */
+  token: string | null;
+  genuine: number | null;
+}
+
+/** A document on chain (metadata label 22084): its exact bytes and their blake2b-256. */
+export interface DocumentRow {
+  tx_hash: string;
+  slot: number;
+  block_height: number | null;
+  type: string;
+  media_type: string;
+  hash: string;
+  bytes: Buffer;
+}
+
+/** A document row without the bytes; `size` is their number. */
+export type DocumentSummary = Omit<DocumentRow, "bytes"> & { size: number };
+
+/** A jury output (utxos row and jury_outputs row) with the block height and redeemer of its spend. */
+export interface JuryOutputRow {
+  ref: string;
+  /** Script hash of the deployment. */
+  deployment: string;
+  token: string;
+  lovelace: string;
+  datum_hex: string;
+  created_slot: number;
+  created_height: number | null;
+  created_tx: string;
+  spent_slot: number | null;
+  spent_height: number | null;
   spent_tx: string | null;
   redeemer_hex: string | null;
 }
@@ -234,18 +272,26 @@ export class SqliteCache {
    * the newest intersection point. Saved points at or after its slot (a
    * rolled-back branch) go, and only the newest INTERSECTION_POINTS stay.
    */
-  saveCursor(slot: number, blockHash: string): void {
+  saveCursor(slot: number, blockHash: string, blockHeight: number | null = null): void {
     this.transaction(() => {
       this.db.prepare(`DELETE FROM chain_points WHERE slot >= ?`).run(slot);
-      this.db.prepare(`INSERT INTO chain_points (slot, block_hash) VALUES (?, ?)`).run(slot, blockHash);
+      this.db.prepare(`INSERT INTO chain_points (slot, block_hash, block_height) VALUES (?, ?, ?)`).run(slot, blockHash, blockHeight);
       this.db.prepare(
         `DELETE FROM chain_points
          WHERE slot <= (SELECT slot FROM chain_points ORDER BY slot DESC LIMIT 1 OFFSET ?)`
       ).run(INTERSECTION_POINTS);
       this.db.prepare(
-        `INSERT OR REPLACE INTO cursor (id, slot, block_hash) VALUES (1, ?, ?)`
-      ).run(slot, blockHash);
+        `INSERT OR REPLACE INTO cursor (id, slot, block_hash, block_height) VALUES (1, ?, ?, ?)`
+      ).run(slot, blockHash, blockHeight);
     });
+  }
+
+  /** Block number of the cursor block; null when unknown (a new database, or a cursor from before schema version 5). */
+  getTipHeight(): number | null {
+    const row = this.db.prepare(`SELECT block_height FROM cursor WHERE id = 1`).get() as
+      | { block_height: number | null }
+      | undefined;
+    return row?.block_height ?? null;
   }
 
   /**
@@ -280,11 +326,13 @@ export class SqliteCache {
     slot: number,
     txHash: string,
     agentId: string | null = null,
+    token: string | null = null,
+    genuine: boolean | null = null,
   ): void {
     this.db.prepare(
-      `INSERT OR REPLACE INTO utxos (ref, address, datum_hex, created_slot, created_tx, spent_slot, spent_tx, agent_id)
-       VALUES (?, ?, ?, ?, ?, NULL, NULL, ?)`
-    ).run(ref, address, datumHex, slot, txHash, agentId);
+      `INSERT OR REPLACE INTO utxos (ref, address, datum_hex, created_slot, created_tx, spent_slot, spent_tx, agent_id, token, genuine)
+       VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)`
+    ).run(ref, address, datumHex, slot, txHash, agentId, token, genuine === null ? null : genuine ? 1 : 0);
   }
 
   /**
@@ -330,24 +378,133 @@ export class SqliteCache {
   listModule1Outputs(addresses: readonly string[]): Module1OutputRow[] {
     if (addresses.length === 0) return [];
     return this.db.prepare(
-      `SELECT u.ref, u.address, u.datum_hex, u.created_slot, u.created_tx, u.spent_slot, u.spent_tx, s.redeemer_hex
+      `SELECT u.ref, u.address, u.datum_hex, u.created_slot, u.created_tx, u.spent_slot, u.spent_tx, s.redeemer_hex,
+              u.token, u.genuine
        FROM utxos u LEFT JOIN module1_spends s ON s.ref = u.ref
        WHERE u.address IN (${addresses.map(() => "?").join(", ")})
        ORDER BY u.created_slot ASC, u.ref ASC`
     ).all(...addresses) as Module1OutputRow[];
   }
 
-  /** The unspent UTxOs among `refs` (any address). */
+  /** The unspent UTxOs among `refs` (any address), with token and genuineness. */
   getUnspentUtxosByRefs(refs: readonly string[]): UtxoRow[] {
+    return this.utxosByRefs(refs, true);
+  }
+
+  /** The UTxOs among `refs`, spent or not (any address), with token and genuineness. */
+  getUtxosByRefs(refs: readonly string[]): UtxoRow[] {
+    return this.utxosByRefs(refs, false);
+  }
+
+  private utxosByRefs(refs: readonly string[], unspentOnly: boolean): UtxoRow[] {
     const out: UtxoRow[] = [];
     for (let i = 0; i < refs.length; i += IN_CHUNK) {
       const chunk = refs.slice(i, i + IN_CHUNK);
       out.push(...(this.db.prepare(
-        `SELECT ref, address, datum_hex, created_slot, created_tx, spent_slot, spent_tx, agent_id
-         FROM utxos WHERE spent_slot IS NULL AND ref IN (${chunk.map(() => "?").join(", ")})`
+        `SELECT ref, address, datum_hex, created_slot, created_tx, spent_slot, spent_tx, agent_id, token, genuine
+         FROM utxos WHERE ${unspentOnly ? "spent_slot IS NULL AND " : ""}ref IN (${chunk.map(() => "?").join(", ")})`
       ).all(...chunk) as UtxoRow[]));
     }
     return out;
+  }
+
+  // ─── Documents on chain and the jury ───────────────────────────────────
+
+  insertDocument(doc: {
+    txHash: string;
+    slot: number;
+    blockHeight: number | null;
+    type: string;
+    mediaType: string;
+    hash: string;
+    bytes: Uint8Array;
+  }): void {
+    this.db.prepare(
+      `INSERT OR REPLACE INTO documents (tx_hash, slot, block_height, type, media_type, hash, bytes)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      doc.txHash, doc.slot, doc.blockHeight, doc.type, doc.mediaType, doc.hash,
+      Buffer.from(doc.bytes.buffer, doc.bytes.byteOffset, doc.bytes.byteLength),
+    );
+  }
+
+  getDocument(txHash: string): DocumentRow | null {
+    const row = this.db.prepare(`SELECT * FROM documents WHERE tx_hash = ?`).get(txHash) as DocumentRow | undefined;
+    return row ?? null;
+  }
+
+  /** The documents with this blake2b-256, oldest first. */
+  listDocumentsByHash(hash: string): DocumentRow[] {
+    return this.db.prepare(
+      `SELECT * FROM documents WHERE hash = ? ORDER BY slot ASC, tx_hash ASC`
+    ).all(hash) as DocumentRow[];
+  }
+
+  /** The documents of these transactions, without their bytes, by transaction id. */
+  getDocumentSummaries(txHashes: readonly string[]): Map<string, DocumentSummary> {
+    const out = new Map<string, DocumentSummary>();
+    const unique = [...new Set(txHashes)];
+    for (let i = 0; i < unique.length; i += IN_CHUNK) {
+      const chunk = unique.slice(i, i + IN_CHUNK);
+      const rows = this.db.prepare(
+        `SELECT tx_hash, slot, block_height, type, media_type, hash, length(bytes) AS size
+         FROM documents WHERE tx_hash IN (${chunk.map(() => "?").join(", ")})`
+      ).all(...chunk) as DocumentSummary[];
+      for (const r of rows) out.set(r.tx_hash, r);
+    }
+    return out;
+  }
+
+  /** The documents of this type with these hashes, without their bytes: hash → documents, oldest first. */
+  getDocumentSummariesByHash(hashes: readonly string[], type: string): Map<string, DocumentSummary[]> {
+    const out = new Map<string, DocumentSummary[]>();
+    const unique = [...new Set(hashes)];
+    for (let i = 0; i < unique.length; i += IN_CHUNK) {
+      const chunk = unique.slice(i, i + IN_CHUNK);
+      const rows = this.db.prepare(
+        `SELECT tx_hash, slot, block_height, type, media_type, hash, length(bytes) AS size
+         FROM documents WHERE type = ? AND hash IN (${chunk.map(() => "?").join(", ")})
+         ORDER BY slot ASC, tx_hash ASC`
+      ).all(type, ...chunk) as DocumentSummary[];
+      for (const r of rows) out.set(r.hash, [...(out.get(r.hash) ?? []), r]);
+    }
+    return out;
+  }
+
+  /** The jury part of a jury output; its utxos row holds the address and the datum. */
+  insertJuryOutput(output: {
+    ref: string;
+    deployment: string;
+    token: string;
+    lovelace: string;
+    slot: number;
+    blockHeight: number | null;
+  }): void {
+    this.db.prepare(
+      `INSERT OR REPLACE INTO jury_outputs (ref, deployment, token, lovelace, created_slot, created_height)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    ).run(output.ref, output.deployment, output.token, output.lovelace, output.slot, output.blockHeight);
+  }
+
+  /** The follower saw a spend of a jury output; keep its redeemer and block height. */
+  recordJurySpend(ref: string, slot: number, blockHeight: number | null, txHash: string, redeemerHex: string | null): void {
+    this.db.prepare(
+      `INSERT OR REPLACE INTO jury_spends (ref, slot, block_height, tx_hash, redeemer_hex) VALUES (?, ?, ?, ?, ?)`
+    ).run(ref, slot, blockHeight, txHash, redeemerHex);
+  }
+
+  /** All outputs of the jury deployments with these script hashes (spent or not), oldest first. */
+  listJuryOutputs(deployments: readonly string[]): JuryOutputRow[] {
+    if (deployments.length === 0) return [];
+    return this.db.prepare(
+      `SELECT j.ref, j.deployment, j.token, j.lovelace, u.datum_hex, u.created_slot, j.created_height, u.created_tx,
+              u.spent_slot, s.block_height AS spent_height, u.spent_tx, s.redeemer_hex
+       FROM jury_outputs j
+       JOIN utxos u ON u.ref = j.ref
+       LEFT JOIN jury_spends s ON s.ref = j.ref
+       WHERE j.deployment IN (${deployments.map(() => "?").join(", ")})
+       ORDER BY u.created_slot ASC, j.ref ASC`
+    ).all(...deployments) as JuryOutputRow[];
   }
 
   // ─── Advertisements ────────────────────────────────────────────────────
@@ -758,10 +915,10 @@ export class SqliteCache {
   /**
    * Roll the state back to the block `point` (null: the origin, before the
    * first block). Everything that later blocks wrote goes: their events
-   * (soft delete), UTxOs, adverts, escrows, and the supplier status of those
-   * adverts. Their spends are undone, and an advert that they retired gets
-   * the status of its datum again. The cursor and the intersection points
-   * move to `point`.
+   * (soft delete), UTxOs, adverts, escrows, the supplier status of those
+   * adverts, documents and jury rows. Their spends are undone, and an advert
+   * that they retired gets the status of its datum again. The cursor and the
+   * intersection points move to `point`.
    *
    * Returns the agent ids of the identity record outputs that the rollback
    * removes or makes unspent again, so the caller can invalidate their
@@ -795,6 +952,9 @@ export class SqliteCache {
       this.db.prepare(`DELETE FROM escrows WHERE created_slot > ?`).run(after);
       this.db.prepare(`UPDATE events SET rolled_back = 1 WHERE slot > ? AND rolled_back = 0`).run(after);
       this.db.prepare(`DELETE FROM module1_spends WHERE slot > ?`).run(after);
+      this.db.prepare(`DELETE FROM jury_spends WHERE slot > ?`).run(after);
+      this.db.prepare(`DELETE FROM jury_outputs WHERE created_slot > ?`).run(after);
+      this.db.prepare(`DELETE FROM documents WHERE slot > ?`).run(after);
       this.db.prepare(`DELETE FROM utxos WHERE created_slot > ?`).run(after);
       this.db.prepare(
         `UPDATE utxos SET spent_slot = NULL, spent_tx = NULL WHERE spent_slot > ?`
@@ -804,7 +964,9 @@ export class SqliteCache {
         this.db.prepare(`DELETE FROM cursor`).run();
         this.db.prepare(`DELETE FROM chain_points`).run();
       } else {
-        this.saveCursor(point.slot, point.blockHash);
+        const kept = this.db.prepare(`SELECT block_height FROM chain_points WHERE slot = ? AND block_hash = ?`)
+          .get(point.slot, point.blockHash) as { block_height: number | null } | undefined;
+        this.saveCursor(point.slot, point.blockHash, kept?.block_height ?? null);
       }
       return touched.map((r) => r.agent_id);
     });

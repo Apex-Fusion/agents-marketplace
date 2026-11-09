@@ -26,12 +26,29 @@
  * resolution spends; its spend at or before expires_at is the application
  * (ApplyVerdict), a later spend is the expiry.
  *
+ * Jury and documents (Module-1/jury/SPEC.md), through DisputeLinks:
+ *   - `jury`: the canonical jury case (§11) of the challenge, found by the
+ *     claim token (ChallengeDatum field 10; the jury case copies it);
+ *   - `resolution_document`: the document (§10.5) in the metadata of the
+ *     OracleResolve transaction; `matches` compares its hash with reasoning_hash;
+ *   - `claim.document`, `challenge.document`: for a `vector-tx:` URI, the
+ *     document of the named transaction; `matches` compares its hash with
+ *     claim_hash or evidence_hash.
+ *
  * Fields that do not decode as the Aiken type stay as Plutus Data CBOR hex.
  */
 
 import { VECTOR_MAINNET, VECTOR_TESTNET, slotToPosixMs, type NetworkId } from "@marketplace/shared";
 import { decodePlutusDataHex, encodePlutusDataHex, type PlutusData } from "@marketplace/shared/cbor";
-import type { Module1OutputRow } from "../db/cache.js";
+import type { DocumentRow, DocumentSummary, Module1OutputRow } from "../db/cache.js";
+import {
+  VECTOR_TX_PREFIX,
+  documentRef,
+  txIdFromVectorTxUri,
+  type DocumentRef,
+  type VectorTxDocument,
+} from "../documents/document.js";
+import type { JuryCaseView } from "../jury/view.js";
 
 export interface Module1Addresses {
   claimAddress: string;
@@ -42,6 +59,12 @@ export interface Module1Addresses {
 export type DisputeFields = Record<string, string | number | null>;
 export type DisputeOutcome = "ClaimerWins" | "AuditorWins" | "Inconclusive" | "Timeout";
 export type DisputeStatus = "open" | "challenged" | "resolved";
+
+/** The resolution document (jury SPEC §10.5): a captured document and its JSON. */
+export interface ResolutionDocument extends DocumentRef {
+  /** The document parsed as JSON; null when it is not JSON. */
+  json: unknown;
+}
 
 export interface DisputeCase {
   claim_ref: string;
@@ -55,15 +78,24 @@ export interface DisputeCase {
     challenge_deadline: string | null;
     text: string | null;
     fields: DisputeFields;
+    /** The document of a `vector-tx:` storage_uri; null for any other URI. */
+    document: VectorTxDocument | null;
   };
   challenge: null | {
     tx: string;
     slot: number;
     time: string;
     auditor_agent_id: string | null;
+    /**
+     * The challenge output is genuine (jury SPEC §11.1). A case is challenged only by a genuine
+     * challenge; another output that names the claim is shown with genuine false and gives no dispute.
+     */
+    genuine: boolean;
     stake_lovelace: string;
     text: string | null;
     fields: DisputeFields;
+    /** The document of a `vector-tx:` evidence_uri; null for any other URI. */
+    document: VectorTxDocument | null;
   };
   resolution: null | {
     tx: string;
@@ -80,6 +112,20 @@ export interface DisputeCase {
     applied_tx: string | null;
     applied_time: string | null;
   };
+  /** The canonical jury case of the challenge; null when there is none. */
+  jury: JuryCaseView | null;
+  /** The document in the metadata of the OracleResolve transaction; null when there is none. */
+  resolution_document: ResolutionDocument | null;
+}
+
+/** Lookups of the jury cases and the documents that the cases link to. */
+export interface DisputeLinks {
+  /** The canonical jury case whose claim token is `claimToken`. */
+  juryCase(claimToken: string): JuryCaseView | null;
+  /** The document of a transaction, without its bytes. */
+  documentSummary(txHash: string): DocumentSummary | null;
+  /** The document of a transaction, with its bytes. */
+  document(txHash: string): DocumentRow | null;
 }
 
 // ─── Plutus Data helpers ─────────────────────────────────────────────────
@@ -214,6 +260,8 @@ interface ChallengeInfo {
   stake: string;
   /** Verdict of a Resolved state (jury resolution), else null. */
   resolved: DisputeOutcome | null;
+  /** Claim token name (field 10): the jury case copies it. */
+  claimToken: string | null;
   fields: DisputeFields;
 }
 
@@ -243,6 +291,7 @@ export function decodeChallengeDatum(datumHex: string): ChallengeInfo | null {
     auditor: agentOf(f[1]),
     stake: bigintText(f[3]) ?? "0",
     resolved,
+    claimToken: bytesOf(f[10]),
     fields,
   };
 }
@@ -291,14 +340,14 @@ interface Entry<T> {
  * Follow continuing outputs: `next` of an entry is the output of its
  * spending transaction for which `same` holds. Returns the chain from `start`.
  */
-function chain<T>(start: Entry<T>, byTx: Map<string, Entry<T>[]>, same: (a: T, b: T) => boolean): Entry<T>[] {
+function chain<T>(start: Entry<T>, byTx: Map<string, Entry<T>[]>, same: (a: Entry<T>, b: Entry<T>) => boolean): Entry<T>[] {
   const out = [start];
   const seen = new Set([start.row.ref]);
   let current = start;
   for (;;) {
     const spentTx = current.row.spent_tx;
     if (!spentTx) return out;
-    const next = (byTx.get(spentTx) ?? []).find((e) => !seen.has(e.row.ref) && same(current.info, e.info));
+    const next = (byTx.get(spentTx) ?? []).find((e) => !seen.has(e.row.ref) && same(current, e));
     if (!next) return out;
     out.push(next);
     seen.add(next.row.ref);
@@ -326,11 +375,43 @@ function entries<T>(rows: Module1OutputRow[], address: string, decodeDatum: (hex
   return out;
 }
 
-/** All cases, newest first. */
+const UTF8_TEXT = new TextDecoder();
+
+/** The document that a `vector-tx:` URI names; null for any other URI. */
+function vectorTxDocument(
+  uri: string | number | null | undefined,
+  expectedHash: string | number | null | undefined,
+  links: DisputeLinks | undefined,
+): VectorTxDocument | null {
+  if (typeof uri !== "string" || !uri.startsWith(VECTOR_TX_PREFIX)) return null;
+  const tx = txIdFromVectorTxUri(uri);
+  const summary = tx && links ? links.documentSummary(tx) : null;
+  return { uri, tx, captured: summary ? documentRef(summary, typeof expectedHash === "string" ? expectedHash : null) : null };
+}
+
+/** The document of an OracleResolve transaction (the resolution with a reasoning_hash). */
+function resolutionDocument(
+  resolution: DisputeCase["resolution"],
+  links: DisputeLinks | undefined,
+): ResolutionDocument | null {
+  const reasoningHash = resolution?.reasoning_hash;
+  const doc = resolution && reasoningHash && links ? links.document(resolution.tx) : null;
+  if (!reasoningHash || !doc) return null;
+  let json: unknown = null;
+  try {
+    json = JSON.parse(UTF8_TEXT.decode(doc.bytes));
+  } catch {
+    json = null;
+  }
+  return { ...documentRef(doc, reasoningHash), json };
+}
+
+/** All cases, newest first. `links` adds the jury cases and the documents on chain. */
 export function buildDisputeCases(
   rows: Module1OutputRow[],
   addresses: Module1Addresses,
   networkId: NetworkId,
+  links?: DisputeLinks,
 ): DisputeCase[] {
   const params = networkId === 1 ? VECTOR_MAINNET : VECTOR_TESTNET;
   const iso = (ms: number): string | null => {
@@ -345,8 +426,11 @@ export function buildDisputeCases(
 
   const claimsByTx = groupByTx(claims);
   const challengesByTx = groupByTx(challenges);
-  const sameClaim = (a: ClaimInfo, b: ClaimInfo): boolean => a.key === b.key;
-  const sameChallenge = (a: ChallengeInfo, b: ChallengeInfo): boolean => a.claimRef === b.claimRef;
+  const sameClaim = (a: Entry<ClaimInfo>, b: Entry<ClaimInfo>): boolean => a.info.key === b.info.key;
+  // Jury SPEC §11.1: only the genuine continuation (it holds the same challenge token) continues a
+  // challenge; other outputs at the challenge address are ignored.
+  const sameChallenge = (a: Entry<ChallengeInfo>, b: Entry<ChallengeInfo>): boolean =>
+    b.row.genuine === 1 && b.row.token !== null && b.row.token === a.row.token && a.info.claimRef === b.info.claimRef;
 
   // A continuing claim output is not a case of its own.
   const continued = new Set<string>();
@@ -363,9 +447,11 @@ export function buildDisputeCases(
     const claimRefs = new Set(claimChain.map((e) => e.row.ref));
     const lastClaim = claimChain[claimChain.length - 1]!;
 
-    const challengeOrigin = challenges.find(
+    const named = challenges.filter(
       (c) => !continuedChallenges.has(c.row.ref) && c.info.claimRef !== null && claimRefs.has(c.info.claimRef),
     );
+    const challengeOrigin = named.find((c) => c.row.genuine === 1) ?? named[0];
+    const genuine = challengeOrigin?.row.genuine === 1;
     const challengeChain = challengeOrigin ? chain(challengeOrigin, challengesByTx, sameChallenge) : [];
     const lastChallenge = challengeChain[challengeChain.length - 1];
 
@@ -407,9 +493,11 @@ export function buildDisputeCases(
     const resolved =
       resolution !== null ||
       (lastChallenge ? lastChallenge.row.spent_tx !== null : lastClaim.row.spent_tx !== null);
-    const status: DisputeStatus = resolved ? "resolved" : challengeOrigin ? "challenged" : "open";
+    const status: DisputeStatus = resolved ? "resolved" : genuine ? "challenged" : "open";
 
     const o = origin.row;
+    const claimFields: DisputeFields = { ...origin.info.fields, state: lastClaim.info.fields.state ?? null };
+    const claimToken = genuine ? challengeOrigin?.info.claimToken ?? null : null;
     cases.push({
       claim_ref: o.ref,
       claimer_agent_id: origin.info.claimer,
@@ -421,7 +509,8 @@ export function buildDisputeCases(
         stake_lovelace: origin.info.stake,
         challenge_deadline: origin.info.deadlineMs === null ? null : iso(origin.info.deadlineMs),
         text: null,
-        fields: { ...origin.info.fields, state: lastClaim.info.fields.state ?? null },
+        fields: claimFields,
+        document: vectorTxDocument(claimFields.storage_uri, claimFields.claim_hash, links),
       },
       challenge:
         challengeOrigin && lastChallenge
@@ -430,13 +519,21 @@ export function buildDisputeCases(
               slot: challengeOrigin.row.created_slot,
               time: slotTime(challengeOrigin.row.created_slot),
               auditor_agent_id: challengeOrigin.info.auditor,
+              genuine,
               stake_lovelace: challengeOrigin.info.stake,
               text: null,
               fields: lastChallenge.info.fields,
+              document: vectorTxDocument(
+                lastChallenge.info.fields.evidence_uri,
+                lastChallenge.info.fields.evidence_hash,
+                links,
+              ),
             }
           : null,
       resolution,
       verdict,
+      jury: claimToken && links ? links.juryCase(claimToken) : null,
+      resolution_document: resolutionDocument(resolution, links),
     });
   }
 

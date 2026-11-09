@@ -52,6 +52,19 @@
  *                             challenge and identity_party (verdict) addresses. None set on
  *                             NETWORK_ID 1: the mainnet deployment (Module-1/deploy/identity/
  *                             mainnet/manifest.json). None set on NETWORK_ID 0: not watched.
+ *
+ * Jury (Module-1/jury/SPEC.md):
+ *   JURY_DEPLOYMENTS — the followed jury deployments, a JSON list of
+ *                      {"label", "address", "script_hash", "params", "cases_from",
+ *                      "cases_until"}: `address` is the enterprise script address of
+ *                      `script_hash` (the jury address), `params` the 16 JuryParams
+ *                      fields of the deployment manifest (SPEC §5.6 names; hashes as
+ *                      hex, treasury as bech32, integers), `cases_from` / `cases_until`
+ *                      the window of challenged_at (POSIX ms; SPEC §12.1) in which the
+ *                      deployment is current (`cases_until` null or absent: no end;
+ *                      `cases_from` null or absent: current for no challenge, the jury
+ *                      is still followed). The windows must not overlap. Unset or "[]":
+ *                      the jury is not followed.
  */
 
 import type { NetworkId } from "@marketplace/shared";
@@ -76,6 +89,42 @@ export interface Module1Config {
   challengeAddress: string;
   /** identity_party (M1) address: the verdict outputs. */
   partyAddress: string;
+}
+
+/** JuryParams (jury SPEC §3, §5.6), with the field names of the specification. */
+export interface JuryParams {
+  identity_hash: string;
+  m1_claim: string;
+  m1_challenge: string;
+  /** bech32 address that receives slashed bond. */
+  treasury: string;
+  bond_min: number;
+  slash: number;
+  juror_floor: number;
+  eligibility_delay: number;
+  exit_notice: number;
+  commit_window: number;
+  reveal_window: number;
+  resolve_margin: number;
+  claim_period: number;
+  quorum: number;
+  majority_num: number;
+  majority_den: number;
+}
+
+export interface JuryDeployment {
+  label: string;
+  /** Jury address: the enterprise address of `scriptHash`. */
+  address: string;
+  /** Script hash J: also the policy id of the jury tokens. */
+  scriptHash: string;
+  params: JuryParams;
+  /**
+   * SPEC §12.1: current for a challenge when casesFrom <= challenged_at < casesUntil (null: no end).
+   * casesFrom null: current for no challenge (the Foundation jurors are not eligible yet).
+   */
+  casesFrom: number | null;
+  casesUntil: number | null;
 }
 
 /** Module-1 mainnet addresses (Module-1/deploy/identity/mainnet/manifest.json, `addresses`). */
@@ -115,6 +164,8 @@ export interface IndexerConfig {
   resyncFrom: { slot: number; blockHash: string } | null;
   /** Module-1 dispute addresses; null: not watched. */
   module1: Module1Config | null;
+  /** Followed jury deployments, in configuration order; empty: the jury is not followed. */
+  jury: JuryDeployment[];
 }
 
 const POLICY_ID_RE = /^[0-9a-f]{56}$/;
@@ -231,6 +282,112 @@ function loadModule1(env: Record<string, string | undefined>, networkId: Network
   return { claimAddress, challengeAddress, partyAddress };
 }
 
+const JURY_HASH_PARAMS = ["identity_hash", "m1_claim", "m1_challenge"] as const;
+const JURY_INT_PARAMS = [
+  "bond_min", "slash", "juror_floor", "eligibility_delay", "exit_notice", "commit_window", "reveal_window",
+  "resolve_margin", "claim_period", "quorum", "majority_num", "majority_den",
+] as const;
+
+function juryParams(name: string, raw: unknown, module1: Module1Config | null): JuryParams {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new Error(`loadConfig: ${name}.params must be a JSON object`);
+  }
+  const input = raw as Record<string, unknown>;
+  const params: Partial<Record<keyof JuryParams, string | number>> = {};
+  for (const key of JURY_HASH_PARAMS) {
+    const v = input[key];
+    if (typeof v !== "string" || !POLICY_ID_RE.test(v)) {
+      throw new Error(`loadConfig: ${name}.params.${key} must be 56 lowercase hexadecimal characters`);
+    }
+    params[key] = v;
+  }
+  const treasury = typeof input.treasury === "string" ? input.treasury.toLowerCase() : "";
+  try {
+    plutusAddressFromBech32(treasury);
+  } catch (err) {
+    throw new Error(`loadConfig: ${name}.params.treasury must be a bech32 address: ${(err as Error).message}`);
+  }
+  params.treasury = treasury;
+  for (const key of JURY_INT_PARAMS) {
+    const v = input[key];
+    const n = typeof v === "string" && /^[0-9]+$/.test(v) ? Number(v) : v;
+    if (typeof n !== "number" || !Number.isSafeInteger(n) || n <= 0) {
+      throw new Error(`loadConfig: ${name}.params.${key} must be a positive integer`);
+    }
+    params[key] = n;
+  }
+  const p = params as JuryParams;
+  if (!(p.majority_num < p.majority_den && p.majority_den < 2 * p.majority_num)) {
+    throw new Error(`loadConfig: ${name}.params needs majority_num < majority_den < 2 * majority_num`);
+  }
+  if (p.bond_min < p.juror_floor + p.slash) {
+    throw new Error(`loadConfig: ${name}.params needs bond_min >= juror_floor + slash`);
+  }
+  if (module1) {
+    const scriptOf = (address: string): string => plutusAddressFromBech32(address).paymentCredential.hash.toLowerCase();
+    if (p.m1_claim !== scriptOf(module1.claimAddress) || p.m1_challenge !== scriptOf(module1.challengeAddress)) {
+      throw new Error(`loadConfig: ${name}.params m1_claim and m1_challenge must be the scripts of the Module-1 addresses`);
+    }
+  }
+  return p;
+}
+
+function loadJury(env: Record<string, string | undefined>, networkId: NetworkId, module1: Module1Config | null): JuryDeployment[] {
+  const raw = value(env, "JURY_DEPLOYMENTS");
+  if (raw === undefined) return [];
+  let list: unknown;
+  try {
+    list = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`loadConfig: JURY_DEPLOYMENTS is not JSON: ${(err as Error).message}`);
+  }
+  if (!Array.isArray(list)) throw new Error("loadConfig: JURY_DEPLOYMENTS must be a JSON list");
+  const labels = new Set<string>();
+  const deployments = list.map((entry: unknown, i): JuryDeployment => {
+    const name = `JURY_DEPLOYMENTS[${i}]`;
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      throw new Error(`loadConfig: ${name} must be a JSON object`);
+    }
+    const { label, address, script_hash: scriptHash, params, cases_from: from, cases_until: until } =
+      entry as Record<string, unknown>;
+    if (typeof label !== "string" || label.trim() === "") throw new Error(`loadConfig: ${name}.label must be a non-empty text`);
+    if (labels.has(label)) throw new Error(`loadConfig: ${name}.label ${JSON.stringify(label)} occurs twice`);
+    labels.add(label);
+    if (typeof scriptHash !== "string" || !POLICY_ID_RE.test(scriptHash)) {
+      throw new Error(`loadConfig: ${name}.script_hash must be 56 lowercase hexadecimal characters`);
+    }
+    const expected = plutusAddressToBech32(
+      { paymentCredential: { type: "Script", hash: scriptHash }, stakeCredential: null },
+      networkId,
+    );
+    if (typeof address !== "string" || address.toLowerCase() !== expected) {
+      throw new Error(`loadConfig: ${name}.address must be the enterprise address of script_hash (${expected})`);
+    }
+    if (from !== undefined && from !== null && (typeof from !== "number" || !Number.isSafeInteger(from) || from < 0)) {
+      throw new Error(`loadConfig: ${name}.cases_from must be null or a POSIX time in milliseconds`);
+    }
+    const casesFrom = typeof from === "number" ? from : null;
+    if (
+      until !== undefined && until !== null &&
+      (typeof until !== "number" || !Number.isSafeInteger(until) || casesFrom === null || until <= casesFrom)
+    ) {
+      throw new Error(`loadConfig: ${name}.cases_until must be null or a POSIX time in milliseconds after cases_from`);
+    }
+    const casesUntil = typeof until === "number" ? until : null;
+    return { label, address: expected, scriptHash, params: juryParams(name, params, module1), casesFrom, casesUntil };
+  });
+  const windows = deployments
+    .filter((d): d is JuryDeployment & { casesFrom: number } => d.casesFrom !== null)
+    .sort((a, b) => a.casesFrom - b.casesFrom);
+  for (let i = 1; i < windows.length; i++) {
+    const before = windows[i - 1]!;
+    if (before.casesUntil === null || before.casesUntil > windows[i]!.casesFrom) {
+      throw new Error(`loadConfig: the cases_from / cases_until windows of ${before.label} and ${windows[i]!.label} overlap`);
+    }
+  }
+  return deployments;
+}
+
 export function loadConfig(env: Record<string, string | undefined>): IndexerConfig {
   const ogmiosUrl = env.OGMIOS_URL;
   const dbPath = env.DB_PATH;
@@ -288,10 +445,11 @@ export function loadConfig(env: Record<string, string | undefined>): IndexerConf
   const escrowAddress = value(env, "ESCROW_SCRIPT_ADDRESS") ?? "";
   const identity = loadIdentity(env, networkId);
   const module1 = loadModule1(env, networkId);
+  const jury = loadJury(env, networkId, module1);
 
   const watched = [
     advertAddress, escrowAddress, identity?.advertAddress, identity?.escrowAddress, identity?.address,
-    module1?.claimAddress, module1?.challengeAddress, module1?.partyAddress,
+    module1?.claimAddress, module1?.challengeAddress, module1?.partyAddress, ...jury.map((d) => d.address),
   ].filter((a): a is string => typeof a === "string" && a.length > 0);
   if (new Set(watched).size !== watched.length) {
     throw new Error("loadConfig: the watched script addresses must all differ");
@@ -333,5 +491,6 @@ export function loadConfig(env: Record<string, string | undefined>): IndexerConf
     switchSlot,
     resyncFrom,
     module1,
+    jury,
   };
 }

@@ -10,18 +10,25 @@
  *   20 newest jobs.
  *
  * Without Module-1 addresses (config `module1` null), /disputes returns no cases.
+ * Each case links its canonical jury case (`jury`, from the followed jury
+ * deployments) and the documents on chain (`resolution_document`, and
+ * `claim.document` / `challenge.document` for `vector-tx:` URIs).
  */
 
 import { Router, type Request, type Response } from "express";
 import type { NetworkId } from "@marketplace/shared";
 import { isVectorId } from "@marketplace/shared/identity";
+import type { JuryDeployment } from "../config.js";
 import { AmbiguousEscrowLineageError, type EscrowTerminalType, type SqliteCache } from "../db/cache.js";
-import { buildDisputeCases, type Module1Addresses } from "../disputes/module1.js";
+import { buildDisputeCases, type DisputeCase, type DisputeLinks, type Module1Addresses } from "../disputes/module1.js";
+import { loadJuryView, type JuryCaseView } from "../jury/view.js";
 
 export interface DisputesDeps {
   cache: SqliteCache;
   module1: Module1Addresses | null;
   networkId: NetworkId;
+  /** Followed jury deployments; empty: no jury cases. */
+  jury: readonly JuryDeployment[];
 }
 
 type JobOutcome = "open" | "claimed" | "submitted" | "accepted" | "reclaimed" | "released" | "refunded";
@@ -51,13 +58,24 @@ export function disputesRouter(deps: DisputesDeps): Router {
       return;
     }
     const m1 = deps.module1;
-    const cases = m1
-      ? buildDisputeCases(
-          deps.cache.listModule1Outputs([m1.claimAddress, m1.challengeAddress, m1.partyAddress]),
-          m1,
-          deps.networkId,
-        )
-      : [];
+    let cases: DisputeCase[] = [];
+    if (m1) {
+      const canonical = new Map<string, JuryCaseView>();
+      for (const c of loadJuryView(deps.cache, deps.jury, deps.networkId).cases) {
+        if (c.canonical && !canonical.has(c.claim)) canonical.set(c.claim, c);
+      }
+      const links: DisputeLinks = {
+        juryCase: (claimToken) => canonical.get(claimToken) ?? null,
+        documentSummary: (txHash) => deps.cache.getDocumentSummaries([txHash]).get(txHash) ?? null,
+        document: (txHash) => deps.cache.getDocument(txHash),
+      };
+      cases = buildDisputeCases(
+        deps.cache.listModule1Outputs([m1.claimAddress, m1.challengeAddress, m1.partyAddress]),
+        m1,
+        deps.networkId,
+        links,
+      );
+    }
     res.status(200).json({
       cases: raw === null ? cases : cases.filter((c) => c.claimer_agent_id === raw || c.challenge?.auditor_agent_id === raw),
     });

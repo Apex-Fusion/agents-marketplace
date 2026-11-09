@@ -18,6 +18,9 @@
  *   meta              — (v2) key/value markers (resync point)
  *   chain_points      — (v3) slot and hash of the last applied blocks
  *   module1_spends    — (v4) spends of Module-1 dispute outputs, with the redeemer
+ *   documents         — (v5) documents on chain (metadata label 22084), one per transaction
+ *   jury_outputs      — (v5) jury outputs: deployment, token name, lovelace, block height
+ *   jury_spends       — (v5) spends of jury outputs, with the redeemer and the block height
  *
  * Version 2 (identity registry, Part 2 §6.4):
  *   advertisements: layout ('legacy' | 'identity'), agent_id, creator_signed
@@ -32,6 +35,16 @@
  * Version 4: module1_spends. The Module-1 claim, challenge and verdict outputs
  * are rows of utxos (address = the Module-1 address); this table keeps the
  * spend redeemer of each of them (OracleResolve carries the outcome).
+ *
+ * Version 5 (jury, Module-1/jury/SPEC.md): documents keeps the exact bytes of
+ * each document on chain and their blake2b-256. The jury outputs are rows of
+ * utxos (address = the jury address, the inline datum); jury_outputs adds the
+ * token name, the lovelace and the block height, and jury_spends the spend
+ * redeemer (the jury view needs the block order and the redeemers).
+ *   utxos:               token, genuine (Module-1 challenge outputs: the challenge
+ *                        token and the §11.1 genuineness)
+ *   cursor, chain_points: block_height (the depth rule of §11.2)
+ * The new tables and columns start empty: data from before the upgrade needs a resync.
  */
 
 import type Database from "better-sqlite3";
@@ -169,6 +182,43 @@ const MODULE1_SQL = `
   CREATE INDEX IF NOT EXISTS idx_module1_spends_slot ON module1_spends(slot);
 `;
 
+const JURY_SQL = `
+  CREATE TABLE IF NOT EXISTS documents (
+    tx_hash TEXT PRIMARY KEY,
+    slot INTEGER NOT NULL,
+    block_height INTEGER,
+    type TEXT NOT NULL,
+    media_type TEXT NOT NULL,
+    hash TEXT NOT NULL,
+    bytes BLOB NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_documents_hash ON documents(hash, slot);
+  CREATE INDEX IF NOT EXISTS idx_documents_slot ON documents(slot);
+
+  CREATE TABLE IF NOT EXISTS jury_outputs (
+    ref TEXT PRIMARY KEY,
+    deployment TEXT NOT NULL,
+    token TEXT NOT NULL,
+    lovelace TEXT NOT NULL,
+    created_slot INTEGER NOT NULL,
+    created_height INTEGER
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_jury_outputs_deployment ON jury_outputs(deployment, created_slot);
+  CREATE INDEX IF NOT EXISTS idx_jury_outputs_slot ON jury_outputs(created_slot);
+
+  CREATE TABLE IF NOT EXISTS jury_spends (
+    ref TEXT PRIMARY KEY,
+    slot INTEGER NOT NULL,
+    block_height INTEGER,
+    tx_hash TEXT NOT NULL,
+    redeemer_hex TEXT
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_jury_spends_slot ON jury_spends(slot);
+`;
+
 function addColumn(db: Database.Database, table: string, column: string, declaration: string): void {
   const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
   if (columns.some((c) => c.name === column)) return;
@@ -196,6 +246,13 @@ const MIGRATIONS: ReadonlyArray<(db: Database.Database) => void> = [
   },
   (db) => {
     db.exec(MODULE1_SQL);
+  },
+  (db) => {
+    addColumn(db, "utxos", "token", "TEXT");
+    addColumn(db, "utxos", "genuine", "INTEGER");
+    addColumn(db, "cursor", "block_height", "INTEGER");
+    addColumn(db, "chain_points", "block_height", "INTEGER");
+    db.exec(JURY_SQL);
   },
 ];
 

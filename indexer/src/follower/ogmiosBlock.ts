@@ -18,10 +18,14 @@
  *     pointers: `rdptr` maps `Spending txin` to `(Spend, indexof txin (txinputs txb))`).
  *     Lowercase hex of equal length sorts like the bytes.
  *   - `Transaction.requiredExtraSignatories` lists the required signer key hashes.
+ *   - `Transaction.metadata` is `{ hash, labels }`; follower/metadata.ts converts
+ *     each label value (`json` or `cbor`) into a Metadatum.
+ *   - `Block.height` is the block number.
  *
- * The converter never throws. A malformed redeemer pointer is logged and left out.
+ * The converter never throws. A malformed redeemer pointer or metadata label is logged and left out.
  */
 
+import { metadataFromOgmios } from "./metadata.js";
 import type { IndexerBlock, IndexerTx, TxInput, TxOutput } from "./types.js";
 
 /** The parts of the Ogmios v6 JSON that the indexer reads. Every leaf is checked before use. */
@@ -49,11 +53,14 @@ interface OgmiosTransactionJson {
   outputs?: unknown;
   requiredExtraSignatories?: unknown;
   redeemers?: unknown;
+  metadata?: unknown;
+  mint?: unknown;
 }
 
 interface OgmiosBlockJson {
   slot?: unknown;
   id?: unknown;
+  height?: unknown;
   ancestor?: unknown;
   transactions?: unknown;
 }
@@ -126,7 +133,22 @@ function toTransaction(raw: unknown): IndexerTx | null {
     spendRedeemers[`${input.transaction.id}#${input.index}`] = data.toLowerCase();
   }
 
-  return { id: txId, inputs, outputs, requiredSigners, spendRedeemers };
+  const converted: IndexerTx = { id: txId, inputs, outputs, requiredSigners, spendRedeemers };
+  const metadata = metadataFromOgmios(tx.metadata, txId);
+  if (metadata) converted.metadata = metadata;
+  const mint: Record<string, Record<string, number>> = {};
+  if (typeof tx.mint === "object" && tx.mint !== null) {
+    for (const [policy, assets] of Object.entries(tx.mint as Record<string, unknown>)) {
+      if (typeof assets !== "object" || assets === null) continue;
+      for (const [name, qty] of Object.entries(assets as Record<string, unknown>)) {
+        if (typeof qty === "number" && Number.isSafeInteger(qty) && qty !== 0) {
+          (mint[policy.toLowerCase()] ??= {})[name.toLowerCase()] = qty;
+        }
+      }
+    }
+  }
+  if (Object.keys(mint).length > 0) converted.mint = mint;
+  return converted;
 }
 
 /**
@@ -141,10 +163,13 @@ export function fromOgmiosBlock(raw: unknown): IndexerBlock {
     const tx = toTransaction(item);
     if (tx) transactions.push(tx);
   }
-  return {
+  const out: IndexerBlock = {
     slot: block?.slot as number,
     id: block?.id as string,
     ancestor: typeof block?.ancestor === "string" ? block.ancestor : undefined,
     transactions,
   };
+  const height = block?.height;
+  if (typeof height === "number" && Number.isSafeInteger(height) && height >= 0) out.height = height;
+  return out;
 }

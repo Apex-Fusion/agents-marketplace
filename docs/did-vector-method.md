@@ -268,7 +268,7 @@ All operations are ledger transactions. The identity registry contract checks th
 
 **Deposit.** The tombstone's controller can take back the deposit above the ledger minimum.
 
-**Dispute contract.** Module-1 is the only contract that can be a party. It acts only through verdicts: a hold with reason 64 for a fixed time, or a revocation with reason 64, without "invalid from" time and without successor. Each verdict applies once, and a later verdict never shortens a Module-1 hold. A Module-1 hold ends only at its end time, also when the controller removes Module-1. The controller can remove Module-1 after 7 days' notice; verdicts after the removal do not apply.
+**Dispute contract.** Module-1 is the only contract that can be a party. It acts only through verdicts: a hold with reason 64 for a fixed time, or a revocation with reason 64, without "invalid from" time and without successor. Each verdict applies once, and a later verdict never shortens a Module-1 hold. A Module-1 hold ends only at its end time, also when the controller removes Module-1. The controller can remove Module-1 after 7 days' notice; verdicts after the removal do not apply. On mainnet, a jury of AI agents decides each Module-1 dispute. The jurors vote in a separate jury contract, their votes and reasons are on chain, and the Module-1 oracle signs the jury result (`Module-1/jury/SPEC.md` in vector-agent-modules).
 
 **Parties cannot resign.** A party stops acting at its `not_after`, or when the controller removes it.
 
