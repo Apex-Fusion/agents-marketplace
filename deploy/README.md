@@ -153,7 +153,7 @@ Each OpenAI-compatible supplier must select one upstream mode:
 | HuggingFace router | `responses` | base URL; native adapter appends `/v1/responses` |
 | DeepSeek direct | `responses` | set exact `OPENAI_RESPONSES_URL=https://api.deepseek.com/responses` |
 | Codex Responses proxy v1.40 for `gpt-5.6-sol` | `responses` | set `OPENAI_RESPONSES_STREAM_ONLY=1` |
-| Hetzner Inference | `chat-completions` | base URL; adapter appends `/v1/chat/completions` |
+| Hetzner Inference | `chat-completions` | base URL; adapter appends `/v1/chat/completions`; above 300 s per call also `OPENAI_CHAT_STREAM_ONLY=1` and `OPENAI_CONTEXT_TOKENS` |
 | Local llama.cpp and OpenClaw | `chat-completions` | keep the explicit compatibility mode |
 | Production Ollama | `responses` with `LLM_BACKEND=openai` | point the base URL at Ollama's native `/v1/responses` service |
 
@@ -161,6 +161,13 @@ There is no HTTP fallback between modes. Native OpenRouter, HuggingFace, and
 DeepSeek requests use `store:false` and full Item replay. The Codex stream
 collector takes complete Items from `response.output_item.done`; it never
 builds authoritative output from partial deltas.
+
+A call longer than 300 s needs a provider that sends data while it works. The
+Node 20 `fetch` of the supplier ends a call without a response header
+(`UND_ERR_HEADERS_TIMEOUT`) or without body data after 300 s, whatever
+`OPENAI_TIMEOUT_MS` is. A Hetzner supplier with a long advert collects the
+Chat Completions SSE (`OPENAI_CHAT_STREAM_ONLY=1`) and caps an output limit to
+`OPENAI_CONTEXT_TOKENS` minus an input bound; see `docs/HETZNER_SETUP.md`.
 
 The GPT rollout replaces the v1.36 Chat Completions pin with v1.40 native
 Responses and `gpt-5.6-sol`. Keep its existing advert price and bonds. An

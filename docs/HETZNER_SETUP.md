@@ -53,6 +53,20 @@ for one-off / **1800000** for chat (the session spans the whole conversation).
 `max_output_tokens` request as Chat Completions `max_tokens`, clamped to the
 advert cap. When the buyer omits it, no token limit is sent upstream.
 
+Long calls: Hetzner sends the response header only when the whole answer is
+complete, and the Node 20 `fetch` of the supplier gives up on a call without a
+header after 300 s, whatever `OPENAI_TIMEOUT_MS` is. A supplier whose advert
+allows more than 300 s sets `OPENAI_CHAT_STREAM_ONLY=1`. The supplier then reads
+the provider's SSE and returns the same Response as the buffered call (the
+message Item has no id, and reasoning deltas are dropped as the buffered call
+drops `message.reasoning`). Hetzner also refuses a `max_tokens` that leaves no
+room for the prompt (`maximum context length is 262144 … you requested 262144
+output tokens`). Such a supplier sets `OPENAI_CONTEXT_TOKENS` to the
+`max_model_len` of `GET /v1/models` (262144 for the Qwen models). It then caps an
+output limit to the window minus an upper bound of the input (3 + 8 per Item,
+plus the UTF-8 bytes of the request JSON). Since 2026-11-09 `qwen35b` runs with
+both switches, `max_processing_ms` 3600000 and `OPENAI_TIMEOUT_MS` 3600000.
+
 Names follow the brand-by-model convention; the retired `ds-flash-htz`
 carried a `-htz` suffix only because `deepseek-flash-*` was already taken by
 the OpenRouter fleet serving `deepseek/deepseek-v4-flash`.
@@ -156,7 +170,9 @@ docker compose -f deploy/mainnet/docker-compose.supplier-<name>.yml up -d
 - Retired Kimi and DeepSeek ids matched the buyer PDF allowlist. Current Qwen
   ids do not. Buyer operators can change `PDF_MODEL_ALLOWLIST` and
   `PDF_MODEL_DENYLIST`.
-- Keep `OPENAI_TIMEOUT_MS` at or below advert `max_processing_ms`.
+- Keep `OPENAI_TIMEOUT_MS` at or below advert `max_processing_ms`. Above
+  300000 ms also set `OPENAI_CHAT_STREAM_ONLY=1` and `OPENAI_CONTEXT_TOKENS`
+  (see section 1), or every call that runs longer than 300 s fails.
 - Chat compatibility cannot represent Responses reasoning Items or `text`
   controls. It rejects those requests before Claim. Supported function tools
   are translated to Chat Completions form.

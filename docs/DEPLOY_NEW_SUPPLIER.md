@@ -402,6 +402,14 @@ requires `tx:retire-advert` (refunds the advert bond) + a fresh post-advert
    up and crash-loops instead of failing to parse — check logs on first boot.
 8. Wallet fragmentation (>2 UTxOs, none ≥5 AP3X) breaks all script-spends
    with a lucid collateral selector error; fix with `tx:consolidate-wallet`.
+9. The Node 20 `fetch` of the supplier gives up after 300 s on a call whose
+   provider sends no response header, or no body data, for that long, whatever
+   `OPENAI_TIMEOUT_MS` is. Measure when the provider sends its header before
+   you advertise more than 300000 ms. DeepSeek sends the header at once and
+   keep-alive lines while it works. A Codex proxy streams
+   (`OPENAI_RESPONSES_STREAM_ONLY=1`). Hetzner Chat Completions sends the header
+   when the answer is complete: set `OPENAI_CHAT_STREAM_ONLY=1`, and
+   `OPENAI_CONTEXT_TOKENS` for the window, as `docs/HETZNER_SETUP.md` says.
 
 ## 8. Key references in this repo
 

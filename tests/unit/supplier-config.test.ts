@@ -223,6 +223,27 @@ describe("loadConfig() — upstream Responses protocol", () => {
     }))).toThrow(/requires OPENAI_UPSTREAM_API=responses/);
   });
 
+  it("allows Chat Completions stream-only collection and rejects it for the native protocol", () => {
+    expect(loadConfig(openAiEnv({
+      OPENAI_UPSTREAM_API: "chat-completions",
+      OPENAI_CHAT_STREAM_ONLY: "1",
+    })).openaiChatStreamOnly).toBe(true);
+    expect(loadConfig(openAiEnv({ OPENAI_UPSTREAM_API: "chat-completions" })).openaiChatStreamOnly).toBe(false);
+    expect(loadConfig(openAiEnv({
+      OPENAI_UPSTREAM_API: "chat-completions",
+      OPENAI_CHAT_STREAM_ONLY: "true",
+    })).openaiChatStreamOnly).toBe(false);
+    expect(() => loadConfig(openAiEnv({ OPENAI_CHAT_STREAM_ONLY: "1" })))
+      .toThrow(/OPENAI_CHAT_STREAM_ONLY requires OPENAI_UPSTREAM_API=chat-completions/);
+  });
+
+  it("reads the context window of the upstream model", () => {
+    expect(loadConfig(openAiEnv()).openaiContextTokens).toBe(0);
+    expect(loadConfig(openAiEnv({ OPENAI_CONTEXT_TOKENS: "262144" })).openaiContextTokens).toBe(262144);
+    expect(() => loadConfig(openAiEnv({ OPENAI_CONTEXT_TOKENS: "0" }))).toThrow(/OPENAI_CONTEXT_TOKENS/);
+    expect(() => loadConfig(openAiEnv({ OPENAI_CONTEXT_TOKENS: "262k" }))).toThrow(/OPENAI_CONTEXT_TOKENS/);
+  });
+
   it("selects Chat Completions only when configured explicitly", () => {
     expect(loadConfig(openAiEnv({
       OPENAI_UPSTREAM_API: "chat-completions",

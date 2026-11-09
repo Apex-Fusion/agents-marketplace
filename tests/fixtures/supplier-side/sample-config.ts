@@ -28,8 +28,10 @@ export function buildSampleConfig(): SupplierConfig {
     openaiUpstreamApi: "responses",
     openaiResponsesUrl: "",
     openaiResponsesStreamOnly: false,
+    openaiChatStreamOnly: false,
     openaiReasoningDisabled: false,
     openaiMaxTokens: 0,
+    openaiContextTokens: 0,
     openaiSessionPassthrough: false,
     openaiModelOverride: "",
     advertRef: {

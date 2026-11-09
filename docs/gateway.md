@@ -307,6 +307,8 @@ enforcement remains the upstream model server's responsibility.
 
 `OPENAI_RESPONSES_URL` can set an exact native endpoint, such as `https://api.deepseek.com/responses`. `OPENAI_RESPONSES_STREAM_ONLY=1` asks the adapter to collect native SSE even when the marketplace call is buffered. The collector still returns one verified terminal Response to the one-shot settlement flow.
 
+`OPENAI_CHAT_STREAM_ONLY=1` does the same for an explicit Chat Completions upstream that sends its response header only when the answer is complete (Hetzner). The adapter reads the Chat Completions SSE and gives the Response that the buffered call gives: same Items, usage, and status. `OPENAI_CONTEXT_TOKENS` is the context window of the upstream model. With it, an output limit that the buyer or the operator set is capped to the window minus an upper bound of the input, because the provider counts the input against the window and refuses a limit that leaves no room for it. The committed `max_output_tokens` in the receipt stays the value that the gateway committed.
+
 Native OpenRouter, Hugging Face, and DeepSeek templates send `store:false` upstream and replay full Items. They do not depend on provider-side response storage. An omitted buyer or operator control remains omitted upstream; the adapter does not add output, reasoning, or sampling caps that neither side requested.
 
 Production Ollama uses its native `/v1/responses` endpoint through `LLM_BACKEND=openai`. The legacy `LLM_BACKEND=ollama` adapter has the restricted behavior described above. Capability fields, not the provider brand, are authoritative.

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { callResponses } from "../../supplier/src/openai.js";
-import type { ResponseObject } from "@marketplace/shared/responses";
+import { responseInputTokenUpperBound, type ResponseObject } from "@marketplace/shared/responses";
 
 const BASE_URL = "http://localhost:8000";
 const MODEL = "gpt-5.4";
@@ -356,5 +356,86 @@ describe("callResponses explicit Chat Completions mode", () => {
       message: expect.stringContaining("text.verbosity"),
     });
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("callResponses output limit against the context window", () => {
+  const WINDOW = 262_144;
+  const chatOk = () => ok({
+    id: "chatcmpl_1",
+    object: "chat.completion",
+    created: 1_800_000_000,
+    model: MODEL,
+    choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+    usage: { prompt_tokens: 7, completion_tokens: 1, total_tokens: 8 },
+  });
+
+  it("caps a limit at the window to the window minus the input bound (Chat Completions)", async () => {
+    const fetchMock = chatOk();
+    vi.stubGlobal("fetch", fetchMock);
+    await callResponses({ ...BASE, upstreamApi: "chat-completions", max_output_tokens: WINDOW, contextTokens: WINDOW });
+    const room = WINDOW - responseInputTokenUpperBound({ input: INPUT, max_output_tokens: WINDOW });
+    expect(requestBody(fetchMock).max_tokens).toBe(room);
+    expect(room).toBeLessThan(WINDOW);
+    expect(room).toBeGreaterThan(WINDOW - 300);
+  });
+
+  it("counts the whole request in the input bound: instructions, many Items and tools", async () => {
+    const fetchMock = chatOk();
+    vi.stubGlobal("fetch", fetchMock);
+    const request = {
+      input: [INPUT[0], INPUT[0], INPUT[0]],
+      instructions: "x".repeat(40_000),
+      tools: [{ type: "function" as const, name: "lookup", parameters: { type: "object" } }],
+      max_output_tokens: WINDOW,
+    };
+    await callResponses({ ...BASE, ...request, upstreamApi: "chat-completions", contextTokens: WINDOW });
+    expect(requestBody(fetchMock).max_tokens).toBe(WINDOW - responseInputTokenUpperBound(request));
+    expect(requestBody(fetchMock).max_tokens as number).toBeLessThan(WINDOW - 40_000);
+  });
+
+  it("leaves a limit that fits the window as it is", async () => {
+    const fetchMock = chatOk();
+    vi.stubGlobal("fetch", fetchMock);
+    await callResponses({ ...BASE, upstreamApi: "chat-completions", max_output_tokens: 4_096, contextTokens: WINDOW });
+    expect(requestBody(fetchMock).max_tokens).toBe(4_096);
+  });
+
+  it("adds no limit when neither the buyer nor the operator set one", async () => {
+    const fetchMock = chatOk();
+    vi.stubGlobal("fetch", fetchMock);
+    await callResponses({ ...BASE, upstreamApi: "chat-completions", contextTokens: WINDOW });
+    expect(requestBody(fetchMock)).not.toHaveProperty("max_tokens");
+  });
+
+  it("keeps the operator ceiling when it is lower than the room", async () => {
+    const fetchMock = chatOk();
+    vi.stubGlobal("fetch", fetchMock);
+    await callResponses({
+      ...BASE, upstreamApi: "chat-completions", max_output_tokens: WINDOW, maxTokens: 1_000, contextTokens: WINDOW,
+    });
+    expect(requestBody(fetchMock).max_tokens).toBe(1_000);
+  });
+
+  it("does not clamp to a degenerate value when the input bound already fills the window", async () => {
+    const fetchMock = chatOk();
+    vi.stubGlobal("fetch", fetchMock);
+    await callResponses({ ...BASE, upstreamApi: "chat-completions", max_output_tokens: 500, contextTokens: 10 });
+    expect(requestBody(fetchMock).max_tokens).toBe(500);
+  });
+
+  it("sends no window clamp without a configured window", async () => {
+    const fetchMock = chatOk();
+    vi.stubGlobal("fetch", fetchMock);
+    await callResponses({ ...BASE, upstreamApi: "chat-completions", max_output_tokens: WINDOW });
+    expect(requestBody(fetchMock).max_tokens).toBe(WINDOW);
+  });
+
+  it("applies the same cap to native Responses calls", async () => {
+    const fetchMock = ok(response());
+    vi.stubGlobal("fetch", fetchMock);
+    await callResponses({ ...BASE, max_output_tokens: WINDOW, contextTokens: WINDOW });
+    expect(requestBody(fetchMock).max_output_tokens)
+      .toBe(WINDOW - responseInputTokenUpperBound({ input: INPUT, max_output_tokens: WINDOW }));
   });
 });

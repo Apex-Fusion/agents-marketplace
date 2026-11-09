@@ -49,11 +49,19 @@ services:
       # No /v1 suffix — supplier/src/openai.ts appends /v1/chat/completions
       # (Hetzner serves at https://inference.hetzner.com/v1/...).
       OPENAI_BASE_URL: https://inference.hetzner.com
-      # Reasoning-style models can be slow; matches the advert's
-      # max_processing_ms (300000).
-      OPENAI_TIMEOUT_MS: "300000"
-      # OPENAI_MAX_TOKENS intentionally unset: no max_tokens forwarded upstream,
-      # the provider grants context − prompt. Advert cap = model context length.
+      # Matches the advert's max_processing_ms (3600000, 60 min).
+      OPENAI_TIMEOUT_MS: "3600000"
+      # Hetzner sends the response header only when the answer is complete, and the
+      # Node 20 fetch gives up on a call without a header after 300 s. Collect the
+      # SSE so that a call can run 60 min (docs/HETZNER_SETUP.md, section 1).
+      OPENAI_CHAT_STREAM_ONLY: "1"
+      # max_model_len of GET /v1/models. Hetzner refuses a max_tokens that leaves no
+      # room for the prompt, so an output limit is capped to this window minus an
+      # upper bound of the input.
+      OPENAI_CONTEXT_TOKENS: "262144"
+      # OPENAI_MAX_TOKENS intentionally unset: no operator ceiling. Without a buyer
+      # limit no max_tokens goes upstream and the provider grants context − prompt.
+      # Advert cap = model context length.
       PORT: "8080"
       # Enable LiveOgmiosProvider so submitTx/awaitTx actually broadcast.
       LIVE_CHAIN: "1"

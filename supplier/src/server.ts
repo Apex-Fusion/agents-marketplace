@@ -1580,6 +1580,7 @@ function makeChatSessionHandlers(deps: ResolvedDeps) {
             baseUrl: deps.config.openaiBaseUrl,
             responsesUrl: deps.config.openaiResponsesUrl || undefined,
             responsesStreamOnly: deps.config.openaiResponsesStreamOnly,
+            contextTokens: deps.config.openaiContextTokens || undefined,
             upstreamApi: deps.config.openaiUpstreamApi,
             model: deps.config.openaiModelOverride || record.advert.model,
             ...turnRequest,
