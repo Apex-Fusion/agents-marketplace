@@ -46,8 +46,10 @@ services:
       OPENAI_UPSTREAM_API: responses
       OPENAI_RESPONSES_URL: https://api.deepseek.com/responses
       OPENAI_BASE_URL: https://api.deepseek.com
-      # DeepSeek reasoning generations can be slow; mirror the GPT compose.
-      OPENAI_TIMEOUT_MS: "300000"
+      # Matches the advert's max_processing_ms (3600000, 60 min). DeepSeek sends the
+      # response header at once and keep-alive lines while it works, so the 300 s
+      # limits of the Node fetch do not end a long call.
+      OPENAI_TIMEOUT_MS: "3600000"
       PORT: "8080"
       # Enable LiveOgmiosProvider so submitTx/awaitTx actually broadcast.
       # Without this the supplier silently falls back to ReadOnlyOgmiosProvider

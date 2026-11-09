@@ -39,7 +39,9 @@ services:
       # Codex supplies complete output Items in SSE, not the terminal aggregate.
       OPENAI_RESPONSES_STREAM_ONLY: "1"
       OPENAI_BASE_URL: http://marketplace-mainnet-chatmock:8000
-      OPENAI_TIMEOUT_MS: "300000"
+      # Matches the advert's max_processing_ms (3600000, 60 min). The Codex proxy
+      # streams the answer as SSE, so the call sends data while it works.
+      OPENAI_TIMEOUT_MS: "3600000"
       PORT: "8080"
       # Enable LiveOgmiosProvider so submitTx/awaitTx actually broadcast.
       # Mirrors the testnet supplier compose; without this the supplier
