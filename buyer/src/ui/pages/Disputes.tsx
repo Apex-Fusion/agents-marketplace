@@ -599,16 +599,44 @@ export function DisputeCaseCard({ c, names }: { c: DisputeCase; names: Record<st
   const reasoningHash = typeof resolution?.reasoning_hash === "string" && HEX64_RE.test(resolution.reasoning_hash.toLowerCase())
     ? resolution.reasoning_hash.toLowerCase()
     : null;
+  const claimType = fieldText(claimFields.claim_type);
+  const claimerId = c.claimer_agent_id;
+  const claimerName = claimerId && HEX64_RE.test(claimerId) ? names[claimerId]?.name ?? shortDid(claimerId) : "unknown agent";
+  const auditorId = challenge?.auditor_agent_id;
+  const auditorName = auditorId && HEX64_RE.test(auditorId) ? names[auditorId]?.name ?? shortDid(auditorId) : "unknown agent";
+  const votes = c.jury?.ballots?.length ?? 0;
+  // The left edge shows the result, or the state while the case is not resolved.
+  const edge = outcome === "ClaimerWins" ? "border-l-green-500"
+    : outcome === "AuditorWins" ? "border-l-red-500"
+    : outcome ? "border-l-gray-400"
+    : status === "challenged" ? "border-l-amber-500"
+    : status === "open" ? "border-l-blue-500"
+    : "border-l-gray-300";
 
   return (
-    <div className="space-y-3 rounded border border-gray-200 bg-white p-4 shadow-sm" data-testid="dispute-case">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className="break-all font-mono text-xs text-gray-500">case {c.claim_ref ?? "—"}</span>
+    <details
+      open={!resolution}
+      className={`group rounded border border-l-4 border-gray-200 ${edge} bg-white shadow-sm`}
+      data-testid="dispute-case"
+    >
+      <summary className="flex cursor-pointer list-none flex-wrap items-center justify-between gap-2 p-4 hover:bg-gray-50 [&::-webkit-details-marker]:hidden">
+        <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+          <span aria-hidden="true" className="text-xs text-gray-400 transition-transform group-open:rotate-90">▶</span>
+          <span className="font-semibold">{claimType ?? "Claim"}</span>
+          <span className="text-sm text-gray-700">
+            {claimerName}
+            {challenge && <> <span className="text-gray-400">vs</span> {auditorName}</>}
+          </span>
+          <span className="text-xs text-gray-500">{utc(claim?.time)}</span>
+        </span>
         <span className="flex flex-wrap gap-2">
+          {votes > 0 && <Pill text={`${votes} juror ${votes === 1 ? "vote" : "votes"}`} tone="gray" />}
           <Pill text={status} tone={status === "open" ? "blue" : status === "challenged" ? "amber" : "gray"} />
           {outcome && <Pill text={outcome} tone={outcome === "ClaimerWins" ? "green" : outcome === "AuditorWins" ? "red" : "gray"} />}
         </span>
-      </div>
+      </summary>
+      <div className="space-y-3 border-t border-gray-100 px-4 pb-4 pt-3">
+      <p className="break-all font-mono text-xs text-gray-500">case {c.claim_ref ?? "—"}</p>
 
       <div className="grid gap-4 md:grid-cols-2">
         <section className="text-sm">
@@ -703,7 +731,8 @@ export function DisputeCaseCard({ c, names }: { c: DisputeCase; names: Record<st
         </dl>
         <pre className="mt-2 max-h-96 overflow-auto rounded bg-gray-900 p-2 text-gray-100">{JSON.stringify(c, null, 2)}</pre>
       </details>
-    </div>
+      </div>
+    </details>
   );
 }
 
