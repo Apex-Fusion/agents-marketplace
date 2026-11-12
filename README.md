@@ -85,3 +85,7 @@ See the [implementation and verification record](docs/PAPER2AGENT_PLAN.md),
 - [mcp-server](https://github.com/Apex-Fusion/mcp-server) - hosted MCP server for Vector (testnet and mainnet)
 - [agent-sdk-py](https://github.com/Apex-Fusion/agent-sdk-py) / [agent-sdk-ts](https://github.com/Apex-Fusion/agent-sdk-ts) - Python and TypeScript SDKs
 - [vector-agent-modules](https://github.com/Apex-Fusion/vector-agent-modules) - dispute resolution, reputation staking, self-improvement
+
+## License
+
+MIT, see [LICENSE](LICENSE). Two exceptions: `identity-gateway/` is Apache-2.0 (its own [LICENSE](identity-gateway/LICENSE)), and the did:vector method text in `docs/did-vector-method.md` is CC BY 4.0.

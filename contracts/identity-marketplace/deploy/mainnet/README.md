@@ -28,7 +28,7 @@ This folder publishes the identity side of the release (Part 2 §11 step 2, [`do
 | `vault` | `bd45078144effb5011f161d8bb433f2ee360da458644fca9b818097a` |
 | `advert` | `f36e366e06d4480651aa0e1064578f0bfe275af96dfcaaabe5efe26c` |
 | Legacy registry (parameter) | `be1a0a2912da180757ed3cd61b56bb8eab0188c19dc3c0e3912d2c01` |
-| Blueprint | `contracts/identity-marketplace/plutus.json`, sha256 `9c8d948a2da12fa519b6f97286cbb8374c002b6bca7e4a3ef1a6d65cca51df3e`, Aiken v1.1.21 |
+| Blueprint | `contracts/identity-marketplace/plutus.json`, sha256 `9c8d948a2da12fa519b6f97286cbb8374c002b6bca7e4a3ef1a6d65cca51df3e`, Aiken v1.1.21. This is the blueprint as deployed. On 2026-11-12 its preamble `license` field changed from Apache-2.0 to MIT; the validators, their compiled code and the script hashes did not change. |
 
 ## Reference scripts
 
