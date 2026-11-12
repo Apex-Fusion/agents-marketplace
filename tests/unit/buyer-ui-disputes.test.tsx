@@ -8,13 +8,18 @@
  * against the hash on chain: the claim and evidence documents of `vector-tx:`
  * URIs, the juror records of the reveals and the resolution document. Site
  * documents still load same-origin. Tests stub globalThis.fetch.
+ *
+ * The card body (the documents and the jury) mounts only while the card is
+ * open, so a collapsed card makes no request. The /disputes page asks the
+ * indexer for 25 cases at a time and shows "Show 25 more".
  */
 
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { setTimeout as delay } from "node:timers/promises";
+import { describe, it, expect, vi, afterEach, type Mock } from "vitest";
 import { act, render, screen, waitFor, fireEvent, within } from "@testing-library/react";
 import { blake2b } from "@noble/hashes/blake2b";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { DisputeCaseCard, disputeAgentIds, vectorTxId, type DisputeCase } from "../../buyer/src/ui/pages/Disputes.js";
+import Disputes, { DisputeCaseCard, disputeAgentIds, vectorTxId, type DisputeCase } from "../../buyer/src/ui/pages/Disputes.js";
 import AgentIdentity from "../../buyer/src/ui/pages/AgentIdentity.js";
 
 const hash = (text: string): string => Buffer.from(blake2b(new TextEncoder().encode(text), { dkLen: 32 })).toString("hex");
@@ -79,9 +84,12 @@ const ON_CHAIN: Record<string, string> = {
   [TX.resolve]: RESOLUTION,
 };
 
-function stubFetch(site: Record<string, string> = {}) {
+/** Stubs fetch: the documents on chain (ON_CHAIN), the site documents and, first, the URLs that `routes` answers. */
+function stubFetch(site: Record<string, string> = {}, routes: (url: string) => Response | undefined = () => undefined) {
   const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
+    const routed = routes(url);
+    if (routed) return routed;
     const onChain = /^\/v1\/indexer\/documents\/([0-9a-f]{64})$/.exec(url);
     if (onChain) {
       const text = ON_CHAIN[onChain[1]!];
@@ -101,9 +109,22 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-/** Renders a card and waits until every document check has an answer. */
+/** The URLs that a stubbed fetch received, in order. */
+const urlsOf = (fetchSpy: Mock): string[] => fetchSpy.mock.calls.map(([url]) => String(url));
+
+/** Opens or closes a card the way the browser does after a click on its summary: `open` changes, then `toggle` fires. */
+function toggleCard(card: HTMLElement, open: boolean): void {
+  act(() => {
+    (card as HTMLDetailsElement).open = open;
+  });
+  fireEvent(card, new Event("toggle"));
+}
+
+/** Renders a card, opens it when it is collapsed (a resolved case), and waits until every document check has an answer. */
 async function renderCard(c: DisputeCase) {
   const view = render(<DisputeCaseCard c={c} names={{}} />);
+  const card = screen.getByTestId("dispute-case") as HTMLDetailsElement;
+  if (!card.open) toggleCard(card, true);
   await waitFor(() => {
     expect(screen.queryByText(/Checking the document…|Reading the resolution document…|Looking up the reasoning document…|Reading the record…/)).toBeNull();
   });
@@ -428,5 +449,212 @@ describe("<DisputeCaseCard /> — record response shapes and resolution bases", 
     const doc = await screen.findByTestId("resolution-document");
     expect(within(doc).getByText(/no Finalize transaction/)).toBeInTheDocument();
     expect(within(doc).queryByText(/finalized in/)).toBeNull();
+  });
+});
+
+// ─── The card body mounts only while the card is open ───────────────────────────
+
+describe("<DisputeCaseCard /> — the body mounts only while the card is open", () => {
+  it("a collapsed resolved card shows its summary line and makes no request until it is opened", async () => {
+    const fetchSpy = stubFetch();
+    render(<DisputeCaseCard c={juryCase()} names={{}} />);
+    const card = screen.getByTestId("dispute-case") as HTMLDetailsElement;
+    expect(card.open).toBe(false);
+    for (const text of ["certification", "did:vector:a1a1…a1a1", "did:vector:a2a2…a2a2", "2026-11-09 10:00 UTC", "2 juror votes", "resolved", "AuditorWins"]) {
+      expect(card).toHaveTextContent(text);
+    }
+    await act(async () => {
+      await delay(0);
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("jury-section")).toBeNull();
+    expect(screen.queryByText("Claim document")).toBeNull();
+
+    toggleCard(card, true);
+    expect(await screen.findByTestId("resolution-document")).toBeInTheDocument();
+    expect(await screen.findByText("“The agent passed the audit.”")).toBeInTheDocument();
+    expect(urlsOf(fetchSpy).sort()).toEqual([TX.claimDoc, TX.evidenceDoc, TX.resolve].map((tx) => `/v1/indexer/documents/${tx}`).sort());
+  });
+
+  it("unmounts the body when the card is closed and mounts it again when the card is opened", async () => {
+    stubFetch();
+    await renderCard(juryCase());
+    const card = screen.getByTestId("dispute-case") as HTMLDetailsElement;
+    expect(screen.getByTestId("jury-section")).toBeInTheDocument();
+    toggleCard(card, false);
+    expect(screen.queryByTestId("jury-section")).toBeNull();
+    expect(card).toHaveTextContent("AuditorWins");
+    toggleCard(card, true);
+    expect(screen.getByTestId("jury-section")).toBeInTheDocument();
+    expect(await screen.findByTestId("resolution-document")).toBeInTheDocument();
+  });
+
+  it("a card without a resolution starts open and reads its documents at once", async () => {
+    const fetchSpy = stubFetch();
+    const c: DisputeCase = { ...juryCase(), status: "challenged", resolution: null, resolution_document: null, jury: null };
+    render(<DisputeCaseCard c={c} names={{}} />);
+    expect((screen.getByTestId("dispute-case") as HTMLDetailsElement).open).toBe(true);
+    expect(urlsOf(fetchSpy).sort()).toEqual([TX.claimDoc, TX.evidenceDoc].map((tx) => `/v1/indexer/documents/${tx}`).sort());
+    expect(await screen.findByText("“The agent passed the audit.”")).toBeInTheDocument();
+  });
+});
+
+// ─── The /disputes page: pages of 25 cases ──────────────────────────────────────
+
+/** A resolved case with documents on chain: its card starts collapsed. */
+function pageCase(i: number): DisputeCase {
+  const tx = i.toString(16).padStart(64, "0");
+  return {
+    claim_ref: `${tx}#0`,
+    claimer_agent_id: CLAIMER,
+    status: "resolved",
+    claim: {
+      tx,
+      time: "2026-11-09T10:00:00.000Z",
+      stake_lovelace: "50000000",
+      fields: { claim_type: "certification", storage_uri: uriOf(TX.claimDoc), claim_hash: hash(CLAIM_DOC) },
+    },
+    challenge: null,
+    resolution: { tx: TX.resolve, time: "2026-11-09T16:10:00.000Z", outcome: "ClaimerWins", reasoning_hash: hash(RESOLUTION) },
+    resolution_document: { tx: TX.resolve },
+    jury: null,
+    verdict: null,
+  };
+}
+
+/**
+ * A stubbed indexer with `available` cases, newest first. It gives the newest `limit` cases and `total`.
+ * `older` is an older indexer: it ignores `limit` and gives all the cases and no `total`.
+ */
+function stubIndexer(available: number, { older = false } = {}) {
+  return stubFetch({}, (url) => {
+    if (url.startsWith("/v1/indexer/disputes?")) {
+      const limit = older ? available : Number(new URL(url, "http://localhost").searchParams.get("limit"));
+      const cases = Array.from({ length: Math.min(limit, available) }, (_, i) => pageCase(i));
+      return Response.json(older ? { cases } : { cases, total: available });
+    }
+    if (url.startsWith("/v1/identity/summaries?ids=")) {
+      return Response.json({
+        [CLAIMER]: { did: `did:vector:${CLAIMER}`, status: 0, name: "Claimer One", origin: null, effective: "active", effectiveReason: null, accountable: true, module1: false },
+      });
+    }
+    return undefined;
+  });
+}
+
+const renderPage = () => render(<MemoryRouter><Disputes /></MemoryRouter>);
+
+describe("<Disputes /> — pages of 25 cases", () => {
+  it("asks for the newest 25 cases, shows the count, and a click on Show 25 more asks for 25 more", async () => {
+    const fetchSpy = stubIndexer(60);
+    renderPage();
+    expect(await screen.findByText("Showing 25 of 60 cases")).toBeInTheDocument();
+    expect(urlsOf(fetchSpy)).toContain("/v1/indexer/disputes?limit=25");
+    expect(screen.getAllByTestId("dispute-case")).toHaveLength(25);
+
+    fireEvent.click(screen.getByText("Show 25 more"));
+    expect(await screen.findByText("Showing 50 of 60 cases")).toBeInTheDocument();
+    expect(urlsOf(fetchSpy)).toContain("/v1/indexer/disputes?limit=50");
+    expect(screen.getAllByTestId("dispute-case")).toHaveLength(50);
+
+    fireEvent.click(screen.getByText("Show 25 more"));
+    await waitFor(() => expect(screen.getAllByTestId("dispute-case")).toHaveLength(60));
+    expect(urlsOf(fetchSpy)).toContain("/v1/indexer/disputes?limit=75");
+    expect(screen.queryByText(/^Showing /)).toBeNull();
+    expect(screen.queryByText("Show 25 more")).toBeNull();
+  });
+
+  it("shows no count and no button when the indexer sends no total", async () => {
+    const fetchSpy = stubIndexer(30, { older: true });
+    renderPage();
+    await waitFor(() => expect(screen.getAllByTestId("dispute-case")).toHaveLength(30));
+    expect(urlsOf(fetchSpy)).toContain("/v1/indexer/disputes?limit=25");
+    expect(screen.queryByText(/^Showing /)).toBeNull();
+    expect(screen.queryByText("Show 25 more")).toBeNull();
+  });
+
+  it("shows no count and no button when all the cases are in the page", async () => {
+    stubIndexer(10);
+    renderPage();
+    await waitFor(() => expect(screen.getAllByTestId("dispute-case")).toHaveLength(10));
+    expect(screen.queryByText(/^Showing /)).toBeNull();
+    expect(screen.queryByText("Show 25 more")).toBeNull();
+  });
+
+  it("stops at 200 cases, the largest page of the indexer, and says how to find older cases", async () => {
+    const fetchSpy = stubIndexer(500);
+    renderPage();
+    for (let shown = 25; shown < 200; shown += 25) {
+      await screen.findByText(`Showing ${shown} of 500 cases`);
+      fireEvent.click(screen.getByText("Show 25 more"));
+    }
+    expect(await screen.findByText("Showing 200 of 500 cases")).toBeInTheDocument();
+    expect(screen.queryByText("Show 25 more")).toBeNull();
+    expect(screen.getByText(/newest 200 cases at most/)).toBeInTheDocument();
+    const limits = urlsOf(fetchSpy).flatMap((url) => /^\/v1\/indexer\/disputes\?limit=(\d+)$/.exec(url)?.[1] ?? []).map(Number);
+    expect(Math.max(...limits)).toBe(200);
+  });
+
+  it("keeps the limit at the 15-second refresh", async () => {
+    const setIntervalSpy = vi.spyOn(globalThis, "setInterval");
+    try {
+      const fetchSpy = stubIndexer(60);
+      renderPage();
+      await screen.findByText("Showing 25 of 60 cases");
+      fireEvent.click(screen.getByText("Show 25 more"));
+      await screen.findByText("Showing 50 of 60 cases");
+      const refreshes = setIntervalSpy.mock.calls.filter(([, ms]) => ms === 15_000);
+      const before = urlsOf(fetchSpy).length;
+      await act(async () => {
+        (refreshes[refreshes.length - 1]![0] as () => void)();
+      });
+      expect(urlsOf(fetchSpy).slice(before)).toEqual(["/v1/indexer/disputes?limit=50"]);
+      expect(await screen.findByText("Showing 50 of 60 cases")).toBeInTheDocument();
+    } finally {
+      setIntervalSpy.mockRestore();
+    }
+  });
+
+  it("makes no document request for the collapsed cards, and shows the identity names of the shown cases", async () => {
+    const fetchSpy = stubIndexer(25);
+    renderPage();
+    await waitFor(() => expect(screen.getAllByText("Claimer One")).toHaveLength(25));
+    expect(screen.getAllByTestId("dispute-case").every((card) => !(card as HTMLDetailsElement).open)).toBe(true);
+    expect(urlsOf(fetchSpy).sort()).toEqual(["/v1/identity/summaries?ids=" + CLAIMER, "/v1/indexer/disputes?limit=25"].sort());
+
+    toggleCard(screen.getAllByTestId("dispute-case")[3]!, true);
+    expect(await screen.findByTestId("resolution-document")).toBeInTheDocument();
+    const documents = urlsOf(fetchSpy).filter((url) => url.startsWith("/v1/indexer/documents/")).sort();
+    expect(documents).toEqual([TX.claimDoc, TX.resolve].map((tx) => `/v1/indexer/documents/${tx}`).sort());
+  });
+});
+
+describe("<AgentIdentity /> — disputes of the agent", () => {
+  it("asks for all the cases of the agent (no limit); the cards are collapsed and there is no count or button", async () => {
+    const urls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      urls.push(url);
+      if (url === `/v1/identity/resolve/did:vector:${CLAIMER}`) {
+        return Response.json({ didDocumentMetadata: { vectorProfile: { name: "Claimer One" }, vectorStatus: { effective: "active" } } });
+      }
+      if (url === `/v1/indexer/disputes?agent_id=${CLAIMER}`) return Response.json({ cases: [juryCase()], total: 1 });
+      return Response.json({ error: "not_found" }, { status: 404 });
+    }));
+    render(
+      <MemoryRouter initialEntries={[`/agents/${CLAIMER}`]}>
+        <Routes>
+          <Route path="/agents/:id" element={<AgentIdentity />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    const card = await screen.findByTestId("dispute-case");
+    expect(card).toHaveTextContent("AuditorWins");
+    expect((card as HTMLDetailsElement).open).toBe(false);
+    expect(urls).toContain(`/v1/indexer/disputes?agent_id=${CLAIMER}`);
+    expect(urls.filter((url) => url.includes("limit="))).toEqual([]);
+    expect(urls.filter((url) => url.startsWith("/v1/indexer/documents/"))).toEqual([]);
+    expect(screen.queryByText(/^Showing /)).toBeNull();
+    expect(screen.queryByText("Show 25 more")).toBeNull();
   });
 });

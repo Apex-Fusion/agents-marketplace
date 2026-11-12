@@ -1,8 +1,12 @@
 /**
  * indexer/src/routes/disputes.ts
  *
- * GET /disputes                  — { cases: DisputeCase[] }, newest first (disputes/module1.ts).
+ * GET /disputes                  — { cases: DisputeCase[], total: number }, newest first (disputes/module1.ts).
  * GET /disputes?agent_id=ID      — only the cases where ID is the claimer or the auditor.
+ * GET /disputes?limit=N&offset=M — one page: the N cases (1 to 200) after the first M (default 0).
+ *   Without `limit`, the page runs to the end of the list (all cases when `offset` is 0).
+ *   `total` is the number of cases after the agent_id filter, before the paging.
+ *   A `limit` or `offset` that is not an integer in range gives HTTP 400.
  * GET /agents/:agent_id/jobs     — AgentJobs: the identity-layout escrows of the agent.
  *   One job is one escrow lineage (SqliteCache.getEscrowLineage); its outcome is
  *   the terminal event (accepted, reclaimed, released, refunded) or the state
@@ -13,6 +17,11 @@
  * Each case links its canonical jury case (`jury`, from the followed jury
  * deployments) and the documents on chain (`resolution_document`, and
  * `claim.document` / `challenge.document` for `vector-tx:` URIs).
+ *
+ * The build of the list of all cases decodes every Module-1 output. The router
+ * builds the list at most once every 5 seconds and keeps it in memory. The
+ * agent_id filter and the paging read this copy, so a change on chain shows in
+ * /disputes up to 5 seconds late.
  */
 
 import { Router, type Request, type Response } from "express";
@@ -29,6 +38,8 @@ export interface DisputesDeps {
   networkId: NetworkId;
   /** Followed jury deployments; empty: no jury cases. */
   jury: readonly JuryDeployment[];
+  /** Clock in milliseconds for the case list copy (default Date.now); tests inject their own. */
+  now?: () => number;
 }
 
 type JobOutcome = "open" | "claimed" | "submitted" | "accepted" | "reclaimed" | "released" | "refunded";
@@ -48,8 +59,49 @@ const STATE_OUTCOME: Record<string, JobOutcome> = {
 
 const RECENT_JOBS = 20;
 
+/** The most cases that one page of GET /disputes holds. */
+const MAX_PAGE = 200;
+
+/** How long a built list of all cases stays valid. */
+const CASES_CACHE_MS = 5_000;
+
+/** A query value that is a whole number in decimal digits; null for any other value (also a repeated parameter). */
+function queryInteger(value: unknown): number | null {
+  if (typeof value !== "string" || !/^\d+$/.test(value)) return null;
+  const n = Number(value);
+  return Number.isSafeInteger(n) ? n : null;
+}
+
 export function disputesRouter(deps: DisputesDeps): Router {
   const router = Router();
+  const now = deps.now ?? Date.now;
+  let built: { at: number; cases: DisputeCase[] } | null = null;
+
+  /** All cases, newest first. The build is the costly step, so it runs at most once every 5 seconds. */
+  const allCases = (): DisputeCase[] => {
+    const m1 = deps.module1;
+    if (!m1) return [];
+    const at = now();
+    // A clock that moved back (at < built.at) makes the copy stale.
+    if (built !== null && at >= built.at && at - built.at < CASES_CACHE_MS) return built.cases;
+    const canonical = new Map<string, JuryCaseView>();
+    for (const c of loadJuryView(deps.cache, deps.jury, deps.networkId).cases) {
+      if (c.canonical && !canonical.has(c.claim)) canonical.set(c.claim, c);
+    }
+    const links: DisputeLinks = {
+      juryCase: (claimToken) => canonical.get(claimToken) ?? null,
+      documentSummary: (txHash) => deps.cache.getDocumentSummaries([txHash]).get(txHash) ?? null,
+      document: (txHash) => deps.cache.getDocument(txHash),
+    };
+    const cases = buildDisputeCases(
+      deps.cache.listModule1Outputs([m1.claimAddress, m1.challengeAddress, m1.partyAddress]),
+      m1,
+      deps.networkId,
+      links,
+    );
+    built = { at, cases };
+    return cases;
+  };
 
   router.get("/disputes", (req: Request, res: Response) => {
     const raw = typeof req.query.agent_id === "string" ? req.query.agent_id.toLowerCase() : null;
@@ -57,27 +109,28 @@ export function disputesRouter(deps: DisputesDeps): Router {
       res.status(400).json({ error: "agent_id must be 64 hexadecimal characters" });
       return;
     }
-    const m1 = deps.module1;
-    let cases: DisputeCase[] = [];
-    if (m1) {
-      const canonical = new Map<string, JuryCaseView>();
-      for (const c of loadJuryView(deps.cache, deps.jury, deps.networkId).cases) {
-        if (c.canonical && !canonical.has(c.claim)) canonical.set(c.claim, c);
+    let limit: number | null = null;
+    if (req.query.limit !== undefined) {
+      limit = queryInteger(req.query.limit);
+      if (limit === null || limit < 1 || limit > MAX_PAGE) {
+        res.status(400).json({ error: `limit must be an integer from 1 to ${MAX_PAGE}` });
+        return;
       }
-      const links: DisputeLinks = {
-        juryCase: (claimToken) => canonical.get(claimToken) ?? null,
-        documentSummary: (txHash) => deps.cache.getDocumentSummaries([txHash]).get(txHash) ?? null,
-        document: (txHash) => deps.cache.getDocument(txHash),
-      };
-      cases = buildDisputeCases(
-        deps.cache.listModule1Outputs([m1.claimAddress, m1.challengeAddress, m1.partyAddress]),
-        m1,
-        deps.networkId,
-        links,
-      );
     }
+    let offset = 0;
+    if (req.query.offset !== undefined) {
+      const parsed = queryInteger(req.query.offset);
+      if (parsed === null) {
+        res.status(400).json({ error: "offset must be an integer of 0 or more" });
+        return;
+      }
+      offset = parsed;
+    }
+    const all = allCases();
+    const cases = raw === null ? all : all.filter((c) => c.claimer_agent_id === raw || c.challenge?.auditor_agent_id === raw);
     res.status(200).json({
-      cases: raw === null ? cases : cases.filter((c) => c.claimer_agent_id === raw || c.challenge?.auditor_agent_id === raw),
+      cases: cases.slice(offset, limit === null ? undefined : offset + limit),
+      total: cases.length,
     });
   });
 

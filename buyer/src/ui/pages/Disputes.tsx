@@ -5,6 +5,11 @@
  * (GET /v1/indexer/disputes; 404 = an indexer without dispute data), draws
  * the escrow job paths and opens any did:vector in /agents/:id.
  *
+ * The list is paged. The page asks for the newest 25 cases (`limit=25`) and
+ * "Show 25 more" raises the limit by 25, up to 200 (the largest page of the
+ * indexer). The indexer also gives `total`, the number of all cases. An older
+ * indexer gives none, and then the page shows no count and no button.
+ *
  * The jury decides each challenge (Module-1/jury/SPEC.md). The Foundation
  * relay signs the Module-1 resolution with the jury result. A case card shows
  * the canonical jury case of the challenge (`jury` of the indexer case): the
@@ -20,6 +25,10 @@
  * hash on chain. It reads and checks the juror records (in the reveal
  * transactions) and the resolution document (in the OracleResolve
  * transaction) in the same way.
+ *
+ * A case card is a details element. Its body (the documents and the jury)
+ * mounts only while the card is open, so a collapsed card makes no request. A
+ * case that is not resolved starts open. A resolved case starts collapsed.
  */
 
 import { useEffect, useState, type FormEvent } from "react";
@@ -129,23 +138,42 @@ const DID_RE = /^did:vector:([0-9a-f]{64})$/;
 const HEX_BYTES_RE = /^(?:[0-9a-f]{2})*$/;
 const DAY_MS = 86_400_000;
 const VOTE_TONE: Record<string, "green" | "red" | "gray"> = { ClaimerWins: "green", AuditorWins: "red", Inconclusive: "gray" };
+/** Cases that the page asks for first and that "Show more" adds. */
+const PAGE_SIZE = 25;
+/** The largest page that the indexer gives (GET /disputes?limit=). */
+const MAX_LIMIT = 200;
 
-/** Cases of all agents, or of one agent (claimer or auditor); refreshes every 15 s. */
-export function useDisputes(agentId?: string): { cases: DisputeCase[]; note: string | null; loading: boolean } {
-  const [state, setState] = useState<{ cases: DisputeCase[]; note: string | null; loading: boolean }>({
-    cases: [],
-    note: null,
-    loading: true,
-  });
+/** What `useDisputes` returns, besides `showMore`. */
+interface DisputeList {
+  cases: DisputeCase[];
+  note: string | null;
+  loading: boolean;
+  /** The number of cases that the indexer has (those of the agent, with `agentId`); null when it does not say. */
+  total: number | null;
+}
+
+/**
+ * Cases of all agents, or of one agent (claimer or auditor); refreshes every 15 s.
+ * Without `pageSize` it asks for all cases. With `pageSize` it asks for the newest `pageSize` cases.
+ * `showMore` raises the limit by `pageSize`, up to MAX_LIMIT, and the refresh keeps the new limit.
+ * `showMore` is null when there is nothing to raise.
+ */
+export function useDisputes(agentId?: string, pageSize?: number): DisputeList & { showMore: (() => void) | null } {
+  const [state, setState] = useState<DisputeList>({ cases: [], note: null, loading: true, total: null });
+  const [limit, setLimit] = useState(pageSize);
   useEffect(() => {
     let cancelled = false;
-    const url = agentId ? `/v1/indexer/disputes?agent_id=${agentId}` : "/v1/indexer/disputes";
+    const params = new URLSearchParams();
+    if (agentId) params.set("agent_id", agentId);
+    if (limit !== undefined) params.set("limit", String(limit));
+    const query = params.toString();
+    const url = query === "" ? "/v1/indexer/disputes" : `/v1/indexer/disputes?${query}`;
     const load = (): void => {
       getJson(url)
         .then(({ status, body }) => {
           if (cancelled) return;
           if (status === 404) {
-            setState({ cases: [], note: "No dispute data yet", loading: false });
+            setState({ cases: [], note: "No dispute data yet", loading: false, total: null });
             return;
           }
           if (status !== 200) {
@@ -156,7 +184,9 @@ export function useDisputes(agentId?: string): { cases: DisputeCase[]; note: str
           const cases = Array.isArray(raw)
             ? raw.filter((c): c is DisputeCase => typeof c === "object" && c !== null)
             : [];
-          setState({ cases, note: null, loading: false });
+          const count = typeof body === "object" && body !== null && "total" in body ? body.total : undefined;
+          const total = typeof count === "number" && Number.isInteger(count) && count >= 0 ? count : null;
+          setState({ cases, note: null, loading: false, total });
         })
         .catch(() => {
           if (!cancelled) setState((prev) => ({ ...prev, note: "Dispute data is unavailable.", loading: false }));
@@ -168,8 +198,11 @@ export function useDisputes(agentId?: string): { cases: DisputeCase[]; note: str
       cancelled = true;
       clearInterval(timer);
     };
-  }, [agentId]);
-  return state;
+  }, [agentId, limit]);
+  const showMore = pageSize !== undefined && limit !== undefined && limit < MAX_LIMIT
+    ? () => setLimit(Math.min(limit + pageSize, MAX_LIMIT))
+    : null;
+  return { ...state, showMore };
 }
 
 /** The DIDs that a case names: the claimer, the auditor and the jurors of its jury case. */
@@ -613,9 +646,14 @@ export function DisputeCaseCard({ c, names }: { c: DisputeCase; names: Record<st
     : status === "open" ? "border-l-blue-500"
     : "border-l-gray-300";
 
+  // A case that is not resolved starts open. The body mounts only while the card is open,
+  // so a collapsed card makes no request.
+  const [open, setOpen] = useState(!resolution);
+
   return (
     <details
-      open={!resolution}
+      open={open}
+      onToggle={(e) => setOpen(e.currentTarget.open)}
       className={`group rounded border border-l-4 border-gray-200 ${edge} bg-white shadow-sm`}
       data-testid="dispute-case"
     >
@@ -635,6 +673,7 @@ export function DisputeCaseCard({ c, names }: { c: DisputeCase; names: Record<st
           {outcome && <Pill text={outcome} tone={outcome === "ClaimerWins" ? "green" : outcome === "AuditorWins" ? "red" : "gray"} />}
         </span>
       </summary>
+      {open && (
       <div className="space-y-3 border-t border-gray-100 px-4 pb-4 pt-3">
       <p className="break-all font-mono text-xs text-gray-500">case {c.claim_ref ?? "—"}</p>
 
@@ -732,6 +771,7 @@ export function DisputeCaseCard({ c, names }: { c: DisputeCase; names: Record<st
         <pre className="mt-2 max-h-96 overflow-auto rounded bg-gray-900 p-2 text-gray-100">{JSON.stringify(c, null, 2)}</pre>
       </details>
       </div>
+      )}
     </details>
   );
 }
@@ -843,7 +883,7 @@ const STEPS: Array<{ title: string; text: string }> = [
 ];
 
 export default function Disputes() {
-  const { cases, note, loading } = useDisputes();
+  const { cases, note, loading, total, showMore } = useDisputes(undefined, PAGE_SIZE);
   const names = useSummaries(cases.flatMap(disputeAgentIds));
   return (
     <div className="space-y-6">
@@ -877,6 +917,24 @@ export default function Disputes() {
           <p className="text-sm text-gray-500">No dispute cases yet.</p>
         ) : (
           cases.map((c, i) => <DisputeCaseCard key={c.claim_ref ?? i} c={c} names={names} />)
+        )}
+        {total !== null && total > cases.length && (
+          <div className="flex flex-wrap items-center gap-3 text-sm text-gray-600">
+            <p>{`Showing ${cases.length} of ${total} cases`}</p>
+            {showMore ? (
+              <button
+                type="button"
+                onClick={showMore}
+                className="rounded border border-gray-300 bg-white px-3 py-1 text-sm font-medium text-gray-700 hover:bg-gray-50"
+              >
+                {`Show ${PAGE_SIZE} more`}
+              </button>
+            ) : (
+              <p className="text-xs text-gray-500">
+                This page lists the newest {MAX_LIMIT} cases at most. To see older cases, look up an agent DID above.
+              </p>
+            )}
+          </div>
         )}
       </section>
 

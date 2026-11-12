@@ -4,12 +4,14 @@
  * Covers the decoders of the jury data (§5; CBOR fixtures built from the
  * field orders of the specification), the JURY_DEPLOYMENTS configuration, the
  * capture of jury outputs and spends, the view (result rule §8, ballots,
- * eligibility, canonical case §11), and one chain from the claim to the
+ * eligibility, canonical case §11), one chain from the claim to the
  * OracleResolve through the worker and the routes: /jury, /jury/jurors,
- * /jury/cases and the jury and document fields of /disputes.
+ * /jury/cases and the jury and document fields of /disputes, and the pages,
+ * the total and the 5-second copy of the case list of /disputes.
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+import express from "express";
 import request from "supertest";
 
 import { VECTOR_TESTNET, slotToPosixMs } from "@marketplace/shared";
@@ -29,6 +31,7 @@ import {
   tallyFromData,
 } from "../../indexer/src/jury/codec.js";
 import { buildJuryView, juryOutcome } from "../../indexer/src/jury/view.js";
+import { disputesRouter } from "../../indexer/src/routes/disputes.js";
 import { createApp } from "../../indexer/src/server.js";
 import { encodePlutusDataHex } from "../../packages/shared/src/cbor/plutus-data.js";
 import { MockChainSyncSource } from "./__helpers__/MockChainSyncSource.js";
@@ -785,5 +788,202 @@ describe("from the claim to the OracleResolve — worker, /jury and /disputes", 
     expect((await request(app).get("/jury")).body.deployments).toEqual([]);
     expect((await request(app).get("/jury/cases")).body.cases).toEqual([]);
     expect((await request(app).get("/jury/jurors")).body.jurors).toEqual([]);
+  });
+});
+
+// ─── GET /disputes: pages, total and the copy of the case list ─────────────────
+
+describe("GET /disputes — pages, total and the 5-second copy of the case list", () => {
+  const OTHER_CLAIMER = "a3".repeat(32);
+  const COUNT = 30;
+  const FIRST_SLOT = 1_000;
+  const module1 = { claimAddress: M1_CLAIM_ADDRESS, challengeAddress: M1_CHALLENGE_ADDRESS, partyAddress: M1_PARTY_ADDRESS };
+
+  /** Claim `i` in its own block at slot FIRST_SLOT + i: even i is CLAIMER's claim, odd i is OTHER_CLAIMER's. */
+  const claimBlock = (i: number): IndexerBlock => ({
+    slot: FIRST_SLOT + i,
+    id: (FIRST_SLOT + i).toString(16).padStart(64, "0"),
+    height: i + 1,
+    transactions: [{
+      id: txId(0x1000 + i),
+      inputs: [],
+      outputs: [plainOutput(M1_CLAIM_ADDRESS, 50_000_000, claimDatumHex({
+        claimer: i % 2 === 0 ? CLAIMER : OTHER_CLAIMER,
+        claimHash: textHash(`claim ${i}`),
+        storageUri: `https://elsewhere.example/claim-${i}.json`,
+      }))],
+    }],
+  });
+
+  /** An indexer that holds claims 0 to count - 1; `push(i)` indexes claim i later. */
+  async function indexedClaims(count: number) {
+    const cache = new SqliteCache(":memory:");
+    const source = new MockChainSyncSource([]);
+    const worker = new ChainSyncWorker({
+      source,
+      cache,
+      networkId: 0,
+      addresses: {
+        advertAddress: "",
+        escrowAddress: "",
+        module1Addresses: [M1_CLAIM_ADDRESS, M1_CHALLENGE_ADDRESS, M1_PARTY_ADDRESS],
+        module1Challenge: { address: M1_CHALLENGE_ADDRESS, policyId: M1_CHALLENGE_HASH },
+      },
+    });
+    await worker.start();
+    const push = (i: number): void => source.pushEvent({ kind: "block", block: claimBlock(i) });
+    for (let i = 0; i < count; i++) push(i);
+    return { cache, worker, push };
+  }
+
+  /** The disputes router alone, with a clock that the test moves (in milliseconds). */
+  async function served(count = COUNT) {
+    const { cache, push } = await indexedClaims(count);
+    const clock = { ms: 1_000_000 };
+    const app = express();
+    app.use(disputesRouter({ cache, module1, networkId: 0, jury: [], now: () => clock.ms }));
+    return { app, cache, push, clock };
+  }
+
+  const slotsOf = (body: { cases: Array<{ claim: { slot: number } }> }): number[] => body.cases.map((c) => c.claim.slot);
+  /** The slots hi, hi - 1, …, lo. */
+  const down = (hi: number, lo: number): number[] => Array.from({ length: hi - lo + 1 }, (_, k) => hi - k);
+
+  it("without limit it returns every case, newest first, and the total", async () => {
+    const { app } = await served();
+    const res = await request(app).get("/disputes");
+    expect(res.status).toBe(200);
+    expect(slotsOf(res.body)).toEqual(down(FIRST_SLOT + COUNT - 1, FIRST_SLOT));
+    expect(res.body.total).toBe(COUNT);
+  });
+
+  it("limit and offset give a page of the same newest-first list; total counts all the cases", async () => {
+    const { app } = await served();
+    const page = async (query: string) => (await request(app).get(`/disputes${query}`)).body;
+    const first = await page("?limit=10");
+    expect(slotsOf(first)).toEqual(down(1029, 1020));
+    expect(first.total).toBe(COUNT);
+    expect(slotsOf(await page("?limit=10&offset=10"))).toEqual(down(1019, 1010));
+    expect(slotsOf(await page("?limit=10&offset=25"))).toEqual(down(1004, 1000));
+    expect(await page("?limit=10&offset=30")).toEqual({ cases: [], total: COUNT });
+    expect(await page("?limit=1&offset=100000")).toEqual({ cases: [], total: COUNT });
+    expect(slotsOf(await page("?limit=1"))).toEqual([1029]);
+    expect(slotsOf(await page("?limit=200"))).toEqual(down(1029, 1000));
+    // Without limit, the page runs from the offset to the end of the list.
+    expect(slotsOf(await page("?offset=25"))).toEqual(down(1004, 1000));
+    expect(slotsOf(await page("?offset=0"))).toEqual(down(1029, 1000));
+    // The pages are slices of the one list.
+    const all = (await page("")).cases;
+    const joined = [...first.cases, ...(await page("?limit=10&offset=10")).cases, ...(await page("?limit=10&offset=20")).cases];
+    expect(joined).toEqual(all);
+  });
+
+  it("refuses a limit that is not an integer from 1 to 200 and an offset that is not an integer of 0 or more", async () => {
+    const { app } = await served(3);
+    const limitError = "limit must be an integer from 1 to 200";
+    const offsetError = "offset must be an integer of 0 or more";
+    const refused: Array<[string, string]> = [
+      ["limit=0", limitError],
+      ["limit=201", limitError],
+      ["limit=-1", limitError],
+      ["limit=abc", limitError],
+      ["limit=1.5", limitError],
+      ["limit=1e2", limitError],
+      ["limit=%2B5", limitError],
+      ["limit=", limitError],
+      ["limit=10&limit=20", limitError],
+      ["limit[a]=1", limitError],
+      ["offset=-1", offsetError],
+      ["offset=abc", offsetError],
+      ["offset=1.5", offsetError],
+      ["offset=", offsetError],
+      ["offset=1&offset=2", offsetError],
+      ["offset=99999999999999999999", offsetError],
+      ["limit=5&offset=-1", offsetError],
+    ];
+    for (const [query, error] of refused) {
+      const res = await request(app).get(`/disputes?${query}`);
+      expect({ query, status: res.status, body: res.body }).toEqual({ query, status: 400, body: { error } });
+    }
+    // The agent_id check comes first and keeps its message.
+    const bad = await request(app).get("/disputes?agent_id=xyz&limit=0");
+    expect(bad.status).toBe(400);
+    expect(bad.body).toEqual({ error: "agent_id must be 64 hexadecimal characters" });
+  });
+
+  it("applies agent_id before the paging: total is the number of cases of the agent", async () => {
+    const { app } = await served();
+    const page = async (query: string) => (await request(app).get(`/disputes?agent_id=${CLAIMER}${query}`)).body;
+    const first = await page("&limit=5");
+    expect(first.cases.map((c: { claimer_agent_id: string }) => c.claimer_agent_id)).toEqual(Array(5).fill(CLAIMER));
+    expect(slotsOf(first)).toEqual([1028, 1026, 1024, 1022, 1020]);
+    expect(first.total).toBe(COUNT / 2);
+    expect(slotsOf(await page("&limit=5&offset=10"))).toEqual([1008, 1006, 1004, 1002, 1000]);
+    expect(await page("&limit=5&offset=15")).toEqual({ cases: [], total: COUNT / 2 });
+    expect(slotsOf(await page(""))).toHaveLength(COUNT / 2);
+    const other = await request(app).get(`/disputes?agent_id=${OTHER_CLAIMER.toUpperCase()}&limit=3`);
+    expect(slotsOf(other.body)).toEqual([1029, 1027, 1025]);
+    expect(other.body.total).toBe(COUNT / 2);
+    expect((await request(app).get(`/disputes?agent_id=${"ee".repeat(32)}&limit=3`)).body).toEqual({ cases: [], total: 0 });
+  });
+
+  it("returns no cases and a total of 0 without Module-1 addresses", async () => {
+    const { cache } = await indexedClaims(3);
+    const app = express();
+    app.use(disputesRouter({ cache, module1: null, networkId: 0, jury: [] }));
+    expect((await request(app).get("/disputes")).body).toEqual({ cases: [], total: 0 });
+    expect((await request(app).get("/disputes?limit=5&offset=2")).body).toEqual({ cases: [], total: 0 });
+  });
+
+  it("is served by createApp with the same parameters", async () => {
+    const { cache, worker } = await indexedClaims(COUNT);
+    const app = createApp({ cache, worker }, { networkId: 0, module1 });
+    const res = await request(app).get("/disputes?limit=4&offset=2");
+    expect(slotsOf(res.body)).toEqual(down(1027, 1024));
+    expect(res.body.total).toBe(COUNT);
+  });
+
+  it("builds the list of all cases at most once every 5 seconds, for every request", async () => {
+    const { app, cache, clock } = await served();
+    const build = vi.spyOn(cache, "listModule1Outputs");
+    await request(app).get("/disputes");
+    expect(build).toHaveBeenCalledTimes(1);
+    clock.ms += 4_999;
+    await request(app).get("/disputes?limit=5");
+    await request(app).get(`/disputes?agent_id=${CLAIMER}&limit=5&offset=5`);
+    await request(app).get("/disputes");
+    expect(build).toHaveBeenCalledTimes(1);
+    clock.ms += 1;
+    await request(app).get("/disputes?limit=5");
+    expect(build).toHaveBeenCalledTimes(2);
+    clock.ms += 4_999;
+    await request(app).get(`/disputes?agent_id=${OTHER_CLAIMER}`);
+    expect(build).toHaveBeenCalledTimes(2);
+    clock.ms += 1;
+    await request(app).get("/disputes");
+    expect(build).toHaveBeenCalledTimes(3);
+  });
+
+  it("shows a new case only when the copy of the list is 5 seconds old", async () => {
+    const { app, push, clock } = await served(3);
+    expect((await request(app).get("/disputes")).body.total).toBe(3);
+    push(3);
+    clock.ms += 4_999;
+    const stale = await request(app).get("/disputes?limit=10");
+    expect(stale.body.total).toBe(3);
+    expect(slotsOf(stale.body)).toEqual([1002, 1001, 1000]);
+    clock.ms += 1;
+    const fresh = await request(app).get("/disputes?limit=10");
+    expect(fresh.body.total).toBe(4);
+    expect(slotsOf(fresh.body)).toEqual([1003, 1002, 1001, 1000]);
+  });
+
+  it("builds the list again when the clock moves back", async () => {
+    const { app, cache, clock } = await served(3);
+    const build = vi.spyOn(cache, "listModule1Outputs");
+    await request(app).get("/disputes");
+    clock.ms -= 1;
+    await request(app).get("/disputes");
+    expect(build).toHaveBeenCalledTimes(2);
   });
 });
