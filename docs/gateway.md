@@ -496,6 +496,13 @@ A client disconnect cancels an unfunded job.
 A funded job continues to settlement or financial recovery.
 Supplier pins still apply; requests pinned to one supplier wait for that supplier.
 
+The gateway writes one line on stderr for each job that ends with an error:
+`[gateway:one-shot] failed job=… key=… model=… supplier=… state=failed|recovering code=… escrow=…`.
+A job that fails with an error that is not a gateway error has `error_class=…` at the end.
+The line has the gateway error code and never the error message, because an upstream or supplier message can quote prompts or generated output.
+Only the message of a wallet transaction guard error is kept (`detail="…"`): it has transaction hashes only.
+The gateway writes no line for `supplier_capacity_timeout`, `concurrency_queue_full` and `request_cancelled`.
+
 ### Financial recovery
 
 The gateway records each original escrow reference before broadcast.

@@ -13,6 +13,7 @@ import {
 import type { EscrowLineage } from "./onchain/settle.js";
 import { chainRecordLookup, refundRevokedApplies } from "./onchain/records.js";
 import { parseRef, type SupplierCandidate } from "./routing/selectSupplier.js";
+import { WalletTransactionGuardError } from "./sdk/walletTransactions.js";
 
 const HEARTBEAT_MS = 5_000;
 const OWNER_STALE_MS = 60_000;
@@ -118,6 +119,45 @@ export async function reserveOneShotSupplier(
   }
 }
 
+/** Failures that repeat for every waiting or refused caller and say nothing new. */
+const QUIET_FAILURE_CODES: Record<string, true> = {
+  supplier_capacity_timeout: true,
+  concurrency_queue_full: true,
+  request_cancelled: true,
+};
+const LOGGED_MODEL_CHARS = 100;
+
+/**
+ * One line on stderr for a job that ended with an error. It has the gateway error
+ * code and never the error message: an upstream or supplier message can quote prompts
+ * or generated output. The message of a wallet guard error is the one exception: it
+ * has only transaction hashes. The model is text from the caller: JSON quotes it.
+ */
+function logFailedJob(
+  job: OneShotJobRow,
+  key: ApiKeyRow,
+  model: string,
+  state: "failed" | "recovering",
+  error: unknown,
+  code: string,
+): void {
+  if (QUIET_FAILURE_CODES[code] === true) return;
+  const fields = [
+    `job=${job.id}`,
+    `key=${key.id}`,
+    `model=${JSON.stringify(model.slice(0, LOGGED_MODEL_CHARS))}`,
+    `supplier=${job.supplier_pkh ?? "-"}`,
+    `state=${state}`,
+    `code=${code}`,
+    `escrow=${job.escrow_ref ?? "-"}`,
+  ];
+  if (!(error instanceof GatewayError)) {
+    fields.push(`error_class=${error instanceof Error ? error.constructor.name : typeof error}`);
+  }
+  if (error instanceof WalletTransactionGuardError) fields.push(`detail=${JSON.stringify(error.message)}`);
+  console.error(`[gateway:one-shot] failed ${fields.join(" ")}`);
+}
+
 /** The journal has no prompts or response text and is independent of store:false. */
 export async function runOneShotJob<T>(
   deps: GatewayDeps,
@@ -146,10 +186,12 @@ export async function runOneShotJob<T>(
       const message = toGatewayError(error).code;
       if (job.escrow_ref === null) {
         deps.store.completeOneShotJob(args.id, current.owner, "failed", message);
+        logFailedJob(job, key, args.model, "failed", error, message);
       } else {
         // No retry may create a second escrow for this job. Recovery follows
         // the exact original output, including when the post response was lost.
         deps.store.updateOneShotJob(args.id, current.owner, { state: "recovering", error: message });
+        logFailedJob(job, key, args.model, "recovering", error, message);
       }
     }
     throw error;

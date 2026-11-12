@@ -17,17 +17,22 @@ import {
   type IdentityEscrowDatum,
   type Status,
 } from "@marketplace/shared/cbor";
+import { SupplierError } from "@marketplace/buyer/sdk";
 import type { IdentityBlueprint, WalletKey } from "@marketplace/shared/tx";
 import { loadConfig } from "../src/config.js";
 import type { GatewayDeps } from "../src/deps.js";
 import { GatewayStore, type ApiKeyRow } from "../src/db/store.js";
 import {
   recoverOneShotJobs,
+  reserveOneShotSupplier,
   runOneShotJob,
   updateOneShotJob,
 } from "../src/oneShotJobs.js";
+import { GatewayError, notFound } from "../src/openai/errors.js";
 import type { EscrowLineage } from "../src/onchain/settle.js";
+import type { SupplierCandidate } from "../src/routing/selectSupplier.js";
 import { Mutex, type KeyContext, type SdkRegistry } from "../src/sdk/registry.js";
+import { WalletTransactionGuardError } from "../src/sdk/walletTransactions.js";
 import { deriveWalletKey, genPrivKeyHex } from "../src/wallet.js";
 import { TEST_IDENTITY_HASH, testIdentityBlueprint } from "../../tests/fixtures/identity-builders/blueprint.js";
 import { agentRecord, recordUtxo, testWallet, tombstone } from "../../tests/fixtures/identity-builders/world.js";
@@ -269,6 +274,7 @@ function syntheticTransactionType(txCborHex: string): string {
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const store of [...stores]) closeStore(store);
   for (const directory of directories.splice(0)) {
     rmSync(directory, { recursive: true, force: true });
@@ -1057,5 +1063,157 @@ describe("one-shot recovery — new escrows (identity layout)", () => {
     expect(body.requiredSigners).toEqual([]);
     expect(body.outputs.map((output) => [output.address, String(output.lovelace)]))
       .toEqual([[walletKey.address, `${escrow.lovelace}n`]]);
+  });
+});
+
+function routedCandidate(supplierPkh: string): SupplierCandidate {
+  return {
+    advertRef: { txHash: "a".repeat(64), index: 0 },
+    utxoRef: `${"a".repeat(64)}#0`,
+    supplierPkh,
+    model: MODEL,
+    capabilityId: CAPABILITY,
+    endpointUrl: "https://supplier-a.test",
+    priceLovelace: PRICE,
+    buyerBondLovelace: 1_000_000n,
+    supplierBondLovelace: 1_000_000n,
+    maxOutputTokens: 512,
+    maxProcessingMs: 30_000,
+    status: "free",
+    agentId: null,
+  };
+}
+
+describe("log line of a failed one-shot job", () => {
+  const PRIVATE_TEXT = "private prompt or generated output in an upstream error";
+
+  function logFixture(label: string) {
+    const directory = databaseDirectory(label);
+    const store = openStore(directory);
+    const { key } = keyFixture(`key-${label}`);
+    const deps = makeDeps(directory, store, new ObservedMockChain(), noIndexerCalls());
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    return { store, key, deps, errorLog };
+  }
+
+  it("writes one line for a funded job that goes to recovering, without the error message", async () => {
+    const { store, key, deps, errorLog } = logFixture("log-recovering");
+    const supplierPkh = "b".repeat(56);
+    const escrowRef = `${"5".repeat(64)}#0`;
+
+    await expect(runOneShotJob(deps, key, { id: "job-log-recovering", model: MODEL }, async () => {
+      updateOneShotJob(deps, "job-log-recovering", {
+        state: "funding", supplier_pkh: supplierPkh, escrow_ref: escrowRef,
+      });
+      throw new SupplierError("internal_error", { status: 500, message: PRIVATE_TEXT });
+    })).rejects.toBeInstanceOf(SupplierError);
+
+    expect(errorLog.mock.calls).toEqual([[
+      `[gateway:one-shot] failed job=job-log-recovering key=${key.id} model="${MODEL}" supplier=${supplierPkh} ` +
+      `state=recovering code=upstream_error escrow=${escrowRef} error_class=SupplierError`,
+    ]]);
+    expect(store.getOneShotJob("job-log-recovering")).toMatchObject({ state: "recovering", error: "upstream_error" });
+  });
+
+  it("writes one line for a job that fails before its escrow, with the class of a plain error", async () => {
+    const { store, key, deps, errorLog } = logFixture("log-failed");
+
+    await expect(runOneShotJob(deps, key, { id: "job-log-failed", model: MODEL }, async () => {
+      throw new Error(PRIVATE_TEXT);
+    })).rejects.toThrow(PRIVATE_TEXT);
+
+    expect(errorLog.mock.calls).toEqual([[
+      `[gateway:one-shot] failed job=job-log-failed key=${key.id} model="${MODEL}" supplier=- ` +
+      "state=failed code=internal_error escrow=- error_class=Error",
+    ]]);
+    expect(JSON.stringify(errorLog.mock.calls)).not.toContain(PRIVATE_TEXT);
+    expect(store.getOneShotJob("job-log-failed")).toMatchObject({ state: "failed", error: "internal_error" });
+  });
+
+  it("adds no class name for a gateway error", async () => {
+    const { key, deps, errorLog } = logFixture("log-gateway");
+
+    await expect(runOneShotJob(deps, key, { id: "job-log-gateway", model: MODEL }, async () => {
+      throw notFound("model_not_found", `no eligible supplier for model "${MODEL}"`, "model");
+    })).rejects.toBeInstanceOf(GatewayError);
+
+    expect(errorLog.mock.calls).toEqual([[
+      `[gateway:one-shot] failed job=job-log-gateway key=${key.id} model="${MODEL}" supplier=- ` +
+      "state=failed code=model_not_found escrow=-",
+    ]]);
+  });
+
+  it("keeps the message of a wallet guard error, which has only transaction hashes", async () => {
+    const { key, deps, errorLog } = logFixture("log-wallet-guard");
+    const supplierPkh = "d".repeat(56);
+    const escrowRef = `${"6".repeat(64)}#0`;
+    const txHash = "c".repeat(64);
+    const message = `pending wallet transaction ${txHash} remains unresolved after exact resubmission failed`;
+
+    await expect(runOneShotJob(deps, key, { id: "job-log-guard", model: MODEL }, async () => {
+      updateOneShotJob(deps, "job-log-guard", {
+        state: "funding", supplier_pkh: supplierPkh, escrow_ref: escrowRef,
+      });
+      throw new WalletTransactionGuardError(message, { cause: new Error(PRIVATE_TEXT) });
+    })).rejects.toBeInstanceOf(WalletTransactionGuardError);
+
+    expect(errorLog.mock.calls).toEqual([[
+      `[gateway:one-shot] failed job=job-log-guard key=${key.id} model="${MODEL}" supplier=${supplierPkh} ` +
+      `state=recovering code=wallet_transaction_pending escrow=${escrowRef} ` +
+      `error_class=WalletTransactionGuardError detail="${message}"`,
+    ]]);
+  });
+
+  it("quotes and cuts the model, which is text from the caller", async () => {
+    const { key, deps, errorLog } = logFixture("log-model");
+    const model = `evil"\n[gateway:sweeper] fake line ${"x".repeat(200)}`;
+
+    await expect(runOneShotJob(deps, key, { id: "job-log-model", model }, async () => {
+      throw notFound("model_not_found", "no eligible supplier", "model");
+    })).rejects.toBeInstanceOf(GatewayError);
+
+    expect(errorLog).toHaveBeenCalledTimes(1);
+    const line = String(errorLog.mock.calls[0]![0]);
+    expect(line).not.toMatch(/[\r\n]/);
+    expect(line).toContain('model="evil\\"\\n[gateway:sweeper] fake line x');
+    expect(line).not.toContain("x".repeat(101));
+  });
+
+  it("writes no line for a capacity timeout, a cancelled request or a full queue", async () => {
+    const { store, key, deps, errorLog } = logFixture("log-quiet");
+    const supplierPkh = "e".repeat(56);
+
+    for (const code of ["supplier_capacity_timeout", "request_cancelled", "concurrency_queue_full"]) {
+      await expect(runOneShotJob(deps, key, { id: `job-${code}`, model: MODEL }, async () => {
+        throw new GatewayError(503, "server_error", code, "text of the error");
+      })).rejects.toMatchObject({ code });
+    }
+
+    // The waiting job of a caller whose supplier is busy: the code that the real wait raises.
+    expect(store.insertOneShotJob({
+      id: "job-holder", key_id: "key-other", owner_id: "worker-holder", model: MODEL, created_at: Date.now(),
+    })).toBe(true);
+    expect(store.reserveOneShotSupplier("job-holder", "worker-holder", [supplierCandidate(supplierPkh)]))
+      .toBeDefined();
+    deps.config.oneShotQueueTimeoutMs = 50;
+    await expect(runOneShotJob(deps, key, { id: "job-waiting", model: MODEL }, async () =>
+      reserveOneShotSupplier(deps, "job-waiting", async () => [routedCandidate(supplierPkh)]),
+    )).rejects.toMatchObject({ code: "supplier_capacity_timeout" });
+    expect(store.getOneShotJob("job-waiting")).toMatchObject({ state: "failed", error: "supplier_capacity_timeout" });
+
+    // The request of a caller that closed the connection: the code that the real wait raises.
+    const controller = new AbortController();
+    await expect(runOneShotJob(deps, key, { id: "job-closed", model: MODEL, signal: controller.signal }, async () => {
+      controller.abort();
+      await reserveOneShotSupplier(deps, "job-closed", async () => [routedCandidate(supplierPkh)], controller.signal);
+    })).rejects.toMatchObject({ code: "request_cancelled" });
+    expect(store.getOneShotJob("job-closed")).toMatchObject({ state: "failed", error: "request_cancelled" });
+    expect(errorLog).not.toHaveBeenCalled();
+
+    // Another code on the same fixture does write its line.
+    await expect(runOneShotJob(deps, key, { id: "job-control", model: MODEL }, async () => {
+      throw new Error("boom");
+    })).rejects.toThrow("boom");
+    expect(errorLog).toHaveBeenCalledTimes(1);
   });
 });
