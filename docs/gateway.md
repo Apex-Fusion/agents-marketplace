@@ -498,7 +498,7 @@ Supplier pins still apply; requests pinned to one supplier wait for that supplie
 
 The gateway writes one line on stderr for each job that ends with an error:
 `[gateway:one-shot] failed job=… key=… model=… supplier=… state=failed|recovering code=… escrow=…`.
-A job that fails with an error that is not a gateway error has `error_class=…` at the end.
+A job that fails with an error that is not a gateway error also has `error_class=…` and `frame=<file:line>`, the place in the code where the error was made.
 The line has the gateway error code and never the error message, because an upstream or supplier message can quote prompts or generated output.
 Only the message of a wallet transaction guard error is kept (`detail="…"`): it has transaction hashes only.
 The gateway writes no line for `supplier_capacity_timeout`, `concurrency_queue_full` and `request_cancelled`.

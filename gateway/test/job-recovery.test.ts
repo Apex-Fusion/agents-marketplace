@@ -1096,6 +1096,16 @@ describe("log line of a failed one-shot job", () => {
     return { store, key, deps, errorLog };
   }
 
+  /** The one logged line: it must start with `head`, then name the place in this test file where the error was made. */
+  function expectLineWithFrame(errorLog: { mock: { calls: unknown[][] } }, head: string, tail = ""): void {
+    expect(errorLog.mock.calls).toHaveLength(1);
+    const line = String(errorLog.mock.calls[0][0]);
+    const frame = " frame=";
+    const at = line.indexOf(frame);
+    expect(line.slice(0, at)).toBe(head);
+    expect(line.slice(at + frame.length)).toMatch(new RegExp(`^\\S*job-recovery\\.test\\.ts:\\d+${tail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`));
+  }
+
   it("writes one line for a funded job that goes to recovering, without the error message", async () => {
     const { store, key, deps, errorLog } = logFixture("log-recovering");
     const supplierPkh = "b".repeat(56);
@@ -1108,10 +1118,12 @@ describe("log line of a failed one-shot job", () => {
       throw new SupplierError("internal_error", { status: 500, message: PRIVATE_TEXT });
     })).rejects.toBeInstanceOf(SupplierError);
 
-    expect(errorLog.mock.calls).toEqual([[
+    expectLineWithFrame(
+      errorLog,
       `[gateway:one-shot] failed job=job-log-recovering key=${key.id} model="${MODEL}" supplier=${supplierPkh} ` +
       `state=recovering code=upstream_error escrow=${escrowRef} error_class=SupplierError`,
-    ]]);
+    );
+    expect(JSON.stringify(errorLog.mock.calls)).not.toContain(PRIVATE_TEXT);
     expect(store.getOneShotJob("job-log-recovering")).toMatchObject({ state: "recovering", error: "upstream_error" });
   });
 
@@ -1122,10 +1134,11 @@ describe("log line of a failed one-shot job", () => {
       throw new Error(PRIVATE_TEXT);
     })).rejects.toThrow(PRIVATE_TEXT);
 
-    expect(errorLog.mock.calls).toEqual([[
+    expectLineWithFrame(
+      errorLog,
       `[gateway:one-shot] failed job=job-log-failed key=${key.id} model="${MODEL}" supplier=- ` +
       "state=failed code=internal_error escrow=- error_class=Error",
-    ]]);
+    );
     expect(JSON.stringify(errorLog.mock.calls)).not.toContain(PRIVATE_TEXT);
     expect(store.getOneShotJob("job-log-failed")).toMatchObject({ state: "failed", error: "internal_error" });
   });
@@ -1157,11 +1170,14 @@ describe("log line of a failed one-shot job", () => {
       throw new WalletTransactionGuardError(message, { cause: new Error(PRIVATE_TEXT) });
     })).rejects.toBeInstanceOf(WalletTransactionGuardError);
 
-    expect(errorLog.mock.calls).toEqual([[
+    expectLineWithFrame(
+      errorLog,
       `[gateway:one-shot] failed job=job-log-guard key=${key.id} model="${MODEL}" supplier=${supplierPkh} ` +
       `state=recovering code=wallet_transaction_pending escrow=${escrowRef} ` +
-      `error_class=WalletTransactionGuardError detail="${message}"`,
-    ]]);
+      "error_class=WalletTransactionGuardError",
+      ` detail="${message}"`,
+    );
+    expect(JSON.stringify(errorLog.mock.calls)).not.toContain(PRIVATE_TEXT);
   });
 
   it("quotes and cuts the model, which is text from the caller", async () => {

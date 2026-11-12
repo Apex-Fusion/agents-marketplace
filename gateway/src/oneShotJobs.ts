@@ -126,12 +126,28 @@ const QUIET_FAILURE_CODES: Record<string, true> = {
   request_cancelled: true,
 };
 const LOGGED_MODEL_CHARS = 100;
+const STACK_FRAME_RE = /^\s+at .*?([^\s()]+:\d+):\d+\)?$/;
+
+/**
+ * `file:line` of the first stack frame that has a source location. The stack starts
+ * with "Name: message" and the message can have several lines: they are skipped.
+ */
+function topFrame(error: unknown): string {
+  if (!(error instanceof Error) || typeof error.stack !== "string") return "unknown";
+  for (const line of error.stack.split("\n").slice(String(error.message).split("\n").length)) {
+    const location = line.length <= 1_000 ? STACK_FRAME_RE.exec(line) : null;
+    if (location) return location[1];
+  }
+  return "unknown";
+}
 
 /**
  * One line on stderr for a job that ended with an error. It has the gateway error
  * code and never the error message: an upstream or supplier message can quote prompts
  * or generated output. The message of a wallet guard error is the one exception: it
  * has only transaction hashes. The model is text from the caller: JSON quotes it.
+ * An error that is not a gateway error also gets its class and the place in the code
+ * where it was made (`frame`), because the code `internal_error` alone says nothing.
  */
 function logFailedJob(
   job: OneShotJobRow,
@@ -153,6 +169,7 @@ function logFailedJob(
   ];
   if (!(error instanceof GatewayError)) {
     fields.push(`error_class=${error instanceof Error ? error.constructor.name : typeof error}`);
+    fields.push(`frame=${topFrame(error)}`);
   }
   if (error instanceof WalletTransactionGuardError) fields.push(`detail=${JSON.stringify(error.message)}`);
   console.error(`[gateway:one-shot] failed ${fields.join(" ")}`);
