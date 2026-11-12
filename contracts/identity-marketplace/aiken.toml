@@ -2,7 +2,7 @@ name = "apex-fusion/identity-marketplace"
 version = "0.1.0"
 compiler = "v1.1.21"
 plutus = "v3"
-license = "Apache-2.0"
+license = "MIT"
 description = "Vector identity registry (did:vector) with attestation, delegation, vault, escrow and advert contracts."
 
 [repository]
