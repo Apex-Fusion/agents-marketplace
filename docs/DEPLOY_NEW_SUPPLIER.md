@@ -74,6 +74,17 @@ Ogmios, point at that instead. Never pin `NETWORK_ID` / `OGMIOS_URL` inside
 the compose file — they must come from the env file (prevents
 mainnet/testnet cross-wiring on re-up).
 
+The public `OGMIOS_URL` endpoint answers HTTP 500 for a few seconds now and then.
+The shared chain clients try a read-only Ogmios request again after a transient
+error: an HTTP status of 500 or higher (the Cloudflare 52x codes too) or a
+network error. A request is read-only when its JSON-RPC method is not
+`submitTransaction`. The client makes at most 3 tries and waits 300 ms, then
+1,000 ms. It does not try again after a status below 500, a JSON-RPC error, a
+malformed body, a timeout or an abort. It never tries `submitTransaction` again:
+a submit that got no clear answer may be on chain. Each retry writes one line:
+`[ogmios] retry <n>/2 method=<method> cause=<http status | error class>`. The
+line has no URL, no body and no params.
+
 ## 4. Procedure
 
 ### 4.1 Smoke-test the backend first (before spending on-chain)
