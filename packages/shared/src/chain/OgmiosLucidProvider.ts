@@ -9,6 +9,10 @@
  *
  * JSON-RPC ids use globalThis.crypto.randomUUID(); no `uuid` package dependency.
  *
+ * A read request (UTxO query, protocol parameters, evaluateTransaction) is
+ * tried again, at most 2 more times, after an HTTP status of 500 or higher or
+ * a network error: see ogmiosRetry.ts. submitTransaction is NEVER tried again.
+ *
  * Catherine M1-F-4-green.
  */
 
@@ -28,12 +32,15 @@ import type {
   UTxO,
   Unit,
 } from "@lucid-evolution/lucid";
+import { fetchOgmiosRead } from "./ogmiosRetry.js";
 
 export interface OgmiosLucidProviderOpts {
   ogmiosUrl: string;
   timeoutMs?: number;
   /** Injected fetch for testing. Defaults to globalThis.fetch. */
   fetch?: typeof globalThis.fetch;
+  /** Wait before a new try of a read request, in ms. Injected for testing. Defaults to a timer. submitTx does not use it. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 /**
@@ -105,11 +112,13 @@ export class OgmiosLucidProvider implements Provider {
   private readonly ogmiosUrl: string;
   private readonly timeoutMs: number;
   private readonly injectedFetch?: typeof globalThis.fetch;
+  private readonly sleep?: (ms: number) => Promise<void>;
 
   constructor(opts: OgmiosLucidProviderOpts) {
     this.ogmiosUrl = opts.ogmiosUrl;
     this.timeoutMs = opts.timeoutMs ?? 30_000;
     this.injectedFetch = opts.fetch;
+    this.sleep = opts.sleep;
   }
 
   // ── HTTP helper ──────────────────────────────────────────────────────
@@ -122,17 +131,15 @@ export class OgmiosLucidProvider implements Provider {
     };
     if (params !== undefined) body.params = params;
 
-    const init: RequestInit = {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
+    // A read request: a transient error is tried again (see ogmiosRetry.ts).
+    const response = await fetchOgmiosRead({
+      fetch: this.resolveFetch(),
+      url: this.ogmiosUrl,
+      method,
       body: JSON.stringify(body),
-    };
-    if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
-      init.signal = AbortSignal.timeout(this.timeoutMs);
-    }
-
-    const fetcher = this.resolveFetch();
-    const response = await fetcher(this.ogmiosUrl, init);
+      timeoutMs: this.timeoutMs,
+      sleep: this.sleep,
+    });
     if (!response.ok) {
       throw new Error(
         `Ogmios HTTP error: ${response.status} ${response.statusText}`,
@@ -219,6 +226,9 @@ export class OgmiosLucidProvider implements Provider {
   }
 
   private async checkTxOnce(txHash: string): Promise<boolean> {
+    // rpc tries a transient error again (see ogmiosRetry.ts). A poll that
+    // fails on all 3 tries takes 1.3 s (300 ms + 1,000 ms of waits) longer
+    // than before, and then ends in `false` as before.
     try {
       const result = await this.rpc<OgmiosUtxo[]>("queryLedgerState/utxo", {
         outputReferences: [{ transaction: { id: txHash }, index: 0 }],
@@ -231,6 +241,12 @@ export class OgmiosLucidProvider implements Provider {
   }
 
   async submitTx(tx: Transaction): Promise<TxHash> {
+    // NEVER try this request again, for any error (HTTP 5xx, network error,
+    // timeout). A submit that got no clear answer may be on chain. A second
+    // submit of the same transaction fails with a misleading error (its
+    // inputs are spent), and the caller would treat a transaction that is on
+    // chain as failed. Read requests are tried again (see ogmiosRetry.ts);
+    // this one does not use fetchOgmiosRead.
     const body = {
       jsonrpc: "2.0",
       method: "submitTransaction",
@@ -271,17 +287,16 @@ export class OgmiosLucidProvider implements Provider {
       params: { transaction: { cbor: tx } },
       id: this.generateId(),
     };
-    const init: RequestInit = {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
+    // evaluateTransaction does not change the chain: a transient error is
+    // tried again (see ogmiosRetry.ts).
+    const response = await fetchOgmiosRead({
+      fetch: this.resolveFetch(),
+      url: this.ogmiosUrl,
+      method: "evaluateTransaction",
       body: JSON.stringify(body),
-    };
-    if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
-      init.signal = AbortSignal.timeout(this.timeoutMs);
-    }
-
-    const fetcher = this.resolveFetch();
-    const response = await fetcher(this.ogmiosUrl, init);
+      timeoutMs: this.timeoutMs,
+      sleep: this.sleep,
+    });
     if (!response.ok) {
       throw new Error(`Ogmios HTTP error: ${response.status} ${response.statusText}`);
     }

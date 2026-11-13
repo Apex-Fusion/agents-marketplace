@@ -7,6 +7,9 @@
  * submitTx() and awaitTx() throw NotSupportedError — this provider is
  * read-only and cannot mutate chain state.
  *
+ * Every request is read-only. A transient error (HTTP status 500 or higher,
+ * network error) is tried again, at most 2 more times: see ogmiosRetry.ts.
+ *
  * JSON-RPC pattern follows apex-dashboard's ogmios-client.ts:
  *   - HTTP POST to ogmiosUrl
  *   - body: { jsonrpc: "2.0", method, params, id }
@@ -21,6 +24,7 @@ import type {
   Utxo,
 } from "./ChainProvider.js";
 import { NotSupportedError } from "./ChainProvider.js";
+import { fetchOgmiosRead } from "./ogmiosRetry.js";
 
 export interface ReadOnlyOgmiosProviderOpts {
   ogmiosUrl: string;
@@ -28,6 +32,8 @@ export interface ReadOnlyOgmiosProviderOpts {
   timeoutMs?: number;
   /** Injected fetch for testing. Defaults to globalThis.fetch resolved at call time. */
   fetch?: typeof globalThis.fetch;
+  /** Wait before a new try of a request, in ms. Injected for testing. Defaults to a timer. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 interface OgmiosUtxo {
@@ -61,12 +67,14 @@ export class ReadOnlyOgmiosProvider implements ChainProvider {
   private readonly ogmiosUrl: string;
   private readonly timeoutMs: number;
   private readonly injectedFetch?: typeof globalThis.fetch;
+  private readonly sleep?: (ms: number) => Promise<void>;
   private requestId = 0;
 
   constructor(opts: ReadOnlyOgmiosProviderOpts) {
     this.ogmiosUrl = opts.ogmiosUrl;
     this.timeoutMs = opts.timeoutMs ?? 30_000;
     this.injectedFetch = opts.fetch;
+    this.sleep = opts.sleep;
   }
 
   private resolveFetch(): typeof globalThis.fetch {
@@ -84,18 +92,15 @@ export class ReadOnlyOgmiosProvider implements ChainProvider {
     };
     if (params !== undefined) body.params = params;
 
-    const init: RequestInit = {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
+    // A read-only request: a transient error is tried again (see ogmiosRetry.ts).
+    const response = await fetchOgmiosRead({
+      fetch: this.resolveFetch(),
+      url: this.ogmiosUrl,
+      method,
       body: JSON.stringify(body),
-    };
-    // AbortSignal.timeout is widely supported in Node 18+; guard for environments
-    // where it may not exist (some test mocks).
-    if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
-      init.signal = AbortSignal.timeout(this.timeoutMs);
-    }
-
-    const response = await this.resolveFetch()(this.ogmiosUrl, init);
+      timeoutMs: this.timeoutMs,
+      sleep: this.sleep,
+    });
     if (!response.ok) {
       throw new Error(`Ogmios HTTP error: ${response.status} ${response.statusText}`);
     }
@@ -135,8 +140,9 @@ export class ReadOnlyOgmiosProvider implements ChainProvider {
 
   async evaluateTx(txCborHex: string): Promise<TxEvaluationResult> {
     // We split error handling into two layers:
-    //   - HTTP/transport errors (500, network failures): re-thrown so callers
-    //     can distinguish "the node is down" from "the script failed".
+    //   - HTTP/transport errors (500, network failures): tried again (see
+    //     ogmiosRetry.ts), then re-thrown so callers can distinguish "the
+    //     node is down" from "the script failed".
     //   - JSON-RPC errors (Ogmios returned a structured error like script
     //     execution failure): returned as { ok: false, error }.
     const params = { transaction: { cbor: txCborHex } };
@@ -148,16 +154,14 @@ export class ReadOnlyOgmiosProvider implements ChainProvider {
       params,
       id: this.requestId,
     });
-    const init: RequestInit = {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
+    const response = await fetchOgmiosRead({
+      fetch: this.resolveFetch(),
+      url: this.ogmiosUrl,
+      method: "evaluateTransaction",
       body,
-    };
-    if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
-      init.signal = AbortSignal.timeout(this.timeoutMs);
-    }
-
-    const response = await this.resolveFetch()(this.ogmiosUrl, init);
+      timeoutMs: this.timeoutMs,
+      sleep: this.sleep,
+    });
     if (!response.ok) {
       throw new Error(`Ogmios HTTP error: ${response.status} ${response.statusText}`);
     }
