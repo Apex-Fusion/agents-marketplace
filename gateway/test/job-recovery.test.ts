@@ -828,6 +828,46 @@ describe("one-shot financial recovery", () => {
     expect(store.listUsage(key.id, 10)).toEqual([]);
     expect(chain.submissions).toEqual([]);
   });
+
+  it("skips an escrow whose datum the chain client withheld, says so one time, and asks the chain no more", async () => {
+    const directory = databaseDirectory("withheld-datum");
+    const store = openStore(directory);
+    const chain = new ObservedMockChain();
+    chain.advanceSlot(Math.floor(Date.now() / 1_000));
+    const { key, walletKey } = keyFixture("key-withheld");
+    store.insertKey(key);
+    const txHash = randomUUID().replace(/-/g, "").repeat(2);
+    const escrowRef = `${txHash}#1`;
+    insertFundedJob(store, {
+      id: "job-withheld",
+      keyId: key.id,
+      supplierPkh: "d".repeat(56),
+      escrowRef,
+      state: "submitted",
+      receiptHash: "2".repeat(64),
+      advertMarker: "e",
+    });
+    // The output is on chain, and the chain client withheld its datum: the output has no datum.
+    chain.seed({ ref: { txHash, index: 1 }, address: "addr_test1_escrow_recovery", lovelace: 4_000_000n, assets: {}, datumHex: null, scriptRef: null });
+    const indexer = lineageIndexer({ [escrowRef]: liveLineage(escrowRef, "Submitted", Date.now() - 120_000) });
+    const queries = vi.spyOn(chain, "queryUtxo");
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const deps = makeDeps(directory, store, chain, indexer.fetchFn, registryFor(key, walletKey, chain));
+
+    await expect(recoverOneShotJobs(deps)).resolves.toBeDefined();
+    await expect(recoverOneShotJobs(deps)).resolves.toBeDefined();
+
+    // No settlement and nothing submitted: the job stays as it was, for a later look.
+    expect(chain.submissions).toEqual([]);
+    expect(store.getOneShotJob("job-withheld")).toMatchObject({ state: "submitted", error: null });
+    // The second pass does not ask the chain about the reference again.
+    expect(queries.mock.calls.filter(([ref]) => ref.txHash === txHash)).toHaveLength(1);
+    const lines = log.mock.calls.map(([line]) => String(line)).filter((line) => line.includes(`skipping escrow ${escrowRef}`));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("[gateway:recovery]");
+    log.mockRestore();
+    queries.mockRestore();
+  });
 });
 
 describe("one-shot recovery — new escrows (identity layout)", () => {
