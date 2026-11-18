@@ -21,6 +21,7 @@ import { JobStore } from "./pdf/summarize-job.js";
 import { PdfJobDb } from "./pdf/job-db.js";
 import { loadPdfCaps } from "./pdf/caps.js";
 import type { WalletKey } from "@marketplace/shared/tx";
+import { startDecoderHealth } from "@marketplace/shared/tx/server";
 
 /** Longest wait at shutdown for background Accepts after in-flight requests end. */
 const SHUTDOWN_DRAIN_MS = 60_000;
@@ -67,7 +68,13 @@ export function deriveWalletKey(privHex: string, networkId: 0 | 1): WalletKey {
   };
 }
 
-export async function runMain(env: Record<string, string | undefined>): Promise<void> {
+/**
+ * `startHealth` starts the check of the decoder library. The buyer loads the library, so it always runs it. A test passes a stand-in.
+ */
+export async function runMain(
+  env: Record<string, string | undefined>,
+  startHealth: typeof startDecoderHealth = startDecoderHealth,
+): Promise<void> {
   const config = loadConfig(env);
   const walletKey = deriveWalletKey(config.privKeyHex, config.networkId);
 
@@ -177,7 +184,10 @@ export async function runMain(env: Record<string, string | undefined>): Promise<
     console.log(`[buyer] listening on :${config.port}, indexer=${config.indexerUrl}`);
   });
 
+  let stopping = false;
   const shutdown = (): void => {
+    if (stopping) return;
+    stopping = true;
     // eslint-disable-next-line no-console
     console.log("[buyer] shutting down...");
     // In-flight requests end first, then background Accepts, for at most SHUTDOWN_DRAIN_MS.
@@ -188,6 +198,8 @@ export async function runMain(env: Record<string, string | undefined>): Promise<
   };
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
+  // When the decoder library cannot decode, the process takes the path of a SIGTERM, so that Docker starts it again.
+  startHealth({ server, stop: shutdown });
 }
 
 // Boot only when invoked directly (not when imported by tests).

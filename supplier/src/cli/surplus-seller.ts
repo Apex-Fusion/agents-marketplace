@@ -20,7 +20,7 @@ import { loadHistoricalSalesCsv } from "../surplus/historyExport.js";
 import { SurplusVectorProofPublisher } from "../surplus/vectorPublisher.js";
 import { LiveOgmiosProvider } from "@marketplace/shared/chain";
 import type { WalletKey } from "@marketplace/shared/tx";
-import { buildAnchorMetadataTx } from "@marketplace/shared/tx/server";
+import { buildAnchorMetadataTx, startDecoderHealth } from "@marketplace/shared/tx/server";
 import { deriveKeypair } from "./gen-keypair.js";
 
 export async function runSurplusSeller(
@@ -179,11 +179,22 @@ async function handleRequest(
   response.end(JSON.stringify({ error: "not_found" }));
 }
 
-export async function main(
-  env: Record<string, string | undefined> = process.env,
-): Promise<void> {
-  const { server, controller, publisher } = await runSurplusSeller(env);
-  console.log("Surplus seller controller listening");
+/** What the shutdown of the surplus seller stops, in this order: the proof publisher, the controller, the server. */
+export interface SurplusSellerParts {
+  server: Server;
+  controller: Pick<SurplusSellerController, "stop">;
+  publisher: Pick<SurplusVectorProofPublisher, "stop"> | null;
+}
+
+/**
+ * Takes the shutdown path on SIGINT and SIGTERM, and starts the check of the decoder library. The surplus seller loads the library
+ * (the proof publisher builds transactions), so it always runs the check. The signals run one shutdown, and the check runs it when
+ * the library cannot decode, so that Docker starts the process again. It runs one time. A test passes a stand-in for the check.
+ */
+export function installShutdown(
+  { server, controller, publisher }: SurplusSellerParts,
+  startHealth: typeof startDecoderHealth = startDecoderHealth,
+): (signal: string) => Promise<void> {
   let shuttingDown = false;
   const shutdown = async (signal: string): Promise<void> => {
     if (shuttingDown) return;
@@ -197,6 +208,17 @@ export async function main(
   };
   process.on("SIGINT", () => void shutdown("SIGINT"));
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
+  startHealth({ server, stop: () => void shutdown("the decoder check") });
+  return shutdown;
+}
+
+export async function main(
+  env: Record<string, string | undefined> = process.env,
+  startHealth: typeof startDecoderHealth = startDecoderHealth,
+): Promise<void> {
+  const parts = await runSurplusSeller(env);
+  console.log("Surplus seller controller listening");
+  installShutdown(parts, startHealth);
 }
 
 const invoked = fileURLToPath(import.meta.url) === resolve(process.argv[1] ?? "");

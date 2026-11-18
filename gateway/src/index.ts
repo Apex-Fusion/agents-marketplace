@@ -7,6 +7,7 @@
  */
 
 import { loadIdentityBlueprint } from "@marketplace/shared/tx";
+import { startDecoderHealth } from "@marketplace/shared/tx/server";
 import { loadConfig } from "./config.js";
 import { buildChainProvider } from "./chain.js";
 import { GatewayStore } from "./db/store.js";
@@ -36,7 +37,13 @@ export function buildDeps(env: Record<string, string | undefined>): GatewayDeps 
   return { config, store, chain, registry, fetchFn: globalThis.fetch };
 }
 
-export function runMain(env: Record<string, string | undefined>): void {
+/**
+ * `startHealth` starts the check of the decoder library. The gateway loads the library, so it always runs it. A test passes a stand-in.
+ */
+export function runMain(
+  env: Record<string, string | undefined>,
+  startHealth: typeof startDecoderHealth = startDecoderHealth,
+): void {
   const deps = buildDeps(env);
   const app = createApp(deps);
 
@@ -50,7 +57,10 @@ export function runMain(env: Record<string, string | undefined>): void {
     );
   });
 
+  let stopping = false;
   const shutdown = (): void => {
+    if (stopping) return;
+    stopping = true;
     // eslint-disable-next-line no-console
     console.log("[gateway] shutting down...");
     stopSweeper();
@@ -59,6 +69,8 @@ export function runMain(env: Record<string, string | undefined>): void {
   };
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
+  // When the decoder library cannot decode, the process takes the path of a SIGTERM, so that Docker starts it again.
+  startHealth({ server, stop: shutdown });
 }
 
 const invokedDirectly =

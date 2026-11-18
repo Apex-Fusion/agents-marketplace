@@ -28,10 +28,15 @@ import { OpenRouterCapacityProvider } from "./reseller/openRouterCapacity.js";
 import { CapacityGate } from "./reseller/capacityGate.js";
 import { ResellerEvidenceStore } from "./reseller/evidenceStore.js";
 import { ResellerRuntime } from "./reseller/runtime.js";
+import { startDecoderHealth } from "@marketplace/shared/tx/server";
 import { deriveSupplierKey } from "./paper2agent/identity.js";
 import { Paper2AgentRuntime } from "./paper2agent/runtime.js";
 
-async function main(): Promise<void> {
+/**
+ * `startHealth` starts the check of the decoder library. The supplier loads the library, so it always runs it (also as a child of
+ * the Paper2Agent publisher, which starts this entry point). A test passes a stand-in.
+ */
+async function main(startHealth: typeof startDecoderHealth = startDecoderHealth): Promise<void> {
   const cfg = loadConfig(process.env);
 
   // Tool suppliers bind the actual signing key to every advertised identity.
@@ -170,7 +175,10 @@ async function main(): Promise<void> {
         )
       : null;
 
+  let stopping = false;
   const shutdown = (signal: string) => {
+    if (stopping) return;
+    stopping = true;
     // eslint-disable-next-line no-console
     console.log(`received ${signal}, shutting down`);
     clearInterval(evictInterval);
@@ -185,6 +193,8 @@ async function main(): Promise<void> {
   };
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));
+  // When the decoder library cannot decode, the process takes the path of a SIGTERM, so that Docker starts it again.
+  startHealth({ server, stop: () => shutdown("the decoder check") });
 }
 
 // Only run when executed directly (not when imported by tests).

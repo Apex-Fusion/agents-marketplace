@@ -1,13 +1,7 @@
-import type { Server } from "node:http";
-import type { Express } from "express";
+import type { DecoderHealth, DecoderHealthOptions } from "@marketplace/shared/tx/server";
+import { serve, type PaperRole, type RoleStart } from "./serve.js";
 
-const role = process.argv[2];
-let app: Express;
-let host: string;
-let port: number;
-let closeService: () => Promise<void>;
-
-if (role === "control") {
+async function startControl(): Promise<RoleStart> {
   const [{ loadPaperControlConfig }, { PaperControlStore }, { PaperControlService, createPaperControlApp },
     { DockerAgentBuilder, loadDockerAgentBuilderConfig }] = await Promise.all([
     import("./control-config.js"), import("./store.js"), import("./control.js"), import("./build.js"),
@@ -17,46 +11,41 @@ if (role === "control") {
   const service = new PaperControlService({ config, store,
     builder: new DockerAgentBuilder(loadDockerAgentBuilderConfig(process.env)) });
   try { await service.start(); } catch (error) { await service.close(); store.close(); throw error; }
-  app = createPaperControlApp({ service, token: config.token });
-  ({ host, port } = config);
-  closeService = async () => { try { await service.close(); } finally { store.close(); } };
-} else if (role === "publisher") {
+  const app = createPaperControlApp({ service, token: config.token });
+  const { host, port } = config;
+  return { app, host, port, closeService: async () => { try { await service.close(); } finally { store.close(); } } };
+}
+
+async function startPublisher(): Promise<RoleStart> {
   const [{ loadPaperPublisherConfig }, { PaperPublisherService, createPaperPublisherApp }] = await Promise.all([
     import("./publisher-config.js"), import("./publisher.js"),
   ]);
   const config = loadPaperPublisherConfig();
   const service = await PaperPublisherService.open(config);
-  app = createPaperPublisherApp(service);
-  ({ host, port } = config);
-  closeService = () => service.close();
-} else {
-  throw new Error("Usage: tsx paper2agent/src/index.ts <control|publisher>");
+  const app = createPaperPublisherApp(service);
+  const { host, port } = config;
+  return { app, host, port, closeService: () => service.close() };
 }
 
-let server: Server;
-try {
-  server = await new Promise<Server>((resolve, reject) => {
-    const listening = app.listen(port, host, () => resolve(listening));
-    listening.once("error", reject);
-  });
-} catch (error) { await closeService(); throw error; }
-console.log(`Paper2Agent ${role} listening on ${host}:${port}`);
-
-let stopping = false;
-for (const signal of ["SIGTERM", "SIGINT"] as const) {
-  process.on(signal, () => {
-    if (stopping) return;
-    stopping = true;
-    void (async () => {
-      // Keep result lookup available while the publisher drains accepted paid work.
-      if (role === "publisher") await closeService();
-      const closed = new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
-      if (role === "control") await Promise.all([closed, closeService()]);
-      else await closed;
-    })().catch((error: unknown) => {
-      console.error(`Paper2Agent ${role} shutdown failed`, error);
-      process.exitCode = 1;
-      if (role === "control") server.closeAllConnections();
-    });
-  });
+/** Only the publisher loads the decoder library (the control role does not), so only its module is loaded for the health check. */
+async function loadStartHealth(): Promise<(options: DecoderHealthOptions) => DecoderHealth> {
+  return (await import("@marketplace/shared/tx/server")).startDecoderHealth;
 }
+
+export interface PaperRoles {
+  control: () => Promise<RoleStart>;
+  publisher: () => Promise<RoleStart>;
+  /** The health check of the decoder library, for the roles that load it. */
+  startHealth: () => Promise<(options: DecoderHealthOptions) => DecoderHealth>;
+}
+
+const ROLES: PaperRoles = { control: startControl, publisher: startPublisher, startHealth: loadStartHealth };
+
+/** Starts one role. A test passes stand-ins for the roles and for the health check. */
+export async function main(role: string | undefined, roles: PaperRoles = ROLES): Promise<void> {
+  if (role !== "control" && role !== "publisher") throw new Error("Usage: tsx paper2agent/src/index.ts <control|publisher>");
+  const start = await roles[role]();
+  await serve(role satisfies PaperRole, start, role === "publisher" ? await roles.startHealth() : undefined);
+}
+
+if (process.argv[1]?.endsWith("paper2agent/src/index.ts")) await main(process.argv[2]);
