@@ -34,7 +34,7 @@
  */
 
 import type { ChainProvider } from "@marketplace/shared/chain";
-import type { WalletKey } from "@marketplace/shared/tx";
+import { TxConstructionError, type WalletKey } from "@marketplace/shared/tx";
 import {
   runConsolidateWallet,
   type ConsolidateWalletFlowParams,
@@ -155,6 +155,13 @@ async function consolidateOnce(
       }
     }
   } catch (err) {
+    if (err instanceof TxConstructionError && err.reason === "address_empty") {
+      // The address of this wallet is empty (an empty SUPPLIER_ADDRESS). No later tick or trigger can build a transaction with it, so
+      // the health stops here: one log line, no new try, and no cost. A restart with an address starts it again.
+      guards.halted = true;
+      opts.log(`HALT: ${err.message} — wallet-health stopped. Set SUPPLIER_ADDRESS and restart the supplier to start it again.`);
+      return;
+    }
     // Neither healthy nor consolidated (e.g. balance too low): no fee was
     // spent, so the guards don't move — but nothing converged either, so
     // the consecutive counter is NOT reset.
