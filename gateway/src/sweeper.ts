@@ -75,6 +75,7 @@ import { requestSupplierEnd, sweepIdleDemoSessions } from "./openai/demoChat.js"
 import { CAPABILITY as CHAT_CAPABILITY } from "./openai/sessions.js";
 import { recoverOneShotJobs } from "./oneShotJobs.js";
 import { acceptRefusal, RECEIPT_RETENTION_MS } from "./onchain/receipts.js";
+import { TxConstructionError } from "@marketplace/shared/tx";
 
 // Don't touch escrows newer than this — an in-flight request is settling them.
 const MIN_AGE_MS = 90_000;
@@ -109,6 +110,16 @@ function markSettled(ref: string): void {
 function log(msg: string): void {
   // eslint-disable-next-line no-console
   console.log(`[gateway:sweeper] ${msg}`);
+}
+
+/** Escrows whose datum a chain client withheld (it nests too deep, or is not CBOR that the decoders read). The sweeper reads none of
+ * them: it says so one time for each reference, and asks the chain no more about it. Bounded FIFO; a restart says it again. */
+const unreadableRefs = new Set<string>();
+
+function noteUnreadable(ref: string): void {
+  if (unreadableRefs.has(ref)) return;
+  remember(unreadableRefs, ref);
+  log(`skipping escrow ${ref}: its datum is not read (nested too deep, or not CBOR that the decoders read)`);
 }
 
 function closeSessionRow(
@@ -222,6 +233,7 @@ export async function runSweepOnce(
       const ref = parseRef(row.utxo_ref);
       if (!ref) continue;
       if (settledRefs.has(row.utxo_ref)) continue;
+      if (unreadableRefs.has(row.utxo_ref)) continue;
       if (protection.protectedRefs.has(row.utxo_ref)) continue;
       const ageMs = now - (row.posted_at ?? 0);
       if (ageMs < MIN_AGE_MS) continue;
@@ -238,7 +250,10 @@ export async function runSweepOnce(
             }
             continue;
           }
-          if (!live.datumHex) continue;
+          if (!live.datumHex) {
+            noteUnreadable(row.utxo_ref);
+            continue;
+          }
           if (await refundIfRevoked(ctx, settle, ref, live.datumHex, lookupRecord)) {
             log(`refunded Submitted escrow ${row.utxo_ref}: its agent is revoked`);
             markSettled(row.utxo_ref);
@@ -304,15 +319,19 @@ export async function runSweepOnce(
             // Before deliver_by only RefundRevoked returns a new escrow, and
             // only when its agent is revoked or retired.
             const live = await ctx.chain.queryUtxo(ref);
-            if (live?.datumHex && await refundIfRevoked(ctx, settle, ref, live.datumHex, lookupRecord)) {
+            if (live !== null && !live.datumHex) {
+              noteUnreadable(row.utxo_ref);
+            } else if (live?.datumHex && await refundIfRevoked(ctx, settle, ref, live.datumHex, lookupRecord)) {
               log(`refunded ${row.state} escrow ${row.utxo_ref}: its agent is revoked or retired`);
               markSettled(row.utxo_ref);
               if (chatSession) closeRefundedSession(deps, row, chatSession);
             }
           }
         }
-      } catch {
-        // Expected when the validator rejects (wrong window/state) or the UTxO
+      } catch (err) {
+        // A reclaim of an escrow whose datum the client withheld fails in the builder: skip the row from now on, and say so one time.
+        if (err instanceof TxConstructionError && err.reason === "escrow datum missing") noteUnreadable(row.utxo_ref);
+        // Otherwise expected when the validator rejects (wrong window/state) or the UTxO
         // was already spent by an in-flight request; skip quietly.
       }
     }

@@ -624,3 +624,64 @@ describe("sweeper — new escrows (identity layout)", () => {
     });
   });
 });
+
+import { TxConstructionError } from "@marketplace/shared/tx";
+
+describe("sweeper — an escrow whose datum the chain client withheld", () => {
+  const rowOf = (changes: Partial<EscrowRow>): EscrowRow => ({ ...openRow("0"), utxo_ref: `${randomBytes(32).toString("hex")}#0`, ...changes });
+  const unreadable = (ref: { txHash: string; index: number }): Utxo => ({
+    ref, address: "addr_test1vz2fs4y3q9ekzs7zrr5xkjhq5dzl2wkxqh5hqz6v3l9kqaqklyp2", lovelace: 5_000_000n, assets: {}, datumHex: null, scriptRef: null,
+  });
+
+  it("a Submitted row: no Accept, one log line for its reference, no new question to the chain, and the other rows go on", async () => {
+    const bad = rowOf({ state: "Submitted" });
+    const good = rowOf({});
+    const queryUtxo = vi.fn(async (ref: { txHash: string; index: number }) => (`${ref.txHash}#${ref.index}` === bad.utxo_ref ? unreadable(ref) : null));
+    const { deps } = makeSweepDeps({ chatSettleMode: "full", escrows: [bad, good], chain: { queryUtxo } as unknown as GatewayDeps["chain"] });
+    const settle = settleOk();
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+    await runSweepOnce(deps, settle);
+    await runSweepOnce(deps, settle);
+
+    expect(settle.accept).not.toHaveBeenCalled();
+    expect(settle.reclaim).toHaveBeenCalledTimes(1); // the other row: reclaimed in the first sweep, remembered after it
+    expect(queryUtxo.mock.calls.filter(([ref]) => `${ref.txHash}#${ref.index}` === bad.utxo_ref)).toHaveLength(1);
+    const lines = log.mock.calls.map(([line]) => String(line)).filter((line) => line.includes(`skipping escrow ${bad.utxo_ref}`));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).not.toMatch(/[0-9a-f]{120}/); // names the reference, never bytes
+    log.mockRestore();
+  });
+
+  it("an Open row whose reclaim is refused for its missing datum: one log line, no second attempt, and the other rows go on", async () => {
+    const bad = openRow("c");
+    const good = openRow("d");
+    const settle = {
+      ...settleOk(),
+      reclaim: vi.fn(async (_chain: unknown, _key: unknown, ref: { txHash: string }) => {
+        if (ref.txHash.startsWith("c")) throw new TxConstructionError("escrow datum missing", "UTxO has no inline datum");
+      }) as never,
+    };
+    const { deps } = makeSweepDeps({ chatSettleMode: "full", escrows: [bad, good] });
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+    await runSweepOnce(deps, settle);
+    await runSweepOnce(deps, settle);
+
+    const attempts = (settle.reclaim as unknown as { mock: { calls: Array<[unknown, unknown, { txHash: string }]> } }).mock.calls;
+    expect(attempts.filter(([, , ref]) => ref.txHash.startsWith("c"))).toHaveLength(1);
+    expect(attempts.filter(([, , ref]) => ref.txHash.startsWith("d"))).toHaveLength(1);
+    expect(log.mock.calls.map(([line]) => String(line)).filter((line) => line.includes(`skipping escrow ${bad.utxo_ref}`))).toHaveLength(1);
+    log.mockRestore();
+  });
+
+  it("an error of another kind is still skipped quietly", async () => {
+    const row = openRow("e");
+    const settle = { ...settleOk(), reclaim: vi.fn(async () => { throw new Error("validator rejected"); }) as never };
+    const { deps } = makeSweepDeps({ chatSettleMode: "full", escrows: [row] });
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    await expect(runSweepOnce(deps, settle)).resolves.toBeUndefined();
+    expect(log.mock.calls.some(([line]) => String(line).includes("skipping escrow"))).toBe(false);
+    log.mockRestore();
+  });
+});
