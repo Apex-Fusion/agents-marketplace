@@ -27,6 +27,11 @@ export {
 export type { SignedTransactionInfo, SignedTransactionFinancials } from "./internal/signedTransaction.js";
 export { inspectSignedTransaction, inspectSignedTransactionFinancials } from "./internal/signedTransaction.js";
 
+// ── Health of the decoder library in a process ──────────────────────────
+// Only a process that loads the library imports this barrel, so only such a process can start the check.
+export type { DecoderHealth, DecoderHealthOptions } from "./internal/decoderHealth.js";
+export { startDecoderHealth } from "./internal/decoderHealth.js";
+
 // ── Wallet consolidate (one-shot operational tx; live-only) ─────────────
 export type {
   ConsolidateWalletParams,
