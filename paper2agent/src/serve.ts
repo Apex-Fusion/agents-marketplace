@@ -14,11 +14,18 @@ export interface RoleStart {
 }
 
 /**
+ * The time that a shutdown which the decoder check starts may take. Docker gives a stop of the publisher the same time:
+ * `stop_grace_period` in `deploy/mainnet/docker-compose.paper2agent-publisher.yml` (17 m). Keep the two equal
+ * (tests/unit/decoder-stop-limits.test.ts reads the compose file).
+ */
+export const DECODER_STOP_LIMIT_MS = 17 * 60_000;
+
+/**
  * Listens, takes the shutdown path on SIGTERM and SIGINT, and starts the health check of the decoder library when `startHealth` is
  * given. The publisher loads the library and gets the check; the control role does not load it and gets none.
  *
- * The shutdown is one function. The signals run it, and the check of the decoder library runs it when the library cannot decode, so
- * that Docker starts the process again. It runs one time.
+ * The shutdown is one function. The signals run it, and the check of the decoder library runs it when the library cannot decode
+ * (with exit code 1), so that Docker starts the process again. It runs one time.
  */
 export async function serve(role: PaperRole, start: RoleStart, startHealth?: (options: DecoderHealthOptions) => DecoderHealth): Promise<Server> {
   const { app, host, port, closeService } = start;
@@ -48,6 +55,15 @@ export async function serve(role: PaperRole, start: RoleStart, startHealth?: (op
     });
   };
   for (const signal of ["SIGTERM", "SIGINT"] as const) process.on(signal, stop);
-  startHealth?.({ server, stop });
+  startHealth?.({
+    server,
+    stopLimitMs: DECODER_STOP_LIMIT_MS,
+    stop: (code) => {
+      if (stopping) return false;
+      process.exitCode = code;
+      stop();
+      return true;
+    },
+  });
   return server;
 }

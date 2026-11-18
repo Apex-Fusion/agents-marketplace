@@ -38,6 +38,12 @@ export function buildDeps(env: Record<string, string | undefined>): GatewayDeps 
 }
 
 /**
+ * The time that a shutdown which the decoder check starts may take. Docker gives a stop of the gateway the same time: its compose file,
+ * `deploy/mainnet/docker-compose.gateway.yml`, has no `stop_grace_period`, so the Docker default of 10 s applies. Keep the two equal
+ * (tests/unit/decoder-stop-limits.test.ts reads the compose file).
+ */
+export const DECODER_STOP_LIMIT_MS = 10_000;
+/**
  * `startHealth` starts the check of the decoder library. The gateway loads the library, so it always runs it. A test passes a stand-in.
  */
 export function runMain(
@@ -58,6 +64,7 @@ export function runMain(
   });
 
   let stopping = false;
+  let exitCode = 0;
   const shutdown = (): void => {
     if (stopping) return;
     stopping = true;
@@ -65,12 +72,22 @@ export function runMain(
     console.log("[gateway] shutting down...");
     stopSweeper();
     stopHealth();
-    server.close(() => process.exit(0));
+    server.close(() => process.exit(exitCode));
   };
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
-  // When the decoder library cannot decode, the process takes the path of a SIGTERM, so that Docker starts it again.
-  startHealth({ server, stop: shutdown });
+  // When the decoder library cannot decode, the process takes the path of a SIGTERM and ends with code 1, so that Docker starts it
+  // again. A SIGTERM that came first keeps its own exit code.
+  startHealth({
+    server,
+    stopLimitMs: DECODER_STOP_LIMIT_MS,
+    stop: (code) => {
+      if (stopping) return false;
+      exitCode = code;
+      shutdown();
+      return true;
+    },
+  });
 }
 
 const invokedDirectly =

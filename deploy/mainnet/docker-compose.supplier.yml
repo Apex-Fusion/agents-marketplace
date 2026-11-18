@@ -29,6 +29,8 @@ services:
       context: ../..
       dockerfile: supplier/Dockerfile
     container_name: marketplace-mainnet-supplier
+    # No stop_grace_period: Docker gives a stop 10 s. The decoder check of the supplier ends a shutdown that it starts after the same
+    # time (DECODER_STOP_LIMIT_MS in supplier/src/index.ts). Change both together.
     restart: unless-stopped
     env_file:
       - path: ../../supplier/.env

@@ -187,9 +187,17 @@ export interface SurplusSellerParts {
 }
 
 /**
+ * The time that a shutdown which the decoder check starts may take. Docker gives a stop of the surplus seller the same time: its compose
+ * file, `deploy/mainnet/docker-compose.surplus-seller.yml`, has no `stop_grace_period`, so the Docker default of 10 s applies. Keep the
+ * two equal (tests/unit/decoder-stop-limits.test.ts reads the compose file).
+ */
+export const DECODER_STOP_LIMIT_MS = 10_000;
+
+/**
  * Takes the shutdown path on SIGINT and SIGTERM, and starts the check of the decoder library. The surplus seller loads the library
  * (the proof publisher builds transactions), so it always runs the check. The signals run one shutdown, and the check runs it when
- * the library cannot decode, so that Docker starts the process again. It runs one time. A test passes a stand-in for the check.
+ * the library cannot decode, with exit code 1, so that Docker starts the process again. It runs one time. A test passes a stand-in
+ * for the check.
  */
 export function installShutdown(
   { server, controller, publisher }: SurplusSellerParts,
@@ -208,7 +216,16 @@ export function installShutdown(
   };
   process.on("SIGINT", () => void shutdown("SIGINT"));
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
-  startHealth({ server, stop: () => void shutdown("the decoder check") });
+  startHealth({
+    server,
+    stopLimitMs: DECODER_STOP_LIMIT_MS,
+    stop: (code) => {
+      if (shuttingDown) return false;
+      process.exitCode = code;
+      void shutdown("the decoder check");
+      return true;
+    },
+  });
   return shutdown;
 }
 

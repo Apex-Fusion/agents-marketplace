@@ -395,3 +395,23 @@ Manual controls:
 Projects with no running containers on the host (e.g. wallet-monitor) are
 skipped; image-only projects (ollama, chatmock, tts-piper) redeploy only when
 their own compose file changes.
+
+## 11. Health of the decoder library
+
+The gateway, the buyer, the supplier (also as a child of the Paper2Agent publisher), the surplus seller and the Paper2Agent
+publisher load the Cardano decoder library. Each of these processes checks the library after each HTTP request and once each second:
+
+1. It puts the stack pointer of the library back to its start value when the pointer is lower. It then writes one line:
+   `The stack pointer of the decoder library was <n> bytes below its start value. The process put it back.`
+2. It asks the library to decode one known value.
+
+When the library cannot decode the value, the process writes one line:
+`The decoder library cannot decode a known value. The process stops so that its supervisor starts it again.`
+It then takes the shutdown path that a SIGTERM takes, with its drain logic, and ends with exit code 1. Docker starts it again
+(`restart: unless-stopped`). A Paper2Agent supplier child that ends in this way is started again by the publisher.
+
+No Docker stop stands behind a shutdown that the check starts. So the process ends itself with exit code 1 after the time that
+Docker gives a stop of that service: the `stop_grace_period` in its compose file in `deploy/mainnet/`, or 10 s when the file has none.
+The same value is a constant in the code of the process (`DECODER_STOP_LIMIT_MS`). A test compares the two, so change both together.
+
+When no failure happens, the check changes nothing and writes nothing.

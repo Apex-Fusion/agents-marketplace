@@ -81,6 +81,8 @@ services:
         bind:
           create_host_path: false
     mem_limit: 768m
+    # The decoder check of the publisher ends a shutdown that it starts after the same time as this value (DECODER_STOP_LIMIT_MS in
+    # paper2agent/src/serve.ts). Change both together.
     stop_grace_period: 17m
     healthcheck:
       test: [CMD, node, -e, "fetch('http://127.0.0.1:8096/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]

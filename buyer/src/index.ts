@@ -26,6 +26,12 @@ import { startDecoderHealth } from "@marketplace/shared/tx/server";
 /** Longest wait at shutdown for background Accepts after in-flight requests end. */
 const SHUTDOWN_DRAIN_MS = 60_000;
 
+/**
+ * The time that a shutdown which the decoder check starts may take. Docker gives a stop of the buyer the same time: `stop_grace_period`
+ * in `deploy/mainnet/docker-compose.buyer.yml` (330 s). Keep the two equal (tests/unit/decoder-stop-limits.test.ts reads the compose file).
+ */
+export const DECODER_STOP_LIMIT_MS = 330_000;
+
 // Wire ed25519 sha512 hook (idempotent — same as receipt/sign.ts).
 ed.etc.sha512Sync = (...messages: Uint8Array[]): Uint8Array => {
   const h = createHash("sha512");
@@ -185,6 +191,7 @@ export async function runMain(
   });
 
   let stopping = false;
+  let exitCode = 0;
   const shutdown = (): void => {
     if (stopping) return;
     stopping = true;
@@ -193,13 +200,23 @@ export async function runMain(
     // In-flight requests end first, then background Accepts, for at most SHUTDOWN_DRAIN_MS.
     server.close(() => {
       void Promise.race([Promise.allSettled([...backgroundTasks]), delay(SHUTDOWN_DRAIN_MS)])
-        .then(() => process.exit(0));
+        .then(() => process.exit(exitCode));
     });
   };
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
-  // When the decoder library cannot decode, the process takes the path of a SIGTERM, so that Docker starts it again.
-  startHealth({ server, stop: shutdown });
+  // When the decoder library cannot decode, the process takes the path of a SIGTERM and ends with code 1, so that Docker starts it
+  // again. A SIGTERM that came first keeps its own exit code.
+  startHealth({
+    server,
+    stopLimitMs: DECODER_STOP_LIMIT_MS,
+    stop: (code) => {
+      if (stopping) return false;
+      exitCode = code;
+      shutdown();
+      return true;
+    },
+  });
 }
 
 // Boot only when invoked directly (not when imported by tests).

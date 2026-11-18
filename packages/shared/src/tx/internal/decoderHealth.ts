@@ -100,11 +100,23 @@ export function restoreStackPointer(): void {
   }
 }
 
+/** The exit code of a process that the check stopped. */
+export const DECODER_EXIT_CODE = 1;
+
 export interface DecoderHealthOptions {
   /** The HTTP server of the process: the check runs after each request on it ends. */
   server: Server;
-  /** Starts the normal shutdown of the process. Called at most one time, after the self-check failed. */
-  stop: () => void;
+  /**
+   * Starts the normal shutdown of the process (the path that a SIGTERM takes) and ends it with `exitCode`. It is called at most one
+   * time, after the self-check failed. It returns false, and starts nothing, when the process is already shutting down.
+   */
+  stop: (exitCode: number) => boolean;
+  /**
+   * The time in ms that the normal shutdown may take. When it has not ended by then, the process ends itself with exit code 1.
+   * Docker gives a stop of the service this time (`stop_grace_period` in its compose file, 10 s when the file has none); a shutdown
+   * that the check starts has no stop of Docker behind it. Each process names its value next to the compose value.
+   */
+  stopLimitMs: number;
   /** The decoder library. Default: CML. */
   library?: DecoderLibrary;
   /** Milliseconds between two checks on the timer. Default: 1000. */
@@ -137,7 +149,13 @@ export function startDecoderHealth(options: DecoderHealthOptions): DecoderHealth
     stopping = true;
     console.error(STOP_LINE);
     try {
-      options.stop();
+      if (options.stop(DECODER_EXIT_CODE)) {
+        const limit = setTimeout(() => {
+          console.error(`The shutdown did not end in ${options.stopLimitMs} ms. The process ends now.`);
+          process.exit(DECODER_EXIT_CODE);
+        }, options.stopLimitMs);
+        limit.unref();
+      }
     } catch (error) {
       console.error(`The shutdown of the process failed: ${error instanceof Error ? error.message : String(error)}`);
     }

@@ -17,8 +17,15 @@ import {
   startDecoderHealth,
   unwatchStackPointer,
   watchStackPointer,
+  DECODER_EXIT_CODE,
+  type DecoderHealth,
+  type DecoderHealthOptions,
   type DecoderLibrary,
 } from "../../packages/shared/src/tx/internal/decoderHealth.js";
+
+/** startDecoderHealth with a time limit that no test reaches, unless it names one. */
+const start = (options: Omit<DecoderHealthOptions, "stopLimitMs"> & { stopLimitMs?: number }): DecoderHealth =>
+  startDecoderHealth({ stopLimitMs: 600_000, ...options });
 
 const START = 1_048_576;
 
@@ -208,7 +215,7 @@ describe("startDecoderHealth", () => {
     const library = standIn();
     const stop = vi.fn();
     const { server, request } = fakeServer();
-    const health = startDecoderHealth({ server, stop, library: library.library });
+    const health = start({ server, stop, library: library.library });
     for (let i = 0; i < 5; i += 1) request().emit("close");
     vi.advanceTimersByTime(10_000);
     expect(stop).not.toHaveBeenCalled();
@@ -220,7 +227,7 @@ describe("startDecoderHealth", () => {
   it("checks after each request ends, not before", () => {
     const library = standIn();
     const { server, request } = fakeServer();
-    const health = startDecoderHealth({ server, stop: vi.fn(), library: library.library });
+    const health = start({ server, stop: vi.fn(), library: library.library });
     const before = library.decoded.length;
     const response = request();
     expect(library.decoded.length).toBe(before);
@@ -234,7 +241,7 @@ describe("startDecoderHealth", () => {
     const library = standIn();
     const timers = vi.spyOn(globalThis, "setInterval");
     const { server } = fakeServer();
-    const health = startDecoderHealth({ server, stop: vi.fn(), library: library.library });
+    const health = start({ server, stop: vi.fn(), library: library.library });
     expect(timers).toHaveBeenCalledTimes(1);
     expect(timers.mock.calls[0]?.[1]).toBe(1000);
     const timer = timers.mock.results[0]?.value as NodeJS.Timeout;
@@ -250,7 +257,7 @@ describe("startDecoderHealth", () => {
     const library = standIn();
     const stop = vi.fn();
     const { server, request } = fakeServer();
-    const health = startDecoderHealth({ server, stop, library: library.library });
+    const health = start({ server, stop, library: library.library });
     library.lower(8192);
     request().emit("close");
     expect(library.pointer()).toBe(START);
@@ -265,7 +272,7 @@ describe("startDecoderHealth", () => {
     const library = standIn();
     const stop = vi.fn();
     const { server, request } = fakeServer();
-    startDecoderHealth({ server, stop, library: library.library });
+    start({ server, stop, library: library.library });
     library.breakDecoder();
     request().emit("close");
     expect(stop).toHaveBeenCalledTimes(1);
@@ -281,7 +288,7 @@ describe("startDecoderHealth", () => {
     vi.useFakeTimers();
     const library = standIn();
     const stop = vi.fn();
-    startDecoderHealth({ server: fakeServer().server, stop, library: library.library });
+    start({ server: fakeServer().server, stop, library: library.library });
     library.breakDecoder();
     vi.advanceTimersByTime(999);
     expect(stop).not.toHaveBeenCalled();
@@ -293,7 +300,7 @@ describe("startDecoderHealth", () => {
     const library = standIn();
     const stop = vi.fn();
     const { server, request } = fakeServer();
-    startDecoderHealth({ server, stop, library: library.library });
+    start({ server, stop, library: library.library });
     library.breakDecoder();
     request().emit("close");
     expect(stop).toHaveBeenCalledTimes(1);
@@ -302,7 +309,7 @@ describe("startDecoderHealth", () => {
   it("does not throw out of a timer or a request when the stop throws, and writes the error", () => {
     const library = standIn();
     const { server, request } = fakeServer();
-    startDecoderHealth({ server, stop: () => { throw new Error("shutdown failed"); }, library: library.library });
+    start({ server, stop: () => { throw new Error("shutdown failed"); }, library: library.library });
     library.breakDecoder();
     expect(() => request().emit("close")).not.toThrow();
     expect(error.mock.calls.map((call) => String(call[0])).join("\n")).toContain("shutdown failed");
@@ -313,7 +320,7 @@ describe("startDecoderHealth", () => {
     const library = standIn();
     const stop = vi.fn();
     const { server, request } = fakeServer();
-    const health = startDecoderHealth({ server, stop, library: library.library });
+    const health = start({ server, stop, library: library.library });
     health.close();
     library.breakDecoder();
     library.lower(64);
@@ -328,7 +335,7 @@ describe("startDecoderHealth", () => {
     const library = standIn();
     const bare = { PlutusData: library.library.PlutusData };
     const { server, request } = fakeServer();
-    const health = startDecoderHealth({ server, stop, library: bare });
+    const health = start({ server, stop, library: bare });
     expect(health.watchesStackPointer).toBe(false);
     library.breakDecoder();
     request().emit("close");
@@ -338,12 +345,63 @@ describe("startDecoderHealth", () => {
   it("runs with the real library: no stop, no line", () => {
     const stop = vi.fn();
     const { server, request } = fakeServer();
-    const health = startDecoderHealth({ server, stop });
+    const health = start({ server, stop });
     expect(health.watchesStackPointer).toBe(true);
     request().emit("close");
     health.check();
     expect(stop).not.toHaveBeenCalled();
     expect(error).not.toHaveBeenCalled();
     health.close();
+  });
+});
+
+describe("the exit code and the time limit of a shutdown that the check starts", () => {
+  let exit: MockInstance<typeof process.exit>;
+  beforeEach(() => {
+    exit = vi.spyOn(process, "exit").mockImplementation((() => undefined) as never);
+  });
+  afterEach(() => {
+    exit.mockRestore();
+  });
+
+  it("starts the shutdown with exit code 1, and ends the process with code 1 when the shutdown does not end in time", () => {
+    vi.useFakeTimers();
+    const library = standIn();
+    const stop = vi.fn(() => true);
+    start({ server: fakeServer().server, stop, stopLimitMs: 5000, library: library.library });
+    library.breakDecoder();
+    vi.advanceTimersByTime(1000);
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(stop).toHaveBeenCalledWith(DECODER_EXIT_CODE);
+    expect(DECODER_EXIT_CODE).toBe(1);
+    vi.advanceTimersByTime(4999);
+    expect(exit).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(error.mock.calls.map((call) => String(call[0])).join("\n")).toContain("The shutdown did not end in 5000 ms. The process ends now.");
+  });
+
+  it("sets no limit when the process was already shutting down (the stop starts nothing)", () => {
+    vi.useFakeTimers();
+    const library = standIn();
+    const stop = vi.fn(() => false);
+    start({ server: fakeServer().server, stop, stopLimitMs: 5000, library: library.library });
+    library.breakDecoder();
+    vi.advanceTimersByTime(1000);
+    expect(stop).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(60_000);
+    expect(exit).not.toHaveBeenCalled();
+  });
+
+  it("does not let the limit keep the process alive", () => {
+    vi.useFakeTimers();
+    const library = standIn();
+    const timers = vi.spyOn(globalThis, "setTimeout");
+    start({ server: fakeServer().server, stop: () => true, stopLimitMs: 5000, library: library.library });
+    library.breakDecoder();
+    vi.advanceTimersByTime(1000);
+    const limit = timers.mock.results.map((result) => result.value as NodeJS.Timeout).find((timer) => timer.hasRef !== undefined);
+    expect(limit?.hasRef()).toBe(false);
+    timers.mockRestore();
   });
 });

@@ -2,16 +2,17 @@
  * supplier-decoder-health.test.ts — the supplier starts the health check of the decoder library with its own shutdown.
  *
  * The supplier loads the decoder library. The children of the Paper2Agent publisher run this entry point, so they start the check
- * too. When the library cannot decode a known value, the supplier takes the path that a SIGTERM takes (mark the state offline,
- * stop the timers, close the server, exit), so that Docker starts it again, or the publisher starts the child again. The check
- * itself is tested in decoder-health.test.ts; here a stand-in starts it, and the test runs both triggers through one scenario.
+ * too. When the library cannot decode a known value, the supplier takes the path that a SIGTERM takes (mark the state offline, stop
+ * the timers, close the server, exit) and ends with exit code 1, so that Docker starts it again, or the publisher starts the child
+ * again. The check itself is tested in decoder-health.test.ts; here a stand-in starts it, and the test runs both triggers through one
+ * scenario.
  */
 
 import { createServer } from "node:net";
 import { afterEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import type { DecoderHealthOptions } from "../../packages/shared/src/tx/server.js";
 import { SupplierState } from "../../supplier/src/state.js";
-import { main } from "../../supplier/src/index.js";
+import { DECODER_STOP_LIMIT_MS, main } from "../../supplier/src/index.js";
 import { buildSampleEnv } from "../fixtures/supplier-side/sample-config.js";
 
 async function freePort(): Promise<number> {
@@ -61,11 +62,15 @@ async function boot(): Promise<{ options: DecoderHealthOptions; sigterm: () => v
 }
 
 describe("supplier: the check of the decoder library", () => {
-  it.each(["a SIGTERM", "the check of the decoder library"])("shuts the supplier down in the same way for %s", async (trigger) => {
+  it.each([
+    ["a SIGTERM", 0],
+    ["the check of the decoder library", 1],
+  ])("shuts the supplier down in the same way for %s, with exit code %i", async (trigger, code) => {
     const { options, sigterm } = await boot();
+    expect(options.stopLimitMs).toBe(DECODER_STOP_LIMIT_MS);
     if (trigger === "a SIGTERM") sigterm();
-    else options.stop();
-    await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(0));
+    else expect(options.stop(1)).toBe(true);
+    await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(code));
     expect(options.server.listening).toBe(false);
     expect(offline).toHaveBeenCalledTimes(1);
     expect(exit).toHaveBeenCalledTimes(1);
@@ -74,10 +79,10 @@ describe("supplier: the check of the decoder library", () => {
     ]);
   });
 
-  it("does the shutdown one time when the check follows a SIGTERM", async () => {
+  it("does the shutdown one time, with the exit code of the SIGTERM, when the check follows a SIGTERM", async () => {
     const { options, sigterm } = await boot();
     sigterm();
-    options.stop();
+    expect(options.stop(1)).toBe(false);
     await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(0));
     expect(offline).toHaveBeenCalledTimes(1);
     expect(log.mock.calls.filter(([line]) => String(line).endsWith("shutting down"))).toHaveLength(1);

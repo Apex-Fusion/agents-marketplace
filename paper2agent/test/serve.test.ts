@@ -11,8 +11,8 @@ import type { Server as HttpServer } from "node:http";
 import express from "express";
 import { afterEach, describe, expect, it, vi, type Mock, type MockInstance } from "vitest";
 import type { DecoderHealth, DecoderHealthOptions } from "@marketplace/shared/tx/server";
-import { main, type PaperRoles } from "../src/index.js";
-import { serve, type RoleStart } from "../src/serve.js";
+import { main, type PaperRoles } from "../src/run.js";
+import { DECODER_STOP_LIMIT_MS, serve, type RoleStart } from "../src/serve.js";
 
 async function freePort(): Promise<number> {
   return await new Promise<number>((resolve, reject) => {
@@ -56,7 +56,7 @@ function quiet(): void {
 const handlerOf = (signal: string): (() => void) => on.mock.calls.find(([name]) => name === signal)?.[1] as () => void;
 
 describe("serve", () => {
-  it("publisher: starts the health check with the server and the function that SIGTERM and SIGINT run, and that function drains first", async () => {
+  it("publisher: starts the health check with the server and the limit of a stop of Docker, and its stop drains first and ends with exit code 1", async () => {
     quiet();
     let release: () => void = () => undefined;
     const closeService = vi.fn(() => new Promise<void>((resolve) => { release = resolve; }));
@@ -65,16 +65,30 @@ describe("serve", () => {
     opened.push(server);
 
     expect(options!.server).toBe(server);
-    expect(options!.stop).toBe(handlerOf("SIGTERM"));
-    expect(options!.stop).toBe(handlerOf("SIGINT"));
+    expect(options!.stopLimitMs).toBe(DECODER_STOP_LIMIT_MS);
+    expect(handlerOf("SIGTERM")).toBe(handlerOf("SIGINT"));
     expect(log).toHaveBeenCalledWith(expect.stringMatching(/^Paper2Agent publisher listening on 127\.0\.0\.1:\d+$/));
 
-    options!.stop();
-    options!.stop(); // a second call does nothing more
+    expect(options!.stop(1)).toBe(true);
+    expect(options!.stop(1)).toBe(false); // a second call does nothing more
+    expect(process.exitCode).toBe(1);
     await vi.waitFor(() => expect(closeService).toHaveBeenCalledTimes(1));
     // The publisher drains accepted paid work before it closes the server.
     expect(server.listening).toBe(true);
     release();
+    await vi.waitFor(() => expect(server.listening).toBe(false));
+    expect(closeService).toHaveBeenCalledTimes(1);
+  });
+
+  it("publisher: a SIGTERM keeps its own exit code, and a check that follows it starts nothing", async () => {
+    quiet();
+    const closeService = vi.fn(async () => undefined);
+    let options: DecoderHealthOptions | undefined;
+    const server = await serve("publisher", await roleStart(closeService), (given) => { options = given; return health; });
+    opened.push(server);
+    handlerOf("SIGTERM")();
+    expect(options!.stop(1)).toBe(false);
+    expect(process.exitCode).toBe(exitCode);
     await vi.waitFor(() => expect(server.listening).toBe(false));
     expect(closeService).toHaveBeenCalledTimes(1);
   });
@@ -131,7 +145,8 @@ describe("main: the roles", () => {
     expect(fake.startHealth).toHaveBeenCalledTimes(1);
     const options = fake.startHealth.mock.calls[0]![0] as DecoderHealthOptions;
     opened.push(options.server as HttpServer);
-    expect(options.stop).toBe(handlerOf("SIGTERM"));
+    expect(options.stop(1)).toBe(true);
+    await vi.waitFor(() => expect(options.server.listening).toBe(false));
   });
 
   it("the control role starts no health check, and does not load the module for it", async () => {

@@ -33,6 +33,13 @@ import { deriveSupplierKey } from "./paper2agent/identity.js";
 import { Paper2AgentRuntime } from "./paper2agent/runtime.js";
 
 /**
+ * The time that a shutdown which the decoder check starts may take. Docker gives a stop of the supplier the same time: its compose file,
+ * `deploy/mainnet/docker-compose.supplier.yml`, has no `stop_grace_period`, so the Docker default of 10 s applies. Keep the two equal
+ * (tests/unit/decoder-stop-limits.test.ts reads the compose file).
+ */
+export const DECODER_STOP_LIMIT_MS = 10_000;
+
+/**
  * `startHealth` starts the check of the decoder library. The supplier loads the library, so it always runs it (also as a child of
  * the Paper2Agent publisher, which starts this entry point). A test passes a stand-in.
  */
@@ -176,6 +183,7 @@ async function main(startHealth: typeof startDecoderHealth = startDecoderHealth)
       : null;
 
   let stopping = false;
+  let exitCode = 0;
   const shutdown = (signal: string) => {
     if (stopping) return;
     stopping = true;
@@ -187,14 +195,24 @@ async function main(startHealth: typeof startDecoderHealth = startDecoderHealth)
     const runtimeCleanup = Promise.all([reseller?.close(), paper2agent?.close()])
       .then(() => 0, () => 1);
     server.close(() => {
-      void runtimeCleanup.then((code) => process.exit(code));
+      void runtimeCleanup.then((code) => process.exit(exitCode === 0 ? code : exitCode));
     });
     setTimeout(() => process.exit(1), 5_000).unref();
   };
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));
-  // When the decoder library cannot decode, the process takes the path of a SIGTERM, so that Docker starts it again.
-  startHealth({ server, stop: () => shutdown("the decoder check") });
+  // When the decoder library cannot decode, the process takes the path of a SIGTERM and ends with code 1, so that Docker starts it
+  // again. A SIGTERM that came first keeps its own exit code. (The shutdown above also ends itself after 5 s, which is inside the limit.)
+  startHealth({
+    server,
+    stopLimitMs: DECODER_STOP_LIMIT_MS,
+    stop: (code) => {
+      if (stopping) return false;
+      exitCode = code;
+      shutdown("the decoder check");
+      return true;
+    },
+  });
 }
 
 // Only run when executed directly (not when imported by tests).
