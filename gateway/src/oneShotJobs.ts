@@ -12,6 +12,7 @@ import {
 } from "./onchain/settle.js";
 import type { EscrowLineage } from "./onchain/settle.js";
 import { chainRecordLookup, refundRevokedApplies } from "./onchain/records.js";
+import { isUnreadable, noteUnreadable } from "./onchain/unreadable.js";
 import { parseRef, type SupplierCandidate } from "./routing/selectSupplier.js";
 import { WalletTransactionGuardError } from "./sdk/walletTransactions.js";
 
@@ -333,7 +334,13 @@ export async function recoverOneShotJobs(
         if (!latest || latest.spent_tx) return;
         const ref = parseRef(latest.utxo_ref);
         if (!ref) throw new Error("invalid escrow lineage reference");
+        // An escrow whose datum the chain client withheld is not read here: say so one time for the reference, and ask no more.
+        if (isUnreadable(latest.utxo_ref)) return;
         const utxo = await ctx.chain.queryUtxo(ref);
+        if (utxo !== null && !utxo.datumHex) {
+          noteUnreadable(latest.utxo_ref, "recovery");
+          return;
+        }
         if (!utxo?.datumHex) return; // spent after the indexer's snapshot
         const escrow = decodeAnyEscrowDatum(utxo.datumHex);
         const datum = escrow.datum;
