@@ -359,17 +359,25 @@ function credentialQueryParams(c: Credential): { addresses: string[] } {
 }
 
 /**
- * The Lucid UTxOs of one Ogmios answer. An output whose datum or native script fails the check stays in the list without it
- * (datumGuard.ts); one log line for the answer names the count and the first reference.
+ * The Lucid UTxOs of one Ogmios answer. An output whose datum fails the check stays in the list without it. An output whose native
+ * script fails the check is left out: when it is spent, the ledger asks a fee for its script, and a transaction that does not count
+ * the script gets a fee that is too low (datumGuard.ts). The log has one line for each reference, one time.
  */
 function ogmiosAnswerToLucidUtxos(result: OgmiosUtxo[]): UTxO[] {
   const withheld = new WithheldOutputs();
-  const utxos = result.map((o) => ogmiosUtxoToLucidUtxo(o, withheld));
-  withheld.report("OgmiosLucidProvider", "an Ogmios answer");
+  const utxos: UTxO[] = [];
+  for (const o of result) {
+    const utxo = ogmiosUtxoToLucidUtxo(o, withheld);
+    if (utxo !== null) utxos.push(utxo);
+  }
+  withheld.report("OgmiosLucidProvider");
   return utxos;
 }
 
-function ogmiosUtxoToLucidUtxo(o: OgmiosUtxo, withheld: WithheldOutputs): UTxO {
+function ogmiosUtxoToLucidUtxo(o: OgmiosUtxo, withheld: WithheldOutputs): UTxO | null {
+  const ref = `${o.transaction.id}#${o.index}`;
+  const scriptRef = ogmiosScriptToLucidScript(o.script, ref, withheld);
+  if (scriptRef === undefined) return null;
   const lovelaceRaw = o.value?.ada?.lovelace;
   const lovelace =
     typeof lovelaceRaw === "bigint"
@@ -394,7 +402,6 @@ function ogmiosUtxoToLucidUtxo(o: OgmiosUtxo, withheld: WithheldOutputs): UTxO {
     }
   }
 
-  const ref = `${o.transaction.id}#${o.index}`;
   return {
     txHash: o.transaction.id,
     outputIndex: o.index,
@@ -402,7 +409,7 @@ function ogmiosUtxoToLucidUtxo(o: OgmiosUtxo, withheld: WithheldOutputs): UTxO {
     assets,
     datumHash: o.datumHash ?? null,
     datum: typeof o.datum === "string" ? withheld.datum(o.datum, ref) : null,
-    scriptRef: ogmiosScriptToLucidScript(o.script, ref, withheld),
+    scriptRef,
   };
 }
 
@@ -411,9 +418,9 @@ function ogmiosUtxoToLucidUtxo(o: OgmiosUtxo, withheld: WithheldOutputs): UTxO {
  *  `{ type: "PlutusV1"|"PlutusV2"|"PlutusV3"|"Native", script: "<cbor-hex>" }`.
  *  Returns null if the field is missing or unrecognised.
  *
- *  A Plutus script is opaque bytes to the decoder library and is mapped as it is. A native script holds nested scripts that the
- *  library reads: it must pass the check, or the output keeps no script (datumGuard.ts). */
-function ogmiosScriptToLucidScript(s: unknown, ref: string, withheld: WithheldOutputs): UTxO["scriptRef"] {
+ *  A Plutus script is opaque bytes and is mapped as it is. A native script holds nested scripts: it must pass the check, or the
+ *  function returns undefined, and the output is left out of the answer (datumGuard.ts). */
+function ogmiosScriptToLucidScript(s: unknown, ref: string, withheld: WithheldOutputs): UTxO["scriptRef"] | undefined {
   if (!s || typeof s !== "object") return null;
   const obj = s as { language?: string; cbor?: string };
   if (typeof obj.cbor !== "string") return null;
@@ -421,10 +428,7 @@ function ogmiosScriptToLucidScript(s: unknown, ref: string, withheld: WithheldOu
     case "plutus:v1": return { type: "PlutusV1", script: obj.cbor };
     case "plutus:v2": return { type: "PlutusV2", script: obj.cbor };
     case "plutus:v3": return { type: "PlutusV3", script: obj.cbor };
-    case "native": {
-      const script = withheld.nativeScript(obj.cbor, ref);
-      return script === null ? null : { type: "Native", script };
-    }
+    case "native": return withheld.nativeScriptReadable(obj.cbor, ref) ? { type: "Native", script: obj.cbor } : undefined;
     default: return null;
   }
 }
