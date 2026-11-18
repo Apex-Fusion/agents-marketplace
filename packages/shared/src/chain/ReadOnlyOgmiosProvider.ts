@@ -16,6 +16,7 @@
  *   - response: { jsonrpc: "2.0", result | error, id }
  */
 
+import { WithheldOutputs } from "./datumGuard.js";
 import type {
   ChainProvider,
   OutputReference,
@@ -128,14 +129,15 @@ export class ReadOnlyOgmiosProvider implements ChainProvider {
     };
     const result = await this.rpc<OgmiosUtxo[]>("queryLedgerState/utxo", params);
     if (!Array.isArray(result) || result.length === 0) return null;
-    return ogmiosUtxoToUtxo(result[0]);
+    const [utxo] = ogmiosAnswerToUtxos([result[0]]);
+    return utxo;
   }
 
   async queryUtxosByAddress(address: string): Promise<Utxo[]> {
     const params = { addresses: [address] };
     const result = await this.rpc<OgmiosUtxo[]>("queryLedgerState/utxo", params);
     if (!Array.isArray(result)) return [];
-    return result.map(ogmiosUtxoToUtxo);
+    return ogmiosAnswerToUtxos(result);
   }
 
   async evaluateTx(txCborHex: string): Promise<TxEvaluationResult> {
@@ -194,7 +196,18 @@ export class ReadOnlyOgmiosProvider implements ChainProvider {
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-function ogmiosUtxoToUtxo(o: OgmiosUtxo): Utxo {
+/**
+ * The UTxOs of one Ogmios answer. An output whose datum fails the check stays in the list with no datum (datumGuard.ts); one log
+ * line for the answer names the count and the first reference.
+ */
+function ogmiosAnswerToUtxos(result: OgmiosUtxo[]): Utxo[] {
+  const withheld = new WithheldOutputs();
+  const utxos = result.map((o) => ogmiosUtxoToUtxo(o, withheld));
+  withheld.report("ReadOnlyOgmiosProvider", "an Ogmios answer");
+  return utxos;
+}
+
+function ogmiosUtxoToUtxo(o: OgmiosUtxo, withheld: WithheldOutputs): Utxo {
   const lovelaceRaw = o.value?.ada?.lovelace;
   const lovelace =
     typeof lovelaceRaw === "bigint"
@@ -222,7 +235,8 @@ function ogmiosUtxoToUtxo(o: OgmiosUtxo): Utxo {
   }
 
   const datumHex =
-    typeof o.datum === "string" && o.datum.length > 0 ? o.datum : null;
+    typeof o.datum === "string" && o.datum.length > 0 ? withheld.datum(o.datum, `${o.transaction.id}#${o.index}`) : null;
+  // Only a Plutus V3 script maps here, and Plutus script bytes are opaque: no native script reaches the decoder library from here.
   const scriptRef = ogmiosScriptRef(o.script);
 
   return {
