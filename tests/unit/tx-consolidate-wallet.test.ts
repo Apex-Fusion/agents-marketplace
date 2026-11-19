@@ -8,6 +8,7 @@ import {
   planConsolidate,
   DEFAULT_COLLATERAL_LOVELACE,
   DEFAULT_FEE_RESERVE,
+  MAX_CONSOLIDATE_INPUTS,
   type UtxoLike,
 } from "../../packages/shared/src/tx/wallet/planConsolidate.js";
 
@@ -184,5 +185,82 @@ describe("planConsolidate — structural health predicate (F7)", () => {
     // below the reshape minimum — loud error, funds needed.
     const utxos = [u(5_000_000n), u(400_000n)];
     expect(() => planConsolidate(utxos)).toThrow(/balance too low/i);
+  });
+});
+
+describe("planConsolidate — input limit", () => {
+  it("spends the UTxOs with the most lovelace and leaves the others for the next run", () => {
+    // A juror supplier wallet of 2026-11-19: no UTxO for the collateral, and 452 payouts of 2 AP3X.
+    const change = u(1_498_372n);
+    const utxos = [u(4_718_055n), change, u(4_498_372n), ...Array.from({ length: 452 }, () => u(2_000_000n))];
+    const plan = planConsolidate(utxos);
+
+    const spent = 4_718_055n + 4_498_372n + BigInt(MAX_CONSOLIDATE_INPUTS - 2) * 2_000_000n;
+    expect(plan.reason).toBe("consolidate");
+    expect(plan.inputs).toHaveLength(MAX_CONSOLIDATE_INPUTS);
+    expect(plan.inputs).not.toContain(change);
+    expect(plan.inputCount).toBe(MAX_CONSOLIDATE_INPUTS);
+    expect(plan.remainingUtxos).toBe(utxos.length - MAX_CONSOLIDATE_INPUTS);
+    expect(plan.totalLovelaceIn).toBe(spent);
+    expect(plan.workingOutput).toBe(spent - DEFAULT_COLLATERAL_LOVELACE - DEFAULT_FEE_RESERVE);
+  });
+
+  it("spends every UTxO of a wallet at the limit", () => {
+    const utxos = Array.from({ length: MAX_CONSOLIDATE_INPUTS }, () => u(2_000_000n));
+    const plan = planConsolidate(utxos);
+
+    expect(plan.inputs).toHaveLength(MAX_CONSOLIDATE_INPUTS);
+    expect(plan.remainingUtxos).toBe(0);
+  });
+
+  it("refuses a run whose UTxOs hold too little, also when the full wallet holds enough", () => {
+    // 300 UTxOs of 0.03 AP3X hold 9 AP3X. The 180 of one run hold 5.4 AP3X: below the 8 AP3X of a reshape.
+    const utxos = Array.from({ length: 300 }, () => u(30_000n));
+    expect(() => planConsolidate(utxos)).toThrow(/balance too low/i);
+  });
+});
+
+describe("planConsolidate — limits of a busy wallet", () => {
+  const LIMITS = { maxUtxos: 150, minWorkingUtxo: 25_000_000n };
+  const payouts = (count: number): UtxoLike[] => Array.from({ length: count }, () => u(2_000_000n));
+
+  it("leaves the payouts alone while the working UTxO is high", () => {
+    const utxos = [u(5_000_000n), u(400_000_000n), ...payouts(100)];
+
+    expect(planConsolidate(utxos, DEFAULT_COLLATERAL_LOVELACE, DEFAULT_FEE_RESERVE, LIMITS).reason).toBe("already-healthy");
+    // Without the limits the same wallet is reshaped: more than 6 UTxOs.
+    expect(planConsolidate(utxos).reason).toBe("consolidate");
+  });
+
+  it("reshapes above maxUtxos, in one run", () => {
+    const utxos = [u(5_000_000n), u(400_000_000n), ...payouts(149)];
+    const plan = planConsolidate(utxos, DEFAULT_COLLATERAL_LOVELACE, DEFAULT_FEE_RESERVE, LIMITS);
+
+    expect(plan.reason).toBe("consolidate");
+    expect(plan.inputCount).toBe(151);
+    expect(plan.remainingUtxos).toBe(0);
+  });
+
+  it("reshapes when the working UTxO is low and the payouts can fill it", () => {
+    const utxos = [u(5_000_000n), u(24_000_000n), ...payouts(60)];
+    const plan = planConsolidate(utxos, DEFAULT_COLLATERAL_LOVELACE, DEFAULT_FEE_RESERVE, LIMITS);
+
+    expect(plan.reason).toBe("consolidate");
+    expect(plan.workingOutput).toBe(149_000_000n - DEFAULT_COLLATERAL_LOVELACE - DEFAULT_FEE_RESERVE);
+  });
+
+  it("does not reshape a wallet with little money again and again", () => {
+    // {5, 13, change}: the working UTxO is below the low mark, and the other UTxOs cannot fill it.
+    const poor = [u(5_000_000n), u(13_000_000n), u(1_498_372n)];
+    expect(planConsolidate(poor, DEFAULT_COLLATERAL_LOVELACE, DEFAULT_FEE_RESERVE, LIMITS).reason).toBe("already-healthy");
+
+    // After 4 jobs: 4 payouts, and the working UTxO paid 8 fees. Now a reshape moves 4 fee reserves.
+    const later = [u(5_000_000n), u(13_000_000n - 4n * 1_003_256n), u(1_498_372n), ...payouts(4)];
+    const plan = planConsolidate(later, DEFAULT_COLLATERAL_LOVELACE, DEFAULT_FEE_RESERVE, LIMITS);
+    expect(plan.reason).toBe("consolidate");
+
+    // The shape that the reshape lands is healthy: the next tick sends no transaction.
+    const landed = [u(plan.collateralOutput), u(plan.workingOutput), u(DEFAULT_FEE_RESERVE - 501_628n)];
+    expect(planConsolidate(landed, DEFAULT_COLLATERAL_LOVELACE, DEFAULT_FEE_RESERVE, LIMITS).reason).toBe("already-healthy");
   });
 });

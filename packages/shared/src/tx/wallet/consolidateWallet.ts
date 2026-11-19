@@ -28,7 +28,9 @@ import { createLucidContext } from "../internal/lucidContext.js";
 import { checkedShelleyAddress } from "../internal/addressText.js";
 import {
   DEFAULT_COLLATERAL_LOVELACE,
+  DEFAULT_FEE_RESERVE,
   planConsolidate,
+  type ConsolidateLimits,
   type ConsolidateReason,
 } from "./planConsolidate.js";
 
@@ -38,6 +40,8 @@ export interface ConsolidateWalletParams {
   /** Lovelace value for output #0 (the collateral candidate).
    *  Default 5_000_000n (matches lucid's default `setCollateral`). */
   collateralLovelace?: bigint;
+  /** When the wallet is reshaped. Default: the planner defaults. */
+  limits?: ConsolidateLimits;
 }
 
 export interface ConsolidateWalletBuildResult extends BuildResult {
@@ -46,6 +50,8 @@ export interface ConsolidateWalletBuildResult extends BuildResult {
   collateralOutputLovelace: bigint;
   workingOutputLovelace: bigint;
   reason: ConsolidateReason;
+  /** Wallet UTxOs that this run left: one run spends at most MAX_CONSOLIDATE_INPUTS. */
+  remainingUtxos: number;
   /** True when the wallet was already at {≥collateral, working} — no tx submitted. */
   alreadyHealthy: boolean;
 }
@@ -69,7 +75,7 @@ export async function buildConsolidateWalletTx(
   );
 
   const realWalletUtxos = await lucid.wallet().getUtxos();
-  const plan = planConsolidate(realWalletUtxos, collateralLovelace);
+  const plan = planConsolidate(realWalletUtxos, collateralLovelace, DEFAULT_FEE_RESERVE, params.limits);
 
   if (plan.alreadyHealthy) {
     return {
@@ -80,6 +86,7 @@ export async function buildConsolidateWalletTx(
       collateralOutputLovelace: plan.collateralOutput,
       workingOutputLovelace: plan.workingOutput,
       reason: plan.reason,
+      remainingUtxos: plan.remainingUtxos,
       alreadyHealthy: true,
     };
   }
@@ -97,10 +104,13 @@ export async function buildConsolidateWalletTx(
       // 500K floor matches commit 4f1ec9a's setMinFee bump across live builders.
       // The workingOutput already deducts a 2M fee reserve in planConsolidate;
       // lucid balances the actual fee out of that reserve via change.
+      // Lucid computes the fee with the Cardano values (44 lovelace for each byte plus 155,381), and Vector asks more
+      // (45 and 156,253). The floor is above the Vector fee only while the plan keeps to MAX_CONSOLIDATE_INPUTS.
       .setMinFee(500_000n);
 
+    // Lucid selects only from these UTxOs, and the two outputs need all of them.
     const completed = await txBuilder.complete({
-      presetWalletInputs: realWalletUtxos,
+      presetWalletInputs: plan.inputs,
       localUPLCEval: false,
     });
     signed = await completed.sign.withWallet().complete();
@@ -122,6 +132,7 @@ export async function buildConsolidateWalletTx(
     collateralOutputLovelace: collateralLovelace,
     workingOutputLovelace: plan.workingOutput,
     reason: plan.reason,
+    remainingUtxos: plan.remainingUtxos,
     alreadyHealthy: false,
   };
 }

@@ -19,7 +19,7 @@ import { blake2b } from "@noble/hashes/blake2b";
 import { bech32 } from "bech32";
 import { LiveOgmiosProvider, type ChainProvider } from "@marketplace/shared/chain";
 import type { WalletKey } from "@marketplace/shared/tx";
-import { runConsolidateWallet } from "@marketplace/shared/tx/server";
+import { planConsolidate, runConsolidateWallet } from "@marketplace/shared/tx/server";
 
 ed.etc.sha512Sync = (...messages: Uint8Array[]): Uint8Array => {
   const h = createHash("sha512");
@@ -225,16 +225,23 @@ export async function main(
     try {
       const utxos = await chain.queryUtxosByAddress(walletKey.address);
       const total = utxos.reduce((acc, u) => acc + u.lovelace, 0n);
+      const plan = planConsolidate(
+        utxos.map((u) => ({ assets: { ...u.assets, lovelace: u.lovelace } })),
+        cfg.collateralLovelace,
+      );
       process.stdout.write(
         `dry-run: wallet ${walletKey.address}\n` +
           `  ${utxos.length} UTxO(s), total ${total} lovelace\n` +
-          `  target collateral: ${cfg.collateralLovelace}\n` +
-          `  planned working:   ~${total - cfg.collateralLovelace - 2_000_000n} (after 2M fee reserve)\n`,
+          (plan.alreadyHealthy
+            ? `  the wallet is already healthy: no transaction\n`
+            : `  ${plan.inputCount} input(s), ${plan.remainingUtxos} UTxO(s) stay for the next run\n` +
+              `  target collateral: ${plan.collateralOutput}\n` +
+              `  planned working:   ~${plan.workingOutput} (after 2M fee reserve)\n`),
       );
       return 0;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      process.stderr.write(`error: dry-run query failed: ${msg}\n`);
+      process.stderr.write(`error: dry-run failed: ${msg}\n`);
       return 1;
     }
   }
@@ -252,6 +259,9 @@ export async function main(
       process.stdout.write(`TX_HASH=${result.txHash}\n`);
       process.stdout.write(`COLLATERAL_UTXO=${result.collateralRef}\n`);
       process.stdout.write(`WORKING_UTXO=${result.workingRef}\n`);
+    }
+    if (result.remainingUtxos > 0) {
+      process.stdout.write(`REMAINING_UTXOS=${result.remainingUtxos}\n`);
     }
     return 0;
   } catch (err) {

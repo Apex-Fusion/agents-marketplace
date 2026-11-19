@@ -22,12 +22,13 @@
  * floor — 116 AP3X in one soak). Two independent circuit breakers protect
  * against ANY future non-convergence:
  *   - consecutive guard: 3 consolidations in a row without ever reaching
- *     `already-healthy` halts wallet-health for this process.
+ *     `already-healthy` halts wallet-health for this process. A run that
+ *     reached the input limit and left UTxOs for the next run does not count.
  *   - budget guard: more than 6 consolidations inside 24h halts it too.
  * A halt logs loudly once; consolidate manually and restart the supplier
  * to re-arm.
  *
- * Wallet-lock discipline: consolidation spends EVERY wallet UTxO, so it runs
+ * Wallet-lock discipline: consolidation spends most or all wallet UTxOs, so it runs
  * inside state.walletMutex — the same mutex that serializes Claims/Submits —
  * queueing behind any in-flight chain op instead of skipping. Session slots
  * are not consumed: consolidation is a wallet op, not a session.
@@ -38,6 +39,7 @@ import type { WalletKey } from "@marketplace/shared/tx";
 import {
   isAddressRefusal,
   runConsolidateWallet,
+  type ConsolidateLimits,
   type ConsolidateWalletFlowParams,
   type ConsolidateWalletFlowResult,
 } from "@marketplace/shared/tx/server";
@@ -47,6 +49,16 @@ import type { SupplierState } from "./state.js";
 const DEFAULT_COLLATERAL_LOVELACE = 5_000_000n;
 const DEFAULT_AWAIT_TIMEOUT_MS = 90_000;
 const DEFAULT_ON_FAILURE_DEBOUNCE_MS = 5 * 60_000;
+
+/**
+ * When the wallet of a supplier is reshaped. Each paid job adds one payout UTxO to the wallet and takes two fees
+ * (about 1 AP3X) from the working UTxO. The planner default (more than 6 UTxOs) reshaped a busy wallet after every
+ * 4 jobs: the budget guard stopped the health in some hours, the working UTxO then went down to nothing, and the
+ * next fee cut the collateral UTxO (2026-11-19: a juror supplier refused every job for 12 hours).
+ *   - maxUtxos is below MAX_CONSOLIDATE_INPUTS, so one run takes the full wallet.
+ *   - minWorkingUtxo is the collateral value plus about 20 jobs: a tick comes each 10 minutes.
+ */
+export const SUPPLIER_WALLET_LIMITS: ConsolidateLimits = { maxUtxos: 150, minWorkingUtxo: 25_000_000n };
 
 export type ConsolidateFn = (
   params: ConsolidateWalletFlowParams,
@@ -125,6 +137,7 @@ async function consolidateOnce(
         walletKey: deps.supplierKey,
         collateralLovelace: opts.collateralLovelace,
         awaitTimeoutMs: opts.awaitTimeoutMs,
+        limits: SUPPLIER_WALLET_LIMITS,
         log: opts.log,
       }),
     );
@@ -137,9 +150,14 @@ async function consolidateOnce(
         guards.windowStart = now;
         guards.windowCount = 0;
       }
-      guards.consecutive += 1;
+      // A run that reached the input limit left UTxOs for the next run. It brings the wallet nearer to the healthy
+      // shape, so it is no step of the loop that the consecutive guard stops. The budget guard counts every run.
+      if (result.remainingUtxos === 0) guards.consecutive += 1;
       guards.windowCount += 1;
-      opts.log(`consolidated: ${result.reason} txHash=${result.txHash}`);
+      opts.log(
+        `consolidated: ${result.reason} txHash=${result.txHash}` +
+          (result.remainingUtxos > 0 ? `, ${result.remainingUtxos} UTxO(s) stay for the next run` : ""),
+      );
       if (guards.consecutive >= MAX_CONSECUTIVE_CONSOLIDATIONS) {
         guards.halted = true;
         opts.log(

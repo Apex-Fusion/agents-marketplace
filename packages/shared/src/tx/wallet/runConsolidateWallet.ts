@@ -13,13 +13,19 @@ import {
   buildConsolidateWalletTx,
   type ConsolidateWalletBuildResult,
 } from "./consolidateWallet.js";
-import type { ConsolidateReason } from "./planConsolidate.js";
+import {
+  MAX_CONSOLIDATE_INPUTS,
+  type ConsolidateLimits,
+  type ConsolidateReason,
+} from "./planConsolidate.js";
 
 export interface ConsolidateWalletFlowParams {
   chain: ChainProvider;
   walletKey: WalletKey;
   collateralLovelace: bigint;
   awaitTimeoutMs?: number;
+  /** When the wallet is reshaped. Default: the planner defaults. */
+  limits?: ConsolidateLimits;
   log?: (line: string) => void;
 }
 
@@ -33,6 +39,8 @@ export interface ConsolidateWalletFlowResult {
   totalLovelaceIn: bigint;
   collateralOutputLovelace: bigint;
   workingOutputLovelace: bigint;
+  /** Wallet UTxOs that this run left: one run spends at most MAX_CONSOLIDATE_INPUTS. Run again for them. */
+  remainingUtxos: number;
 }
 
 export async function runConsolidateWallet(
@@ -61,6 +69,7 @@ export async function runConsolidateWallet(
     chain,
     walletKey,
     collateralLovelace,
+    limits: params.limits,
   });
 
   writeLog(
@@ -68,6 +77,11 @@ export async function runConsolidateWallet(
       `total ${built.totalLovelaceIn} lovelace → ` +
       `collateral ${built.collateralOutputLovelace} + working ${built.workingOutputLovelace}`,
   );
+  if (built.remainingUtxos > 0) {
+    writeLog(
+      `${built.remainingUtxos} more UTxO(s) stay for the next run: one run spends at most ${MAX_CONSOLIDATE_INPUTS}`,
+    );
+  }
 
   if (built.alreadyHealthy) {
     writeLog("wallet already healthy — no tx submitted");
@@ -80,6 +94,7 @@ export async function runConsolidateWallet(
       totalLovelaceIn: built.totalLovelaceIn,
       collateralOutputLovelace: built.collateralOutputLovelace,
       workingOutputLovelace: built.workingOutputLovelace,
+      remainingUtxos: built.remainingUtxos,
     };
   }
 
@@ -108,5 +123,6 @@ export async function runConsolidateWallet(
     totalLovelaceIn: built.totalLovelaceIn,
     collateralOutputLovelace: built.collateralOutputLovelace,
     workingOutputLovelace: built.workingOutputLovelace,
+    remainingUtxos: built.remainingUtxos,
   };
 }

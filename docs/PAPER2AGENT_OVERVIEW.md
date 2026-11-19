@@ -290,7 +290,7 @@ Release of `945dd12` (11:14–11:16 UTC):
 - Above 7,638 bytes (about 200 inputs), the fee that Vector needs is more than the floor.
 - For the 248-input wallet, the builder set a fee of 501,628 lovelace. Vector needs 570,208 lovelace for its 9,199 bytes, so the node rejects the transaction. No funds move.
 - On 2026-10-15 a one-off script ran the same builder steps, with a fee floor from the live parameters and the signed size.
-- Fix: compute the fee floor from the live parameters, or limit the number of inputs in each transaction.
+- Fix (2026-11-19): one consolidation spends at most 180 UTxOs, the ones with the most AP3X (`MAX_CONSOLIDATE_INPUTS` in `packages/shared/src/tx/wallet/planConsolidate.ts`). 180 inputs give 6,751 bytes, and Vector needs 460,048 lovelace for them, below the floor. The other UTxOs stay for the next run: the CLI prints `REMAINING_UTXOS=<n>`.
 
 ### 3. Nothing reclaims the escrows of failed calls
 
@@ -376,7 +376,7 @@ Do not run them while a build makes model calls, because they spend the same wal
 # Reclaim every expired Open or Claimed escrow of the buyer wallet.
 docker exec marketplace-mainnet-buyer sh -c 'env | grep -E "^(BUYER_PRIV_KEY_HEX|OGMIOS_URL|INDEXER_URL|NETWORK_ID|VECTOR_ZERO_TIME_MS)=" | node --import tsx buyer/src/cli/reclaim-orphans.ts --env /dev/stdin'
 
-# Consolidate the buyer wallet. Use it only below about 200 UTxOs (see problem 2).
+# Consolidate the buyer wallet. One run spends at most 180 UTxOs: run it again while it prints REMAINING_UTXOS.
 docker exec marketplace-mainnet-buyer node --import tsx buyer/src/cli/consolidate-wallet.ts
 ```
 

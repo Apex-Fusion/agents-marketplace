@@ -16,8 +16,17 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
+import {
+  DEFAULT_COLLATERAL_LOVELACE,
+  DEFAULT_FEE_RESERVE,
+  MAX_CONSOLIDATE_INPUTS,
+  planConsolidate,
+  type PlannedConsolidate,
+  type UtxoLike,
+} from "../../packages/shared/src/tx/wallet/planConsolidate.js";
 import { SupplierState } from "../../supplier/src/state.js";
 import {
+  SUPPLIER_WALLET_LIMITS,
   startWalletHealthTicker,
   triggerOnFailureConsolidate,
   _resetWalletHealthForTests,
@@ -42,6 +51,7 @@ const healthyResult = {
   totalLovelaceIn: 200_000_000n,
   collateralOutputLovelace: 5_000_000n,
   workingOutputLovelace: 195_000_000n,
+  remainingUtxos: 0,
 };
 
 const consolidatedResult = {
@@ -53,6 +63,7 @@ const consolidatedResult = {
   totalLovelaceIn: 328_530_235n,
   collateralOutputLovelace: 5_000_000n,
   workingOutputLovelace: 322_530_235n,
+  remainingUtxos: 0,
 };
 
 describe("walletHealth — ticker", () => {
@@ -86,6 +97,8 @@ describe("walletHealth — ticker", () => {
     await vi.waitFor(() => expect(consolidate).toHaveBeenCalledTimes(1));
 
     expect(logLines).toContain("already-healthy");
+    // Without these limits the planner reshapes a busy wallet after every 4 jobs.
+    expect(consolidate).toHaveBeenCalledWith(expect.objectContaining({ limits: SUPPLIER_WALLET_LIMITS }));
     expect(state.snapshot().status).toBe("free");
 
     ticker.stop();
@@ -352,5 +365,115 @@ describe("walletHealth — F7 circuit breakers", () => {
     expect(logLines.some((l) => l.includes("HALT") && l.includes("consecutive"))).toBe(true);
 
     ticker.stop();
+  });
+
+  it("a run that left UTxOs for the next run is no step of a loop", async () => {
+    // A wallet with 500 UTxOs: two runs reach the input limit, the third takes the rest.
+    consolidate
+      .mockResolvedValueOnce({ ...consolidatedResult, inputCount: 180, remainingUtxos: 320 })
+      .mockResolvedValueOnce({ ...consolidatedResult, inputCount: 180, remainingUtxos: 143 })
+      .mockResolvedValueOnce({ ...consolidatedResult, inputCount: 146 })
+      .mockResolvedValue(healthyResult);
+
+    const ticker = startWalletHealthTicker(
+      { chain: FAKE_CHAIN, state, supplierKey: FAKE_KEY, consolidate },
+      { intervalMs: 1_000, log },
+    );
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.waitFor(() => expect(consolidate).toHaveBeenCalledTimes(5));
+    expect(logLines.some((l) => l.includes("HALT"))).toBe(false);
+    expect(logLines.filter((l) => l === "already-healthy")).toHaveLength(2);
+
+    ticker.stop();
+  });
+
+  it("the budget guard counts the runs that left UTxOs", async () => {
+    consolidate.mockResolvedValue({ ...consolidatedResult, inputCount: 180, remainingUtxos: 100 });
+
+    const ticker = startWalletHealthTicker(
+      { chain: FAKE_CHAIN, state, supplierKey: FAKE_KEY, consolidate },
+      { intervalMs: 1_000, log },
+    );
+
+    await vi.advanceTimersByTimeAsync(8_000);
+    await vi.waitFor(() => expect(logLines.some((l) => l.includes("HALT") && l.includes("budget"))).toBe(true));
+    expect(consolidate).toHaveBeenCalledTimes(6);
+
+    ticker.stop();
+  });
+});
+
+describe("walletHealth — limits of a supplier wallet", () => {
+  const PAYOUT = 2_000_000n; // each paid job adds one payout UTxO
+  const JOB_FEES = 1_003_256n; // Claim and Submit, 501,628 lovelace each (mainnet, 2026-11-19)
+  const RESHAPE_FEE = 501_628n;
+
+  const utxo = (lovelace: bigint): UtxoLike => ({ assets: { lovelace } });
+  const lovelace = (wallet: UtxoLike[]): bigint => wallet.reduce((sum, x) => sum + (x.assets.lovelace ?? 0n), 0n);
+  const plan = (wallet: UtxoLike[]): PlannedConsolidate =>
+    planConsolidate(wallet, DEFAULT_COLLATERAL_LOVELACE, DEFAULT_FEE_RESERVE, SUPPLIER_WALLET_LIMITS);
+
+  /** The wallet after the transaction of a plan: collateral, working UTxO, change, and the UTxOs that the plan left. */
+  function reshaped(wallet: UtxoLike[], planned: PlannedConsolidate): UtxoLike[] {
+    const spent = new Set(planned.inputs);
+    return [
+      utxo(planned.collateralOutput),
+      utxo(planned.workingOutput),
+      utxo(DEFAULT_FEE_RESERVE - RESHAPE_FEE),
+      ...wallet.filter((x) => !spent.has(x)),
+    ];
+  }
+
+  /**
+   * `jobs` paid jobs with one health tick before each job. Lucid pays the fees of a job from the UTxO with the most
+   * lovelace. Returns the number of reshapes. Throws when a job leaves no UTxO that can be the collateral.
+   */
+  function runJobs(start: UtxoLike[], jobs: number): number {
+    let wallet = start;
+    let reshapes = 0;
+    for (let job = 1; job <= jobs; job += 1) {
+      const planned = plan(wallet);
+      if (!planned.alreadyHealthy) {
+        wallet = reshaped(wallet, planned);
+        reshapes += 1;
+      }
+      const payer = wallet.reduce((most, x) => ((x.assets.lovelace ?? 0n) > (most.assets.lovelace ?? 0n) ? x : most));
+      wallet = [...wallet.filter((x) => x !== payer), utxo((payer.assets.lovelace ?? 0n) - JOB_FEES), utxo(PAYOUT)];
+      if (!wallet.some((x) => (x.assets.lovelace ?? 0n) >= DEFAULT_COLLATERAL_LOVELACE)) {
+        throw new Error(`job ${job} left no UTxO for the collateral`);
+      }
+    }
+    return reshapes;
+  }
+
+  it("brings a juror supplier wallet of 2026-11-19 to the healthy shape inside the budget of one day", () => {
+    // 533 UTxOs: working UTxO, collateral, change, 530 payouts.
+    let wallet = [utxo(2_274_615_692n), utxo(5_000_000n), utxo(1_498_372n), ...Array.from({ length: 530 }, () => utxo(PAYOUT))];
+    const before = lovelace(wallet);
+
+    let runs = 0;
+    for (let planned = plan(wallet); !planned.alreadyHealthy; planned = plan(wallet)) {
+      expect(planned.inputCount).toBeLessThanOrEqual(MAX_CONSOLIDATE_INPUTS);
+      wallet = reshaped(wallet, planned);
+      runs += 1;
+      expect(runs).toBeLessThanOrEqual(6);
+    }
+
+    expect(runs).toBe(3);
+    expect(wallet).toHaveLength(3);
+    expect(lovelace(wallet)).toBe(before - 3n * RESHAPE_FEE);
+  });
+
+  it("reshapes a wallet with much money seldom, and each job finds a UTxO for the collateral", () => {
+    // The default limits reshaped this wallet after every 4 jobs: 100 times in 400 jobs, with a budget of 6 for each day.
+    expect(runJobs([utxo(5_000_000n), utxo(1_400_000_000n), utxo(1_498_372n)], 400)).toBe(2);
+  });
+
+  it("keeps the collateral UTxO of a wallet with little money", () => {
+    const reshapes = runJobs([utxo(5_000_000n), utxo(13_000_000n), utxo(1_498_372n)], 40);
+
+    expect(reshapes).toBeGreaterThan(0);
+    expect(reshapes).toBeLessThanOrEqual(10);
   });
 });

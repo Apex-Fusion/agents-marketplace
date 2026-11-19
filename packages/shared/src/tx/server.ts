@@ -39,6 +39,7 @@ export type {
 } from "./wallet/consolidateWallet.js";
 export { buildConsolidateWalletTx } from "./wallet/consolidateWallet.js";
 export type {
+  ConsolidateLimits,
   ConsolidateReason,
   PlannedConsolidate,
   UtxoLike,
