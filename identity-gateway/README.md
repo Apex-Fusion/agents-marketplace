@@ -60,7 +60,8 @@ Every variable is optional, except that a deployed identity registry needs both
 | `GATEWAY_ED25519_KEY_FILE` / `GATEWAY_P256_KEY_FILE` | none | PEM private key files of the gateway keys (Part 2 Section 8.2): PKCS#8, or SEC1 for P-256. The gateway refuses a file that its group or other users can read or write (use mode 600 or 400, owned by the container user). Set both or neither; without them the M4 services are off and agent cards answer 503. |
 | `GATEWAY_VECTOR_ID` | none | The gateway's own identifier (64 hex), required with the key files. Key IDs are `did:vector:<id>#<key hash>`, and the gateway's DID issues credentials. |
 | `DELEGATION_POLICY_ID` / `DELEGATION_ADDRESS` | none | The delegation contract (policy ID = script hash; the address must be its enterprise address). Without it, delegation tokens are refused. Mainnet: `bdc16990b844a8860f28c51bb0e6a469c84bebcd57db699ce204785a` / `addr1wx7uz6vshpz23ps09rz3hv8x535usjlte4tak6vuugz8sks9wdc5c`. |
-| `STATUS_LIST_REFRESH_SECONDS` | `60` | How long built status lists and the status-list index are used (1 to 3600). It is also the `ttl` of the lists. |
+| `STATUS_LIST_REFRESH_SECONDS` | `60` | How old built status lists and the status-list index are before a request builds them again (1 to 2700). It is also the `ttl` of the lists. |
+| `STATUS_LIST_BACKGROUND_REFRESH_SECONDS` | `600` | How old built status lists are before the timer builds them again, with no request (60 to 2700, and not below `STATUS_LIST_REFRESH_SECONDS`). The gateway refuses a value that breaks the timing rule: see "Status list timing". |
 
 The testnet uses the same network magic as mainnet. So the resolver compares all four genesis values
 with the values that Koios reports (`/genesis`). If one differs, every resolution is
@@ -134,13 +135,17 @@ and the status lists are public and cacheable.
 | `GET /agents/{id}/credential` | | `application/vc+jwt`: a VC 2.0 credential of the gateway's DID with the subject DID, `created`, `origin` and, for a subagent, `parent`; two `BitstringStatusListEntry` items. 409 when the agent is not Active, 410 when deactivated. |
 
 Index i of `listRecords()` is in list n = floor(i / 131,072) at position i mod 131,072. The first
-build starts with the services. Lists older than `STATUS_LIST_REFRESH_SECONDS` are built again in
-the background; until the build ends, requests get the previous lists, which stay valid for one hour
-(`exp`, `validUntil`). At most one build runs at a time, and at most one starts in each refresh
-interval, also after a failed build: until then, a request without valid lists is 503 at once.
-Without valid lists, a request waits up to 10 s for the running build, then it is 503. A build is
-one pass over the records (see "Chain data") and reads only the effective status of each record
-(`currentStatus`, no legacy key search). A status other than Active
+build starts with the services. After that, a build starts in two cases: a request finds lists that
+are older than `STATUS_LIST_REFRESH_SECONDS`, or the timer finds lists that are older than
+`STATUS_LIST_BACKGROUND_REFRESH_SECONDS`. The timer checks the lists every 10 s, so the lists are
+built again also when no request comes (see "Status list timing"). Until a build ends, requests get
+the previous lists, which stay valid for one hour (`exp`, `validUntil`). At most one build runs at a
+time, and at most one starts in each refresh interval, also after a failed build. A failed build
+keeps the previous lists, and the timer goes on. Without valid lists, a request waits up to 10 s for
+the running build, then it is 503. After a failed build, a request without valid lists is 503 at
+once, until the next build starts. A build is one pass over the records (see "Chain data") and
+reads only the effective status of each record (`currentStatus`, no legacy key search). A status
+other than Active
 that the gateway sees (at introspection, or in the status watcher every 30 s) revokes every token of
 that agent issued up to then. A token revoked on its own (`/revoke`, or a delegation that no longer
 passes) shows only in introspection. Replay stores, nonces and issued tokens are in memory: a restart
@@ -160,6 +165,42 @@ list covers nothing. Introspection checks the chain again.
 it is independent (lineage Root), its effective status without options is Active, and the last
 detection of its current endpoint succeeded. The catalogs read the records of the last background
 scan; the per-agent renderings read the record at the current tip.
+
+### Status list timing
+
+A signed list is valid for 3600 s after the end of its build. A reader always gets the last lists,
+also while a new build runs. So a reader waits for a build only when no list is valid: after a
+start, until the first build ends, or after builds that fail for longer than the lists stay valid.
+
+The timer keeps the lists valid when nobody asks for them. It checks the lists every 10 s and
+starts a build when they are as old as `STATUS_LIST_BACKGROUND_REFRESH_SECONDS`. A request that
+finds lists older than `STATUS_LIST_REFRESH_SECONDS` starts a build in the same way, so lists that
+readers use stay younger than the background interval. A failed build keeps the last lists. The
+timer tries again when one refresh interval has passed since the failed build started.
+
+The rule: the interval, the delay of the check and the time of a build must fit in the validity of
+a list.
+
+    background interval + 10 s + time of the build <= 3600 s
+
+The gateway allows 900 s for the check and the build together. So each interval is at most 2700 s,
+and the gateway refuses a longer one when it starts. The message names the setting. The default of
+600 s leaves time for a build that is much longer than 900 s, and for several failed builds in a
+row. A longer interval means fewer Koios calls, because each build is one pass over every record
+(see "Chain data").
+
+Each build writes two lines to the error output. The word in brackets tells what started the build:
+`start` (the first build of the services), `timer` or `request`. The first line below is written
+once, when the services start. The `not rebuilt` line says that a build failed and gives the reason;
+the last lists stay. The last line is a warning: the build was so long that a list can expire before
+the next build ends. Use a shorter `STATUS_LIST_BACKGROUND_REFRESH_SECONDS` then. The lines hold no
+list content and no identifier.
+
+    identity-gateway: status lists: the timer builds them again when they are older than <seconds> s; a list is valid for <seconds> s
+    identity-gateway: status lists: build started (timer): the lists are <seconds> s old
+    identity-gateway: status lists: build ended after <seconds> s: <count> records
+    identity-gateway: status lists not rebuilt after <seconds> s: <reason>
+    identity-gateway: status lists: the build took <seconds> s, and the interval is <seconds> s. A list is valid for <seconds> s, so a list can expire before the next build ends. Use a shorter STATUS_LIST_BACKGROUND_REFRESH_SECONDS.
 
 ## Background jobs (Part 1 Section 9, Part 2 Sections 8.5 and 8.6)
 
@@ -238,7 +279,8 @@ output, so a pass reads a record again only when the holders of its tokens chang
 transaction has fewer than 30 confirmations, or when no output holds its tokens. A read that started
 before a pass read its tip serves that pass only when the holders vouch for it. `main.ts` gives the
 scan and the M4 services one resolver, so they share these reads; the request path has its own
-resolver and cache.
+resolver and cache. The timer of the status lists starts one pass in each background interval when
+nobody asks for the lists, so a longer `STATUS_LIST_BACKGROUND_REFRESH_SECONDS` means fewer passes.
 
 Measured on mainnet (826 records, 2026-11-03). Before: the start scan made 4,110 Koios calls (one
 tip, two asset histories, one transaction read and one block read for each record) in about 10 s,
@@ -277,7 +319,8 @@ of `contracts/identity-marketplace/fixtures/`.
 |---|---|
 | Every request is 500 `INTERNAL_ERROR` | The log line names the failed read. Koios or Ogmios is down or slow, or the genesis values differ from the configuration (wrong `KOIOS_URL`, or testnet). |
 | The log shows "Koios … answered HTTP 429" | Koios refused the gateway or another client of the same Koios: the gateway pauses all Koios calls (10 s, then 20, 40 and 60 s) and makes the refused calls again. Requests in a pause longer than 15 s are 500. If it happens without other clients, lower `KOIOS_RATE_PER_SECOND`. |
-| Status lists are 503 after a start | The first build reads every record once (minutes at 10 Koios calls per second). Requests are 503 until it ends; then they are 200. |
+| Status lists are 503 after a start | The first build reads every record once (minutes at 10 Koios calls per second). Requests are 503 until it ends; then they are 200. The timer keeps the lists valid from then on. |
+| Status lists are 503 although the gateway runs for a long time | No list is valid: the builds fail, or a build is longer than the lists stay valid. Look for `status lists not rebuilt` and `the build took` in the log (see "Status list timing"). A failed build is tried again one refresh interval after it started. For a build that is too long for the interval, set a shorter `STATUS_LIST_BACKGROUND_REFRESH_SECONDS`. If a build takes longer than 3600 s, find why Koios is slow. |
 | Legacy DIDs have no keys and `controllerKeyNotFound` | No vkey witness of the record's own token transactions has the owner hash (Part 1 Section 8.1). The key appears after the owner key signs a transaction of the record. |
 | 500 only for legacy DIDs | Ogmios is not reachable from the container. Check `OGMIOS_URL`. |
 | `NOT_FOUND` for a new record | A version shows after 30 confirmations. Wait, or check the mint with Koios. |
