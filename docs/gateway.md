@@ -644,8 +644,9 @@ Raw API keys are returned once. Withdrawal is the custodial exit path for keys.
 
 `POST /account/withdraw` checks its two fields before it reads the wallet:
 
-- `to_address` must be a bech32 Cardano payment address with the prefix `addr` or `addr_test`, a valid checksum, and at most
-  200 characters. Any other text gets `400 invalid_address`.
+- `to_address` must be a bech32 Cardano payment address of the network of the gateway, with a valid checksum and at most 200
+  characters. The prefix is `addr` on the main network (`NETWORK_ID=1`) and `addr_test` on the test network (`NETWORK_ID=0`). Any
+  other text, and an address of the other network, gets `400 invalid_address`.
 - `amount_lovelace` is optional. It must be a positive integer, as a number or as a text of at most 64 characters. Any other value
   gets `400 invalid_amount`.
 

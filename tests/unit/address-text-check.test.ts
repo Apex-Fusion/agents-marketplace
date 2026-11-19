@@ -257,6 +257,7 @@ describe("isAddressRefusal", () => {
     ["the empty text", () => checkedAddressText("", "an address")],
     ["a long text", () => checkedAddressText("a".repeat(2000), "an address")],
     ["a text that is no payment address", () => checkedShelleyAddress("addr1qqqqqqqq", "an address")],
+    ["an address of the other network", () => checkedShelleyAddress(addressesOfEachKind(0)[0]![1], "an address", 1)],
   ])("is true for the refusal of %s", (_name, run) => {
     expect(isAddressRefusal(refusal(run))).toBe(true);
   });
@@ -270,6 +271,44 @@ describe("isAddressRefusal", () => {
     ["nothing", undefined],
   ])("is false for %s", (_name, value) => {
     expect(isAddressRefusal(value)).toBe(false);
+  });
+});
+
+describe("checkedShelleyAddress with the network of the caller", () => {
+  it.each([
+    [1 as const, 0 as const, "main"],
+    [0 as const, 1 as const, "test"],
+  ])("network %i: passes each kind of address of its network, and refuses each kind of address of network %i", (own, other, ownName) => {
+    for (const [name, address] of addressesOfEachKind(own)) expect(checkedShelleyAddress(address, "an address", own), name).toBe(address);
+    for (const [name, address] of addressesOfEachKind(other)) {
+      const error = refusal(() => checkedShelleyAddress(address, "the destination", own));
+      expect(error.reason, name).toBe("address_wrong_network");
+      expect(error.message).toBe(`the destination is not an address of the ${ownName} network`);
+      expect(error.message).not.toContain(address);
+    }
+  });
+
+  it.each([
+    ["the empty text", "", "address_empty"],
+    ["a text of 2,000 characters", `addr1${"q".repeat(1995)}`, "address_too_long"],
+    ["a text that is no payment address", "addr1mykd6t", "address_invalid"],
+    ["a text with a wrong checksum", `${addressesOfEachKind(1)[7]![1].slice(0, -1)}q`, "address_invalid"],
+  ])("refuses %s with its own reason, whatever the network", (_name, text, reason) => {
+    for (const networkId of [0 as const, 1 as const, undefined]) {
+      expect(refusal(() => checkedShelleyAddress(text, "an address", networkId)).reason).toBe(reason);
+    }
+  });
+
+  it("reads the network from the prefix, whatever the case of the letters", () => {
+    const test = addressesOfEachKind(0)[7]![1];
+    expect(checkedShelleyAddress(test.toUpperCase(), "an address", 0)).toBe(test.toUpperCase());
+    expect(refusal(() => checkedShelleyAddress(test.toUpperCase(), "an address", 1)).reason).toBe("address_wrong_network");
+  });
+
+  it("checks no network when none is given", () => {
+    for (const networkId of [0 as const, 1 as const]) {
+      for (const [name, address] of addressesOfEachKind(networkId)) expect(checkedShelleyAddress(address, "an address"), name).toBe(address);
+    }
   });
 });
 

@@ -9,7 +9,7 @@
 
 import { randomBytes, randomUUID, timingSafeEqual } from "crypto";
 import type { Request, Response } from "express";
-import { buildWithdrawTx, checkedShelleyAddress } from "@marketplace/shared/tx/server";
+import { buildWithdrawTx, checkedShelleyAddress, isAddressRefusal } from "@marketplace/shared/tx/server";
 import type { GatewayDeps } from "../deps.js";
 import { genPrivKeyHex, deriveWalletKey } from "../wallet.js";
 import { seal } from "../crypto/seal.js";
@@ -212,11 +212,16 @@ export function makeWithdrawHandler(deps: GatewayDeps) {
     if (typeof toAddress !== "string" || !TO_ADDRESS_PATTERN.test(toAddress)) {
       throw badRequest("invalid_address", "`to_address` must be a bech32 Cardano address");
     }
-    // A text that passes the pattern can still be no address (a wrong checksum, too few bytes). The shared check reads it with the
-    // codec of the shared package, before the wallet is read and before the key mutex is taken.
+    // A text that passes the pattern can still be no address (a wrong checksum, too few bytes), or an address of the other network
+    // (the wallet of the key is on the network of the gateway). The shared check reads it with the codec of the shared package, before
+    // the wallet is read and before the key mutex is taken.
+    const networkName = deps.config.networkId === 1 ? "main" : "test";
     try {
-      checkedShelleyAddress(toAddress, "`to_address`");
-    } catch {
+      checkedShelleyAddress(toAddress, "`to_address`", deps.config.networkId);
+    } catch (error) {
+      if (isAddressRefusal(error) && error.reason === "address_wrong_network") {
+        throw badRequest("invalid_address", `\`to_address\` must be an address of the ${networkName} network`);
+      }
       throw badRequest("invalid_address", "`to_address` must be a valid Cardano payment address");
     }
 

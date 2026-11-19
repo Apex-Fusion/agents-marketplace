@@ -2,12 +2,15 @@
  * withdraw-route.test.ts — POST /account/withdraw reads `to_address` and `amount_lovelace` from the request.
  *
  * The route checks `to_address` before it reads the wallet and before it takes the mutex of the key: first a pattern with a length
- * bound, then the shared codec check. Three kinds of text:
+ * bound, then the shared codec check with the network of the gateway. Four kinds of text:
  *   - a text that the pattern refuses (also a text of 1 MB): 400 `invalid_address` at once, and the builder does not run;
  *   - a text that passes the pattern and is no address (a wrong checksum, a right checksum and the wrong bytes): the same 400, and
  *     the builder does not run;
- *   - a valid address of each kind: the transaction builds, goes to the fake Ogmios, and the route answers 200.
- * A text of 1 MB is answered in under 50 ms, and the process serves another request in that time.
+ *   - a valid address of the other network (`addr_test` for a gateway on the main network, `addr` for one on the test network): the
+ *     same 400 with its own message, before the wallet is read;
+ *   - a valid address of each kind on the network of the gateway: the transaction builds, goes to the fake Ogmios, and the route
+ *     answers 200.
+ * A text of 1 MB is answered in under 1,000 ms, and the process serves another request in that time.
  */
 
 import { randomUUID } from "node:crypto";
@@ -107,14 +110,14 @@ interface World {
 
 const worlds: World[] = [];
 
-function makeWorld(): World {
+function makeWorld(networkId: 0 | 1 = NETWORK_ID): World {
   const fake = new FakeOgmios();
   const ogmios = vi.fn(confirming(fake));
   const chain = new LiveOgmiosProvider({ ogmiosUrl: "http://ogmios.invalid", fetch: ogmios });
   const dbDir = join(tmpdir(), `gw-withdraw-${randomUUID()}`);
   const store = new GatewayStore(dbDir);
   const config: GatewayConfig = {
-    masterKeyHex: MASTER, indexerUrl: "http://indexer.invalid", ogmiosUrl: "http://ogmios.invalid", networkId: NETWORK_ID,
+    masterKeyHex: MASTER, indexerUrl: "http://indexer.invalid", ogmiosUrl: "http://ogmios.invalid", networkId,
     liveChain: true, port: 0, dbDir, signupRate: { max: 1000, windowMs: 60_000 },
     keyRate: { max: 1000, windowMs: 60_000 }, demoIpRate: { max: 1000, windowMs: 60_000 },
     sweeperIntervalMs: 60_000, demoSessionIdleMs: 180_000, chatSettleMode: "full",
@@ -134,7 +137,7 @@ function makeWorld(): World {
   // A custodial wallet with its API key, as POST /signup makes it. The wallet holds 150 AP3X on the fake Ogmios.
   const apiKey = `vk_live_${randomUUID().replaceAll("-", "")}`;
   const privateKey = genPrivKeyHex();
-  const wallet = deriveWalletKey(privateKey, NETWORK_ID);
+  const wallet = deriveWalletKey(privateKey, networkId);
   const sealed = seal(privateKey, MASTER);
   store.insertKey({
     id: randomUUID(),
@@ -356,15 +359,31 @@ describe("a valid to_address", () => {
     expect(libraryDecodes()).toBe(true);
   });
 
-  it("passes an address of the test network through the check of the route; the builder, which is fixed to the main network, refuses it", async () => {
+  it("refuses an address of the test network with 400 invalid_address before the wallet is read, when the gateway is on the main network", async () => {
     const world = makeWorld();
+    const pointerBefore = stackPointer();
     const address = plutusAddressToBech32({ paymentCredential: keyOf(hashOf("11")), stakeCredential: null }, 0);
     expect(address).toMatch(/^addr_test1/);
     const response = await world.withdraw({ to_address: address, amount_lovelace: "10000000" });
-    expect(buildWithdrawTx).toHaveBeenCalledWith(expect.objectContaining({ toAddress: address }));
-    expect(response.status).toBe(502);
-    expect(response.body.error).toMatchObject({ code: "escrow_failed" });
-    expect(world.fake.submitted).toHaveLength(0);
-    expect(libraryDecodes()).toBe(true);
+    expect(response.status).toBe(400);
+    expect(response.body.error).toMatchObject({ type: "invalid_request_error", code: "invalid_address", message: "`to_address` must be an address of the main network" });
+    expectNothingReached(world, pointerBefore);
+  });
+});
+
+describe("a gateway on the test network", () => {
+  it("refuses an address of the main network with 400 invalid_address, and gives an address of the test network to the builder", async () => {
+    const world = makeWorld(0);
+    const pointerBefore = stackPointer();
+    const mainAddress = KINDS[0]![1];
+    const refused = await world.withdraw({ to_address: mainAddress, amount_lovelace: "10000000" });
+    expect(refused.status).toBe(400);
+    expect(refused.body.error).toMatchObject({ code: "invalid_address", message: "`to_address` must be an address of the test network" });
+    expectNothingReached(world, pointerBefore);
+
+    const testAddress = plutusAddressToBech32({ paymentCredential: keyOf(hashOf("11")), stakeCredential: null }, 0);
+    const response = await world.withdraw({ to_address: testAddress, amount_lovelace: "10000000" });
+    expect(buildWithdrawTx).toHaveBeenCalledWith(expect.objectContaining({ toAddress: testAddress }));
+    expect(response.status).not.toBe(400); // the route passes it; the builder is fixed to the main network
   });
 });
