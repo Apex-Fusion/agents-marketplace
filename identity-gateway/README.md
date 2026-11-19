@@ -174,9 +174,10 @@ start, until the first build ends, or after builds that fail for longer than the
 
 The timer keeps the lists valid when nobody asks for them. It checks the lists every 10 s and
 starts a build when they are as old as `STATUS_LIST_BACKGROUND_REFRESH_SECONDS`. A request that
-finds lists older than `STATUS_LIST_REFRESH_SECONDS` starts a build in the same way, so lists that
-readers use stay younger than the background interval. A failed build keeps the last lists. The
-timer tries again when one refresh interval has passed since the failed build started.
+finds lists older than `STATUS_LIST_REFRESH_SECONDS` starts a build in the same way. So while
+readers ask for the lists, a build starts as soon as the lists are as old as the refresh interval.
+The timer is the only trigger when nobody asks. A failed build keeps the last lists. The timer tries
+again when one refresh interval has passed since the failed build started.
 
 The rule: the interval, the delay of the check and the time of a build must fit in the validity of
 a list.
