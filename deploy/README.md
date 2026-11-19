@@ -408,7 +408,9 @@ publisher load the Cardano decoder library. Each of these processes checks the l
 When the library cannot decode the value, the process writes one line:
 `The decoder library cannot decode a known value. The process stops so that its supervisor starts it again.`
 It then takes the shutdown path that a SIGTERM takes, with its drain logic, and ends with exit code 1. Docker starts it again
-(`restart: unless-stopped`). A Paper2Agent supplier child that ends in this way is started again by the publisher.
+(`restart: unless-stopped`). The publisher starts a Paper2Agent supplier child again when the child exits by itself (for example
+after this stop), at most once in 30 s, without a request. A child that the publisher stops itself (a switch of the advert, a stop
+of the publisher) is not started again.
 
 No Docker stop stands behind a shutdown that the check starts. The check starts it only when the library cannot decode, so the work
 that still runs and needs the library cannot end well, and a long drain only delays the restart. So the gateway, the buyer, the

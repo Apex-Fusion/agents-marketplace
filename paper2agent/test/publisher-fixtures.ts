@@ -20,7 +20,7 @@ import { encodeTxBody, sha256Hex } from "../../packages/shared/src/tx/internal/t
 import { deriveSupplierKey } from "../../supplier/src/paper2agent/identity.js";
 import { PublisherTarget, type PaperPublisherConfig } from "../src/publisher-config.js";
 import { PaperPublisherService, createPaperPublisherApp, type PaperPublisherDeps, type RuntimeImages,
-  type SupplierLauncher } from "../src/publisher.js";
+  type SupplierLauncher, type SupplierProcess } from "../src/publisher.js";
 import { IDENTITY } from "../../tests/fixtures/supplier-side/identity.js";
 
 export const TOKEN = "publisher-token-".repeat(3);
@@ -126,20 +126,25 @@ export interface Launch {
   calls: Array<{ headers: Record<string, string | string[] | undefined>; body: string }>;
   /** While set, the child holds each unpaid call until it resolves. */
   callGate?: Promise<void>;
-  /** The child process exits on its own, as after an OOM kill. */
-  crash(): void;
+  /** While set, the child answers its health check only after it resolves. */
+  readyGate?: Promise<void>;
+  /** The child process exits on its own with this exit code, as after an OOM kill. */
+  exit(code?: number): void;
 }
 
+/** Runs when the launcher starts a child, before the publisher uses it. A test makes this child exit or report another advert. */
+export type LaunchHook = (launch: Launch, index: number) => void;
+
 /** A local stand-in for the supplier child that answers from its trusted launch environment. */
-export function supplierLauncher(launches: Launch[], price: string): SupplierLauncher {
+export function supplierLauncher(launches: Launch[], price: string, onLaunch?: LaunchHook): SupplierLauncher {
   return ({ targetId, port, env }) => {
-    const launch: Launch = { targetId, env, signals: [], statusPolls: 0, admissions: 0, activeSessions: 0, calls: [], crash: () => undefined };
+    const launch: Launch = { targetId, env, signals: [], statusPolls: 0, admissions: 0, activeSessions: 0, calls: [], exit: () => undefined };
     launches.push(launch);
     const key = deriveSupplierKey(env.SUPPLIER_PRIV_KEY_HEX, env.NETWORK_ID === "1" ? 1 : 0);
     const manifest = JSON.parse(readFileSync(env.PAPER2AGENT_MANIFEST, "utf8")) as Paper2AgentManifest;
     const server = createServer((req, res) => {
       res.setHeader("content-type", "application/json");
-      if (req.url === "/healthz") res.end(JSON.stringify({ ok: true }));
+      if (req.url === "/healthz") void (launch.readyGate ?? Promise.resolve()).then(() => { res.end(JSON.stringify({ ok: true })); });
       else if (req.url === "/capability") {
         res.end(JSON.stringify({ capability_id: PAPER2AGENT_CAPABILITY_ID, model: paper2AgentModel(manifest), advert_ref: env.ADVERT_REF,
           supplier_pkh: key.pubKeyHash, pub_key_hex: key.pubKeyHex, price_lovelace: price,
@@ -169,15 +174,15 @@ export function supplierLauncher(launches: Launch[], price: string): SupplierLau
     servers.push(server);
     server.listen(port, "127.0.0.1");
     let exitCode: number | null = null;
-    let exit: () => void = () => undefined;
-    const exited = new Promise<void>((resolve) => { exit = resolve; });
-    launch.crash = () => {
+    let finish: () => void = () => undefined;
+    const exited = new Promise<void>((resolve) => { finish = resolve; });
+    launch.exit = (code = 1) => {
       server.close();
       server.closeAllConnections();
-      exitCode = 1;
-      exit();
+      exitCode = code;
+      finish();
     };
-    return {
+    const supplier: SupplierProcess = {
       get exitCode() { return exitCode; },
       exited,
       kill(signal) {
@@ -185,17 +190,20 @@ export function supplierLauncher(launches: Launch[], price: string): SupplierLau
         server.close();
         server.closeAllConnections();
         exitCode = 0;
-        exit();
+        finish();
       },
       output: () => "",
     };
+    onLaunch?.(launch, launches.length - 1);
+    return supplier;
   };
 }
 
 export async function publisher(options: { dataDir?: string; targets?: PublisherTarget[]; chain?: ChainProvider; images?: RuntimeImages;
   postAdvert?: PaperPublisherDeps["postAdvert"]; retireAdvert?: PaperPublisherDeps["retireAdvert"]; price?: string;
   toolCallToken?: string; identityController?: PaperPublisherConfig["identityController"]; registrar?: PaperPublisherDeps["registrar"];
-  identity?: PaperPublisherDeps["identity"] } = {}) {
+  identity?: PaperPublisherDeps["identity"]; now?: PaperPublisherDeps["now"]; schedule?: PaperPublisherDeps["schedule"];
+  log?: PaperPublisherDeps["log"]; onLaunch?: LaunchHook } = {}) {
   const dataDir = options.dataDir ?? temporary();
   const chain = options.chain ?? new MockChainProvider();
   const images = options.images ?? fakeImages();
@@ -206,8 +214,9 @@ export async function publisher(options: { dataDir?: string; targets?: Publisher
     supplierEntry: join(process.cwd(), "supplier/src/index.ts"), targets: options.targets ?? [target("slot-a", KEY_A)],
     identityController: options.identityController ?? null };
   const service = await PaperPublisherService.open(publisherConfig, {
-    chain: () => chain, images, launchSupplier: supplierLauncher(launches, options.price ?? "2000000"), postAdvert: options.postAdvert,
-    retireAdvert: options.retireAdvert, sleep: tick, log: () => undefined, registrar: options.registrar, identity: options.identity,
+    chain: () => chain, images, launchSupplier: supplierLauncher(launches, options.price ?? "2000000", options.onLaunch), postAdvert: options.postAdvert,
+    retireAdvert: options.retireAdvert, sleep: tick, log: options.log ?? (() => undefined), registrar: options.registrar, identity: options.identity,
+    now: options.now, schedule: options.schedule,
   });
   services.push(service);
   return { service, app: createPaperPublisherApp(service), chain, images, launches, dataDir };
@@ -247,4 +256,41 @@ export function fundWallet(chain: MockChainProvider, key: string, lovelace: bigi
   const ref = { txHash: "dd".repeat(32), index: 0 };
   chain.seed({ ref, address: deriveSupplierKey(key, 0).address, lovelace, assets: {}, datumHex: null, scriptRef: null });
   return ref;
+}
+
+/** One timer of `manualTime`: its delay, and whether it ran or a cancel stopped it. */
+export interface ManualTimer {
+  delay: number;
+  cancelled: boolean;
+  fired: boolean;
+}
+
+/**
+ * A clock and a timer set that move only when a test moves them. The restart back-off needs no real wait.
+ * Pass `now` and `schedule` to the publisher.
+ */
+export function manualTime(start = Date.now()) {
+  let now = start;
+  const set: Array<ManualTimer & { at: number; run: () => void }> = [];
+  return {
+    now: () => now,
+    schedule: (run: () => void, delay: number) => {
+      const timer = { delay, cancelled: false, fired: false, at: now + delay, run };
+      set.push(timer);
+      return () => { timer.cancelled = true; };
+    },
+    advance(ms: number): void { now += ms; },
+    /** Every timer that the publisher set, in order. */
+    timers: (): ManualTimer[] => set.map(({ delay, cancelled, fired }) => ({ delay, cancelled, fired })),
+    /** The delays of the timers that still wait. */
+    waiting: (): number[] => set.filter((timer) => !timer.cancelled && !timer.fired).map((timer) => timer.delay),
+    /** Runs each waiting timer that is due. */
+    runDue(): void {
+      for (const timer of set) {
+        if (timer.cancelled || timer.fired || timer.at > now) continue;
+        timer.fired = true;
+        timer.run();
+      }
+    },
+  };
 }

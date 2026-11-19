@@ -21,6 +21,9 @@
  * until the switch (POST /targets/<id>/switch) restarts only that slot's child
  * with the identity advert. The legacy advert is then retired explicitly
  * (POST /targets/<id>/retire-legacy), only while the identity advert is live.
+ *
+ * Supervision: a supplier child that ends by itself starts again at once, then at most once in RESTART_INTERVAL_MS.
+ * A stop by the publisher (a switch, close) starts nothing.
  */
 import { spawn } from "node:child_process";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
@@ -497,6 +500,8 @@ interface SupervisedSupplier {
   admissions: number;
   /** A switch to another advert waits for active work; new admissions are refused meanwhile. */
   draining: boolean;
+  /** The publisher stops this child (stopChild). Its exit starts no restart. */
+  stopping: boolean;
 }
 
 export interface ChildReply {
@@ -524,6 +529,8 @@ export interface PaperPublisherDeps {
   now?: () => number;
   /** Poll interval wait for supplier readiness and drain. */
   sleep?: (ms: number) => Promise<void>;
+  /** Runs a callback once after ms and returns the function that cancels it. Default: an unref'd timer. The restart back-off uses it. */
+  schedule?: (callback: () => void, ms: number) => () => void;
   log?: (line: string) => void;
   /** The Register builder of a slot. Default: the shared builder over the slot's Ogmios and its IDENTITY_REF_UTXO. */
   registrar?: (target: PublisherTarget) => RecordRegistrar;
@@ -539,6 +546,7 @@ export class PaperPublisherService {
   private readonly retireAdvert: (params: RetireAdvertFlowParams) => Promise<RetireAdvertFlowResult>;
   private readonly now: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
+  private readonly schedule: (callback: () => void, ms: number) => () => void;
   private readonly log: (line: string) => void;
   private readonly chains = new Map<string, ChainProvider>();
   private readonly children = new Map<string, SupervisedSupplier>();
@@ -547,6 +555,8 @@ export class PaperPublisherService {
   private readonly activations = new Map<string, Promise<void>>();
   private readonly preparations = new Set<AbortController>();
   private readonly restartAttempts = new Map<string, number>();
+  /** The cancel function of the pending restart of a slot: one at most for each slot. */
+  private readonly restartTimers = new Map<string, () => void>();
   private readonly registrarFor: (target: PublisherTarget) => RecordRegistrar;
   private readonly identityFor: (target: PublisherTarget) => SupplierIdentity;
   private readonly identities = new Map<string, SupplierIdentity>();
@@ -565,6 +575,11 @@ export class PaperPublisherService {
     this.retireAdvert = deps.retireAdvert ?? runRetireAdvert;
     this.now = deps.now ?? Date.now;
     this.sleep = deps.sleep ?? ((ms) => new Promise<void>((resolve) => { setTimeout(resolve, ms); }));
+    this.schedule = deps.schedule ?? ((callback, ms) => {
+      const timer = setTimeout(callback, ms);
+      timer.unref();
+      return () => { clearTimeout(timer); };
+    });
     this.toolCallDigest = config.toolCallToken ? createHash("sha256").update(config.toolCallToken).digest() : null;
     this.registrarFor = deps.registrar ?? ((target) => {
       const env = target.supplierEnv();
@@ -1047,6 +1062,8 @@ export class PaperPublisherService {
 
   private async shutdown(): Promise<void> {
     this.closing = true;
+    for (const cancel of this.restartTimers.values()) cancel();
+    this.restartTimers.clear();
     for (const controller of this.preparations) controller.abort(new Error("The publisher is stopping"));
     await this.idle();
     const deadline = this.now() + DRAIN_TIMEOUT_MS;
@@ -1667,12 +1684,55 @@ export class PaperPublisherService {
     await this.activate(id);
   }
 
+  /**
+   * Starts the slot's supplier again, at most once in RESTART_INTERVAL_MS. A call inside the interval leaves one
+   * attempt at its end, so a child that ended does not stay down. A slot with a ready child, or with a start that
+   * runs, needs no start.
+   */
   private restartSoon(targetId: string): void {
-    const holder = this.store.slotHolder(targetId);
-    const last = this.restartAttempts.get(targetId) ?? -Infinity;
-    if (holder?.phase !== "published" || this.closing || this.now() - last < RESTART_INTERVAL_MS) return;
+    if (this.closing) return;
+    let holder: PublicationRecord | undefined;
+    try {
+      holder = this.store.slotHolder(targetId);
+    } catch (error) {
+      // A restart runs in the background (an exit, a timer). No caller can take an error.
+      this.log(`supplier for target ${targetId} does not restart: ${message(error)}`);
+      return;
+    }
+    const child = this.children.get(targetId);
+    if (holder?.phase !== "published" || this.activations.has(holder.id) ||
+        (child?.ready === true && child.process.exitCode === null)) return;
+    const wait = (this.restartAttempts.get(targetId) ?? -Infinity) + RESTART_INTERVAL_MS - this.now();
+    if (wait > 0) {
+      this.restartLater(targetId, wait);
+      return;
+    }
     this.restartAttempts.set(targetId, this.now());
     void this.activate(holder.id);
+  }
+
+  /** The one pending attempt of a slot, at the end of the back-off. close() cancels it. */
+  private restartLater(targetId: string, delayMs: number): void {
+    if (this.restartTimers.has(targetId)) return;
+    this.log(`supplier for target ${targetId} restarts in ${Math.ceil(delayMs / 1000)} s`);
+    this.restartTimers.set(targetId, this.schedule(() => {
+      this.restartTimers.delete(targetId);
+      this.restartSoon(targetId);
+    }, delayMs));
+  }
+
+  /**
+   * A child that ends by itself starts again (restartSoon). A child that the publisher stops (stopChild), and
+   * any child while the publisher closes, start nothing.
+   */
+  private async childExited(targetId: string, child: SupervisedSupplier): Promise<void> {
+    child.ready = false;
+    if (this.closing) return;
+    this.log(`supplier for target ${targetId} exited with code ${child.process.exitCode}`);
+    if (child.stopping) return;
+    // A start that runs now replaces this child or fails. Wait for it, then check the slot.
+    await this.activations.get(child.publicationId);
+    this.restartSoon(targetId);
   }
 
   private async startSupplier(id: string): Promise<void> {
@@ -1751,13 +1811,10 @@ export class PaperPublisherService {
     };
     const child: SupervisedSupplier = {
       publicationId: record.id, advertRef: advert.advert_ref, port, process: this.launchSupplier({ targetId: target.id, port, env }),
-      ready: false, admissions: 0, draining: false,
+      ready: false, admissions: 0, draining: false, stopping: false,
     };
     this.children.set(target.id, child);
-    void child.process.exited.then(() => {
-      child.ready = false;
-      if (!this.closing) this.log(`supplier for target ${target.id} exited with code ${child.process.exitCode}`);
-    });
+    void child.process.exited.then(() => this.childExited(target.id, child));
     try {
       await this.awaitReady(child, record, target, advert);
       child.ready = true;
@@ -1808,7 +1865,9 @@ export class PaperPublisherService {
     }
   }
 
+  /** The publisher's own stop. The flag comes first, so the exit of this child starts no restart. */
   private async stopChild(child: SupervisedSupplier): Promise<void> {
+    child.stopping = true;
     child.ready = false;
     if (child.process.exitCode === null) {
       child.process.kill("SIGTERM");

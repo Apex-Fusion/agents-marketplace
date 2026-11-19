@@ -17,7 +17,7 @@ import { PaperPublisherStore, type SignedAdvert } from "../src/publisher-store.j
 import { AGENT_ID, CONTROLLER, IDENTITY, recordUtxo, supplierAgentRecord, testIdentity } from "../../tests/fixtures/supplier-side/identity.js";
 import {
   AUTH, BASE_IMAGE, JOB_ID, KEY_A, KEY_B, PUBLIC_URL, RUNTIME_IMAGE, TOKEN, TOOL_TOKEN, cleanup, fakeImages, fundWallet, preparation,
-  publisher, reviewedPackage, target, temporary, terms, tick, until, walletFundedAdvert,
+  publisher, reviewedPackage, target, temporary, terms, tick, until, walletFundedAdvert, type LaunchHook,
 } from "./publisher-fixtures.js";
 
 afterEach(cleanup);
@@ -545,7 +545,7 @@ describe("identity re-advertisement of a published slot (Part 2 §9.6)", () => {
    * builds the slot's record registration first (a slot without AGENT_ID).
    */
   async function republished(options: { chain?: MockChainProvider; slot?: PublisherTarget; record?: boolean; register?: boolean;
-    secondSlot?: boolean; postAdvert?: PaperPublisherDeps["postAdvert"] } = {}) {
+    secondSlot?: boolean; postAdvert?: PaperPublisherDeps["postAdvert"]; onLaunch?: LaunchHook } = {}) {
     const chain = options.chain ?? new MockChainProvider();
     const dataDir = temporary();
     const legacySlots = [target("slot-a", KEY_A), ...(options.secondSlot ? [target("slot-b", KEY_B)] : [])];
@@ -563,7 +563,7 @@ describe("identity re-advertisement of a published slot (Part 2 §9.6)", () => {
     await legacy.service.close();
     const settings = { dataDir, chain, images: legacy.images, targets: [options.slot ?? identitySlot(AGENT_ID), ...legacySlots.slice(1)],
       identity: () => testIdentity(chain), identityController: controller, registrar };
-    const fixture = await publisher({ ...settings, postAdvert: options.postAdvert });
+    const fixture = await publisher({ ...settings, postAdvert: options.postAdvert, onLaunch: options.onLaunch });
     await fixture.service.idle();
     if (options.register) expect((await request(fixture.app).post("/targets/slot-a/record").set(AUTH)).body.agent_id).toBe(AGENT_ID);
     if (options.record !== false) chain.seed(recordUtxo(supplierAgentRecord(deriveSupplierKey(KEY_A, 0), [PAPER2AGENT_CAPABILITY_ID])));
@@ -717,6 +717,9 @@ describe("identity re-advertisement of a published slot (Part 2 §9.6)", () => {
       CAPABILITY_KIND: "paper2agent" });
     expect(otherChild.signals).toEqual([]);
     expect(fixture.launches.filter((launch) => launch.targetId === "slot-b")).toHaveLength(1);
+    // The stop of the legacy child starts nothing: the slot has the legacy child and the identity child only.
+    for (let turn = 0; turn < 100; turn++) await tick();
+    expect(fixture.launches.filter((launch) => launch.targetId === "slot-a")).toHaveLength(2);
     expect((await request(fixture.app).get("/tools/slot-a/capability")).body).toMatchObject({ advert_ref: identityRef, agent_id: AGENT_ID });
 
     // A repeated switch restarts nothing; a publisher restart serves the identity advert.
@@ -769,12 +772,14 @@ describe("identity re-advertisement of a published slot (Part 2 §9.6)", () => {
   });
 
   it("refuses to retire while no ready child serves the identity advert", async () => {
-    const fixture = await republished();
+    let exitAtStart = false;
+    const fixture = await republished({ onLaunch: (launch) => { if (exitAtStart) launch.exit(1); } });
     await readvert(fixture.app);
     await switchAdvert(fixture.app);
     const submit = vi.spyOn(fixture.chain, "submitTx");
-    // The identity child exits; no request has started it again yet.
-    fixture.launches.at(-1)!.crash();
+    // The identity child exits. The publisher starts it again at once, and each new child exits during startup.
+    exitAtStart = true;
+    fixture.launches.at(-1)!.exit(1);
     const refused = await retireLegacy(fixture.app);
     expect([refused.status, refused.body.error]).toEqual([409, "identity_advert_not_live"]);
     expect(refused.body.message).toMatch(/no ready supplier serves identity advert/);
