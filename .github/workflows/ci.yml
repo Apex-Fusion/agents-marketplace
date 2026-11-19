@@ -1,15 +1,22 @@
 name: CI
 
 on:
+  # Push runs only for main: deploy-mainnet.yml starts after CI on main.
+  # A branch with a pull request runs through the pull_request trigger.
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
     branches: ["**"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build-and-test:
     name: typecheck + vitest (Node 20)
     runs-on: nixos
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -42,6 +49,7 @@ jobs:
   contracts:
     name: aiken contracts + script evaluation (Node 20)
     runs-on: nixos
+    timeout-minutes: 65
     steps:
       - name: Checkout
         uses: actions/checkout@v4

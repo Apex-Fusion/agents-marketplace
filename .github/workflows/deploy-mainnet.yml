@@ -42,6 +42,7 @@ jobs:
     runs-on: nixos
     # workflow_run fires on failure too — only deploy green main.
     if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    timeout-minutes: 50
     steps:
       # Self-hosted runner: keep key material in the job's temp dir, not the
       # runner user's ~/.ssh (which persists across jobs).
