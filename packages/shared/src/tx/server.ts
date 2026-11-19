@@ -56,6 +56,9 @@ export type {
 } from "./wallet/withdrawWallet.js";
 export { buildWithdrawTx } from "./wallet/withdrawWallet.js";
 
+// ── Address text checks (before Lucid reads an address text) ────────────
+export { MAX_ADDRESS_TEXT_LENGTH, checkedAddressText, checkedShelleyAddress, isAddressRefusal } from "./internal/addressText.js";
+
 // ── Surplus Merkle-batch anchor (live-only) ────────────────────────────
 export type {
   AnchorMetadataParams,

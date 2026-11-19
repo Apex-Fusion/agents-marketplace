@@ -9,7 +9,7 @@
 
 import { randomBytes, randomUUID, timingSafeEqual } from "crypto";
 import type { Request, Response } from "express";
-import { buildWithdrawTx } from "@marketplace/shared/tx/server";
+import { buildWithdrawTx, checkedShelleyAddress } from "@marketplace/shared/tx/server";
 import type { GatewayDeps } from "../deps.js";
 import { genPrivKeyHex, deriveWalletKey } from "../wallet.js";
 import { seal } from "../crypto/seal.js";
@@ -189,6 +189,15 @@ export function makeAccountHandler(deps: GatewayDeps) {
 
 // ─── withdraw ────────────────────────────────────────────────────────────────
 
+/**
+ * A bech32 payment address: the prefix, the separator `1`, and the data and checksum characters. A mainnet or testnet address has at
+ * most 108 characters; the pattern allows 200. A text outside the pattern never reaches the codec or the builder.
+ */
+const TO_ADDRESS_PATTERN = /^addr(_test)?1[0-9a-z]{20,200}$/;
+
+/** The longest text of `amount_lovelace`. The largest amount has 20 digits; the rest is room for a sign or spaces. */
+const AMOUNT_TEXT_MAX = 64;
+
 export function makeWithdrawHandler(deps: GatewayDeps) {
   return asyncHandler(async (req: Request, res: Response) => {
     const keyRow = requireKey(req);
@@ -200,14 +209,25 @@ export function makeWithdrawHandler(deps: GatewayDeps) {
     const body = (req.body ?? {}) as Record<string, unknown>;
 
     const toAddress = body.to_address;
-    if (typeof toAddress !== "string" || !/^addr(_test)?1[0-9a-z]+$/.test(toAddress)) {
+    if (typeof toAddress !== "string" || !TO_ADDRESS_PATTERN.test(toAddress)) {
       throw badRequest("invalid_address", "`to_address` must be a bech32 Cardano address");
+    }
+    // A text that passes the pattern can still be no address (a wrong checksum, too few bytes). The shared check reads it with the
+    // codec of the shared package, before the wallet is read and before the key mutex is taken.
+    try {
+      checkedShelleyAddress(toAddress, "`to_address`");
+    } catch {
+      throw badRequest("invalid_address", "`to_address` must be a valid Cardano payment address");
     }
 
     let amountLovelace: bigint | undefined;
     if (body.amount_lovelace !== undefined && body.amount_lovelace !== null) {
+      const amountText = String(body.amount_lovelace);
+      if (amountText.length > AMOUNT_TEXT_MAX) {
+        throw badRequest("invalid_amount", "`amount_lovelace` must be an integer (string or number)");
+      }
       try {
-        amountLovelace = BigInt(String(body.amount_lovelace));
+        amountLovelace = BigInt(amountText);
       } catch {
         throw badRequest("invalid_amount", "`amount_lovelace` must be an integer (string or number)");
       }
