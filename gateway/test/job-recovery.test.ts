@@ -1273,3 +1273,67 @@ describe("log line of a failed one-shot job", () => {
     expect(errorLog).toHaveBeenCalledTimes(1);
   });
 });
+
+import { LiveOgmiosProvider } from "@marketplace/shared/chain";
+
+describe("one-shot recovery — an escrow output with a native reference script that fails the check", () => {
+  // The node lists such an output, so the read-only client lists it, and the recovery reads it as it reads any other live output. The
+  // outcome must equal the outcome for the same output with no script, and the outcome on `origin/main` (the same answers of the
+  // node, with a read-only client that has no check): "spent after the snapshot" means that the node does not list the output.
+  const nativeScript = (scripts: number): string => `${"820181".repeat(scripts)}8200581c${"11".repeat(28)}`;
+  const VARIANTS: Array<[string, unknown]> = [
+    ["no script", null],
+    ["a native script of 65 levels", { language: "native", cbor: nativeScript(32) }],
+    ["a native script of 3,001 levels", { language: "native", cbor: nativeScript(1500) }],
+  ];
+
+  /** A node that lists the given outputs. A query by reference gets the outputs that were asked for, and no more. */
+  function node(outputs: Array<{ ref: OutputReference; datum: string; script: unknown }>): typeof globalThis.fetch {
+    return (async (_url: unknown, init?: RequestInit) => {
+      const query = JSON.parse(String(init?.body)) as { params?: { outputReferences?: Array<{ transaction: { id: string }; index: number }> } };
+      const asked = query.params?.outputReferences ?? [];
+      const result = outputs
+        .filter((o) => asked.some((r) => r.transaction.id === o.ref.txHash && r.index === o.ref.index))
+        .map((o) => ({
+          transaction: { id: o.ref.txHash }, index: o.ref.index, address: "addr_test1_escrow_recovery",
+          value: { ada: { lovelace: 3_200_000 } }, datum: o.datum, datumHash: null, script: o.script,
+        }));
+      return new Response(JSON.stringify({ jsonrpc: "2.0", result }), { headers: { "content-type": "application/json" } });
+    }) as typeof globalThis.fetch;
+  }
+
+  /** A Submitted escrow with another receipt than the job expects, in a node that lists it (or not). */
+  async function recover(script: unknown, listed: boolean): Promise<{ state: string; error: string | null; usage: unknown[] }> {
+    const directory = databaseDirectory("native-script-output");
+    const store = openStore(directory);
+    try {
+      const { key, walletKey } = keyFixture(`key-script-${randomUUID()}`);
+      store.insertKey(key);
+      const txHash = randomUUID().replace(/-/g, "").repeat(2);
+      const escrowRef = `${txHash}#2`;
+      const supplierPkh = "d".repeat(56);
+      const jobId = `job-script-${randomUUID()}`;
+      insertFundedJob(store, { id: jobId, keyId: key.id, supplierPkh, escrowRef, state: "submitted", receiptHash: "2".repeat(64), advertMarker: "f" });
+      const datum = escrowDatum({
+        buyerPkh: key.wallet_pkh, supplierPkh, state: "Submitted", deliverBy: Date.now() + 30_000, receiptHash: "3".repeat(64), marker: "f",
+      });
+      const chain = new LiveOgmiosProvider({
+        ogmiosUrl: "http://og", fetch: node(listed ? [{ ref: { txHash, index: 2 }, datum: encodeEscrowDatum(datum), script }] : []),
+      }) as unknown as ObservedMockChain;
+      const indexer = lineageIndexer({ [escrowRef]: liveLineage(escrowRef, "Submitted", Date.now() - 120_000) });
+      await recoverOneShotJobs(makeDeps(directory, store, chain, indexer.fetchFn, registryFor(key, walletKey, chain)));
+      const job = store.getOneShotJob(jobId);
+      return { state: job?.state ?? "missing", error: job?.error ?? null, usage: store.listUsage(key.id, 10) };
+    } finally {
+      closeStore(store);
+    }
+  }
+
+  it.each(VARIANTS)("%s: a Submitted escrow with another receipt is refused, and the job keeps its reservation", async (_name, script) => {
+    expect(await recover(script, true)).toEqual({ state: "recovering", error: "escrow receipt commitment mismatch", usage: [] });
+  });
+
+  it("the node does not list the output: the recovery reads it as spent after the snapshot, and leaves the job as it is", async () => {
+    expect(await recover(null, false)).toEqual({ state: "submitted", error: null, usage: [] });
+  });
+});

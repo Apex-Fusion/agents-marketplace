@@ -685,3 +685,86 @@ describe("sweeper — an escrow whose datum the chain client withheld", () => {
     log.mockRestore();
   });
 });
+
+import { LiveOgmiosProvider } from "@marketplace/shared/chain";
+import type { OutputReference } from "@marketplace/shared/chain";
+
+describe("sweeper — an escrow output with a native reference script that fails the check", () => {
+  // The node lists such an output, so the read-only client lists it, and the sweeper reads it as it reads any other live output. The
+  // outcome must equal the outcome for the same output with no script, and the outcome on `origin/main` (the same answers of the
+  // node, with a read-only client that has no check): "spent" means that the node does not list the output, and nothing else.
+  const nativeScript = (scripts: number): string => `${"820181".repeat(scripts)}8200581c${"11".repeat(28)}`;
+  const VARIANTS: Array<[string, unknown]> = [
+    ["no script", null],
+    ["a native script of 65 levels", { language: "native", cbor: nativeScript(32) }],
+    ["a native script of 3,001 levels", { language: "native", cbor: nativeScript(1500) }],
+  ];
+
+  /** A node that lists the given outputs. A query by reference gets the outputs that were asked for, and no more. */
+  function node(outputs: Array<{ ref: OutputReference; datum: string; script: unknown }>): typeof globalThis.fetch {
+    return (async (_url: unknown, init?: RequestInit) => {
+      const query = JSON.parse(String(init?.body)) as { params?: { outputReferences?: Array<{ transaction: { id: string }; index: number }> } };
+      const asked = query.params?.outputReferences ?? [];
+      const result = outputs
+        .filter((o) => asked.some((r) => r.transaction.id === o.ref.txHash && r.index === o.ref.index))
+        .map((o) => ({
+          transaction: { id: o.ref.txHash }, index: o.ref.index, address: "addr_test1_legacy_escrow",
+          value: { ada: { lovelace: 2_200_000 } }, datum: o.datum, datumHash: null, script: o.script,
+        }));
+      return new Response(JSON.stringify({ jsonrpc: "2.0", result }), { headers: { "content-type": "application/json" } });
+    }) as typeof globalThis.fetch;
+  }
+
+  type Settle = "accept fails" | "accept works";
+  type Outcome = { acceptCalls: number[]; session: string | undefined; usage: Array<{ status: string; cost: string | null }> };
+
+  /** One sweep (two for "accept fails") over a Submitted legacy escrow of an open chat session. `listed`: the node lists the output. */
+  async function sweep(script: unknown, listed: boolean, settleMode: Settle): Promise<Outcome> {
+    const wallet = deriveWalletKey(genPrivKeyHex(), 0);
+    const txHash = randomBytes(32).toString("hex");
+    const datum: EscrowDatum = {
+      buyer_pkh: wallet.pubKeyHash, supplier_pkh: "d".repeat(56), advert_ref: { txHash: "ad".repeat(32), index: 0 },
+      capability_id: "llm.chat.v1", request_spec_hash: "1b".repeat(32), prompt_hash: "c3".repeat(32),
+      payment_lovelace: 200_000n, buyer_bond_lovelace: 1_000_000n, supplier_bond_lovelace: 1_000_000n,
+      deliver_by: Date.now() + 10 * 60 * 1000, posted_at: Date.now() - 40 * 60 * 1000, submitted_at: Date.now() - 20 * 60 * 1000,
+      result_receipt_hash: "e".repeat(64), state: "Submitted",
+    };
+    const ref = { txHash, index: 0 };
+    const chain = new LiveOgmiosProvider({
+      ogmiosUrl: "http://og", fetch: node(listed ? [{ ref, datum: encodeEscrowDatum(datum), script }] : []),
+    });
+    const row: EscrowRow = { utxo_ref: `${txHash}#0`, state: "Submitted", posted_at: Date.now() - 40 * 60 * 1000, deliver_by: datum.deliver_by };
+    const { deps, keyRow } = makeSweepDeps({ chatSettleMode: "full", escrows: [row], privHex: undefined, chain });
+    // The key of the sweep is the wallet of the escrow: the sweeper reads the rows of its own key from the indexer.
+    const sessionId = insertOpenSession(deps, keyRow.id, row.utxo_ref);
+    const accept = vi.fn(async () => {
+      if (settleMode === "accept fails") throw new Error("validator rejected");
+      return undefined;
+    });
+    const settle = { ...settleOk(), accept: accept as never };
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    await runSweepOnce(deps, settle);
+    if (settleMode === "accept fails") await runSweepOnce(deps, settle);
+    vi.mocked(console.log).mockRestore();
+    return {
+      acceptCalls: accept.mock.calls.map(() => 1),
+      session: deps.store.getSession(sessionId)?.state,
+      usage: deps.store.listUsage(keyRow.id, 10).map((u) => ({ status: u.status, cost: u.cost_lovelace })),
+    };
+  }
+
+  it.each(VARIANTS)("%s, Accept fails and the node lists the output: the session stays open, nothing is billed, and the Accept is tried again", async (_name, script) => {
+    const outcome = await sweep(script, true, "accept fails");
+    expect(outcome).toEqual({ acceptCalls: [1, 1], session: "open", usage: [] });
+  });
+
+  it.each(VARIANTS)("%s, Accept works and the node lists the output: the session closes as completed, and the price is billed", async (_name, script) => {
+    const outcome = await sweep(script, true, "accept works");
+    expect(outcome).toEqual({ acceptCalls: [1], session: "closed", usage: [{ status: "completed", cost: "200000" }] });
+  });
+
+  it("the node does not list the output: that is spent, the session closes as completed, and no Accept is tried", async () => {
+    const outcome = await sweep(null, false, "accept fails");
+    expect(outcome).toEqual({ acceptCalls: [], session: "closed", usage: [{ status: "completed", cost: "200000" }] });
+  });
+});

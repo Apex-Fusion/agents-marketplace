@@ -16,7 +16,7 @@
  * Catherine M1-F-4-green.
  */
 
-import { WithheldOutputs } from "./datumGuard.js";
+import { WithheldOutputs, assertOutputFields } from "./datumGuard.js";
 import type {
   Address,
   Credential,
@@ -52,6 +52,20 @@ export class NotSupportedInM1F4Error extends Error {
   constructor(method: string) {
     super(`OgmiosLucidProvider.${method}: not supported in M1-F-4; stub only`);
     this.name = "NotSupportedInM1F4Error";
+  }
+}
+
+/**
+ * Thrown by getUtxosByOutRef when the node lists an output that was asked for and this client leaves it out, because the native
+ * reference script of the output fails the check (datumGuard.ts). It names the references, never the bytes. A caller must not read
+ * a missing output as "spent": an answer without an output means "the node does not list it" or this error says otherwise.
+ */
+export class OutputLeftOutError extends Error {
+  readonly refs: readonly string[];
+  constructor(refs: readonly string[]) {
+    super(`The node lists ${refs.length} output(s) that were asked for, and the client leaves them out because their reference script is not read; first: ${refs[0]}`);
+    this.name = "OutputLeftOutError";
+    this.refs = refs;
   }
 }
 
@@ -185,6 +199,11 @@ export class OgmiosLucidProvider implements Provider {
     throw new NotSupportedInM1F4Error("getUtxoByUnit");
   }
 
+  /**
+   * The outputs that the node lists for the references that were asked for. The answer never lacks an output for any reason but
+   * this one: the node does not list it. When the node lists an output and this client leaves it out (see below), the call throws
+   * OutputLeftOutError, so that no caller reads the missing output as "spent", "paid" or "done".
+   */
   async getUtxosByOutRef(outRefs: Array<OutRef>): Promise<UTxO[]> {
     const params = {
       outputReferences: outRefs.map((r) => ({
@@ -194,7 +213,12 @@ export class OgmiosLucidProvider implements Provider {
     };
     const result = await this.rpc<OgmiosUtxo[]>("queryLedgerState/utxo", params);
     if (!Array.isArray(result)) return [];
-    return ogmiosAnswerToLucidUtxos(result);
+    const utxos = ogmiosAnswerToLucidUtxos(result);
+    if (utxos.length < result.length) {
+      const kept = new Set(utxos.map((utxo) => `${utxo.txHash}#${utxo.outputIndex}`));
+      throw new OutputLeftOutError(result.map((o) => `${o.transaction.id}#${o.index}`).filter((ref) => !kept.has(ref)));
+    }
+    return utxos;
   }
 
   async getDelegation(_rewardAddress: RewardAddress): Promise<Delegation> {
@@ -361,7 +385,8 @@ function credentialQueryParams(c: Credential): { addresses: string[] } {
 /**
  * The Lucid UTxOs of one Ogmios answer. An output whose datum fails the check stays in the list without it. An output whose native
  * script fails the check is left out: when it is spent, the ledger asks a fee for its script, and a transaction that does not count
- * the script gets a fee that is too low (datumGuard.ts). The log has one line for each reference, one time.
+ * the script gets a fee that is too low (datumGuard.ts). An output with a field that is longer than the ledger allows
+ * (assertOutputFields) fails the whole call, as any other error of the node does. The log has one line for each reference, one time.
  */
 function ogmiosAnswerToLucidUtxos(result: OgmiosUtxo[]): UTxO[] {
   const withheld = new WithheldOutputs();
@@ -375,8 +400,9 @@ function ogmiosAnswerToLucidUtxos(result: OgmiosUtxo[]): UTxO[] {
 }
 
 function ogmiosUtxoToLucidUtxo(o: OgmiosUtxo, withheld: WithheldOutputs): UTxO | null {
+  assertOutputFields(o);
   const ref = `${o.transaction.id}#${o.index}`;
-  const scriptRef = ogmiosScriptToLucidScript(o.script, ref, withheld);
+  const scriptRef = ogmiosScriptToLucidScript(o.script, ref, o.address, withheld);
   if (scriptRef === undefined) return null;
   const lovelaceRaw = o.value?.ada?.lovelace;
   const lovelace =
@@ -408,7 +434,7 @@ function ogmiosUtxoToLucidUtxo(o: OgmiosUtxo, withheld: WithheldOutputs): UTxO |
     address: o.address,
     assets,
     datumHash: o.datumHash ?? null,
-    datum: typeof o.datum === "string" ? withheld.datum(o.datum, ref) : null,
+    datum: typeof o.datum === "string" ? withheld.datum(o.datum, ref, o.address) : null,
     scriptRef,
   };
 }
@@ -419,8 +445,10 @@ function ogmiosUtxoToLucidUtxo(o: OgmiosUtxo, withheld: WithheldOutputs): UTxO |
  *  Returns null if the field is missing or unrecognised.
  *
  *  A Plutus script is opaque bytes and is mapped as it is. A native script holds nested scripts: it must pass the check, or the
- *  function returns undefined, and the output is left out of the answer (datumGuard.ts). */
-function ogmiosScriptToLucidScript(s: unknown, ref: string, withheld: WithheldOutputs): UTxO["scriptRef"] | undefined {
+ *  function returns undefined and the output is left out of the answer. The output is not kept without the script: Lucid asks a fee
+ *  for the reference script of each output that it spends, and a transaction that does not count it gets a fee that is too low
+ *  (datumGuard.ts). This holds for this client only: the read-only client maps no native script and leaves nothing out. */
+function ogmiosScriptToLucidScript(s: unknown, ref: string, address: string, withheld: WithheldOutputs): UTxO["scriptRef"] | undefined {
   if (!s || typeof s !== "object") return null;
   const obj = s as { language?: string; cbor?: string };
   if (typeof obj.cbor !== "string") return null;
@@ -428,7 +456,7 @@ function ogmiosScriptToLucidScript(s: unknown, ref: string, withheld: WithheldOu
     case "plutus:v1": return { type: "PlutusV1", script: obj.cbor };
     case "plutus:v2": return { type: "PlutusV2", script: obj.cbor };
     case "plutus:v3": return { type: "PlutusV3", script: obj.cbor };
-    case "native": return withheld.nativeScriptReadable(obj.cbor, ref) ? { type: "Native", script: obj.cbor } : undefined;
+    case "native": return withheld.nativeScriptReadable(obj.cbor, ref, address) ? { type: "Native", script: obj.cbor } : undefined;
     default: return null;
   }
 }

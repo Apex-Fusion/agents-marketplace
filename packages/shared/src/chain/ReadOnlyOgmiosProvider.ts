@@ -16,7 +16,7 @@
  *   - response: { jsonrpc: "2.0", result | error, id }
  */
 
-import { WithheldOutputs } from "./datumGuard.js";
+import { WithheldOutputs, assertOutputFields } from "./datumGuard.js";
 import type {
   ChainProvider,
   OutputReference,
@@ -129,8 +129,7 @@ export class ReadOnlyOgmiosProvider implements ChainProvider {
     };
     const result = await this.rpc<OgmiosUtxo[]>("queryLedgerState/utxo", params);
     if (!Array.isArray(result) || result.length === 0) return null;
-    const [utxo] = ogmiosAnswerToUtxos([result[0]]);
-    return utxo ?? null;
+    return ogmiosAnswerToUtxos([result[0]])[0] ?? null;
   }
 
   async queryUtxosByAddress(address: string): Promise<Utxo[]> {
@@ -197,26 +196,22 @@ export class ReadOnlyOgmiosProvider implements ChainProvider {
 // ── Helpers ──────────────────────────────────────────────────────────
 
 /**
- * The UTxOs of one Ogmios answer. An output whose datum fails the check stays in the list with no datum. An output whose native
- * script fails the check is left out: when it is spent, the ledger asks a fee for its script, and a transaction that does not count
- * the script gets a fee that is too low (datumGuard.ts). The log has one line for each reference, one time.
+ * The UTxOs of one Ogmios answer. This client never leaves an output out: an output is absent from an answer only when the node does
+ * not list it, and the callers read "absent" as "spent". An output whose datum fails the check stays in the list with no datum
+ * (datumGuard.ts). The client maps no native script (only a Plutus V3 script, as opaque bytes), so the decoder library never reads
+ * a script that comes from here. An output with a field that is longer than the ledger allows (assertOutputFields) fails the whole
+ * call, as any other error of the node does. The log has one line for each output reference, one time.
  */
 function ogmiosAnswerToUtxos(result: OgmiosUtxo[]): Utxo[] {
   const withheld = new WithheldOutputs();
-  const utxos: Utxo[] = [];
-  for (const o of result) {
-    const utxo = ogmiosUtxoToUtxo(o, withheld);
-    if (utxo !== null) utxos.push(utxo);
-  }
+  const utxos = result.map((o) => ogmiosUtxoToUtxo(o, withheld));
   withheld.report("ReadOnlyOgmiosProvider");
   return utxos;
 }
 
-function ogmiosUtxoToUtxo(o: OgmiosUtxo, withheld: WithheldOutputs): Utxo | null {
+function ogmiosUtxoToUtxo(o: OgmiosUtxo, withheld: WithheldOutputs): Utxo {
+  assertOutputFields(o);
   const ref = `${o.transaction.id}#${o.index}`;
-  // A native script is not mapped at this client (only a Plutus V3 script is), but it is checked: such an output is left out.
-  const script: { language?: unknown; cbor?: unknown } | null = typeof o.script === "object" && o.script !== null ? o.script : null;
-  if (script?.language === "native" && typeof script.cbor === "string" && !withheld.nativeScriptReadable(script.cbor, ref)) return null;
   const lovelaceRaw = o.value?.ada?.lovelace;
   const lovelace =
     typeof lovelaceRaw === "bigint"
@@ -243,7 +238,7 @@ function ogmiosUtxoToUtxo(o: OgmiosUtxo, withheld: WithheldOutputs): Utxo | null
     }
   }
 
-  const datumHex = typeof o.datum === "string" && o.datum.length > 0 ? withheld.datum(o.datum, ref) : null;
+  const datumHex = typeof o.datum === "string" && o.datum.length > 0 ? withheld.datum(o.datum, ref, o.address) : null;
   // Only a Plutus V3 script maps here, and Plutus script bytes are opaque.
   const scriptRef = ogmiosScriptRef(o.script);
 
