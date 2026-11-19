@@ -275,6 +275,36 @@ describe("builds", () => {
     ]);
     expect((await bitstringList(h)).bit(index.get(R.active)!)).toBe(1);
   });
+
+  test("a failed build starts no further record read", async () => {
+    const records = Array.from({ length: 40 }, (_, i) => id(`many ${i}`));
+    const many = (): LedgerBuilder => {
+      const b = new LedgerBuilder();
+      records.forEach((record, i) => b.register(record, identityDatum(), { height: 100 + i }));
+      return b;
+    };
+    // The twin: a build with no failure reads the two token histories of each of the 40 records.
+    const sound = await startGateway(many());
+    await sound.services.statusLists.refresh();
+    expect(reads(sound, "assetTxHashes")).toBe(80);
+
+    // The read of the first record fails. The build fails with it, and the other workers stop.
+    const b = many();
+    const original = b.chain.assetTxHashes.bind(b.chain);
+    b.chain.assetTxHashes = async (policyId, assetName) => {
+      const hashes = await original(policyId, assetName);
+      if (assetName === records[0]) throw new Error("Koios assetTxHashes answered HTTP 503");
+      return hashes;
+    };
+    const h = await startGateway(b);
+    await expect(h.services.statusLists.refresh()).rejects.toThrow(/answered HTTP 503/);
+    // Wait until the reads stop. The ledger answers at once, so a turn of the event loop is enough.
+    for (let seen = -1; seen !== b.chain.calls.length; ) {
+      seen = b.chain.calls.length;
+      await new Promise((done) => setImmediate(done));
+    }
+    expect(reads(h, "assetTxHashes")).toBeLessThan(40);
+  });
 });
 
 describe("GET /status/bsl/{n}", () => {

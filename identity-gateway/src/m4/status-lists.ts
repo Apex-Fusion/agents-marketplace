@@ -182,14 +182,22 @@ export class StatusLists {
         const listCount = entries.reduce((count, [, i]) => Math.max(count, listPosition(i).n + 1), 1);
         const values = Array.from({ length: listCount }, () => new Uint8Array(LIST_SIZE));
         let next = 0;
+        let failed = false;
         const worker = async (): Promise<void> => {
-          while (next < entries.length) {
-            const [vectorId, i] = entries[next++]!;
-            const lookup = await this.ctx.records.currentStatus(vectorId, list);
-            // An indexed identifier always resolves; if it does not, suspension is the reversible answer.
-            const value = lookup.found ? statusValue(lookup.effective.status) : STATUS.suspended;
-            const { n, p } = listPosition(i);
-            values[n]![p] = value;
+          try {
+            while (next < entries.length && !failed) {
+              const [vectorId, i] = entries[next++]!;
+              const lookup = await this.ctx.records.currentStatus(vectorId, list);
+              // An indexed identifier always resolves; if it does not, suspension is the reversible answer.
+              const value = lookup.found ? statusValue(lookup.effective.status) : STATUS.suspended;
+              const { n, p } = listPosition(i);
+              values[n]![p] = value;
+            }
+          } catch (e) {
+            // The build fails with the first error. The other workers start no further read: a failed
+            // build leaves no work behind for the build that follows it.
+            failed = true;
+            throw e;
           }
         };
         await Promise.all(Array.from({ length: Math.min(BUILD_CONCURRENCY, entries.length) }, worker));
