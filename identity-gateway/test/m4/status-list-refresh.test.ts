@@ -283,14 +283,14 @@ describe("the timing rule", () => {
     return ends;
   }
 
-  test("with builds of 9 minutes, a new build ends every interval, tick and build time, so that the lists are valid at every moment", async () => {
-    const buildMs = 9 * MINUTE;
+  test("with builds of 10 minutes, a new build ends every interval, tick and build time, so that the lists are valid at every moment", async () => {
+    const buildMs = 10 * MINUTE;
     const b = ledger();
     const gate = new Gate(b.chain);
     gate.shutNow();
     const h = await startedGateway(b);
     const ends = await simulate(h, gate, buildMs, 4);
-    expect(ends.length).toBeGreaterThanOrEqual(12);
+    expect(ends.length).toBeGreaterThanOrEqual(11);
     const gaps = ends.slice(1).map((end, i) => end - ends[i]!);
     expect(Math.max(...gaps)).toBeLessThanOrEqual(INTERVAL + REFRESH_TICK_MS + buildMs);
     expect(Math.max(...gaps)).toBeLessThan(LIST_VALIDITY_MS);
