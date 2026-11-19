@@ -20,8 +20,8 @@ services:
       context: ../..
       dockerfile: gateway/Dockerfile
     container_name: marketplace-mainnet-gateway
-    # No stop_grace_period: Docker gives a stop 10 s. The decoder check of the gateway ends a shutdown that it starts after the same
-    # time (DECODER_STOP_LIMIT_MS in gateway/src/index.ts). Change both together.
+    # No stop_grace_period: Docker gives a stop 10 s. The decoder check of the gateway ends a shutdown that it starts after 10 s too
+    # (DECODER_STOP_LIMIT_MS in gateway/src/index.ts). A test keeps that limit at or below the grace period of this file.
     restart: unless-stopped
     env_file:
       - path: ../../gateway/.env

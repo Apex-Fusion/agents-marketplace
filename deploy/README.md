@@ -410,8 +410,15 @@ When the library cannot decode the value, the process writes one line:
 It then takes the shutdown path that a SIGTERM takes, with its drain logic, and ends with exit code 1. Docker starts it again
 (`restart: unless-stopped`). A Paper2Agent supplier child that ends in this way is started again by the publisher.
 
-No Docker stop stands behind a shutdown that the check starts. So the process ends itself with exit code 1 after the time that
-Docker gives a stop of that service: the `stop_grace_period` in its compose file in `deploy/mainnet/`, or 10 s when the file has none.
-The same value is a constant in the code of the process (`DECODER_STOP_LIMIT_MS`). A test compares the two, so change both together.
+No Docker stop stands behind a shutdown that the check starts. The check starts it only when the library cannot decode, so the work
+that still runs and needs the library cannot end well, and a long drain only delays the restart. So the gateway, the buyer, the
+supplier and the surplus seller end themselves with exit code 1 after 10 s (`DECODER_STOP_LIMIT_MS` in the code of each process).
+10 s is the time that Docker gives a stop when a compose file has no `stop_grace_period`. The buyer keeps its `stop_grace_period`
+of 330 s for a stop that Docker starts.
+
+The publisher waits for the full time of its `stop_grace_period` (17 min): its paid work runs in supplier children, which are
+separate processes with their own copy of the library, so a drain can end well. A test (`tests/unit/decoder-stop-limits.test.ts`)
+keeps each limit at or below the `stop_grace_period` in its compose file in `deploy/mainnet/` (10 s when the file has none), and
+keeps the limit of the publisher equal to it.
 
 When no failure happens, the check changes nothing and writes nothing.

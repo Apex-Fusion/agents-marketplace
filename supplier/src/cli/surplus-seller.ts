@@ -187,9 +187,10 @@ export interface SurplusSellerParts {
 }
 
 /**
- * The time that a shutdown which the decoder check starts may take. Docker gives a stop of the surplus seller the same time: its compose
- * file, `deploy/mainnet/docker-compose.surplus-seller.yml`, has no `stop_grace_period`, so the Docker default of 10 s applies. Keep the
- * two equal (tests/unit/decoder-stop-limits.test.ts reads the compose file).
+ * The time that a shutdown which the decoder check starts may take: 10 s, the time that Docker gives a stop when a compose file has no
+ * `stop_grace_period` (`deploy/mainnet/docker-compose.surplus-seller.yml` has none). The check starts a shutdown only when the library
+ * cannot decode a known value. The work that is still running in the surplus seller needs the library to end well, so a long drain
+ * would only delay the restart. (tests/unit/decoder-stop-limits.test.ts reads the compose file.)
  */
 export const DECODER_STOP_LIMIT_MS = 10_000;
 

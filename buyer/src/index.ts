@@ -27,10 +27,13 @@ import { startDecoderHealth } from "@marketplace/shared/tx/server";
 const SHUTDOWN_DRAIN_MS = 60_000;
 
 /**
- * The time that a shutdown which the decoder check starts may take. Docker gives a stop of the buyer the same time: `stop_grace_period`
- * in `deploy/mainnet/docker-compose.buyer.yml` (330 s). Keep the two equal (tests/unit/decoder-stop-limits.test.ts reads the compose file).
+ * The time that a shutdown which the decoder check starts may take: 10 s, the time that Docker gives a stop when a compose file has no
+ * `stop_grace_period`. The check starts a shutdown only when the library cannot decode a known value. The work that is still running
+ * in the buyer (a request that waits for a supplier, a background Accept) needs the library to end well, so a long drain would only
+ * delay the restart. A stop that Docker starts keeps the 330 s of `deploy/mainnet/docker-compose.buyer.yml`.
+ * (tests/unit/decoder-stop-limits.test.ts reads the compose file.)
  */
-export const DECODER_STOP_LIMIT_MS = 330_000;
+export const DECODER_STOP_LIMIT_MS = 10_000;
 
 // Wire ed25519 sha512 hook (idempotent — same as receipt/sign.ts).
 ed.etc.sha512Sync = (...messages: Uint8Array[]): Uint8Array => {

@@ -1,9 +1,16 @@
 /**
- * decoder-stop-limits.test.ts — the time limit of a shutdown that the decoder check starts equals what Docker gives a stop.
+ * decoder-stop-limits.test.ts — the time limit of a shutdown that the decoder check starts.
  *
- * Docker gives a stop of a service `stop_grace_period` (10 s when the compose file has none). A shutdown that the decoder check
- * starts has no stop of Docker behind it, so each process ends itself after the same time. The value is a constant in the entry of
- * each process, and the compose file of the service holds the other. This test reads both, so that a change of one shows the other.
+ * The check starts a shutdown only when the library cannot decode a known value. No stop of Docker stands behind that shutdown, so
+ * each process ends itself after a limit (a constant in its entry). Docker gives a stop of a service `stop_grace_period`, and 10 s
+ * when the compose file of the service has none.
+ *
+ * - The gateway, the buyer, the supplier and the surplus seller end after 10 s. The work that is still running in them needs the
+ *   library to end well, so a long drain only delays the restart. The limit is at or below the grace period of the compose file.
+ * - The publisher ends after the full grace period of its compose file (17 min): its paid work runs in supplier children, which
+ *   are separate processes with their own copy of the library.
+ *
+ * This test reads the constants and the compose files, so that a change of one shows the other.
  */
 
 import { readFileSync } from "node:fs";
@@ -28,13 +35,29 @@ function graceOf(composeFile: string): number {
 
 describe("the time limit of a shutdown that the decoder check starts", () => {
   it.each([
-    ["gateway", "docker-compose.gateway.yml", GATEWAY, 10_000],
+    ["gateway", "docker-compose.gateway.yml", GATEWAY, DOCKER_DEFAULT_MS],
     ["buyer", "docker-compose.buyer.yml", BUYER, 330_000],
-    ["supplier", "docker-compose.supplier.yml", SUPPLIER, 10_000],
-    ["surplus seller", "docker-compose.surplus-seller.yml", SURPLUS, 10_000],
-    ["Paper2Agent publisher", "docker-compose.paper2agent-publisher.yml", PUBLISHER, 1_020_000],
-  ])("%s: equals the stop_grace_period of %s", (_name, file, limit, expected) => {
-    expect(limit).toBe(graceOf(file));
-    expect(limit).toBe(expected);
+    ["supplier", "docker-compose.supplier.yml", SUPPLIER, DOCKER_DEFAULT_MS],
+    ["surplus seller", "docker-compose.surplus-seller.yml", SURPLUS, DOCKER_DEFAULT_MS],
+  ])("%s: ends after 10 s, which is at or below the stop_grace_period of %s", (_name, file, limit, grace) => {
+    expect(limit).toBe(10_000);
+    expect(graceOf(file)).toBe(grace);
+    expect(limit).toBeLessThanOrEqual(graceOf(file));
+  });
+
+  it("Paper2Agent publisher: ends after the full stop_grace_period of its compose file (17 min)", () => {
+    expect(PUBLISHER).toBe(graceOf("docker-compose.paper2agent-publisher.yml"));
+    expect(PUBLISHER).toBe(1_020_000);
+  });
+
+  it.each([
+    ["docker-compose.gateway.yml", "gateway/src/index.ts"],
+    ["docker-compose.buyer.yml", "buyer/src/index.ts"],
+    ["docker-compose.supplier.yml", "supplier/src/index.ts"],
+    ["docker-compose.surplus-seller.yml", "supplier/src/cli/surplus-seller.ts"],
+    ["docker-compose.paper2agent-publisher.yml", "paper2agent/src/serve.ts"],
+  ])("%s names the constant in %s, and that file holds it", (composeFile, source) => {
+    expect(readFileSync(resolve(ROOT, "deploy/mainnet", composeFile), "utf8")).toContain(`DECODER_STOP_LIMIT_MS in ${source}`);
+    expect(readFileSync(resolve(ROOT, source), "utf8")).toMatch(/export const DECODER_STOP_LIMIT_MS = /);
   });
 });

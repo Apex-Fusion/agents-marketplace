@@ -14,9 +14,11 @@ export interface RoleStart {
 }
 
 /**
- * The time that a shutdown which the decoder check starts may take. Docker gives a stop of the publisher the same time:
- * `stop_grace_period` in `deploy/mainnet/docker-compose.paper2agent-publisher.yml` (17 m). Keep the two equal
- * (tests/unit/decoder-stop-limits.test.ts reads the compose file).
+ * The time that a shutdown which the decoder check starts may take: the `stop_grace_period` of
+ * `deploy/mainnet/docker-compose.paper2agent-publisher.yml` (17 m), as for a stop that Docker starts. The publisher differs from the
+ * other processes here. Its paid work runs in supplier children, which are separate processes with their own copy of the library.
+ * When the library of the publisher cannot decode, a child can still end the job that it holds, so the drain can end well and a
+ * wait of the full time is useful. (tests/unit/decoder-stop-limits.test.ts reads the compose file.)
  */
 export const DECODER_STOP_LIMIT_MS = 17 * 60_000;
 

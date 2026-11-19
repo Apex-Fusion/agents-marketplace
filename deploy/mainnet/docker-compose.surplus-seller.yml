@@ -6,8 +6,8 @@ services:
       context: ../..
       dockerfile: supplier/Dockerfile
     container_name: marketplace-mainnet-surplus-seller
-    # No stop_grace_period: Docker gives a stop 10 s. The decoder check of the surplus seller ends a shutdown that it starts after the
-    # same time (DECODER_STOP_LIMIT_MS in supplier/src/cli/surplus-seller.ts). Change both together.
+    # No stop_grace_period: Docker gives a stop 10 s. The decoder check of the surplus seller ends a shutdown that it starts after 10 s
+    # too (DECODER_STOP_LIMIT_MS in supplier/src/cli/surplus-seller.ts). A test keeps that limit at or below the grace period of this file.
     restart: unless-stopped
     command:
       - node_modules/.bin/tsx
