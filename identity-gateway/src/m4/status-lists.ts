@@ -98,6 +98,12 @@ export const LIST_VALIDITY_MS = 3_600_000;
 /** How long a request without valid lists waits for a running build. */
 export const BUILD_WAIT_MS = 10_000;
 
+/** What starts a build, for the log: the start of the services, a request, or a call of `refresh`. */
+type BuildReason = "start" | "request" | "call";
+
+/** Milliseconds as seconds with one decimal, for the log. */
+const seconds = (ms: number): string => (ms / 1000).toFixed(1);
+
 /** The value of `promise`; an error when it takes longer than `ms`. */
 async function within<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
@@ -150,12 +156,12 @@ export class StatusLists {
 
   /** Builds the lists again now (or joins the running build), whenever the last build started. */
   async refresh(): Promise<void> {
-    await this.buildLists();
+    await this.buildLists("call");
   }
 
   /** Starts the first build in the background, so that the first requests find lists. */
   start(): void {
-    if (this.lists === null && this.listsBuild === null) this.buildInBackground();
+    if (this.lists === null && this.listsBuild === null) this.buildInBackground("start");
   }
 
   private buildIndex(): Promise<IndexCache> {
@@ -173,10 +179,14 @@ export class StatusLists {
     return this.indexBuild;
   }
 
-  private buildLists(): Promise<Lists> {
+  /** One build, or the running one. It logs its start, its end and its failure. */
+  private buildLists(reason: BuildReason): Promise<Lists> {
     this.listsBuild ??= inBackground(async () => {
-      this.lastBuildAt = this.ctx.now();
+      const startedAt = this.ctx.now();
+      this.lastBuildAt = startedAt;
       try {
+        const previous = this.lists === null ? "no lists yet" : `the lists are ${seconds(startedAt - this.lists.builtAt)} s old`;
+        this.ctx.info?.(`identity-gateway: status lists: build started (${reason}): ${previous}`);
         const { indices, list } = await this.buildIndex();
         const entries = [...indices];
         const listCount = entries.reduce((count, [, i]) => Math.max(count, listPosition(i).n + 1), 1);
@@ -207,8 +217,13 @@ export class StatusLists {
           const { n, p } = listPosition(i);
           if (held.has(vectorId) && tokenValues[n]![p] === STATUS.valid) tokenValues[n]![p] = STATUS.suspended;
         }
-        this.lists = { builtAt: this.ctx.now(), values, tokenValues, signed: new Map() };
-        return this.lists;
+        const built: Lists = { builtAt: this.ctx.now(), values, tokenValues, signed: new Map() };
+        this.lists = built;
+        this.ctx.info?.(`identity-gateway: status lists: build ended after ${seconds(built.builtAt - startedAt)} s: ${entries.length} records`);
+        return built;
+      } catch (e) {
+        this.ctx.log(`identity-gateway: status lists not rebuilt after ${seconds(this.ctx.now() - startedAt)} s: ${e instanceof Error ? e.message : String(e)}`);
+        throw e;
       } finally {
         this.listsBuild = null;
       }
@@ -216,8 +231,9 @@ export class StatusLists {
     return this.listsBuild;
   }
 
-  private buildInBackground(): void {
-    this.buildLists().catch((e: unknown) => this.ctx.log(`identity-gateway: status lists not rebuilt: ${e instanceof Error ? e.message : String(e)}`));
+  /** Starts a build that nobody waits for. `buildLists` logs its failure. */
+  private buildInBackground(reason: BuildReason): void {
+    this.buildLists(reason).catch(() => undefined);
   }
 
   /**
@@ -231,7 +247,7 @@ export class StatusLists {
     const lists = this.lists;
     const age = lists === null ? Infinity : now - lists.builtAt;
     if (lists !== null && age < refreshMs) return lists;
-    if (this.listsBuild === null && now - this.lastBuildAt >= refreshMs) this.buildInBackground();
+    if (this.listsBuild === null && now - this.lastBuildAt >= refreshMs) this.buildInBackground("request");
     if (lists !== null && age < LIST_VALIDITY_MS) return lists;
     if (this.listsBuild !== null) return within(this.listsBuild, BUILD_WAIT_MS, "the status-list build");
     throw new Error("no valid status lists: the last build failed, and the next one starts one refresh interval after it");

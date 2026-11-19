@@ -39,6 +39,11 @@ export interface M4Context {
   readonly now: () => number;
   /** Error log. Messages never contain tokens or key material. */
   readonly log: (message: string) => void;
+  /**
+   * Progress log: the start and the end of each status-list build. Messages never contain tokens,
+   * key material, identifiers or list content. A context without it writes no progress lines.
+   */
+  readonly info?: (message: string) => void;
 }
 
 export const tokenEndpoint = (settings: M4Settings): string => `${settings.baseUrl}/token`;

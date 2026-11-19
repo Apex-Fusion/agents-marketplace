@@ -307,6 +307,65 @@ describe("builds", () => {
   });
 });
 
+describe("the log of the builds", () => {
+  /** Three agents, each with a status-list index. */
+  const small = (): LedgerBuilder => {
+    const b = new LedgerBuilder();
+    ["one", "two", "three"].forEach((label, i) => b.register(id(`log ${label}`), identityDatum(), { height: 100 + 10 * i }));
+    return b;
+  };
+
+  test("a build logs its start, its duration and its number of records, and nothing of the lists", async () => {
+    const b = small();
+    const h = await startGateway(b);
+    let open: () => void = () => undefined;
+    const gate = new Promise<void>((done) => {
+      open = done;
+    });
+    const assets = b.chain.policyAssets.bind(b.chain);
+    b.chain.policyAssets = async (policyId) => {
+      await gate;
+      return assets(policyId);
+    };
+    const answer = fetch(`${h.url}/status/tsl/0`);
+    try {
+      // The build waits at its first ledger read; the clock moves while it waits.
+      await expect.poll(() => h.info.length).toBe(1);
+      h.now += 125_300;
+    } finally {
+      open();
+    }
+    const res = await answer;
+    expect(res.status).toBe(200);
+    const jwt = await res.text();
+    expect(h.info).toEqual([
+      "identity-gateway: status lists: build started (request): no lists yet",
+      "identity-gateway: status lists: build ended after 125.3 s: 3 records",
+    ]);
+    expect(h.info.join("\n")).not.toMatch(/[0-9a-f]{64}/);
+    expect(h.info.join("\n")).not.toContain(jwt.slice(0, 40));
+
+    // The start line of the next build says how old the lists are.
+    h.now += 61_000;
+    await h.services.statusLists.refresh();
+    expect(h.info.slice(2)).toEqual([
+      "identity-gateway: status lists: build started (call): the lists are 61.0 s old",
+      "identity-gateway: status lists: build ended after 0.0 s: 3 records",
+    ]);
+  });
+
+  test("a failed build logs its duration and its reason once, and no end line", async () => {
+    const b = small();
+    const h = await startGateway(b);
+    b.chain.failing.add("policyAssets");
+    expect((await fetch(`${h.url}/status/tsl/0`)).status).toBe(503);
+    expect(h.logs.filter((m) => m.includes("status lists not rebuilt"))).toEqual([
+      "identity-gateway: status lists not rebuilt after 0.0 s: Koios policyAssets answered HTTP 503",
+    ]);
+    expect(h.info).toEqual(["identity-gateway: status lists: build started (request): no lists yet"]);
+  });
+});
+
 describe("GET /status/bsl/{n}", () => {
   test("a BitstringStatusListCredential with both purposes, secured as application/vc+jwt", async () => {
     const h = await startGateway(ledger());

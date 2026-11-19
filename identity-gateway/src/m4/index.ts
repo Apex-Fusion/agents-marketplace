@@ -24,6 +24,8 @@ export interface M4ServicesOptions {
   /** POSIX milliseconds; default Date.now. */
   readonly now?: () => number;
   readonly log?: (message: string) => void;
+  /** Progress lines (M4Context.info); default: the error output, as `log`. */
+  readonly info?: (message: string) => void;
 }
 
 export interface M4Services {
@@ -45,6 +47,7 @@ export function createM4Services(options: M4ServicesOptions): M4Services {
     chain: options.chain,
     now: options.now ?? Date.now,
     log: options.log ?? ((message) => console.error(message)),
+    info: options.info ?? ((message) => console.error(message)),
   };
   const replay = new SingleUseStore();
   const delegations = options.settings.delegation ? new DelegationSource(options.chain, options.settings.delegation) : null;

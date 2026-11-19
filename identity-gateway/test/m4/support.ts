@@ -96,6 +96,8 @@ export interface Harness {
   readonly resolver: VectorResolver;
   readonly url: string;
   readonly logs: string[];
+  /** The progress lines of the services (the start and the end of each status-list build). */
+  readonly info: string[];
   /** The services' clock (POSIX ms); tests may move it. */
   now: number;
 }
@@ -104,8 +106,9 @@ const servers: Server[] = [];
 
 export async function startGateway(builder: LedgerBuilder, options: { delegations?: boolean; refreshMs?: number } = {}): Promise<Harness> {
   const logs: string[] = [];
+  const info: string[] = [];
   const resolver = new VectorResolver(builder.chain, builder.settings, { log: (m) => logs.push(m) });
-  const harness = { builder, resolver, logs, now: NOW } as Harness;
+  const harness = { builder, resolver, logs, info, now: NOW } as Harness;
   const services = createM4Services({
     settings: {
       baseUrl: BASE,
@@ -119,6 +122,7 @@ export async function startGateway(builder: LedgerBuilder, options: { delegation
     chain: builder.chain,
     now: () => harness.now,
     log: (m) => logs.push(m),
+    info: (m) => info.push(m),
   });
   const server = createResolverServer(resolver, { log: (m) => logs.push(m), routes: [m4Routes(services)] });
   await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
