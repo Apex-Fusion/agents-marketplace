@@ -57,6 +57,8 @@ const DEFAULT_ON_FAILURE_DEBOUNCE_MS = 5 * 60_000;
  * next fee cut the collateral UTxO (2026-11-19: a juror supplier refused every job for 12 hours).
  *   - maxUtxos is below MAX_CONSOLIDATE_INPUTS, so one run takes the full wallet.
  *   - minWorkingUtxo is the collateral value plus about 20 jobs: a tick comes each 10 minutes.
+ * The limits help a wallet with about 35 AP3X or more. Below that a reshape cannot lift the working UTxO to
+ * minWorkingUtxo, and the wallet is reshaped after about each 4 jobs, as with the planner default.
  */
 export const SUPPLIER_WALLET_LIMITS: ConsolidateLimits = { maxUtxos: 150, minWorkingUtxo: 25_000_000n };
 

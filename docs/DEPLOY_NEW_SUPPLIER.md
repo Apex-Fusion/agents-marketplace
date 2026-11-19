@@ -375,10 +375,13 @@ requires `tx:retire-advert` (refunds the advert bond) + a fresh post-advert
   new `ADVERT_REF` in the env file → drain, then `up -d --force-recreate`.
 - **Wallet health**: the supplier reshapes its wallet by itself (each 10
   minutes, and after a failed Claim) when the wallet holds no collateral
-  UTxO, more than 150 UTxOs, or a working UTxO below 25 AP3X. One reshape
-  spends at most 180 UTxOs, so a large wallet needs several runs. Search the
-  log for `[wallet-health] HALT`: after it, the supplier does not reshape
-  until a restart. By hand: `tx:consolidate-wallet`.
+  UTxO, more than 150 UTxOs, or a working UTxO below 25 AP3X while the other
+  UTxOs hold at least 8 AP3X. One reshape spends at most 180 UTxOs, so a
+  large wallet needs several runs. The supplier stops after 6 reshapes in
+  24 hours: a busy wallet below about 35 AP3X, or a wallet above about 950
+  UTxOs, reaches that limit. Search the log for `[wallet-health] HALT`:
+  after it, the supplier does not reshape until a restart. By hand:
+  `tx:consolidate-wallet`.
 - **Stuck Submitted escrows**: a job you Submitted that the buyer never
   Accepted (buyer-side timeout, crash) sits in `Submitted` holding the
   payment and both bonds. After the 10 min accept window only your

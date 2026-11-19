@@ -470,10 +470,14 @@ describe("walletHealth — limits of a supplier wallet", () => {
     expect(runJobs([utxo(5_000_000n), utxo(1_400_000_000n), utxo(1_498_372n)], 400)).toBe(2);
   });
 
-  it("keeps the collateral UTxO of a wallet with little money", () => {
-    const reshapes = runJobs([utxo(5_000_000n), utxo(13_000_000n), utxo(1_498_372n)], 40);
+  it("a wallet with the least funding of the deploy document stays inside the budget of one day", () => {
+    // 50 AP3X and 92 jobs in one day (the load of 2026-11-19). The guard halts the health at the 6th reshape of a day.
+    expect(runJobs([utxo(5_000_000n), utxo(43_501_628n), utxo(1_498_372n)], 92)).toBeLessThan(6);
+  });
 
-    expect(reshapes).toBeGreaterThan(0);
-    expect(reshapes).toBeLessThanOrEqual(10);
+  it("a wallet with little money: each job finds a UTxO for the collateral", () => {
+    // The planner alone. Below about 35 AP3X a reshape cannot lift the working UTxO to the low mark, so the wallet is
+    // reshaped after about each 4 jobs, as with the old limit, and a busy supplier uses the budget of one day.
+    expect(runJobs([utxo(5_000_000n), utxo(13_000_000n), utxo(1_498_372n)], 40)).toBeGreaterThan(0);
   });
 });

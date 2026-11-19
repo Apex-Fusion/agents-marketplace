@@ -36,8 +36,9 @@ function fakeChain(): LiveOgmiosProvider {
     const body = JSON.parse((init?.body as string) ?? "{}");
     let result: unknown = {};
     if (body.method === "queryLedgerState/utxo") {
+      // Index 300 needs 3 bytes in each input: the largest size that a real wallet gives for this number of inputs.
       result = WALLET_LOVELACE.map((lovelace, i) => ({
-        transaction: { id: i.toString(16).padStart(64, "0") }, index: 0, address: WALLET.address,
+        transaction: { id: i.toString(16).padStart(64, "0") }, index: 300, address: WALLET.address,
         value: { ada: { lovelace } }, datum: null, datumHash: null, script: null,
       }));
     } else if (body.method === "submitTransaction") {
