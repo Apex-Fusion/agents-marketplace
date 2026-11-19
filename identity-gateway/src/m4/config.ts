@@ -7,13 +7,26 @@
 //   GATEWAY_VECTOR_ID             the gateway's own identifier (64 hex); required with the key files
 //   DELEGATION_POLICY_ID          delegation contract policy ID (= script hash); optional
 //   DELEGATION_ADDRESS            its enterprise address; optional, must match the policy
-//   STATUS_LIST_REFRESH_SECONDS   how long built status lists are used, default 60
+//   STATUS_LIST_REFRESH_SECONDS             how old built status lists are before a request builds them
+//                                           again, default 60 (1 to 2700)
+//   STATUS_LIST_BACKGROUND_REFRESH_SECONDS  how old they are before the timer builds them again, with
+//                                           no request, default 600 (60 to 2700, not below the first)
+// The limits come from the timing rule in status-lists.ts: an interval plus the allowance for the
+// check of the timer and for a build must fit in the validity of a list.
 
 import { registryOf } from "../resolve/settings.js";
 import type { M4Settings } from "./context.js";
+import { DEFAULT_BACKGROUND_REFRESH_MS, checkTiming } from "./status-lists.js";
 
 export interface M4Config extends M4Settings {
   readonly keyFiles: { readonly ed25519: string; readonly p256: string };
+}
+
+/** The value of a variable in whole seconds, as milliseconds; `fallback` (seconds) when it is not set. */
+function seconds(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
+  const text = env[name] || String(fallback);
+  if (!/^\d+$/.test(text)) throw new Error(`${name} must be a whole number of seconds, got "${text}"`);
+  return Number(text) * 1000;
 }
 
 /**
@@ -29,16 +42,16 @@ export function loadM4Config(env: NodeJS.ProcessEnv, baseUrl: string): M4Config 
   if (!/^[0-9a-f]{64}$/.test(gatewayId)) throw new Error("GATEWAY_VECTOR_ID must be the gateway's identifier: 64 lowercase hex characters");
   const delegationPolicy = env.DELEGATION_POLICY_ID || undefined;
   if (!delegationPolicy && env.DELEGATION_ADDRESS) throw new Error("DELEGATION_ADDRESS needs DELEGATION_POLICY_ID");
-  const refreshText = env.STATUS_LIST_REFRESH_SECONDS || "60";
-  if (!/^\d+$/.test(refreshText) || Number(refreshText) < 1 || Number(refreshText) > 3600) {
-    throw new Error(`STATUS_LIST_REFRESH_SECONDS must be an integer from 1 to 3600, got "${refreshText}"`);
-  }
+  const statusListRefreshMs = seconds(env, "STATUS_LIST_REFRESH_SECONDS", 60);
+  const statusListBackgroundRefreshMs = seconds(env, "STATUS_LIST_BACKGROUND_REFRESH_SECONDS", DEFAULT_BACKGROUND_REFRESH_MS / 1000);
+  checkTiming(statusListRefreshMs, statusListBackgroundRefreshMs);
   return {
     keyFiles: { ed25519, p256 },
     gatewayId,
     baseUrl,
     trustDomain: new URL(baseUrl).hostname,
     delegation: delegationPolicy ? registryOf(delegationPolicy, env.DELEGATION_ADDRESS || undefined) : null,
-    statusListRefreshMs: Number(refreshText) * 1000,
+    statusListRefreshMs,
+    statusListBackgroundRefreshMs,
   };
 }

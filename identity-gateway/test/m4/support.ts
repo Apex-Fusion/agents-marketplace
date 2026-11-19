@@ -104,7 +104,15 @@ export interface Harness {
 
 const servers: Server[] = [];
 
-export async function startGateway(builder: LedgerBuilder, options: { delegations?: boolean; refreshMs?: number } = {}): Promise<Harness> {
+export interface GatewayOptions {
+  readonly delegations?: boolean;
+  /** How old lists are before a request builds them again (ms); default 60 s. */
+  readonly refreshMs?: number;
+  /** How old lists are before the timer builds them again (ms); default: the setting's default. */
+  readonly backgroundRefreshMs?: number;
+}
+
+export async function startGateway(builder: LedgerBuilder, options: GatewayOptions = {}): Promise<Harness> {
   const logs: string[] = [];
   const info: string[] = [];
   const resolver = new VectorResolver(builder.chain, builder.settings, { log: (m) => logs.push(m) });
@@ -116,6 +124,7 @@ export async function startGateway(builder: LedgerBuilder, options: { delegation
       trustDomain: TRUST_DOMAIN,
       delegation: options.delegations === false ? null : DELEGATION,
       statusListRefreshMs: options.refreshMs ?? 60_000,
+      ...(options.backgroundRefreshMs === undefined ? {} : { statusListBackgroundRefreshMs: options.backgroundRefreshMs }),
     },
     keys: gatewayKeys(),
     records: resolver,

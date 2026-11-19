@@ -12,10 +12,20 @@
 // Builds: at most one runs at a time, and at most one starts in each refresh interval
 // (STATUS_LIST_REFRESH_SECONDS), also after a failed build. The first starts with the services. A
 // build is one pass over the records (one tip, kept ledger reads; resolver.ts), and its Koios reads
-// go in the background lane (chain/limiter.ts), after the reads of requests. A list older than the
-// refresh interval is built again in the background; until that build ends, requests get the
-// previous lists, which stay valid (`exp`, `validUntil`) for an hour. Without valid lists, a request
-// waits up to 10 s for a running build.
+// go in the background lane (chain/limiter.ts), after the reads of requests. Two things start a
+// build again: a request that finds lists older than the refresh interval, and a timer. The timer
+// checks the lists every REFRESH_TICK_MS and builds them again when they are older than the
+// background interval (STATUS_LIST_BACKGROUND_REFRESH_SECONDS), also when no request comes. A failed
+// build leaves the last lists in place and the timer on. Until a build ends, requests get the
+// previous lists. Without valid lists, a request waits up to 10 s for a running build.
+// Timing rule: a list is valid for LIST_VALIDITY_MS after the end of its build (`exp`,
+// `validUntil`). The timer starts a build when the lists are as old as the background interval, at
+// most one tick late, and the new lists replace the old ones when the build ends. The old lists are
+// still valid at that time, and no reader waits, when
+//   background interval + REFRESH_TICK_MS + time of the build <= LIST_VALIDITY_MS.
+// BUILD_ALLOWANCE_MS is the time that the rule allows for the tick and the build together. So each
+// interval is at most LIST_VALIDITY_MS - BUILD_ALLOWANCE_MS: `checkTiming` refuses a longer one
+// when the services start, and a build that is longer than the rule allows for is logged.
 // Two formats, both signed with ES256 by the gateway's P-256 key:
 // - W3C Bitstring Status List v1.0 (W3C Recommendation, 15 May 2025,
 //   https://www.w3.org/TR/2025/REC-vc-bitstring-status-list-20250515/): one list with both purposes
@@ -97,9 +107,36 @@ const BUILD_CONCURRENCY = 8;
 export const LIST_VALIDITY_MS = 3_600_000;
 /** How long a request without valid lists waits for a running build. */
 export const BUILD_WAIT_MS = 10_000;
+/** The timer checks the age of the lists this often. */
+export const REFRESH_TICK_MS = 10_000;
+/** The time that the timing rule allows for the check of the timer and for one build, together. */
+export const BUILD_ALLOWANCE_MS = 900_000;
+/** The longest interval of both settings: the validity of a list less the allowance. */
+export const MAX_REFRESH_MS = LIST_VALIDITY_MS - BUILD_ALLOWANCE_MS;
+/** The shortest background interval: a build takes minutes, so a shorter interval is a loop of builds. */
+export const MIN_BACKGROUND_REFRESH_MS = 60_000;
+/** The default of STATUS_LIST_BACKGROUND_REFRESH_SECONDS: 10 minutes. */
+export const DEFAULT_BACKGROUND_REFRESH_MS = 600_000;
 
-/** What starts a build, for the log: the start of the services, a request, or a call of `refresh`. */
-type BuildReason = "start" | "request" | "call";
+const TIMING_RULE = `A list is valid for ${LIST_VALIDITY_MS / 1000} s. An interval and ${BUILD_ALLOWANCE_MS / 1000} s for the check of the timer and for a build must fit in that time.`;
+
+/**
+ * Refuses intervals that break the timing rule (see the head of this file). The messages name the
+ * settings of the environment, which `loadM4Config` reads.
+ */
+export function checkTiming(refreshMs: number, backgroundMs: number): void {
+  const check = (name: string, minMs: number, ms: number): void => {
+    if (!(ms >= minMs && ms <= MAX_REFRESH_MS)) {
+      throw new Error(`${name} must be from ${minMs / 1000} to ${MAX_REFRESH_MS / 1000} s, got ${ms / 1000}. ${TIMING_RULE}`);
+    }
+  };
+  check("STATUS_LIST_REFRESH_SECONDS", 1_000, refreshMs);
+  check("STATUS_LIST_BACKGROUND_REFRESH_SECONDS", MIN_BACKGROUND_REFRESH_MS, backgroundMs);
+  if (backgroundMs < refreshMs) throw new Error("STATUS_LIST_BACKGROUND_REFRESH_SECONDS must not be shorter than STATUS_LIST_REFRESH_SECONDS");
+}
+
+/** What starts a build, for the log: the start of the services, the timer, a request, or a call of `refresh`. */
+type BuildReason = "start" | "timer" | "request" | "call";
 
 /** Milliseconds as seconds with one decimal, for the log. */
 const seconds = (ms: number): string => (ms / 1000).toFixed(1);
@@ -125,12 +162,18 @@ export class StatusLists {
   private listsBuild: Promise<Lists> | null = null;
   /** When the last build started (POSIX ms). */
   private lastBuildAt = -Infinity;
+  /** The age at which the timer builds the lists again (POSIX ms). */
+  private readonly backgroundMs: number;
+  private timer: NodeJS.Timeout | undefined;
 
   constructor(
     private readonly ctx: M4Context,
     /** Agents whose Token Status List entry must read SUSPENDED (TokenRegistry.heldEntries). */
     private readonly heldEntries: (now: number) => ReadonlySet<string> = () => new Set(),
-  ) {}
+  ) {
+    this.backgroundMs = ctx.settings.statusListBackgroundRefreshMs ?? DEFAULT_BACKGROUND_REFRESH_MS;
+    checkTiming(ctx.settings.statusListRefreshMs, this.backgroundMs);
+  }
 
   /** The status-list index of an identifier, or null when it has none (yet). A failed read throws. */
   async indexOf(vectorId: string): Promise<number | null> {
@@ -159,9 +202,30 @@ export class StatusLists {
     await this.buildLists("call");
   }
 
-  /** Starts the first build in the background, so that the first requests find lists. */
+  /**
+   * Starts the timer, and the first build in the background so that the first requests find lists.
+   * The timer builds the lists again when they are older than the background interval.
+   */
   start(): void {
+    if (this.timer === undefined) {
+      this.timer = setInterval(() => this.startWhenDue(this.backgroundMs, "timer"), REFRESH_TICK_MS);
+      this.timer.unref();
+      this.ctx.info?.(
+        `identity-gateway: status lists: the timer builds them again when they are older than ${this.backgroundMs / 1000} s; a list is valid for ${LIST_VALIDITY_MS / 1000} s`,
+      );
+    }
     if (this.lists === null && this.listsBuild === null) this.buildInBackground("start");
+  }
+
+  /** Stops the timer. A build that runs ends on its own. */
+  stop(): void {
+    clearInterval(this.timer);
+    this.timer = undefined;
+  }
+
+  /** Resolves when no build runs (for tests and orderly shutdown). */
+  async idle(): Promise<void> {
+    while (this.listsBuild !== null) await this.listsBuild.catch(() => undefined);
   }
 
   private buildIndex(): Promise<IndexCache> {
@@ -219,7 +283,14 @@ export class StatusLists {
         }
         const built: Lists = { builtAt: this.ctx.now(), values, tokenValues, signed: new Map() };
         this.lists = built;
-        this.ctx.info?.(`identity-gateway: status lists: build ended after ${seconds(built.builtAt - startedAt)} s: ${entries.length} records`);
+        const duration = built.builtAt - startedAt;
+        this.ctx.info?.(`identity-gateway: status lists: build ended after ${seconds(duration)} s: ${entries.length} records`);
+        if (this.backgroundMs + REFRESH_TICK_MS + duration > LIST_VALIDITY_MS) {
+          this.ctx.log(
+            `identity-gateway: status lists: the build took ${seconds(duration)} s, and the interval is ${this.backgroundMs / 1000} s. ` +
+              `A list is valid for ${LIST_VALIDITY_MS / 1000} s, so a list can expire before the next build ends. Use a shorter STATUS_LIST_BACKGROUND_REFRESH_SECONDS.`,
+          );
+        }
         return built;
       } catch (e) {
         this.ctx.log(`identity-gateway: status lists not rebuilt after ${seconds(this.ctx.now() - startedAt)} s: ${e instanceof Error ? e.message : String(e)}`);
@@ -237,6 +308,17 @@ export class StatusLists {
   }
 
   /**
+   * Starts a build in the background when the lists are older than `minAgeMs` or missing, no build
+   * runs, and the last build started one refresh interval ago or earlier, also when it failed.
+   */
+  private startWhenDue(minAgeMs: number, reason: BuildReason): void {
+    const now = this.ctx.now();
+    if (this.listsBuild !== null || now - this.lastBuildAt < this.ctx.settings.statusListRefreshMs) return;
+    const age = this.lists === null ? Infinity : now - this.lists.builtAt;
+    if (age >= minAgeMs) this.buildInBackground(reason);
+  }
+
+  /**
    * The lists to serve: lists younger than the refresh interval; else, while they are valid, the
    * previous lists, and a build starts in the background when the last one started a refresh
    * interval ago; without valid lists, the result of the running build.
@@ -247,7 +329,7 @@ export class StatusLists {
     const lists = this.lists;
     const age = lists === null ? Infinity : now - lists.builtAt;
     if (lists !== null && age < refreshMs) return lists;
-    if (this.listsBuild === null && now - this.lastBuildAt >= refreshMs) this.buildInBackground("request");
+    this.startWhenDue(refreshMs, "request");
     if (lists !== null && age < LIST_VALIDITY_MS) return lists;
     if (this.listsBuild !== null) return within(this.listsBuild, BUILD_WAIT_MS, "the status-list build");
     throw new Error("no valid status lists: the last build failed, and the next one starts one refresh interval after it");

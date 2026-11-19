@@ -17,8 +17,14 @@ export interface M4Settings {
   readonly trustDomain: string;
   /** The delegation contract (policy ID = script hash, and the delegation address); null when not deployed. */
   readonly delegation: Registry | null;
-  /** How long a built status list (and the status-list index) is used before it is built again. */
+  /** How old built status lists are before a request builds them again (STATUS_LIST_REFRESH_SECONDS). It is also the `ttl` of the lists. */
   readonly statusListRefreshMs: number;
+  /**
+   * How old built status lists are before the timer builds them again, with no request
+   * (STATUS_LIST_BACKGROUND_REFRESH_SECONDS). Not shorter than `statusListRefreshMs`. Default:
+   * DEFAULT_BACKGROUND_REFRESH_MS. The timing rule in status-lists.ts gives its limits.
+   */
+  readonly statusListBackgroundRefreshMs?: number;
 }
 
 /** The resolver core functions that the M4 services use. `VectorResolver` implements them. */
