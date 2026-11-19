@@ -1,16 +1,22 @@
 /**
  * decoder-sites.test.ts — the places where the code calls the decoder library on data from outside are named.
  *
- * The test reads the syntax tree of each source file of the repository. Tests, `node_modules` and `dist` are not source. It finds each
- * call that gives data to the decoder library:
+ * The test reads the syntax tree of each source file of the repository. The files come from `git ls-files`: a file that git does not
+ * track is not read, and a new file counts after `git add`. Tests, `node_modules` and `dist` are not source. It finds each call that
+ * gives data to the decoder library:
  *
  * - a decoder of the library: `CML.*.from_cbor_hex`, `from_bech32`, `from_hex`, and the others in DECODER_NAMES;
+ * - a free function of the library: any call on `CML` itself, as `CML.hash_transaction(body)`, `CML.min_fee(...)` or
+ *   `CML.encode_json_str_to_plutus_datum(...)`. A test reads the declarations of the library and checks each function that they export;
  * - a call of Lucid that decodes inside Lucid: `pay.ToAddress`, `collectFrom`, `readFrom`, `attach.*`, `addSignerKey`, `attachMetadata`,
  *   `complete`, `utxosAt`, `utxosByOutRef`, `fromTx`, `selectWallet.*`, and `getUtxos` of the wallet;
  * - a function of Lucid or of its UPLC package that reads a text: `getAddressDetails`, `validatorToScriptHash`, `apply_params_to_script`.
  *
- * Line breaks do not matter. A name that a destructuring, a variable or an import alias gives counts as the name of the library. A
- * decoder that a call hands on (`items.map(CML.Address.from_bech32)`) counts too.
+ * Line breaks do not matter. A name that a destructuring, a variable or an import alias gives counts as the name of the library. The
+ * same holds for `CML` itself and its free functions: `import * as X from "@dcspark/cardano-multiplatform-lib-nodejs"`, `const X = CML`,
+ * `const { min_fee } = CML`, `import { min_fee } from "@dcspark/cardano-multiplatform-lib-nodejs"`, and a parameter with `CML` as its
+ * default. The scan follows a name inside one file, not from one file to another. A decoder that a call hands on
+ * (`items.map(CML.Address.from_bech32)`) counts too.
  *
  * Each call has a row in SITES: its file, its function, its callee, the number of its calls, and the reason why it is safe. The reason
  * says which check runs before the call, or why no check is needed. A new call in a file or a function that SITES does not name fails
@@ -22,10 +28,11 @@
  * the datum (and a native script) before it returns the output.
  *
  * A name can be the name of another thing: `jobs.complete` of the job store of the supplier is not a transaction builder. EXCLUDED lists
- * these calls with a reason. A call through `CML` or `lucid` is never excluded.
+ * these calls with a reason. A call through `CML` (or a name for it) or `lucid` is never excluded.
  */
 
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
@@ -36,7 +43,7 @@ const ROOT = resolve(__dirname, "../..");
 
 // ─── The source files ────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** The folders that the scan must cover. The scan walks the whole repository, so a new folder is covered too. */
+/** The folders that the scan must cover. The scan reads each file that git tracks, so a new folder is covered too. */
 const SOURCE_DIRS = [
   "packages/shared/src", "gateway/src", "buyer/src", "buyer/src/ui", "buyer/scripts", "supplier/src", "paper2agent/src",
   "wallet-monitor/src", "indexer/src", "indexer-ui/src", "identity-gateway/src", "contracts/identity-marketplace/deploy",
@@ -45,21 +52,78 @@ const SOURCE_DIRS = [
 
 const SOURCE_FILE = /\.(?:[cm]?[jt]s|[jt]sx)$/;
 const TEST_FILE = /\.(?:test|spec)\.[^./]+$/;
-const NOT_SOURCE_FOLDERS = ["node_modules", "dist", "coverage", ".git", ".vitest-cache", "test", "tests", "__tests__"];
+/** A folder with one of these names holds modules or output. It is not source, at any depth. */
+const NOT_SOURCE_FOLDERS = ["node_modules", "dist", "coverage", ".git", ".vitest-cache"];
+/** A folder with one of these names holds tests in the places that `inTestFolder` names. */
+const TEST_FOLDERS = ["test", "tests"];
 
-/** The source files under `directory`, sorted. */
-function sourceFiles(directory: string): string[] {
+/**
+ * True when the folders of a path hold tests. The repository keeps its tests in `tests/` at the root, in `test/` or `tests/` of a
+ * package, and in `__tests__` at any depth. The folders `gateway/test`, `identity-gateway/test` and `paper2agent/test` exist today. A
+ * package under `packages/` has them one level deeper (`packages/<name>/test`). A folder with one of these names under `src` holds
+ * source: `gateway/src/test/helper.ts` is a source file. The `tests` folders of the Aiken project in `contracts/` hold no script today,
+ * so the rule does not name them.
+ */
+function inTestFolder(folders: readonly string[]): boolean {
+  return (
+    folders[0] === "tests" || folders.includes("__tests__") || TEST_FOLDERS.includes(folders[1] ?? "") ||
+    (folders[0] === "packages" && TEST_FOLDERS.includes(folders[2] ?? ""))
+  );
+}
+
+/**
+ * The source files among `paths`, sorted. A path goes from the repository root, with `/`. A path is a source file when its name has the
+ * extension of a script and is not the name of a test, and no folder of it holds modules, output or tests.
+ */
+function selectSourcePaths(paths: readonly string[]): string[] {
+  return paths
+    .filter((path) => {
+      const parts = path.split("/");
+      const name = parts[parts.length - 1]!;
+      const folders = parts.slice(0, -1);
+      return (
+        SOURCE_FILE.test(name) && !TEST_FILE.test(name) && !folders.some((folder) => NOT_SOURCE_FOLDERS.includes(folder)) &&
+        !inTestFolder(folders)
+      );
+    })
+    .sort();
+}
+
+/**
+ * The files that git tracks in `root`, as paths from `root` with `/`. None when git cannot give a list: the folder has no `.git` (a copy
+ * of the sources), or git is not installed. The scan then walks the folders. A walk also reads the files that git does not track, so it
+ * is the second choice. Any other failure of git is an error, not a reason to walk.
+ */
+function gitFiles(root: string, command = "git"): string[] | undefined {
+  if (!existsSync(join(root, ".git"))) return undefined;
+  try {
+    const output = execFileSync(command, ["ls-files", "-z"], {
+      cwd: root, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"],
+    });
+    return [...new Set(output.split("\0").filter((path) => path !== ""))];
+  } catch (error) {
+    if ((error as { code?: unknown }).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+/** Every file under `directory`, as a path from `directory` with `/`. The walk skips the folders that hold modules or output. */
+function walkFiles(directory: string, prefix = ""): string[] {
   const files: string[] = [];
-  const entries = readdirSync(directory, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1));
-  for (const entry of entries) {
-    const path = join(directory, entry.name);
-    if (entry.isDirectory()) {
-      if (!NOT_SOURCE_FOLDERS.includes(entry.name)) files.push(...sourceFiles(path));
-    } else if (SOURCE_FILE.test(entry.name) && !TEST_FILE.test(entry.name)) {
-      files.push(path);
-    }
+  for (const entry of readdirSync(join(directory, prefix), { withFileTypes: true })) {
+    const path = prefix === "" ? entry.name : `${prefix}/${entry.name}`;
+    if (!entry.isDirectory()) files.push(path);
+    else if (!NOT_SOURCE_FOLDERS.includes(entry.name)) files.push(...walkFiles(directory, path));
   }
   return files;
+}
+
+/**
+ * The source files of the repository at `root`, as absolute paths, sorted. `listed` is the list of the files that git tracks (gitFiles).
+ * With none, the files come from a walk. A path that the list names and the work tree no longer has is left out.
+ */
+function sourceFiles(root: string, listed: readonly string[] | undefined): string[] {
+  return selectSourcePaths(listed ?? walkFiles(root)).map((path) => join(root, path)).filter((path) => existsSync(path));
 }
 
 /** The path from the repository root, with `/`. */
@@ -96,18 +160,25 @@ const NAMESPACES = ["pay", "attach", "selectWallet"];
 /** The methods of `Data` of Lucid that read a text. */
 const DATA_METHODS = ["from", "fromJson", "toJson"];
 
+/** `CML` is the namespace of the decoder library. It holds its classes (`CML.Transaction`) and its free functions (`CML.hash_transaction`). */
+const CML_NAME = "CML";
+
+/** The packages of the decoder library, one for each target: `@dcspark/cardano-multiplatform-lib-nodejs`, `@anastasia-labs/...-browser`. */
+const CML_MODULE = /^@(?:dcspark|anastasia-labs)\/cardano-multiplatform-lib(?:-[a-z]+)?(?:\/|$)/;
+
 /** A chain with one of these names goes through the decoder library. A call on it is never excluded. */
-const LIBRARY_ROOTS = ["CML", "lucid"];
+const LIBRARY_ROOTS = [CML_NAME, "lucid"];
 
 /** Modules of the decoder library and of Lucid. */
-const LIBRARY_MODULE = /^@(?:lucid-evolution|anastasia-labs)\//;
+const LIBRARY_MODULE = /^@(?:lucid-evolution|anastasia-labs|dcspark)\//;
 
 /**
  * The words that make a detection possible. A file with none of them cannot hold a decoder call, and the scan does not parse it.
- * `extraWords` are the names of the functions that the guards follow.
+ * `extraWords` are the names of the functions that the guards follow. The name of the package of the decoder library is one of the
+ * words: a file that imports the package can give its namespace and its functions names of its own.
  */
 function detectionPattern(extraWords: readonly string[]): RegExp {
-  const words = [...DECODER_NAMES, ...NAMESPACES, ...LIBRARY_ROOTS, ...extraWords, "getUtxos"];
+  const words = [...DECODER_NAMES, ...NAMESPACES, ...LIBRARY_ROOTS, "cardano-multiplatform-lib", ...extraWords, "getUtxos"];
   return new RegExp(`\\b(?:${words.join("|")})\\b|\\bData\\s*(?:\\?\\.|\\.|\\[)`);
 }
 
@@ -175,7 +246,9 @@ function chainNames(expression: ts.Expression): string[] {
   return names.reverse();
 }
 
-const throughLibrary = (receiver: ts.Expression): boolean => chainNames(receiver).some((name) => LIBRARY_ROOTS.includes(name));
+/** True when a chain goes through the library: one of its names is `CML` or `lucid`, or a name that `cml` holds. */
+const throughLibrary = (receiver: ts.Expression, cml: ReadonlySet<string> = new Set()): boolean =>
+  chainNames(receiver).some((name) => LIBRARY_ROOTS.includes(name) || cml.has(name));
 
 /** The functions around a node, the innermost first. */
 function enclosingFunctions(node: ts.Node): FunctionLike[] {
@@ -279,45 +352,140 @@ interface DecoderCall {
   node: ts.Node;
   /** The receiver of a call of a member. */
   receiver: ts.Expression | undefined;
+  /** True when the receiver goes through the library: `CML.Transaction`, `lucid.newTx()`, or a name that the file gives to `CML`. */
+  library: boolean;
 }
 
-/** The names that a destructuring, a variable or an import alias gives to a name of the library. */
-function decoderAliases(file: ts.SourceFile): Map<string, string> {
+/** The names that a file gives to the decoder library. */
+interface LibraryNames {
+  /** The names of `CML` itself: `CML`, and each name that an import, a variable or a parameter gives to it. */
+  cml: ReadonlySet<string>;
+  /** The names that stand for one name of the library: a destructuring, a variable or an import gives them. The key is the name in the file. */
+  aliases: ReadonlyMap<string, string>;
+}
+
+/**
+ * True when `name` is the name of a function of the library and not of a class. The classes and the enums of the library start with a
+ * capital letter and its free functions do not. A test reads the declarations of the library to check it.
+ */
+const isFunctionName = (name: string): boolean => /^[a-z]/.test(name);
+
+/** True when `expression` loads a module that `pattern` matches: `require("m")` or `import("m")`. */
+function loadsModule(expression: ts.Expression, pattern: RegExp): boolean {
+  const call = unwrap(expression);
+  if (!ts.isCallExpression(call)) return false;
+  const first = call.arguments[0];
+  const loads = call.expression.kind === ts.SyntaxKind.ImportKeyword || squash(call.expression) === "require";
+  return loads && first !== undefined && ts.isStringLiteralLike(first) && pattern.test(first.text);
+}
+
+/**
+ * True when `expression` is `CML` itself: a name for it, a member named `CML` (`lucid.CML`), a load of its package, or a choice between
+ * values where one is `CML` (`options.library ?? CML`).
+ */
+function isCml(expression: ts.Expression, cml: ReadonlySet<string>): boolean {
+  const value = unwrap(expression);
+  if (ts.isIdentifier(value)) return cml.has(value.text);
+  if (ts.isPropertyAccessExpression(value) || ts.isElementAccessExpression(value)) return memberName(value) === CML_NAME;
+  if (ts.isBinaryExpression(value)) {
+    const operator = value.operatorToken.kind;
+    const isChoice = operator === ts.SyntaxKind.QuestionQuestionToken || operator === ts.SyntaxKind.BarBarToken;
+    return isChoice && (isCml(value.left, cml) || isCml(value.right, cml));
+  }
+  if (ts.isConditionalExpression(value)) return isCml(value.whenTrue, cml) || isCml(value.whenFalse, cml);
+  return loadsModule(value, CML_MODULE);
+}
+
+/**
+ * The name of the function of the library that `expression` is, when the code does not call it where it stands: a name that stands for
+ * one, a member with a decoder name, or a member of `CML` itself with the name of a function (`CML.hash_transaction`). Else none.
+ */
+function functionOf(expression: ts.Expression, names: LibraryNames): string | undefined {
+  const value = unwrap(expression);
+  if (ts.isIdentifier(value)) {
+    const alias = names.aliases.get(value.text);
+    if (alias === undefined) return DECODER_NAMES.includes(value.text) ? value.text : undefined;
+    return DECODER_NAMES.includes(alias) || isFunctionName(alias) ? alias : undefined;
+  }
+  if (!ts.isPropertyAccessExpression(value) && !ts.isElementAccessExpression(value)) return undefined;
+  const member = memberName(value);
+  if (member === undefined) return undefined;
+  if (DECODER_NAMES.includes(member)) return member;
+  return isFunctionName(member) && isCml(value.expression, names.cml) ? member : undefined;
+}
+
+/** The names that a file gives to `CML` and to the names of the library: by an import, a destructuring, a variable or a parameter. */
+function libraryNames(file: ts.SourceFile): LibraryNames {
+  const cml = new Set([CML_NAME]);
   const aliases = new Map<string, string>();
+  const names: LibraryNames = { cml, aliases };
   const visit = (node: ts.Node): void => {
-    if (ts.isImportSpecifier(node) && node.propertyName !== undefined && DECODER_NAMES.includes(node.propertyName.text)) {
-      aliases.set(node.name.text, node.propertyName.text);
+    if (ts.isImportDeclaration(node)) {
+      // An import of the package of the library gives its namespace, or its functions by name.
+      const clause = node.importClause;
+      const named = clause?.namedBindings;
+      if (clause !== undefined && ts.isStringLiteral(node.moduleSpecifier) && CML_MODULE.test(node.moduleSpecifier.text)) {
+        if (clause.name !== undefined) cml.add(clause.name.text);
+        if (named !== undefined && ts.isNamespaceImport(named)) cml.add(named.name.text);
+        if (named !== undefined && ts.isNamedImports(named)) {
+          for (const element of named.elements) aliases.set(element.name.text, (element.propertyName ?? element.name).text);
+        }
+      }
+    } else if (ts.isImportEqualsDeclaration(node)) {
+      const reference = node.moduleReference;
+      if (ts.isExternalModuleReference(reference) && ts.isStringLiteral(reference.expression) && CML_MODULE.test(reference.expression.text)) {
+        cml.add(node.name.text);
+      }
+    } else if (ts.isImportSpecifier(node)) {
+      const original = (node.propertyName ?? node.name).text;
+      if (original === CML_NAME) cml.add(node.name.text);
+      else if (node.propertyName !== undefined && DECODER_NAMES.includes(original)) aliases.set(node.name.text, original);
     } else if (ts.isBindingElement(node) && ts.isIdentifier(node.name)) {
-      const source = node.propertyName === undefined ? node.name.text : ts.isIdentifier(node.propertyName) ? node.propertyName.text : undefined;
-      if (source !== undefined && DECODER_NAMES.includes(source)) aliases.set(node.name.text, source);
-    } else if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer !== undefined) {
-      const value = unwrap(node.initializer);
-      const source = ts.isIdentifier(value) ? (aliases.get(value.text) ?? value.text) : memberName(value);
-      if (source !== undefined && DECODER_NAMES.includes(source)) aliases.set(node.name.text, source);
+      const key = node.propertyName ?? node.name;
+      const source = ts.isIdentifier(key) || ts.isStringLiteral(key) ? key.text : undefined;
+      // A name in the pattern of a declaration whose value is `CML`: `const { min_fee } = CML`.
+      const holder = ts.isObjectBindingPattern(node.parent) ? node.parent.parent : undefined;
+      const fromCml =
+        holder !== undefined && (ts.isVariableDeclaration(holder) || ts.isParameter(holder)) && holder.initializer !== undefined &&
+        isCml(holder.initializer, cml);
+      if (node.dotDotDotToken !== undefined) {
+        if (fromCml) cml.add(node.name.text);
+      } else if (source === CML_NAME) {
+        cml.add(node.name.text);
+      } else if (source !== undefined && (fromCml || DECODER_NAMES.includes(source))) {
+        aliases.set(node.name.text, source);
+      }
+    } else if ((ts.isVariableDeclaration(node) || ts.isParameter(node)) && ts.isIdentifier(node.name)) {
+      const value = node.initializer;
+      const typed = node.type !== undefined && ts.isTypeQueryNode(node.type) && ts.isIdentifier(node.type.exprName) && cml.has(node.type.exprName.text);
+      if (typed || (value !== undefined && isCml(value, cml))) cml.add(node.name.text);
+      const alias = value === undefined ? undefined : functionOf(value, names);
+      if (alias !== undefined) aliases.set(node.name.text, alias);
     }
     ts.forEachChild(node, visit);
   };
   visit(file);
-  return aliases;
+  return names;
 }
 
 /** The decoder name of a call, or none. */
-function decoderNameOfCall(call: ts.CallExpression, aliases: ReadonlyMap<string, string>): string | undefined {
+function decoderNameOfCall(call: ts.CallExpression, names: LibraryNames): string | undefined {
   const callee = unwrap(call.expression);
   if (ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee)) {
     const receiver = unwrap(callee.expression);
     const member = memberName(callee);
-    if (member === undefined) return throughLibrary(receiver) ? "<computed>" : undefined;
+    if (member === undefined) return throughLibrary(receiver, names.cml) ? "<computed>" : undefined;
     if (DECODER_NAMES.includes(member)) return member;
+    // A free function of the library: any member of `CML` itself.
+    if (isCml(receiver, names.cml)) return member;
     if (member === "getUtxos" && ts.isCallExpression(receiver) && calleeName(receiver.expression) === "wallet") return member;
     if (ts.isIdentifier(receiver) && receiver.text === "Data" && DATA_METHODS.includes(member)) return `Data.${member}`;
     const namespace = ts.isIdentifier(receiver) ? receiver.text : memberName(receiver);
     if (namespace !== undefined && NAMESPACES.includes(namespace)) return member;
-    return member.startsWith("from_") && chainNames(receiver).includes("CML") ? member : undefined;
+    return member.startsWith("from_") && chainNames(receiver).some((name) => names.cml.has(name)) ? member : undefined;
   }
   if (!ts.isIdentifier(callee)) return undefined;
-  const name = aliases.get(callee.text) ?? callee.text;
-  return DECODER_NAMES.includes(name) ? name : undefined;
+  return names.aliases.get(callee.text) ?? (DECODER_NAMES.includes(callee.text) ? callee.text : undefined);
 }
 
 /**
@@ -345,19 +513,23 @@ const nameNode = (expression: ts.Expression): ts.Node =>
 
 /** The decoder calls in a file, and the decoders that the file hands on. A comment or a string holds no call. */
 function findDecoderCalls(file: ts.SourceFile): DecoderCall[] {
-  const aliases = decoderAliases(file);
+  const names = libraryNames(file);
   const found: DecoderCall[] = [];
   const add = (node: ts.Node, callee: string, target: ts.Expression): void => {
-    const receiver = ts.isPropertyAccessExpression(target) || ts.isElementAccessExpression(target) ? target.expression : undefined;
-    found.push({ file: rootPath(file.fileName), line: lineOf(nameNode(target)), fn: functionLabel(node), callee, node, receiver: ts.isCallExpression(node) ? receiver : undefined });
+    const object = ts.isPropertyAccessExpression(target) || ts.isElementAccessExpression(target) ? target.expression : undefined;
+    const receiver = ts.isCallExpression(node) ? object : undefined;
+    found.push({
+      file: rootPath(file.fileName), line: lineOf(nameNode(target)), fn: functionLabel(node), callee, node, receiver,
+      library: receiver !== undefined && throughLibrary(receiver, names.cml),
+    });
   };
   const visit = (node: ts.Node): void => {
     if (ts.isCallExpression(node)) {
-      const callee = decoderNameOfCall(node, aliases);
+      const callee = decoderNameOfCall(node, names);
       if (callee !== undefined) add(node, callee, unwrap(node.expression));
     } else if ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node) || ts.isIdentifier(node)) && isHandedOn(node)) {
-      const name = ts.isIdentifier(node) ? (aliases.get(node.text) ?? node.text) : memberName(node);
-      if (name !== undefined && DECODER_NAMES.includes(name)) add(node, name, node);
+      const name = functionOf(node, names);
+      if (name !== undefined) add(node, name, node);
     }
     ts.forEachChild(node, visit);
   };
@@ -418,7 +590,7 @@ function isSignBuilder(receiver: ts.Expression): boolean {
 /** The exclusion of a call. A call through the decoder library has none. */
 function exclusionOf(call: DecoderCall): Exclusion | undefined {
   const receiver = call.receiver;
-  if (receiver === undefined || throughLibrary(receiver)) return undefined;
+  if (receiver === undefined || call.library) return undefined;
   return EXCLUDED.find((exclusion) => {
     const inFile = exclusion.where === "anywhere" || call.file === exclusion.where || (exclusion.where.endsWith("/") && call.file.startsWith(exclusion.where));
     const sameReceiver = exclusion.receiver === SIGN_BUILDER ? isSignBuilder(receiver) : squash(receiver) === exclusion.receiver;
@@ -649,6 +821,10 @@ const SITES: Site[] = [
     "text first (HEX64_RE.test: 64 hex characters).",
     afterCheckOfCallers("HEX64_RE.test")),
   site(SIGNED_TRANSACTION, "inspectSignedTransaction", "from_cbor_hex", 1, OWN_TRANSACTION),
+  site(SIGNED_TRANSACTION, "inspectSignedTransaction", "hash_transaction", 1,
+    "The argument is the transaction body object that CML.Transaction.from_cbor_hex made in the same function. The function takes an " +
+    `object, not a text or bytes, and it only hashes it. ${OWN_TRANSACTION}`,
+    before("CML.Transaction.from_cbor_hex")),
   site(SIGNED_TRANSACTION, "inspectSignedTransactionFinancials", "from_cbor_hex", 1, OWN_TRANSACTION),
   site(DECODER_HEALTH, "decoderWorks", "from_cbor_hex", 1, "The self-check decodes one known value: the argument is a constant text.", CONSTANT),
 
@@ -917,7 +1093,13 @@ function firstCallOf(code: string, name: string): ts.CallExpression {
   return call;
 }
 
-const SCAN = scanSources(sourceFiles(ROOT), trackedNamesOf(SITES));
+/** The scan of the repository: the files that git tracks, or the files of a walk when git gives no list. */
+const scanRepository = (): Scan => scanSources(sourceFiles(ROOT, gitFiles(ROOT)), trackedNamesOf(SITES));
+
+const SCAN = scanRepository();
+
+/** False when git gives no list. The scan walks the folders then, and the tests of the list do not apply. */
+const GIT_LISTS_FILES = gitFiles(ROOT) !== undefined;
 
 describe("the detector", () => {
   const SHAPES: Array<[shape: string, code: string, callees: string[]]> = [
@@ -955,6 +1137,37 @@ describe("the detector", () => {
     ["a key that is not a string, on the library", "CML.Transaction[method](hex);", ["<computed>"]],
     ["a call in a callback", "items.map((item) => CML.Transaction.from_cbor_hex(item.hex));", ["from_cbor_hex"]],
     ["an import call beside a decoder call", "const module = await import('x');\nconst bytes = CML.Transaction.from_bytes(raw);", ["from_bytes"]],
+    // The free functions of the library.
+    ["a free function of CML", "const hash = CML.hash_transaction(body);", ["hash_transaction"]],
+    ["a free function over several lines", "const datum = CML\n  .encode_json_str_to_plutus_datum(\n    text,\n    schema,\n  );", ["encode_json_str_to_plutus_datum"]],
+    ["a free function with comments between the parts", "CML /* the library */\n  // the function\n  .hash_transaction(\n    body, // the body\n  );", ["hash_transaction"]],
+    ["a free function with an optional call", "CML?.make_vkey_witness?.(hash, key);", ["make_vkey_witness"]],
+    ["a free function with an element access", 'CML["min_fee"](tx, fee, prices, 0n);', ["min_fee"]],
+    ["a free function with a template key", "CML[`hash_plutus_data`](data);", ["hash_plutus_data"]],
+    ["a free function in a comma expression", "(0, CML.hash_transaction)(body);", ["hash_transaction"]],
+    ["a free function of CML after a cast", "(CML as typeof CML).min_fee(tx, fee, prices, 0n);", ["min_fee"]],
+    ["a key that is not a string, on CML itself", "CML[name](value);", ["<computed>"]],
+    ["a free function that a call hands on", "const hashes = bodies.map(CML.hash_transaction);", ["hash_transaction"]],
+    ["a free function that `call` applies", "CML.hash_transaction.call(CML, body);", ["hash_transaction"]],
+    ["a free function that a variable holds", "const hash = CML.hash_transaction;\nhash(body);", ["hash_transaction", "hash_transaction"]],
+    ["a destructured free function", "const { encode_json_str_to_plutus_datum } = CML;\nencode_json_str_to_plutus_datum(text, schema);", ["encode_json_str_to_plutus_datum"]],
+    ["a destructured free function with a new name", "const { hash_transaction: hash } = CML;\nhash(body);", ["hash_transaction"]],
+    ["a free function through the rest of a destructuring", "const { Transaction, ...library } = CML;\nlibrary.hash_transaction(body);", ["hash_transaction"]],
+    ["a free function through a namespace import", 'import * as Library from "@dcspark/cardano-multiplatform-lib-nodejs";\nLibrary.hash_transaction(body);', ["hash_transaction"]],
+    ["a namespace import over several lines", 'import * as Library\n  from "@dcspark/cardano-multiplatform-lib-nodejs";\nLibrary\n  .hash_transaction(\n    body,\n  );', ["hash_transaction"]],
+    ["a free function through a default import", 'import Library from "@anastasia-labs/cardano-multiplatform-lib-browser";\nLibrary.hash_transaction(body);', ["hash_transaction"]],
+    ["a key that is not a string, on a name for CML", 'import * as Library from "@dcspark/cardano-multiplatform-lib-nodejs";\nLibrary[name](value);', ["<computed>"]],
+    ["a free function through CML under a new name", 'import { CML as Library } from "@lucid-evolution/lucid";\nLibrary.min_fee(tx, fee, prices, 0n);', ["min_fee"]],
+    ["a free function through a variable", "const library = CML;\nlibrary.min_fee(tx, fee, prices, 0n);", ["min_fee"]],
+    ["a free function through a member named CML", "const hash = lucid.CML.hash_transaction(body);", ["hash_transaction"]],
+    ["a free function through a parameter with CML as its default", "function f(library = CML) {\n  return library.hash_transaction(body);\n}", ["hash_transaction"]],
+    ["a free function through a choice between libraries", "const library = options.library ?? CML;\nlibrary.hash_transaction(body);", ["hash_transaction"]],
+    ["a free function through a parameter of the type of CML", "function f(library: typeof CML) {\n  return library.hash_transaction(body);\n}", ["hash_transaction"]],
+    ["a named import of a free function", 'import { hash_transaction } from "@anastasia-labs/cardano-multiplatform-lib-nodejs";\nhash_transaction(body);', ["hash_transaction"]],
+    ["a named import of a free function under a new name", 'import { make_vkey_witness as witness } from "@dcspark/cardano-multiplatform-lib-nodejs";\nwitness(hash, key);', ["make_vkey_witness"]],
+    ["a free function of a package that require loads", 'const { hash_transaction } = require("@dcspark/cardano-multiplatform-lib-nodejs");\nhash_transaction(body);', ["hash_transaction"]],
+    ["a free function of a package that import() loads", 'const library = await import("@anastasia-labs/cardano-multiplatform-lib-nodejs");\nlibrary.hash_transaction(body);', ["hash_transaction"]],
+    ["a free function of a package that an import equals names", 'import library = require("@dcspark/cardano-multiplatform-lib-nodejs");\nlibrary.hash_transaction(body);', ["hash_transaction"]],
   ];
 
   it.each(SHAPES)("sees %s", (_shape, code, callees) => {
@@ -980,6 +1193,27 @@ describe("the detector", () => {
     expect(calleesIn("// CML.Transaction.from_cbor_hex(hex)\n/* tx.pay.ToAddress(a, v) */\nconst note = 'builder.complete()';")).toEqual([]);
   });
 
+  it("does not see a free function in a comment or in a string", () => {
+    const code = "// CML.hash_transaction(body)\n/* CML.min_fee(tx) */\nconst note = 'CML.hash_transaction(body)';\nconst text = `CML.min_fee(${tx})`;";
+    expect(calleesIn(code)).toEqual([]);
+  });
+
+  it("does not see a free function of another name or of another module", () => {
+    for (const code of [
+      "const hash = CMLX.hash_transaction(body);", "const hash = cml.hash_transaction(body);", "const hash = Library.hash_transaction(body);",
+      'import { hash_transaction } from "./hash.js";\nhash_transaction(body);',
+      'import * as Library from "node:crypto";\nLibrary.hash_transaction(body);',
+      'const { hash_transaction } = require("node:crypto");\nhash_transaction(body);',
+    ]) expect(calleesIn(code), code).toEqual([]);
+  });
+
+  it("does not take a class of CML for a function", () => {
+    for (const code of [
+      "const Transaction = CML.Transaction;", "const { Transaction } = CML;\nconst list = [Transaction];",
+      'import { Transaction } from "@dcspark/cardano-multiplatform-lib-nodejs";\nconst list = [Transaction];',
+    ]) expect(calleesIn(code), code).toEqual([]);
+  });
+
   it("parses a file when it has a name of the detector, and only then", () => {
     const pattern = detectionPattern(["helper"]);
     for (const [, code] of SHAPES) expect(pattern.test(code), code).toBe(true);
@@ -1001,6 +1235,90 @@ describe("the detector", () => {
     expect(exclusionOf(firstCallIn("await lucid.fromTx(cbor).sign.withWallet().complete();"))).toBeUndefined();
     expect(exclusionOf(firstCallIn("await lucid.newTx().complete();", "supplier/src/jobRunner.ts"))).toBeUndefined();
   });
+
+  it("excludes no call through a name that the file gives to CML", () => {
+    const call = "await Library.sign.withWallet().complete();";
+    expect(exclusionOf(firstCallIn(`import * as Library from "@dcspark/cardano-multiplatform-lib-nodejs";\n${call}`))).toBeUndefined();
+    expect(exclusionOf(firstCallIn(`const Library = CML;\n${call}`))).toBeUndefined();
+    // The same call with no such name is the call of the sign builder.
+    expect(exclusionOf(firstCallIn(call))).toBe(SIGN_COMPLETE);
+  });
+});
+
+describe("the free functions of the library", () => {
+  const PACKAGES = [
+    "@dcspark/cardano-multiplatform-lib-nodejs", "@dcspark/cardano-multiplatform-lib-browser",
+    "@anastasia-labs/cardano-multiplatform-lib-nodejs", "@anastasia-labs/cardano-multiplatform-lib-browser",
+  ];
+
+  /** The names that the declaration file of the package of the library exports: its free functions, and its classes and enums. */
+  interface LibraryExports {
+    functions: string[];
+    types: string[];
+  }
+
+  /** The exports of the package that Lucid loads as the decoder library. */
+  function readExports(): LibraryExports {
+    const lucid = createRequire(join(ROOT, "packages/shared/package.json")).resolve("@lucid-evolution/lucid");
+    const folder = dirname(createRequire(lucid).resolve("@anastasia-labs/cardano-multiplatform-lib-nodejs"));
+    const manifest = JSON.parse(readFileSync(join(folder, "package.json"), "utf8")) as { types: string };
+    const functions: string[] = [];
+    const types: string[] = [];
+    for (const statement of parse(join(folder, manifest.types)).statements) {
+      const exported = ts.canHaveModifiers(statement) && (ts.getModifiers(statement) ?? []).some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword);
+      if (!exported) continue;
+      if (ts.isFunctionDeclaration(statement) && statement.name !== undefined) functions.push(statement.name.text);
+      else if ((ts.isClassDeclaration(statement) || ts.isEnumDeclaration(statement)) && statement.name !== undefined) types.push(statement.name.text);
+    }
+    return { functions, types };
+  }
+
+  let declared: LibraryExports | undefined;
+  const exportsOfLibrary = (): LibraryExports => (declared ??= readExports());
+
+  it("reads the free functions from the declarations of the library", () => {
+    const { functions } = exportsOfLibrary();
+    expect(functions.length).toBeGreaterThan(0);
+    // The sources call this one (tx/internal/signedTransaction.ts).
+    expect(functions).toContain("hash_transaction");
+  });
+
+  it("tells a free function from a class by its first letter", () => {
+    const { functions, types } = exportsOfLibrary();
+    expect(types.length).toBeGreaterThan(0);
+    expect(functions.filter((name) => !isFunctionName(name))).toEqual([]);
+    expect(types.filter((name) => isFunctionName(name))).toEqual([]);
+  });
+
+  it("sees each free function that is called on CML", () => {
+    for (const name of exportsOfLibrary().functions) {
+      expect(calleesIn(`CML.${name}(value);`), name).toEqual([name]);
+      expect(calleesIn(`CML\n  .${name}(\n    value,\n  );`), name).toEqual([name]);
+      expect(calleesIn(`const { ${name} } = CML;\n${name}(value);`), name).toEqual([name]);
+      expect(calleesIn(`const library = CML;\nlibrary.${name}(value);`), name).toEqual([name]);
+      expect(calleesIn(`import { CML as Library } from "@lucid-evolution/lucid";\nLibrary.${name}(value);`), name).toEqual([name]);
+      expect(calleesIn(`items.map(CML.${name});`), name).toEqual([name]);
+    }
+  });
+
+  it("sees each free function that an import of the package names", () => {
+    for (const name of exportsOfLibrary().functions) {
+      for (const module of PACKAGES) {
+        const at = `${name} from ${module}`;
+        expect(calleesIn(`import { ${name} } from "${module}";\n${name}(value);`), at).toEqual([name]);
+        expect(calleesIn(`import { ${name} as use } from "${module}";\nuse(value);`), at).toEqual([name]);
+        expect(calleesIn(`import * as Library from "${module}";\nLibrary.${name}(value);`), at).toEqual([name]);
+      }
+    }
+  });
+
+  it("parses a file that holds a call of one of them", () => {
+    const pattern = detectionPattern([]);
+    for (const name of exportsOfLibrary().functions) {
+      expect(pattern.test(`CML.${name}(value);`), name).toBe(true);
+      for (const module of PACKAGES) expect(pattern.test(`import { ${name} } from "${module}";\n${name}(value);`), `${name} from ${module}`).toBe(true);
+    }
+  });
 });
 
 describe("the source files", () => {
@@ -1009,21 +1327,108 @@ describe("the source files", () => {
     for (const folder of folders) rmSync(folder, { recursive: true, force: true });
   });
 
-  it("takes each type of source file and leaves out tests, modules and output", () => {
+  const relativeNames = (folder: string, paths: readonly string[]): string[] => paths.map((path) => relative(folder, path).split(sep).join("/"));
+
+  /** A folder in the temporary folder of the system, with these files in it. */
+  const folderWith = (files: readonly string[]): string => {
     const folder = mkdtempSync(join(tmpdir(), "decoder-sites-"));
     folders.push(folder);
-    const source = [
-      "scripts/j.ts", "src/a.ts", "src/b.tsx", "src/c.mts", "src/d.cts", "src/e.js", "src/f.jsx", "src/g.mjs", "src/h.cjs", "src/ui/i.tsx",
-    ];
-    const other = [
-      "src/a.test.ts", "src/b.spec.mts", "src/c.test.tsx", "src/test/k.ts", "src/tests/l.ts", "src/__tests__/m.ts", "test/n.ts",
-      "node_modules/pkg/index.js", "src/node_modules/pkg/index.js", "dist/o.js", "src/notes.md", "src/style.css",
-    ];
-    for (const file of [...source, ...other]) {
+    for (const file of files) {
       mkdirSync(dirname(join(folder, file)), { recursive: true });
       writeFileSync(join(folder, file), "export {};\n");
     }
-    expect(sourceFiles(folder).map((path) => relative(folder, path).split(sep).join("/"))).toEqual([...source].sort());
+    return folder;
+  };
+
+  it("takes each type of source file and leaves out tests, modules and output", () => {
+    const source = [
+      "scripts/j.ts", "pkg/src/a.ts", "pkg/src/b.tsx", "pkg/src/c.mts", "pkg/src/d.cts", "pkg/src/e.js", "pkg/src/f.jsx", "pkg/src/g.mjs",
+      "pkg/src/h.cjs", "pkg/src/ui/i.tsx", "pkg/src/test/k.ts", "pkg/src/tests/l.ts", "packages/shared/src/test/p.ts",
+    ];
+    const other = [
+      "pkg/src/a.test.ts", "pkg/src/b.spec.mts", "pkg/src/c.test.tsx", "pkg/test/n.ts", "pkg/tests/q.ts", "packages/shared/test/r.ts",
+      "tests/s.ts", "pkg/src/__tests__/m.ts", "node_modules/pkg/index.js", "pkg/src/node_modules/pkg/index.js", "dist/o.js",
+      "pkg/src/notes.md", "pkg/src/style.css",
+    ];
+    const folder = folderWith([...source, ...other]);
+    expect(relativeNames(folder, sourceFiles(folder, undefined))).toEqual([...source].sort());
+  });
+
+  const PATHS: Array<[path: string, source: boolean]> = [
+    ["gateway/src/test/helper.ts", true],
+    ["gateway/src/tests/helper.ts", true],
+    ["packages/shared/src/test/x.ts", true],
+    ["buyer/src/ui/test/x.tsx", true],
+    ["buyer/scripts/run-agent-a.ts", true],
+    ["vitest.config.ts", true],
+    ["gateway/test/sweeper.test.ts", false],
+    ["gateway/test/helper.ts", false],
+    ["identity-gateway/test/vectors/case.ts", false],
+    ["paper2agent/tests/x.ts", false],
+    ["packages/shared/test/x.ts", false],
+    ["packages/shared/tests/x.ts", false],
+    ["tests/fixtures/x.ts", false],
+    ["tests/unit/__helpers__/x.ts", false],
+    ["buyer/src/ui/__tests__/x.tsx", false],
+    ["gateway/src/sweeper.test.ts", false],
+    ["buyer/src/b.spec.tsx", false],
+    ["gateway/node_modules/pkg/index.js", false],
+    ["gateway/dist/index.js", false],
+    ["gateway/src/notes.md", false],
+  ];
+
+  it.each(PATHS)("%s is a source file: %s", (path, source) => {
+    expect(selectSourcePaths([path])).toEqual(source ? [path] : []);
+  });
+
+  it("scans the paths of the list and no other file", () => {
+    const listed = ["gateway/src/a.ts", "buyer/src/b.ts"];
+    // `scratch/x.ts` and `gateway/src/c.ts` are in the folder, and the list does not name them.
+    const folder = folderWith([...listed, "scratch/x.ts", "gateway/src/c.ts"]);
+    expect(relativeNames(folder, sourceFiles(folder, listed))).toEqual(["buyer/src/b.ts", "gateway/src/a.ts"]);
+    // A walk finds all of them. The scan walks only when git gives no list.
+    expect(relativeNames(folder, sourceFiles(folder, undefined))).toEqual(["buyer/src/b.ts", "gateway/src/a.ts", "gateway/src/c.ts", "scratch/x.ts"]);
+    // A path of the list that the folder does not have is left out.
+    expect(relativeNames(folder, sourceFiles(folder, [...listed, "gateway/src/gone.ts"]))).toEqual(["buyer/src/b.ts", "gateway/src/a.ts"]);
+  });
+
+  it("gets no list when the folder has no .git or git is not installed", () => {
+    expect(gitFiles(folderWith([]))).toBeUndefined();
+    expect(gitFiles(ROOT, "git-that-is-not-installed")).toBeUndefined();
+  });
+
+  it("does not walk when git fails for another reason", () => {
+    const folder = folderWith([]);
+    mkdirSync(join(folder, ".git"));
+    // A command that exists and exits with an error stands in for a git that fails.
+    expect(() => gitFiles(folder, process.execPath)).toThrow();
+  });
+
+  it.skipIf(!GIT_LISTS_FILES)("scans the files that git tracks, and no other file", () => {
+    const output = execFileSync("git", ["ls-files", "-z"], { cwd: ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+    const tracked = output.split("\0").filter((path) => path !== "");
+    // A tracked file that the work tree no longer has is not read.
+    const expected = selectSourcePaths(tracked).filter((path) => existsSync(join(ROOT, path)));
+    expect(expected.length).toBeGreaterThan(0);
+    expect([...SCAN.files].sort()).toEqual(expected);
+  });
+
+  it.skipIf(!GIT_LISTS_FILES)("does not read a file that git does not track", () => {
+    // The folder is in the repository, and git does not track it. A call of the library is in its file.
+    const scratch = mkdtempSync(join(ROOT, ".scratch-sites-"));
+    const scratchFile = `${relative(ROOT, scratch)}/x.ts`;
+    try {
+      writeFileSync(join(scratch, "x.ts"), "CML.Address.from_bech32(x);\n");
+      // The rules call the file source. Only the list of git leaves it out.
+      expect(selectSourcePaths([scratchFile])).toEqual([scratchFile]);
+      const scan = scanRepository();
+      expect(scan.files).not.toContain(scratchFile);
+      expect(scan.files).toEqual(SCAN.files);
+      expect(scan.sites).toHaveLength(SCAN.sites.length);
+      expect(compareSites(scan.sites, SITES)).toEqual([]);
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
   });
 
   it.each(SOURCE_DIRS)("scans the files of %s", (folder) => {
@@ -1036,7 +1441,10 @@ describe("the source files", () => {
   });
 
   it("scans no test file, no module and no output", () => {
-    expect(SCAN.files.filter((file) => /(?:^|\/)(?:node_modules|dist|tests?)\//.test(file) || TEST_FILE.test(file))).toEqual([]);
+    const notSource = [
+      /(?:^|\/)(?:node_modules|dist)\//, /^tests\//, /^[^/]+\/tests?\//, /^packages\/[^/]+\/tests?\//, /(?:^|\/)__tests__\//, TEST_FILE,
+    ];
+    expect(SCAN.files.filter((file) => notSource.some((pattern) => pattern.test(file)))).toEqual([]);
   });
 });
 
