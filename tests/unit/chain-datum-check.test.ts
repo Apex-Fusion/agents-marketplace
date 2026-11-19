@@ -665,3 +665,62 @@ describe("the bounds of the fields of an output", () => {
     expect(await lucid([odd]).getUtxos(ADDRESS)).toHaveLength(1);
   });
 });
+
+describe("an answer with a withheld datum or a refused field starts no new try", () => {
+  // The clients try a read request again after an HTTP status of 500 or higher, or after a network error (ogmiosRetry.ts). A withheld
+  // datum, a left-out output and a refused field belong to an answer that arrived with HTTP 200. The client reads them after the
+  // request has ended, so they are answers and never transient errors. The submit of a transaction does not use the retry.
+  const deep = arrays(MAX_CBOR_DEPTH + 1);
+  const ref = (index: number) => ({ txHash: TX, outputIndex: index });
+
+  /** A node that gives the answers in turn (the last one again and again), and counts its requests and the waits of the clients. */
+  function node(...answers: Array<{ status?: number; result?: unknown }>) {
+    let next = 0;
+    const fetch = vi.fn(async (_url: unknown, _init?: RequestInit) => {
+      const answer = answers[Math.min(next, answers.length - 1)]!;
+      next += 1;
+      return new Response(JSON.stringify({ jsonrpc: "2.0", result: answer.result ?? [] }), {
+        status: answer.status ?? 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    const sleep = vi.fn(async (_ms: number) => undefined);
+    return { fetch: fetch as unknown as typeof globalThis.fetch, requests: fetch, sleep };
+  }
+  const retryLines = (): string[] => warn.mock.calls.map((call) => String(call.join(" "))).filter((line) => line.startsWith("[ogmios] retry"));
+
+  const CASES: Array<[string, OgmiosOutput[], (n: ReturnType<typeof node>) => Promise<unknown>]> = [
+    ["Lucid client, getUtxos, a withheld datum", [output(0, { datum: deep })], (n) => new OgmiosLucidProvider({ ogmiosUrl: URL, fetch: n.fetch, sleep: n.sleep }).getUtxos(ADDRESS)],
+    ["Lucid client, getUtxos, a refused field", [output(0, { address: "a".repeat(1025) })], (n) => new OgmiosLucidProvider({ ogmiosUrl: URL, fetch: n.fetch, sleep: n.sleep }).getUtxos(ADDRESS)],
+    ["Lucid client, getUtxosByOutRef, a left-out output", [output(0, { script: { language: "native", cbor: deep } })], (n) => new OgmiosLucidProvider({ ogmiosUrl: URL, fetch: n.fetch, sleep: n.sleep }).getUtxosByOutRef([ref(0)])],
+    ["read-only client, queryUtxosByAddress, a withheld datum", [output(0, { datum: deep })], (n) => new ReadOnlyOgmiosProvider({ ogmiosUrl: URL, fetch: n.fetch, sleep: n.sleep }).queryUtxosByAddress(ADDRESS)],
+    ["read-only client, queryUtxo, a refused field", [output(0, { transaction: { id: "ab".repeat(33) } })], (n) => new ReadOnlyOgmiosProvider({ ogmiosUrl: URL, fetch: n.fetch, sleep: n.sleep }).queryUtxo({ txHash: TX, index: 0 })],
+    ["live client, queryUtxosByAddress, a refused field", [output(0, { address: "a".repeat(1025) })], (n) => new LiveOgmiosProvider({ ogmiosUrl: URL, fetch: n.fetch, sleep: n.sleep }).queryUtxosByAddress(ADDRESS)],
+  ];
+
+  it.each(CASES)("%s: one request, no wait, no retry line", async (_name, answer, call) => {
+    const n = node({ result: answer });
+    await call(n).catch(() => undefined);
+    expect(n.requests).toHaveBeenCalledTimes(1);
+    expect(n.sleep).not.toHaveBeenCalled();
+    expect(retryLines()).toEqual([]);
+  });
+
+  it("keeps both rules for one call: a transient error is tried again, and the answer that follows is checked", async () => {
+    const n = node({ status: 503 }, { result: [output(0, { datum: deep }), output(1, { datum: "d87980" })] });
+    const utxos = await new ReadOnlyOgmiosProvider({ ogmiosUrl: URL, fetch: n.fetch, sleep: n.sleep }).queryUtxosByAddress(ADDRESS);
+    expect(n.requests).toHaveBeenCalledTimes(2); // the 503 is tried again
+    expect(n.sleep).toHaveBeenCalledTimes(1);
+    expect(retryLines()).toEqual(["[ogmios] retry 1/2 method=queryLedgerState/utxo cause=503"]);
+    expect(utxos.map((utxo) => utxo.datumHex)).toEqual([null, "d87980"]); // the datum is withheld, the output stays
+    expect(warn.mock.calls.map((call) => String(call.join(" "))).filter((line) => line.includes("its datum is not read"))).toHaveLength(1);
+  });
+
+  it("does not retry a refused field after a transient error either: the answer that arrived is the answer", async () => {
+    const n = node({ status: 502 }, { result: [output(0, { address: "a".repeat(1025) })] });
+    const error = await new OgmiosLucidProvider({ ogmiosUrl: URL, fetch: n.fetch, sleep: n.sleep }).getUtxos(ADDRESS).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(OutputFieldError);
+    expect(n.requests).toHaveBeenCalledTimes(2); // one retry for the 502, none for the field
+    expect(retryLines()).toHaveLength(1);
+  });
+});
