@@ -6,8 +6,7 @@
  *
  * - Both clients: an inline datum that fails the check is WITHHELD. The output stays in the list with its address, its value and its
  *   other fields, and it has no datum. Its value still counts. A key address needs no datum to be spent. A caller that reads the
- *   datum of an output at a script address finds none, and refuses the output as it refuses an output with no datum. A datum text
- *   longer than MAX_CBOR_TEXT_LENGTH is withheld in the same way, without a scan.
+ *   datum of an output at a script address finds none, and refuses the output as it refuses an output with no datum.
  * - The Lucid client only (OgmiosLucidProvider): a native script that fails the check LEAVES THE OUTPUT OUT of the answer. That
  *   client hands the script to Lucid, and Lucid asks a fee for the reference script of each output that it spends. A transaction
  *   that does not count the script gets a fee that is too low, and the node refuses it. An output with a withheld datum stays in the
@@ -23,12 +22,13 @@
  * ids and the asset names (assertOutputFields). The ledger fixes the size of each, so a longer text means a broken node. The whole call
  * fails with an OutputFieldError, as for any other error of the node. No output becomes absent because of it.
  *
- * The work for one answer is bounded:
- * - Time. An output costs one scan of its datum text, about 2 ns for each character, and about 6 to 14 microseconds for the scan
- *   itself (the refusal of a scan has no stack trace). The scan of one answer reads at most SCAN_BUDGET_CHARS characters and at most
- *   SCAN_BUDGET_TEXTS texts, which is under 0.4 s. A datum past either budget is withheld without a scan, so it never reaches the
- *   decoder library. An answer with more inline datums than the second budget (25,000) loses the datums after that count; a read of
- *   an address that holds that many needs pages.
+ * A datum is withheld for one reason only: the datum itself fails the check. The check has no limit for the number of outputs, for the
+ * size of one answer, or for the length of a text. Any wallet can send an output with an inline datum to any address, so a limit for
+ * one answer would let a third party add outputs before the record or the escrow that a reader looks for. The reader would find that
+ * output with no datum, although the datum is valid. The scan is linear in the text that the client has already read and parsed: about
+ * 2 ns for each character and a few microseconds for each datum.
+ *
+ * The log is bounded, and the bound never changes what a reader gets:
  * - Memory. An answer keeps at most 20 new references for its lines, and counts the others.
  * - Lines. An answer writes at most 20 lines for new references, and one summary line for each address that has more. After a
  *   summary line an address writes nothing for one hour (SILENT_MS); the process remembers at most 100 such addresses, oldest out
@@ -47,15 +47,6 @@ export const LINES_PER_ANSWER_MAX = 20;
 export const SILENT_ADDRESSES_MAX = 100;
 /** How long an address stays silent after its summary line (ms). */
 export const SILENT_MS = 60 * 60 * 1000;
-/** The characters that the scan of one answer reads. The scan of 32 MiB takes under 100 ms. */
-export const SCAN_BUDGET_CHARS = 32 * 1024 * 1024;
-/** The datum and script texts that the scan of one answer reads. At about 14 microseconds for each text, 25,000 texts take 0.35 s. */
-export const SCAN_BUDGET_TEXTS = 25_000;
-/**
- * The longest datum or script text (hex characters) that a client scans. The ledger limits a transaction to 16 KiB (32,768 hex
- * characters), and no output holds more than a transaction does. The limit is 4 times that.
- */
-export const MAX_CBOR_TEXT_LENGTH = 131_072;
 
 /** The longest address text of an output, in characters. A real address has at most 108; this is the bound of `checkedAddressText`. */
 export const MAX_OUTPUT_ADDRESS_LENGTH = 1024;
@@ -137,6 +128,22 @@ function silence(address: string): void {
 /** The address in a line: the node gives the text, so a long one is cut. */
 const shortAddress = (address: string): string => (address.length > 120 ? `${address.slice(0, 120)}...` : address);
 
+/** True when `cbor` (hex) passes the check of the depth and the form (cbor-depth.ts). */
+function passes(cbor: string): boolean {
+  // A refusal is an Error, and an Error takes a stack trace. The trace of a refusal is never read, and it costs more than the scan
+  // of a small datum, so the scan runs with no trace.
+  const traceLimit = Error.stackTraceLimit;
+  Error.stackTraceLimit = 0;
+  try {
+    assertCborHexDepth(cbor);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    Error.stackTraceLimit = traceLimit;
+  }
+}
+
 /** What one answer found: the outputs whose datum was withheld or whose script left the output out. */
 export class WithheldOutputs {
   /** The new references of this answer that get a line, at most LINES_PER_ANSWER_MAX. */
@@ -145,45 +152,20 @@ export class WithheldOutputs {
   private readonly more = new Map<string, number>();
   /** The new references beyond that at other addresses. */
   private moreOthers = 0;
-  /** The characters that this answer may still scan. */
-  private charsLeft = SCAN_BUDGET_CHARS;
-  /** The texts that this answer may still scan. */
-  private textsLeft = SCAN_BUDGET_TEXTS;
 
-  /**
-   * The inline datum `datum` of the output `ref` at `address`, or null when it fails the check or the scan budget of the answer is
-   * spent. The empty text is no datum and is kept as it is.
-   */
+  /** The inline datum `datum` of the output `ref` at `address`, or null when it fails the check. The empty text is no datum and is kept as it is. */
   datum(datum: string, ref: string, address: string): string | null {
     if (datum.length === 0) return datum;
-    if (this.passes(datum, "The datum")) return datum;
+    if (passes(datum)) return datum;
     this.note(ref, "datum", address);
     return null;
   }
 
   /** True when the CBOR of the native script of the output `ref` at `address` passes the check. False: the output is left out of the answer. */
   nativeScriptReadable(cbor: string, ref: string, address: string): boolean {
-    if (this.passes(cbor, "The native script")) return true;
+    if (passes(cbor)) return true;
     this.note(ref, "script", address);
     return false;
-  }
-
-  private passes(cbor: string, what: string): boolean {
-    if (cbor.length > MAX_CBOR_TEXT_LENGTH || cbor.length > this.charsLeft || this.textsLeft <= 0) return false;
-    this.charsLeft -= cbor.length;
-    this.textsLeft -= 1;
-    // A refusal is an Error, and an Error takes a stack trace. The trace of a refusal is never read, and it costs more than the scan
-    // of a small datum, so the scan runs with no trace.
-    const traceLimit = Error.stackTraceLimit;
-    Error.stackTraceLimit = 0;
-    try {
-      assertCborHexDepth(cbor, { what });
-      return true;
-    } catch {
-      return false;
-    } finally {
-      Error.stackTraceLimit = traceLimit;
-    }
   }
 
   private note(ref: string, kind: "datum" | "script", address: string): void {

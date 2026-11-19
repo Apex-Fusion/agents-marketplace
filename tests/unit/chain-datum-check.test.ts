@@ -16,7 +16,7 @@ import { OgmiosLucidProvider, OutputLeftOutError } from "../../packages/shared/s
 import { ReadOnlyOgmiosProvider } from "../../packages/shared/src/chain/ReadOnlyOgmiosProvider.js";
 import { LiveOgmiosProvider } from "../../packages/shared/src/chain/LiveOgmiosProvider.js";
 import {
-  MAX_CBOR_TEXT_LENGTH, OutputFieldError, SCAN_BUDGET_CHARS, SCAN_BUDGET_TEXTS, SILENT_ADDRESSES_MAX, SILENT_MS, resetGuardLogForTests,
+  OutputFieldError, SILENT_ADDRESSES_MAX, SILENT_MS, resetGuardLogForTests,
 } from "../../packages/shared/src/chain/datumGuard.js";
 import { createLucidContext } from "../../packages/shared/src/tx/internal/lucidContext.js";
 import { resolveSpendCtx } from "../../packages/shared/src/tx/internal/liveCbor.js";
@@ -115,6 +115,19 @@ describe("the check of an inline datum at the Ogmios clients", () => {
   it("passes a datum that nests 64 levels and withholds one that nests 65", async () => {
     const answers = await datumsOf([output(0, { datum: arrays(MAX_CBOR_DEPTH) }), output(1, { datum: arrays(MAX_CBOR_DEPTH + 1) })]);
     for (const datums of [answers.lucid, answers.readOnly, answers.live]) expect(datums).toEqual([arrays(MAX_CBOR_DEPTH), null]);
+  });
+
+  it("leaves Error.stackTraceLimit as it was, after a datum that passes and after one that is withheld", async () => {
+    const before = Error.stackTraceLimit;
+    try {
+      for (const limit of [before, 3]) {
+        Error.stackTraceLimit = limit;
+        await datumsOf([output(0, { datum: arrays(2) }), output(1, { datum: arrays(MAX_CBOR_DEPTH + 1) }), output(2, { datum: "zz" })]);
+        expect(Error.stackTraceLimit).toBe(limit);
+      }
+    } finally {
+      Error.stackTraceLimit = before;
+    }
   });
 
   it.each([
@@ -380,17 +393,14 @@ describe("the log lines of the check: one line for each output reference", () =>
     });
   });
 
-  it("bounds the work for one answer: 100,000 bad outputs keep 100,000 outputs, write 21 lines, and remember 20 references", async () => {
-    const flood = bad(100_000);
-    const started = performance.now();
+  it("writes 21 lines for 100,000 bad outputs, keeps all of them, and remembers 20 references", async () => {
+    // The bad datums are short (65 levels), so that the scan of 100,000 of them is quick. The log does not depend on the length.
+    const flood = Array.from({ length: 100_000 }, () => output(next++, { datum: arrays(MAX_CBOR_DEPTH + 1) }));
     const utxos = await lucid(flood).getUtxos(ADDRESS);
-    const elapsed = performance.now() - started;
     expect(utxos).toHaveLength(100_000);
     expect(utxos.every((utxo) => utxo.datum === null)).toBe(true);
     expect(linesOf()).toHaveLength(21);
     expect(linesOf()[20]).toContain("99980 more outputs");
-    // The work is bounded by the scan budgets, whatever the machine: seconds at most, not minutes.
-    expect(elapsed).toBeLessThan(5000);
 
     // The memory holds 20 references of the answer, not 100,000: they are not said again at another address, the 21st is.
     warn.mockClear();
@@ -399,60 +409,59 @@ describe("the log lines of the check: one line for each output reference", () =>
     expect(warn).not.toHaveBeenCalled();
     await lucid(elsewhere(flood.slice(20, 21))).getUtxos("addr1elsewhere");
     expect(warn).toHaveBeenCalledTimes(1);
-  });
+  }, 60_000);
 });
 
-describe("the scan budgets of one answer", () => {
+describe("a datum is withheld for one reason only: the datum itself fails the check", () => {
+  // Any wallet can send an output with an inline datum to any address. A limit for the number of outputs, or for the size, of one
+  // answer would let a third party add outputs before the record or the escrow that a reader looks for, and the reader would find
+  // that output with no datum. The check has no such limit.
   const small = "d87980";
-  /** A valid datum of 120,000 hex characters: a byte string of 59,995 zero bytes. */
-  const big = `5a0000ea5b${"00".repeat(59_995)}`;
+  /** A valid datum: a byte string of `bytes` bytes. */
+  const byteString = (bytes: number): string => `5a${bytes.toString(16).padStart(8, "0")}${"07".repeat(bytes)}`;
+  const record = encodeEscrowDatum(buildSampleEscrowDatum());
+  const linesOf = (): string[] => warn.mock.calls.map((call) => String(call.join(" ")));
+  const CLIENTS: Array<[string, (answer: OgmiosOutput[]) => Promise<Array<string | null>>]> = [
+    ["the Lucid client", async (answer) => (await lucid(answer).getUtxos(ADDRESS)).map((utxo) => utxo.datum ?? null)],
+    ["the read-only client", async (answer) => (await readOnly(answer).queryUtxosByAddress(ADDRESS)).map((utxo) => utxo.datumHex)],
+  ];
 
-  it("scans at most 25,000 texts: the 25,001st valid datum of an answer is withheld without a scan, and its output stays", async () => {
-    expect(SCAN_BUDGET_TEXTS).toBe(25_000);
-    const answer = Array.from({ length: SCAN_BUDGET_TEXTS + 1 }, (_unused, i) => output(i, { datum: small }));
-    const utxos = await lucid(answer).getUtxos(ADDRESS);
-    expect(utxos).toHaveLength(SCAN_BUDGET_TEXTS + 1);
-    expect(utxos.filter((utxo) => utxo.datum !== null)).toHaveLength(SCAN_BUDGET_TEXTS);
-    expect(utxos[SCAN_BUDGET_TEXTS]?.datum).toBeNull();
-    const plain = await readOnly(answer).queryUtxosByAddress(ADDRESS);
-    expect(plain.filter((utxo) => utxo.datumHex !== null)).toHaveLength(SCAN_BUDGET_TEXTS);
-  });
+  describe.each(CLIENTS)("%s", (_name, datumsOf) => {
+    it.each([25_000, 25_001, 100_000])("keeps the datum of each of %i valid outputs, and the datum of the record after them", async (count) => {
+      const answer = Array.from({ length: count }, (_unused, i) => output(i, { datum: small }));
+      answer.push(output(count, { datum: record }));
+      const datums = await datumsOf(answer);
+      expect(datums).toHaveLength(count + 1);
+      expect(datums.slice(0, count).every((datum) => datum === small)).toBe(true);
+      expect(datums[count]).toBe(record);
+    }, 60_000);
 
-  it("reads at most 32 MiB of text: the 280th datum of 120,000 characters is withheld", async () => {
-    expect(SCAN_BUDGET_CHARS).toBe(33_554_432);
-    expect(big).toHaveLength(120_000);
-    const answer = Array.from({ length: 300 }, (_unused, i) => output(i, { datum: big }));
-    const utxos = await readOnly(answer).queryUtxosByAddress(ADDRESS);
-    expect(utxos.filter((utxo) => utxo.datumHex !== null)).toHaveLength(279);
-    expect(utxos[278]?.datumHex).toBe(big);
-    expect(utxos[279]?.datumHex).toBeNull();
-  });
+    it("keeps the datum of each of 2,100 outputs with a datum of 16,000 bytes (67 MB of text), and the record after them", async () => {
+      const big = byteString(16_000);
+      const answer = Array.from({ length: 2100 }, (_unused, i) => output(i, { datum: big }));
+      answer.push(output(2100, { datum: record }));
+      const datums = await datumsOf(answer);
+      expect(datums.slice(0, 2100).every((datum) => datum === big)).toBe(true);
+      expect(datums[2100]).toBe(record);
+    }, 60_000);
 
-  it("reads exactly 32 MiB: 256 datums of 131,072 characters pass, and the 257th is withheld", async () => {
-    const exact = `5a0000ffdb${"00".repeat(65_531)}`;
-    expect(exact).toHaveLength(131_072);
-    const answer = Array.from({ length: 257 }, (_unused, i) => output(i, { datum: exact }));
-    const utxos = await readOnly(answer).queryUtxosByAddress(ADDRESS);
-    expect(utxos.filter((utxo) => utxo.datumHex !== null)).toHaveLength(256);
-    expect(utxos[255]?.datumHex).toBe(exact);
-    expect(utxos[256]?.datumHex).toBeNull();
-  });
+    it("keeps one valid datum of 4 MiB", async () => {
+      const huge = byteString(4 * 1024 * 1024);
+      expect(await datumsOf([output(0, { datum: huge })])).toEqual([huge]);
+    }, 60_000);
 
-  it("withholds a datum text longer than 131,072 characters without a scan, and passes one of that length", async () => {
-    expect(MAX_CBOR_TEXT_LENGTH).toBe(131_072);
-    const exact = `5a0000ffdb${"00".repeat(65_531)}`; // 131,072 characters: a byte string of 65,531 zero bytes
-    const over = `5a0000ffdc${"00".repeat(65_532)}`; // 131,074 characters
-    expect(exact).toHaveLength(131_072);
-    expect(over).toHaveLength(131_074);
-    const utxos = await readOnly([output(0, { datum: exact }), output(1, { datum: over })]).queryUtxosByAddress(ADDRESS);
-    expect(utxos.map((utxo) => utxo.datumHex)).toEqual([exact, null]);
-  });
+    it("withholds the one bad datum among 60,000 valid ones, and no other", async () => {
+      const answer = Array.from({ length: 60_001 }, (_unused, i) => output(i, { datum: i === 30_000 ? arrays(MAX_CBOR_DEPTH + 1) : small }));
+      const datums = await datumsOf(answer);
+      expect(datums.filter((datum) => datum === null)).toHaveLength(1);
+      expect(datums[30_000]).toBeNull();
+      expect(linesOf()).toHaveLength(1);
+    }, 60_000);
 
-  it("takes a new budget for each answer", async () => {
-    const answer = Array.from({ length: 300 }, (_unused, i) => output(i, { datum: big }));
-    await readOnly(answer).queryUtxosByAddress(ADDRESS);
-    const again = await readOnly(answer).queryUtxosByAddress(ADDRESS);
-    expect(again.filter((utxo) => utxo.datumHex !== null)).toHaveLength(279);
+    it("takes nothing from an earlier answer: the verdict for a datum depends on the datum alone", async () => {
+      await datumsOf(Array.from({ length: 30_000 }, (_unused, i) => output(i, { datum: small })));
+      expect(await datumsOf([output(0, { datum: small })])).toEqual([small]);
+    }, 60_000);
   });
 });
 
