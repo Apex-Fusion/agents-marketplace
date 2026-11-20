@@ -8,9 +8,9 @@
 //   DELEGATION_POLICY_ID          delegation contract policy ID (= script hash); optional
 //   DELEGATION_ADDRESS            its enterprise address; optional, must match the policy
 //   STATUS_LIST_REFRESH_SECONDS             how old built status lists are before a request builds them
-//                                           again, default 60 (1 to 2700)
+//                                           again, default 60 (1 to 2400)
 //   STATUS_LIST_BACKGROUND_REFRESH_SECONDS  how old they are before the timer builds them again, with
-//                                           no request, default 600 (60 to 2700, not below the first)
+//                                           no request, default 600 (60 to 2400, not below the first)
 //   STATUS_LIST_FOLLOW_SECONDS              how often the timer reads the changes of the chain into the
 //                                           lists, default 10 (0, or a multiple of 10 up to 300; 0: the
 //                                           lists change only when a build ends)

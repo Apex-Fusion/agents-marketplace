@@ -12,7 +12,7 @@ import { VectorResolver } from "../../src/resolve/resolver.js";
 import { CONFIRMATION_DEPTH } from "../../src/resolve/settings.js";
 import { formatTime } from "../../src/resolve/time.js";
 import type { ChainMethod, FakeChain } from "../support/chain.js";
-import { LedgerBuilder, identityDatum, idOf, legacyDatum, timeAt } from "../support/ledger.js";
+import { LedgerBuilder, identityDatum, idOf, legacyDatum, slotAt, timeAt } from "../support/ledger.js";
 import { tombstoneOf } from "../support/resolve.js";
 import { child, clockAt, decode, hold, listsOn, retirement, revocation, bslBits, tslValue, type DecodedLists, type ServiceOptions } from "./status-list-support.js";
 import { nowS } from "./support.js";
@@ -20,6 +20,8 @@ import { nowS } from "./support.js";
 /** The background interval of the tests. A full build is due when the last one ended this long ago. */
 const INTERVAL = 600_000;
 const id = (label: string): string => idOf(`m4 follow ${label}`);
+/** What a request gets when the newest ledger point that the service has is older than the validity of a list. */
+const TIP_TOO_OLD = `no valid status lists: the ledger tip is older than ${LIST_VALIDITY_MS / 1000} s`;
 
 /** A status-list service with a fake ledger, a clock, its logs, and the record reads that it makes. */
 class Rig {
@@ -177,6 +179,39 @@ function gateOn(chain: FakeChain, assetName: string): { shut(): void; open(): vo
       gate = null;
     },
   };
+}
+
+/** The mint of a record leaves the chain (a rollback of more than 30 blocks). */
+function removeMint(b: LedgerBuilder, assetName: string): void {
+  const mint = b.chain.txs.find((tx) => tx.mint.some((m) => m.assetName === assetName));
+  if (mint === undefined) throw new Error("the mint is in the ledger");
+  b.chain.txs.splice(b.chain.txs.indexOf(mint), 1);
+}
+
+/** The log line of a misfit: the follow steps cannot go on from the lists, and a full build repairs them. */
+const misfit = (why: string): string => `identity-gateway: status lists: the records do not fit the lists (${why}); the lists do not change until a full build ends`;
+
+/** Makes the first read of the policy assets wait: `reached` ends when that read comes, and `release` lets it go on. */
+function holdFirstRead(chain: FakeChain): { reached: Promise<void>; release(): void } {
+  let release: () => void = () => undefined;
+  const waiting = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let arrive: () => void = () => undefined;
+  const reached = new Promise<void>((resolve) => {
+    arrive = resolve;
+  });
+  const policyAssets = chain.policyAssets.bind(chain);
+  let held = 0;
+  chain.policyAssets = async (policyId) => {
+    // Only the first read waits.
+    if (held++ === 0) {
+      arrive();
+      await waiting;
+    }
+    return policyAssets(policyId);
+  };
+  return { reached, release: () => release() };
 }
 
 describe("a follow step", () => {
@@ -472,8 +507,8 @@ describe("what the lists claim", () => {
     // The tick that reaches the end of the validity: no list is valid, and the service says so.
     await rig.idleTick();
     expect(rig.clock.now).toBe(validUntil);
-    await expect(rig.lists.tokenStatusList(0)).rejects.toThrow(/no valid status lists/);
-    await expect(rig.lists.bitstringStatusList(0)).rejects.toThrow(/no valid status lists/);
+    await expect(rig.lists.tokenStatusList(0)).rejects.toThrow(TIP_TOO_OLD);
+    await expect(rig.lists.bitstringStatusList(0)).rejects.toThrow(TIP_TOO_OLD);
     // A tip that moves makes valid lists again at the next step.
     await rig.tick();
     expect(typeof (await rig.lists.tokenStatusList(0))).toBe("string");
@@ -487,7 +522,7 @@ describe("what the lists claim", () => {
     rig.clock.now += LIST_VALIDITY_MS + 60_000;
     rig.lists.start();
     await rig.lists.idle();
-    await expect(rig.lists.tokenStatusList(0)).rejects.toThrow(/no valid status lists/);
+    await expect(rig.lists.tokenStatusList(0)).rejects.toThrow(TIP_TOO_OLD);
   });
 
   test("a reader that waits for a build gets no lists when the build read a tip older than the validity", async () => {
@@ -512,7 +547,7 @@ describe("what the lists claim", () => {
     );
     release();
     const result = await answer;
-    expect("error" in result ? String(result.error) : "an answer").toBe(`Error: no valid status lists: the ledger tip is older than ${LIST_VALIDITY_MS / 1000} s`);
+    expect("error" in result ? String(result.error) : "an answer").toBe(`Error: ${TIP_TOO_OLD}`);
   });
 
   test("a tip that is lower than the last one changes nothing; a tip with the same height and another hash is read", async () => {
@@ -544,6 +579,38 @@ describe("what the lists claim", () => {
     await rig.idleTick();
     expect(await rig.values([ia, ib])).toEqual([2, 2]);
     expect((await rig.decoded()).iat).toBe(nowS(timeAt(1004)));
+  });
+
+  test("the ledger point never goes back when the ledger source changes to a block with an earlier block time or a lower height", async () => {
+    const [A, B] = ["a", "b"].map(id) as [string, string];
+    const b = roots(A, B);
+    const rig = await new Rig(b).start();
+    await rig.tick();
+    const first = await rig.decoded();
+
+    // The chain forks: the tip is another block 1001, 7 s before the first one. A step and a full build read it. The lists stay as they are.
+    b.chain.tipInfo = { blockHeight: 1001, blockHash: "cd".repeat(32), slot: slotAt(1001) - 7 };
+    await rig.idleTick();
+    expect(await rig.decoded()).toEqual(first);
+    await rig.lists.refresh();
+    expect(await rig.decoded()).toEqual(first);
+    // The new fork has block 1002, which is 4 s before block 1001 of the first fork. A higher block is not a later ledger point.
+    b.chain.tipInfo = { blockHeight: 1002, blockHash: "ce".repeat(32), slot: slotAt(1001) - 4 };
+    await rig.idleTick();
+    expect(await rig.decoded()).toEqual(first);
+    // Block 1003 of the new fork is 3 s after block 1001 of the first fork: the lists follow.
+    b.chain.tipInfo = { blockHeight: 1003, blockHash: "cf".repeat(32), slot: slotAt(1001) + 3 };
+    await rig.idleTick();
+    const point = timeAt(1001) + 3_000;
+    const later = await rig.decoded();
+    expect(later.iat).toBe(nowS(point));
+    expect(later.exp).toBe(nowS(point) + LIST_VALIDITY_MS / 1000);
+    expect(later.validFrom).toBe(formatTime(point));
+    expect(later.validUntil).toBe(formatTime(point + LIST_VALIDITY_MS));
+    // A full build reads a tip with a lower block height and a later block time. The lists keep the higher block.
+    b.chain.tipInfo = { blockHeight: 1002, blockHash: "d0".repeat(32), slot: slotAt(1001) + 10 };
+    await rig.lists.refresh();
+    expect(await rig.decoded()).toEqual(later);
   });
 });
 
@@ -647,22 +714,18 @@ describe("a build and the follow steps", () => {
   test.each([
     ["a record leaves the list", 2, "a record left the list"],
     ["an index changes", 0, "an index changed"],
-  ])("when %s, the step starts a full build when one may start, and the build gives the lists of the ledger", async (_name, position, why) => {
+  ])("when %s, the first step that sees it logs it and starts a full build, and the build gives the lists of the ledger", async (_name, position, why) => {
     const [A, B, C] = ["a", "b", "c"].map(id) as [string, string, string];
     const b = roots(A, B, C);
     const rig = await new Rig(b).start();
     const ids = [A, B, C];
     // The mint of one record leaves the chain (a rollback of more than 30 blocks).
-    const mint = b.chain.txs.find((tx) => tx.mint.some((m) => m.assetName === ids[position]));
-    if (mint === undefined) throw new Error("the mint is in the ledger");
-    b.chain.txs.splice(b.chain.txs.indexOf(mint), 1);
+    removeMint(b, ids[position]!);
 
-    // The step finds the mismatch at each tick, and the build waits for a refresh interval after the first one.
-    await rig.tick(5);
-    expect(rig.starts()).toEqual(["start"]);
+    // The first step after that finds the mismatch. The build starts at once: 10 s after the last build, with no wait for a refresh interval.
     await rig.tick();
     expect(rig.starts()).toEqual(["start", "repair"]);
-    expect(rig.logs).toEqual([`identity-gateway: status lists: the records do not fit the lists (${why}); a full build starts`]);
+    expect(rig.logs).toEqual([misfit(why)]);
     const rest = ids.filter((_, i) => i !== position);
     const indices = await indicesOf(rig, rest);
     expect(indices).toEqual([0, 1]);
@@ -671,6 +734,99 @@ describe("a build and the follow steps", () => {
     // The steps go on from the build.
     await rig.tick(2);
     expect(rig.starts()).toEqual(["start", "repair"]);
+  });
+
+  test("a step logs a misfit when it first sees it, also while a build runs, and then once for each refresh interval", async () => {
+    const { b, B, L } = slowLedger();
+    const rig = await new Rig(b).start();
+    const gate = gateOn(b.chain, L);
+    gate.shut();
+    // The timer starts a build, and it waits for the read of the burned record.
+    await rig.tickSteps(INTERVAL / REFRESH_TICK_MS);
+    expect(rig.starts()).toEqual(["start", "timer"]);
+    // The mint of B leaves the chain while the build runs.
+    removeMint(b, B);
+
+    // The first step that sees it logs it. It starts no second build.
+    await rig.tickSteps();
+    expect(rig.logs).toEqual([misfit("a record left the list")]);
+    // The misfit stands. The log has one line for each refresh interval: none after 50 s, one after 60 s.
+    await rig.tickSteps(5);
+    expect(rig.logs).toHaveLength(1);
+    await rig.tickSteps();
+    expect(rig.logs).toHaveLength(2);
+    expect(rig.starts()).toEqual(["start", "timer"]);
+
+    // The running build ends with the records that it read at its start (it still has B). The next step starts the repair at once.
+    gate.open();
+    await rig.lists.idle();
+    expect(rig.starts()).toEqual(["start", "timer"]);
+    await rig.tick();
+    expect(rig.starts()).toEqual(["start", "timer", "repair"]);
+    expect(rig.logs).toHaveLength(2);
+    expect(await rig.lists.indexOf(B)).toBeNull();
+  });
+
+  test("a repair build that fails is tried again after a refresh interval, not at every tick", async () => {
+    const { b, A, B, L } = slowLedger();
+    const rig = await new Rig(b).start();
+    // A step does not read the burned record, but a full build does: the read fails, so no build can end.
+    let broken = true;
+    const read = b.chain.assetTxHashes.bind(b.chain);
+    b.chain.assetTxHashes = async (policyId, assetName) => {
+      if (broken && assetName === L) throw new Error("Koios assetTxHashes answered HTTP 503");
+      return read(policyId, assetName);
+    };
+    removeMint(b, B);
+
+    // The first step that sees the misfit starts the build, and the build fails.
+    await rig.tick();
+    expect(rig.starts()).toEqual(["start", "repair"]);
+    expect(rig.logs.filter((line) => line.includes("status lists not rebuilt"))).toHaveLength(1);
+    // The misfit stands, but the next try waits for a refresh interval after the failed one started: 50 s later there is none, 60 s later there is one.
+    await rig.tick(5);
+    expect(rig.starts()).toEqual(["start", "repair"]);
+    await rig.tick();
+    expect(rig.starts()).toEqual(["start", "repair", "repair"]);
+    // The read works again. The next try is a refresh interval later, and it repairs the lists.
+    broken = false;
+    await rig.tick(5);
+    expect(rig.starts()).toEqual(["start", "repair", "repair"]);
+    await rig.tick();
+    expect(rig.starts()).toEqual(["start", "repair", "repair", "repair"]);
+    expect(await rig.lists.indexOf(B)).toBeNull();
+    // The burned record has the first index and shows as revoked; A is active.
+    expect(await rig.values([0, 1])).toEqual([1, 0]);
+    // The last build ended well: a new misfit is repaired at the next step, with no wait.
+    removeMint(b, A);
+    await rig.tick();
+    expect(rig.starts()).toEqual(["start", "repair", "repair", "repair", "repair"]);
+    expect(await rig.lists.indexOf(A)).toBeNull();
+    expect(await rig.values([0])).toEqual([1]);
+  });
+
+  test("a step that started before a build and finds a misfit does not start a second build", async () => {
+    const [A, B, C] = ["a", "b", "c"].map(id) as [string, string, string];
+    const b = roots(A, B, C);
+    const rig = await new Rig(b).start();
+    // The mint of C leaves the chain. A step starts and waits for the asset index.
+    removeMint(b, C);
+    rig.moveTo(rig.tip + 1);
+    const held = holdFirstRead(b.chain);
+    const step = rig.lists.follow();
+    await held.reached;
+    // A full build ends while the step waits. Its lists have no C. A refresh interval has passed since it started.
+    await rig.lists.refresh();
+    rig.clock.now += 60_000;
+    held.release();
+    await step;
+    // The step read the records of the ledger, and the build has the same records: nothing is left to repair.
+    expect(rig.starts()).toEqual(["start", "call"]);
+    expect(rig.logs).toEqual([]);
+    expect(await rig.lists.indexOf(C)).toBeNull();
+    await rig.tick(2);
+    expect(rig.starts()).toEqual(["start", "call"]);
+    expect(rig.logs).toEqual([]);
   });
 });
 
@@ -840,6 +996,79 @@ describe("failures", () => {
     expect(rig.starts()).toEqual(["start", "request"]);
   });
 
+  test("with a follow interval of 300 s, a request between two steps starts no build; after two follow intervals without a read it does", async () => {
+    const [A, B] = ["a", "b"].map(id) as [string, string];
+    const b = roots(A, B);
+    // The timer build is far away, so only a request can start a build here.
+    const rig = await new Rig(b, { followMs: 300_000, refreshMs: 60_000, backgroundRefreshMs: 1_800_000 }).start();
+    // The lists are 120 s old, and the next step is at 300 s: the lists count as read.
+    await rig.tick(12);
+    expect(typeof (await rig.lists.tokenStatusList(0))).toBe("string");
+    await rig.lists.idle();
+    expect(rig.starts()).toEqual(["start"]);
+    // The steps fail from now on. The lists count as read for 600 s, which is two follow intervals.
+    b.chain.failing.add("assetHolders");
+    await rig.tick(47);
+    expect(typeof (await rig.lists.tokenStatusList(0))).toBe("string");
+    await rig.lists.idle();
+    expect(rig.starts()).toEqual(["start"]);
+    await rig.tick();
+    expect(typeof (await rig.lists.tokenStatusList(0))).toBe("string");
+    await rig.lists.idle();
+    expect(rig.starts()).toEqual(["start", "request"]);
+  });
+
+  test("with the default follow interval, a request starts no build until the lists were last read one refresh interval ago", async () => {
+    const [A, B] = ["a", "b"].map(id) as [string, string];
+    const b = roots(A, B);
+    const rig = await new Rig(b, { refreshMs: 60_000 }).start();
+    // The steps work for 100 s, and then they fail.
+    await rig.tick(10);
+    b.chain.failing.add("assetHolders");
+    // The last good step was 30 s ago: that is less than the refresh interval, so a request starts no build.
+    await rig.tick(3);
+    expect(typeof (await rig.lists.tokenStatusList(0))).toBe("string");
+    await rig.lists.idle();
+    expect(rig.starts()).toEqual(["start"]);
+    // The last good step was 60 s ago: a request starts a build.
+    await rig.tick(3);
+    expect(typeof (await rig.lists.tokenStatusList(0))).toBe("string");
+    await rig.lists.idle();
+    expect(rig.starts()).toEqual(["start", "request"]);
+  });
+
+  test("a tip that stays the same counts as a read: while the steps read it, a request starts no build", async () => {
+    const [A, B] = ["a", "b"].map(id) as [string, string];
+    const rig = await new Rig(roots(A, B), { refreshMs: 60_000 }).start();
+    // The tip does not move for 80 s, which is longer than the refresh interval. Each step reads it and finds nothing new.
+    for (let k = 0; k < 8; k++) await rig.idleTick();
+    expect(typeof (await rig.lists.tokenStatusList(0))).toBe("string");
+    await rig.lists.idle();
+    expect(rig.starts()).toEqual(["start"]);
+  });
+
+  test("a history read that Koios gives without the newest transaction of a record does not stay: the next step reads again and the hold shows", async () => {
+    const [A, B] = ["a", "b"].map(id) as [string, string];
+    const b = roots(A, B);
+    const rig = await new Rig(b).start();
+    const [ia, ib] = (await indicesOf(rig, [A, B])) as [number, number];
+    // Koios lists the transactions of B without the hold, but the holder list already has the output of the hold.
+    const holdTx = b.update(B, identityDatum({ status: hold(timeAt(1004) + 3_600_000) }), { height: 1001 });
+    let behind = true;
+    const read = b.chain.assetTxHashes.bind(b.chain);
+    b.chain.assetTxHashes = async (policyId, assetName) => {
+      const hashes = await read(policyId, assetName);
+      return behind ? hashes.filter((hash) => hash !== holdTx.txHash) : hashes;
+    };
+    await rig.tick();
+    expect(await rig.values([ia, ib])).toEqual([0, 0]);
+    // Koios has caught up. The step reads the history of B again, because the first read did not stay.
+    behind = false;
+    await rig.tick();
+    expect(await rig.values([ia, ib])).toEqual([0, 2]);
+    await agree(rig, [A, B]);
+  });
+
   test("a step that started from the state before a build does not undo the build: a record that the build repairs stays repaired", async () => {
     const [A, R] = ["a", "r"].map(id) as [string, string];
     const b = roots(A);
@@ -853,29 +1082,12 @@ describe("failures", () => {
     b.chain.txs.splice(b.chain.txs.indexOf(end), 1);
     rig.moveTo(rig.tip + 1);
     // A step starts and waits for the asset index. The full build runs and ends while it waits.
-    let release: () => void = () => undefined;
-    const waiting = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    let arrive: () => void = () => undefined;
-    const reached = new Promise<void>((resolve) => {
-      arrive = resolve;
-    });
-    const policyAssets = b.chain.policyAssets.bind(b.chain);
-    let held = 0;
-    b.chain.policyAssets = async (policyId) => {
-      // Only the first read of the step waits.
-      if (held++ === 0) {
-        arrive();
-        await waiting;
-      }
-      return policyAssets(policyId);
-    };
+    const held = holdFirstRead(b.chain);
     const step = rig.lists.follow();
-    await reached;
+    await held.reached;
     await rig.lists.refresh();
     expect(await rig.values([ia, ir])).toEqual([0, 0]);
-    release();
+    held.release();
     await step;
     // The step read from the state before the build, in which R is final. It must not give R its old status again.
     expect(await rig.values([ia, ir])).toEqual([0, 0]);

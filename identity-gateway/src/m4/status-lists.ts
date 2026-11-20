@@ -30,30 +30,36 @@
 //   tokens.
 //   At most one step runs at a time. A step that fails leaves the lists as they are.
 // - A full build. It is one pass over every record (one tip, kept ledger reads). It makes the first
-//   lists, and it repairs the lists when the steps cannot. At most one build runs at a time. At most
-//   one starts in each refresh interval (STATUS_LIST_REFRESH_SECONDS), also after a failed build. The
+//   lists, and it repairs the lists when the steps cannot. At most one build runs at a time. The
 //   first build starts with the services. Three things start a build later:
 //   the timer, when the last build ended as long ago as the background interval
 //   (STATUS_LIST_BACKGROUND_REFRESH_SECONDS), also when no request comes; a request that finds
 //   lists that no step and no build has read from the chain for longer than the refresh interval (or
 //   two follow intervals, when that is longer), which means that the steps fail; and a step that finds
-//   that the records do not fit the lists, which means that an index changed or a record left. A
-//   failed build leaves the last lists in place. The timer goes on.
+//   that the records do not fit the lists, which means that an index changed or a record left.
+//   The timer and a request start a build only when the last build started one refresh interval
+//   (STATUS_LIST_REFRESH_SECONDS) ago or earlier, also when it failed. A step does not wait for that
+//   time. It logs the misfit (one line for each refresh interval), and the build starts as soon as no
+//   build runs. After a build that failed, it waits for one refresh interval too. The lists do not
+//   change until that build ends. A failed build leaves the last lists in place. The timer goes on.
 // The newest state is the one of the last build or step. A build replaces it when it ends. A step
 // that started from an older state ends without effect. Readers get the lists of the newest state,
-// unless its ledger point is older than the ledger point of their lists. So a build that ends after
-// newer steps does not take them back, and the next step goes on from the build. Until a build ends,
-// requests get the previous lists. Without valid lists, a request waits up to 10 s for a running
-// build.
+// unless its ledger point is older than the ledger point of their lists. A ledger point is older when
+// its block time is earlier or its block height is lower: after a switch to another fork, the tip can
+// have a higher block and an earlier block time. So the ledger point of the lists never goes back,
+// and a build that ends after newer steps does not take them back. The next step goes on from the
+// build. Until a build ends, requests get the previous lists. Without valid lists, a request waits
+// up to 10 s for a running build.
 // Timing rule. A build ends with lists that are as old as the build plus the age of the tip that it
 // read first. The timer starts the next build when the last one ended as long ago as the background
 // interval, at most one tick late. The old lists are still valid when the new ones are there, and no
 // reader waits, when
 //   background interval + REFRESH_TICK_MS + time of the build + age of the bits at the end <= LIST_VALIDITY_MS.
 // BUILD_ALLOWANCE_MS is the time that the rule allows for the last three terms together. So each
-// interval is at most LIST_VALIDITY_MS - BUILD_ALLOWANCE_MS. `checkTiming` refuses a longer interval
-// when the services start, and the log has a line for a build that is longer than the rule allows
-// for. While the steps work, each step gives new lists, and the rule matters only when they fail.
+// interval is at most LIST_VALIDITY_MS - BUILD_ALLOWANCE_MS. At that longest interval, a build of up
+// to 590 s keeps a valid list at every moment, also when no step runs. `checkTiming` refuses a longer
+// interval when the services start, and the log has a line for a build that is longer than the rule
+// allows for. While the steps work, each step gives new lists, and the rule matters only when they fail.
 // Two formats, both signed with ES256 by the gateway's P-256 key:
 // - W3C Bitstring Status List v1.0 (W3C Recommendation, 15 May 2025,
 //   https://www.w3.org/TR/2025/REC-vc-bitstring-status-list-20250515/): one list with both purposes
@@ -152,7 +158,7 @@ export const BUILD_WAIT_MS = 10_000;
 /** The timer checks the age of the lists this often. */
 export const REFRESH_TICK_MS = 10_000;
 /** The time that the timing rule allows for the check of the timer, for one build and for the age of its bits, together. */
-export const BUILD_ALLOWANCE_MS = 900_000;
+export const BUILD_ALLOWANCE_MS = 1_200_000;
 /** The longest interval of both settings: the validity of a list less the allowance. */
 export const MAX_REFRESH_MS = LIST_VALIDITY_MS - BUILD_ALLOWANCE_MS;
 /** The shortest background interval: a build takes minutes, so a shorter interval is a loop of builds. */
@@ -165,6 +171,9 @@ export const DEFAULT_FOLLOW_MS = REFRESH_TICK_MS;
 export const MAX_FOLLOW_MS = 300_000;
 
 const TIMING_RULE = `A list is valid for ${LIST_VALIDITY_MS / 1000} s. An interval and ${BUILD_ALLOWANCE_MS / 1000} s for the check of the timer and for a build must fit in that time.`;
+
+/** The error of a request when the newest ledger point that the service has is older than the validity of a list. */
+const TIP_TOO_OLD = `no valid status lists: the ledger tip is older than ${LIST_VALIDITY_MS / 1000} s`;
 
 /**
  * Refuses intervals that break the timing rule (see the head of this file). The messages name the
@@ -320,6 +329,8 @@ export class StatusLists {
   private network: Promise<GenesisParameters> | null = null;
   /** When the last build started (POSIX ms). */
   private lastBuildAt = -Infinity;
+  /** True when the last build failed: a repair build then waits for one refresh interval after that build started. */
+  private lastBuildFailed = false;
   /** When the last build ended (POSIX ms); null before the first. */
   private builtAt: number | null = null;
   /** When a build or a follow step last read the state from the chain (POSIX ms); null before the first. */
@@ -328,6 +339,8 @@ export class StatusLists {
   private ticks = 0;
   /** When a failed follow step was last logged (POSIX ms): the log has one line for each refresh interval. */
   private followFailureLoggedAt = -Infinity;
+  /** When a misfit of the records and the lists was last logged (POSIX ms): the log has one line for each refresh interval. */
+  private misfitLoggedAt = -Infinity;
   /** The age at which the timer builds the lists again (POSIX ms). */
   private readonly backgroundMs: number;
   /** The interval of the follow steps (POSIX ms); 0: none. */
@@ -451,12 +464,13 @@ export class StatusLists {
 
   /**
    * The lists that readers get from `state`. A state with an older ledger point than the lists that
-   * readers have does not replace them. The held entries of revoked tokens are part of the Token
-   * Status List values.
+   * readers have does not replace them: it has an earlier block time or a lower block height. The
+   * next state with a ledger point that is not older does. The held entries of revoked tokens are
+   * part of the Token Status List values.
    */
   private publish(state: ListState): Lists {
     const current = this.lists;
-    if (current !== null && state.tip.blockHeight < current.state.tip.blockHeight) return current;
+    if (current !== null && (state.asOf < current.state.asOf || state.tip.blockHeight < current.state.tip.blockHeight)) return current;
     const held = this.heldEntries(this.ctx.now());
     let tokenValues = state.values;
     if (held.size > 0) {
@@ -496,6 +510,7 @@ export class StatusLists {
         // The build replaces the newest state; the next follow step starts from it.
         this.state = state;
         this.builtAt = this.checkedAt = endedAt;
+        this.lastBuildFailed = false;
         const built = this.publish(state);
         const duration = endedAt - startedAt;
         this.ctx.info?.(`identity-gateway: status lists: build ended after ${seconds(duration)} s: ${entries.length} records`);
@@ -507,6 +522,7 @@ export class StatusLists {
         }
         return built;
       } catch (e) {
+        this.lastBuildFailed = true;
         this.ctx.log(`identity-gateway: status lists not rebuilt after ${seconds(this.ctx.now() - startedAt)} s: ${e instanceof Error ? e.message : String(e)}`);
         throw e;
       } finally {
@@ -547,10 +563,12 @@ export class StatusLists {
     try {
       const network = await this.genesis();
       const list = await this.ctx.records.listRecords();
+      // A build that ended while the step read makes the step useless: it ends with no effect.
+      if (this.state !== base) return;
       const { tip } = list;
       if (tip.blockHeight < base.tip.blockHeight || (tip.blockHeight === base.tip.blockHeight && tip.blockHash === base.tip.blockHash)) {
         // The ledger source shows no newer tip: the lists are as new as it can tell.
-        if (this.state === base) this.checkedAt = this.ctx.now();
+        this.checkedAt = this.ctx.now();
         return;
       }
       const plan = planFollow(base, list);
@@ -582,12 +600,20 @@ export class StatusLists {
     }
   }
 
-  /** The records do not fit the lists (see `planFollow`): a build reads every record again, when one may start. */
+  /**
+   * The records do not fit the lists (see `planFollow`): the steps cannot go on. The log has a line
+   * for the first step that sees it, and then one for each refresh interval while it lasts. A build
+   * reads every record again as soon as no build runs. After a build that failed, it waits for one
+   * refresh interval after that build started.
+   */
   private repair(why: string): void {
     const now = this.ctx.now();
-    if (this.listsBuild !== null || now - this.lastBuildAt < this.ctx.settings.statusListRefreshMs) return;
-    this.ctx.log(`identity-gateway: status lists: the records do not fit the lists (${why}); a full build starts`);
-    this.buildInBackground("repair");
+    const refreshMs = this.ctx.settings.statusListRefreshMs;
+    if (now - this.misfitLoggedAt >= refreshMs) {
+      this.misfitLoggedAt = now;
+      this.ctx.log(`identity-gateway: status lists: the records do not fit the lists (${why}); the lists do not change until a full build ends`);
+    }
+    if (this.listsBuild === null && !(this.lastBuildFailed && now - this.lastBuildAt < refreshMs)) this.buildInBackground("repair");
   }
 
   /**
@@ -615,12 +641,12 @@ export class StatusLists {
     this.startWhenDue("request", this.checkedAt, this.staleMs);
     if (lists !== null) return lists;
     if (this.listsBuild !== null) return within(this.listsBuild, BUILD_WAIT_MS, "the status-list build").then((built) => this.validated(built));
-    throw new Error("no valid status lists: the last build failed, and the next one starts one refresh interval after it");
+    throw new Error(this.lists === null ? "no valid status lists: the last build failed, and the next one starts one refresh interval after it" : TIP_TOO_OLD);
   }
 
   /** The lists of a build that a request waited for, when they are still valid: the tip that the build read can be old. */
   private validated(lists: Lists): Lists {
-    if (this.ctx.now() >= lists.expiresAt) throw new Error(`no valid status lists: the ledger tip is older than ${LIST_VALIDITY_MS / 1000} s`);
+    if (this.ctx.now() >= lists.expiresAt) throw new Error(TIP_TOO_OLD);
     return lists;
   }
 

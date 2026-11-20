@@ -55,11 +55,24 @@ describe("the follow interval", () => {
   });
 
   test("the other two intervals keep their limits, and they are checked first", () => {
-    expect(() => follow({ STATUS_LIST_BACKGROUND_REFRESH_SECONDS: "59", [FOLLOW]: "15" })).toThrow(/STATUS_LIST_BACKGROUND_REFRESH_SECONDS must be from 60 to 2700 s/);
+    expect(() => follow({ STATUS_LIST_BACKGROUND_REFRESH_SECONDS: "59", [FOLLOW]: "15" })).toThrow(/STATUS_LIST_BACKGROUND_REFRESH_SECONDS must be from 60 to 2400 s/);
     expect(() => checkTiming(60_000, 600_000)).not.toThrow();
     expect(() => checkTiming(60_000, 600_000, 0)).not.toThrow();
     expect(() => checkTiming(60_000, 600_000, 20_000)).not.toThrow();
     expect(() => checkTiming(60_000, 600_000, 25_000)).toThrow(`${FOLLOW} must be 0`);
+  });
+
+  test("the longest interval is 2400 s with the steps on or off, so a list cannot expire before a build of up to 590 s ends", () => {
+    for (const followMs of [0, 10_000, 300_000]) {
+      expect(() => checkTiming(2_400_000, 2_400_000, followMs)).not.toThrow();
+      expect(() => checkTiming(60_000, 2_401_000, followMs)).toThrow(/STATUS_LIST_BACKGROUND_REFRESH_SECONDS must be from 60 to 2400 s, got 2401\./);
+      expect(() => checkTiming(2_401_000, 2_401_000, followMs)).toThrow(/STATUS_LIST_REFRESH_SECONDS must be from 1 to 2400 s, got 2401\./);
+    }
+    // The intervals that the rule allowed before this limit.
+    expect(() => checkTiming(2_700_000, 2_700_000, 0)).toThrow(/STATUS_LIST_REFRESH_SECONDS must be from 1 to 2400 s, got 2700\./);
+    expect(() => checkTiming(60_000, 2_700_000, 0)).toThrow(/STATUS_LIST_BACKGROUND_REFRESH_SECONDS must be from 60 to 2400 s, got 2700\./);
+    // The refusal states the rule with the allowance of this limit.
+    expect(() => checkTiming(60_000, 2_401_000, 0)).toThrow("1200 s for the check of the timer and for a build");
   });
 
   test("the services refuse a follow interval that breaks the rule, with the same message", () => {

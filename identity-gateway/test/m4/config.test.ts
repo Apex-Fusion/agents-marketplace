@@ -31,16 +31,16 @@ describe("the status-list intervals", () => {
   test("the environment sets both, up to the longest interval that the timing rule allows", () => {
     expect(intervals({ [REFRESH]: "120", [BACKGROUND]: "900" })).toEqual([120_000, 900_000]);
     expect(intervals({ [REFRESH]: "1", [BACKGROUND]: "60" })).toEqual([1_000, 60_000]);
-    expect(LONGEST).toBe(2_700);
+    expect(LONGEST).toBe(2_400);
     expect(intervals({ [REFRESH]: String(LONGEST), [BACKGROUND]: String(LONGEST) })).toEqual([LONGEST * 1000, LONGEST * 1000]);
   });
 
   test.each<[string, Record<string, string>, RegExp]>([
-    ["a background interval of 59 s", { [BACKGROUND]: "59" }, /STATUS_LIST_BACKGROUND_REFRESH_SECONDS must be from 60 to 2700 s, got 59\./],
-    ["a background interval above the longest", { [BACKGROUND]: String(LONGEST + 1) }, /STATUS_LIST_BACKGROUND_REFRESH_SECONDS must be from 60 to 2700 s, got 2701\./],
-    ["a refresh interval of 0", { [REFRESH]: "0" }, /STATUS_LIST_REFRESH_SECONDS must be from 1 to 2700 s, got 0\./],
-    ["a refresh interval above the longest", { [REFRESH]: String(LONGEST + 1), [BACKGROUND]: String(LONGEST) }, /STATUS_LIST_REFRESH_SECONDS must be from 1 to 2700 s, got 2701\./],
-    ["a refresh interval of the whole validity, which the setting allowed before", { [REFRESH]: "3600", [BACKGROUND]: "600" }, /STATUS_LIST_REFRESH_SECONDS must be from 1 to 2700 s, got 3600\./],
+    ["a background interval of 59 s", { [BACKGROUND]: "59" }, /STATUS_LIST_BACKGROUND_REFRESH_SECONDS must be from 60 to 2400 s, got 59\./],
+    ["a background interval above the longest", { [BACKGROUND]: String(LONGEST + 1) }, /STATUS_LIST_BACKGROUND_REFRESH_SECONDS must be from 60 to 2400 s, got 2401\./],
+    ["a refresh interval of 0", { [REFRESH]: "0" }, /STATUS_LIST_REFRESH_SECONDS must be from 1 to 2400 s, got 0\./],
+    ["a refresh interval above the longest", { [REFRESH]: String(LONGEST + 1), [BACKGROUND]: String(LONGEST) }, /STATUS_LIST_REFRESH_SECONDS must be from 1 to 2400 s, got 2401\./],
+    ["a refresh interval of the whole validity, which the setting allowed before", { [REFRESH]: "3600", [BACKGROUND]: "600" }, /STATUS_LIST_REFRESH_SECONDS must be from 1 to 2400 s, got 3600\./],
     ["a background interval that is shorter than the refresh interval", { [REFRESH]: "900", [BACKGROUND]: "600" }, /STATUS_LIST_BACKGROUND_REFRESH_SECONDS must not be shorter than STATUS_LIST_REFRESH_SECONDS/],
   ])("%s is refused", (_name, env, message) => {
     expect(() => intervals(env)).toThrow(message);
