@@ -1,10 +1,11 @@
 // Catalog renderings of Part 2 Section 8.5. They list only agents that meet the listing rule
 // (Part 2 Section 8.4), and only those with a protocol card: an A2A agent through its agent card, an
 // MCP agent through its server card. A web agent has neither card, so the catalog formats cannot
-// describe it; its per-agent renderings stay available.
+// describe it; its per-agent renderings stay available. No entry names only a DID: an agent without
+// a card has no entry, because a catalog client could not call it.
 
 import { formatTime } from "../resolve/time.js";
-import { agentUrl, fallbackName, reverseHost, type RenderedAgent } from "./agent.js";
+import { agentUrl, catalogIdentifier, fallbackName, reverseHost, type RenderedAgent } from "./agent.js";
 import { serverJson } from "./documents.js";
 
 export const A2A_CARD_TYPE = "application/a2a-agent-card+json";
@@ -18,12 +19,16 @@ interface CardRef {
   readonly url: string;
 }
 
-/** `urn:air:<gateway host>:agent:<identifier>`: the gateway publishes these renderings under its own domain. */
+/**
+ * One entry for each listed A2A or MCP agent. Detection names one protocol for an agent (the first check
+ * that succeeds, A2A before MCP), so an agent has one entry and no two entries share an identifier: the
+ * AI Catalog needs identifier and version to be unique in a catalog. An agent that serves both an A2A
+ * card and an MCP endpoint shows through its A2A card only.
+ */
 function cardRefs(agents: readonly RenderedAgent[], baseUrl: string): CardRef[] {
-  const host = new URL(baseUrl).hostname;
   return agents.flatMap((agent): CardRef[] => {
     const protocol = agent.facts.detection?.protocol;
-    const identifier = `urn:air:${host}:agent:${agent.vectorId}`;
+    const identifier = catalogIdentifier(baseUrl, agent.vectorId);
     if (protocol === "a2a") return [{ agent, protocol, identifier, type: A2A_CARD_TYPE, url: agentUrl(baseUrl, agent.vectorId, "agent-card.json") }];
     if (protocol === "mcp") return [{ agent, protocol, identifier, type: MCP_CARD_TYPE, url: agentUrl(baseUrl, agent.vectorId, "server-card") }];
     return [];
@@ -31,13 +36,16 @@ function cardRefs(agents: readonly RenderedAgent[], baseUrl: string): CardRef[] 
 }
 
 /**
- * AI Catalog (https://github.com/Agent-Card/ai-catalog, specification/ai-catalog.md at 9aac2c1,
- * specVersion 1.0). Entries leave out the name, description and version that the referenced card
- * carries, as the specification recommends.
+ * AI Catalog (https://github.com/Agent-Card/ai-catalog, specification/ai-catalog.md at 19208af, the v0.9
+ * release candidate of version 1.0: implementations of it use `specVersion` "0.9"). Entries leave out the
+ * name, description and version that the referenced card carries, as the specification recommends.
+ * The specification has no member for the DID of the agent behind an entry. The entry carries it in
+ * `extensions`, which takes a URL or a reverse-DNS string as key: here the reverse-DNS name of the
+ * gateway host. A consumer that does not know the key ignores it.
  */
 export function aiCatalog(agents: readonly RenderedAgent[], baseUrl: string, gatewayDid: string | null): Record<string, unknown> {
   return {
-    specVersion: "1.0",
+    specVersion: "0.9",
     host: { displayName: "Vector identity gateway", ...(gatewayDid ? { identifier: gatewayDid } : {}), documentationUrl: `${baseUrl}/policy` },
     entries: cardRefs(agents, baseUrl).map((ref) => ({
       identifier: ref.identifier,
@@ -45,6 +53,7 @@ export function aiCatalog(agents: readonly RenderedAgent[], baseUrl: string, gat
       url: ref.url,
       ...(ref.agent.capabilities.length ? { tags: ref.agent.capabilities } : {}),
       updatedAt: formatTime(ref.agent.updatedAt),
+      extensions: { [reverseHost(baseUrl)]: { did: ref.agent.did } },
     })),
   };
 }

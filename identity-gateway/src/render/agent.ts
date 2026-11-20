@@ -68,6 +68,19 @@ export function reverseHost(baseUrl: string): string {
   return new URL(baseUrl).hostname.split(".").reverse().join(".");
 }
 
+/**
+ * The identifier of an agent in the AI Catalog and in ARD: `urn:air:<gateway host>:<id>`, where `<id>` is
+ * the method-specific identifier of the agent's DID (`did:vector:<id>`). The DID and the identifier name
+ * each other without a table. The entries point to renderings that the gateway builds and publishes under
+ * its own domain, so the gateway host is the publisher in the identifier. The form has a publisher and a
+ * name and no namespace and no kind, so the AI Catalog grammar (`urn:air:{publisher}:{name}[:{kind}]`) and
+ * the ARD grammar (`urn:air:<publisher>:[<namespace>:]<agent-name>`) read it the same way. Both
+ * specifications still change: no other code builds this text.
+ */
+export function catalogIdentifier(baseUrl: string, vectorId: string): string {
+  return `urn:air:${new URL(baseUrl).hostname}:${vectorId}`;
+}
+
 export const agentUrl = (baseUrl: string, vectorId: string, file: string): string => `${baseUrl}/agents/${vectorId}/${file}`;
 
 /** The gateway's resolution URL of the DID: the documentation link of the renderings. */

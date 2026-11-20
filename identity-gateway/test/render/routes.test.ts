@@ -4,6 +4,7 @@ import { createPublicKey, verify } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { keyHash } from "../../src/codec/keys.js";
 import { canonicalize } from "../../src/resolve/jcs.js";
+import { catalogIdentifier } from "../../src/render/agent.js";
 import { formatTime } from "../../src/resolve/time.js";
 import { CONTROLLER, IDENTITY, KEY_A, LEGACY, LEGACY_OWNER, LedgerBuilder, SETTINGS, identityDatum, idOf, legacyDatum, timeAt, utf8 } from "../support/ledger.js";
 import { FakeNet } from "../fetch/support.js";
@@ -58,6 +59,15 @@ function ecPoint(value: unknown, index: number): { x: string; y: string } {
   const key: unknown = value.keys[index];
   if (typeof key !== "object" || key === null || !("x" in key) || !("y" in key) || typeof key.x !== "string" || typeof key.y !== "string") throw new Error("not an EC key");
   return { x: key.x, y: key.y };
+}
+
+/** The entries of an AI Catalog or an ARD manifest, as plain objects. */
+function entriesOf(body: unknown): Array<Record<string, unknown>> {
+  if (typeof body !== "object" || body === null || !("entries" in body) || !Array.isArray(body.entries)) throw new Error("the body has no entries");
+  return body.entries.map((entry: unknown) => {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) throw new Error("an entry is not an object");
+    return Object.fromEntries(Object.entries(entry));
+  });
 }
 
 /** The registration file with its 256-bit agentId as a string, so that JSON.parse keeps every digit. */
@@ -273,22 +283,24 @@ describe("catalogs", () => {
     expect(status).toBe(200);
     expect(type).toBe("application/ai-catalog+json");
     expect(body).toEqual({
-      specVersion: "1.0",
+      specVersion: "0.9",
       host: { displayName: "Vector identity gateway", identifier: did(GATEWAY_ID), documentationUrl: `${BASE}/policy` },
       entries: [
         {
-          identifier: `urn:air:id.vector.apexfusion.org:agent:${A2A_ID}`,
+          identifier: `urn:air:id.vector.apexfusion.org:${A2A_ID}`,
           type: "application/a2a-agent-card+json",
           url: `${BASE}/agents/${A2A_ID}/agent-card.json`,
           tags: ["llm.text.generate.v1", "ocr.extract.v1", "custom.thing"],
           updatedAt: formatTime(timeAt(100)),
+          extensions: { "org.apexfusion.vector.id": { did: did(A2A_ID) } },
         },
         {
-          identifier: `urn:air:id.vector.apexfusion.org:agent:${MCP_ID}`,
+          identifier: `urn:air:id.vector.apexfusion.org:${MCP_ID}`,
           type: "application/mcp-server-card+json",
           url: `${BASE}/agents/${MCP_ID}/server-card`,
           tags: ["mcp.tool.execute.v1"],
           updatedAt: formatTime(timeAt(110)),
+          extensions: { "org.apexfusion.vector.id": { did: did(MCP_ID) } },
         },
       ],
     });
@@ -301,7 +313,7 @@ describe("catalogs", () => {
       body: {
         entries: [
           {
-            identifier: `urn:air:id.vector.apexfusion.org:agent:${A2A_ID}`,
+            identifier: `urn:air:id.vector.apexfusion.org:${A2A_ID}`,
             displayName: "Route planner",
             type: "application/a2a-agent-card+json",
             url: `${BASE}/agents/${A2A_ID}/agent-card.json`,
@@ -314,6 +326,78 @@ describe("catalogs", () => {
         ],
       },
     });
+  });
+
+  test("an identifier names its agent: urn:air:<gateway host>:<id> with the id of the DID, in the AI Catalog and in ARD; the AI Catalog entry carries the DID", async () => {
+    const catalog = entriesOf((await json("/.well-known/ai-catalog.json")).body);
+    const ard = entriesOf((await json("/.well-known/ard.json")).body);
+    expect(catalog.map((e) => e.identifier)).toEqual([A2A_ID, MCP_ID].map((id) => catalogIdentifier(BASE, id)));
+    expect(ard.map((e) => e.identifier)).toEqual(catalog.map((e) => e.identifier));
+    expect(new Set(catalog.map((e) => e.identifier)).size).toBe(catalog.length);
+    for (const entry of catalog) {
+      // AI Catalog: urn:air:{publisher}:{name}[:{kind}]. The entry has a publisher and a name, and no kind.
+      const [, publisher, name, kind] = /^urn:air:([a-z0-9.-]+):([^:]+)(?::([^:]+))?$/.exec(String(entry.identifier)) ?? [];
+      expect(publisher).toBe("id.vector.apexfusion.org");
+      expect(name).toMatch(/^[0-9a-f]{64}$/);
+      expect(kind).toBeUndefined();
+      // The extension key is a reverse-DNS string, as the AI Catalog requires; its data names the DID.
+      expect(entry.extensions).toEqual({ "org.apexfusion.vector.id": { did: did(name!) } });
+    }
+    for (const entry of ard) expect(entry.metadata).toMatchObject({ did: did(String(entry.identifier).split(":").pop()!) });
+    const servers = (await json("/v0/servers")).body;
+    expect(JSON.stringify(servers)).toContain(`"org.apexfusion.vector.id/did":"${did(MCP_ID)}"`);
+  });
+
+  test("no catalog has an entry for an agent that has no detected A2A or MCP protocol: no entry holds only a DID", async () => {
+    const unlisted = [WEB_ID, DOWN_ID, CHILD_ID, HELD_ID, REVOKED_ID];
+    for (const path of ["/.well-known/ai-catalog.json", "/.well-known/ard.json"]) {
+      const identifiers = entriesOf((await json(path)).body).map((e) => e.identifier);
+      for (const id of unlisted) expect(identifiers).not.toContain(catalogIdentifier(BASE, id));
+    }
+    const servers = JSON.stringify((await json("/v0/servers")).body);
+    for (const id of unlisted) expect(servers).not.toContain(id);
+  });
+
+  test("an agent that serves both an A2A card and an MCP endpoint has one entry in each catalog, through its A2A card: identifier and version stay unique", async () => {
+    const net = new FakeNet().host("both.example.org");
+    const id = idOf("render dual agent");
+    net.json("https://both.example.org/.well-known/agent-card.json", { ...A2A_CARD, supportedInterfaces: [{ url: "https://both.example.org/rpc", protocolBinding: "JSONRPC", protocolVersion: "1.0" }] });
+    net.on(
+      "https://both.example.org/mcp",
+      { headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, result: { supportedVersions: ["2026-07-28"], capabilities: {} } }) },
+      "POST",
+    );
+    const ledger = new LedgerBuilder();
+    ledger.register(id, identityDatum({ name: utf8("Both"), endpoint: utf8("https://both.example.org/mcp") }), { height: 100 });
+    const dual = await startGateway({ net, ledger });
+    try {
+      for (const path of ["/.well-known/ai-catalog.json", "/.well-known/ard.json"]) {
+        expect(entriesOf((await json(path, undefined, dual)).body).map((e) => [e.identifier, e.type])).toEqual([[catalogIdentifier(BASE, id), "application/a2a-agent-card+json"]]);
+      }
+      expect((await json("/v0/servers", undefined, dual)).body).toMatchObject({ servers: [], metadata: { count: 0 } });
+    } finally {
+      await dual.close();
+    }
+  });
+
+  test("an agent whose card goes live after the first check is in both catalogs after the next scan: the catalogs do not stay empty for a day", async () => {
+    const net = new FakeNet().host("late.example.org");
+    const id = idOf("render late card agent");
+    const ledger = new LedgerBuilder();
+    ledger.register(id, identityDatum({ name: utf8("Late"), endpoint: utf8("https://late.example.org/") }), { height: 100 });
+    const late = await startGateway({ net, ledger });
+    try {
+      expect(entriesOf((await json("/.well-known/ai-catalog.json", undefined, late)).body)).toEqual([]);
+      net.json("https://late.example.org/.well-known/agent-card.json", { ...A2A_CARD, supportedInterfaces: [{ url: "https://late.example.org/rpc", protocolBinding: "JSONRPC", protocolVersion: "1.0" }] });
+      net.clock.t += 3_600_000;
+      await late.scheduler.scan();
+      await late.scheduler.idle();
+      for (const path of ["/.well-known/ai-catalog.json", "/.well-known/ard.json"]) {
+        expect(entriesOf((await json(path, undefined, late)).body).map((e) => e.identifier)).toEqual([catalogIdentifier(BASE, id)]);
+      }
+    } finally {
+      await late.close();
+    }
   });
 });
 

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { didWebOf, reverseHost } from "../../src/render/agent.js";
+import { catalogIdentifier, didWebOf, reverseHost } from "../../src/render/agent.js";
 import { DEFAULT_ACCESS_LOG_RETENTION, DEFAULT_BASE_URL, loadRenderConfig } from "../../src/render/config.js";
 import { renderJson } from "../../src/render/json.js";
 
@@ -30,6 +30,11 @@ describe("names", () => {
   test("did:web alias: host, a port with a percent-encoded colon, the agents path", () => {
     expect(didWebOf("https://id.vector.apexfusion.org", "ab".repeat(32))).toBe(`did:web:id.vector.apexfusion.org:agents:${"ab".repeat(32)}`);
     expect(didWebOf("https://localhost:8443", "00".repeat(32))).toBe(`did:web:localhost%3A8443:agents:${"00".repeat(32)}`);
+  });
+
+  test("the catalog identifier: urn:air, the gateway host and the id of the DID; no namespace, no kind, no port", () => {
+    expect(catalogIdentifier("https://id.vector.apexfusion.org", "ab".repeat(32))).toBe(`urn:air:id.vector.apexfusion.org:${"ab".repeat(32)}`);
+    expect(catalogIdentifier("https://localhost:8443", "00".repeat(32))).toBe(`urn:air:localhost:${"00".repeat(32)}`);
   });
 
   test("the reverse-DNS namespace of MCP server names", () => {
