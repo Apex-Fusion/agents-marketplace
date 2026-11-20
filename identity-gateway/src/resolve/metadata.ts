@@ -104,9 +104,12 @@ export interface VectorFetched {
 
 export interface DidDocumentMetadata {
   readonly created?: string;
+  /** DID Core `updated`: the version time of the base. Not present for version 0. */
   readonly updated?: string;
   readonly versionId?: string;
   readonly nextVersionId?: string;
+  /** DID Core `nextUpdate`: the version time of the next version. Present when `nextVersionId` is present. */
+  readonly nextUpdate?: string;
   readonly deactivated?: true;
   readonly vectorCurrent?: { readonly effective: EffectiveStatus; readonly effectiveReason?: EffectiveReason };
   readonly canonicalId?: string;
@@ -283,6 +286,8 @@ export interface MetadataInput {
 export function buildMetadata(input: MetadataInput): DidDocumentMetadata {
   const { history, base, view, effective, facts } = input;
   const next = history.versions[base.number + 1];
+  // A version with fewer than 30 confirmations can still move to another block. It is not a next version yet.
+  const nextConfirmed = next !== undefined && next.made.confirmations >= CONFIRMATION_DEPTH ? next : undefined;
   const statusFields =
     view.kind === "identity"
       ? identityStatusFields(view.status)
@@ -295,7 +300,8 @@ export function buildMetadata(input: MetadataInput): DidDocumentMetadata {
     created: formatTime(history.firstMint.timeMs),
     updated: base.number > 0 ? formatTime(base.made.timeMs) : undefined,
     versionId: String(base.number),
-    nextVersionId: next && next.made.confirmations >= CONFIRMATION_DEPTH ? String(next.number) : undefined,
+    nextVersionId: nextConfirmed === undefined ? undefined : String(nextConfirmed.number),
+    nextUpdate: nextConfirmed === undefined ? undefined : formatTime(nextConfirmed.made.timeMs),
     deactivated: input.deactivated || undefined,
     vectorCurrent: input.current ? compact({ effective: input.current.status, effectiveReason: input.current.reason ?? undefined }) : undefined,
     canonicalId: canonicalDid(history.vectorId),

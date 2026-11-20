@@ -1,6 +1,6 @@
 {
   "name": "retired-successor",
-  "description": "An agent that its controller retired, naming a live root agent as successor.",
+  "description": "An agent that its controller retired, naming a live root agent as successor. The `versionTime` requests are before the retirement, at it and one second after it: only the last one has no document.",
   "specification": "docs/did-vector-method.md",
   "comparison": "Resolve each request against the ledger (as of its tip) and the settings. The JCS (RFC 8785) serialisation of the result must equal that of `result`, except the error `title` (Part 1 Section 8.2).",
   "settings": {
@@ -259,6 +259,7 @@
           "canonicalId": "did:vector:5a7daa99bd816214a018ef9fd3448efb05d84cb8406fc63732f0058642b51825",
           "created": "2025-08-29T16:56:40Z",
           "deactivated": true,
+          "nextUpdate": "2025-08-29T17:46:40Z",
           "nextVersionId": "1",
           "vectorCurrent": {
             "effective": "retired"
@@ -314,6 +315,142 @@
         "didResolutionMetadata": {
           "contentType": "application/did"
         }
+      }
+    },
+    {
+      "did": "did:vector:5a7daa99bd816214a018ef9fd3448efb05d84cb8406fc63732f0058642b51825",
+      "options": {
+        "versionTime": "2025-08-29T17:46:40Z"
+      },
+      "httpStatus": 410,
+      "result": {
+        "didDocument": {
+          "@context": "https://www.w3.org/ns/did/v1.1",
+          "assertionMethod": [
+            "#8a95c8ed588306ea88860b54eb0c65e77dfab999789cc5e6ca008799"
+          ],
+          "authentication": [
+            "#8a95c8ed588306ea88860b54eb0c65e77dfab999789cc5e6ca008799"
+          ],
+          "capabilityInvocation": [
+            "#0d6a577e9441ad8ed9663931906e4d43ece8f82c712b1d0235affb06"
+          ],
+          "id": "did:vector:5a7daa99bd816214a018ef9fd3448efb05d84cb8406fc63732f0058642b51825",
+          "verificationMethod": [
+            {
+              "controller": "did:vector:5a7daa99bd816214a018ef9fd3448efb05d84cb8406fc63732f0058642b51825",
+              "id": "did:vector:5a7daa99bd816214a018ef9fd3448efb05d84cb8406fc63732f0058642b51825#0d6a577e9441ad8ed9663931906e4d43ece8f82c712b1d0235affb06",
+              "publicKeyMultibase": "z6Mkon3Necd6NkkyfoGoHxid2znGc59LU3K7mubaRcFbLfLX",
+              "type": "Multikey"
+            },
+            {
+              "controller": "did:vector:5a7daa99bd816214a018ef9fd3448efb05d84cb8406fc63732f0058642b51825",
+              "id": "did:vector:5a7daa99bd816214a018ef9fd3448efb05d84cb8406fc63732f0058642b51825#8a95c8ed588306ea88860b54eb0c65e77dfab999789cc5e6ca008799",
+              "publicKeyMultibase": "z6MkvRXNYcE7MMduynWTgeKbDaT1iijDSC8pZqXZc8rHPrf2",
+              "type": "Multikey"
+            }
+          ]
+        },
+        "didDocumentMetadata": {
+          "canonicalId": "did:vector:5a7daa99bd816214a018ef9fd3448efb05d84cb8406fc63732f0058642b51825",
+          "created": "2025-08-29T16:56:40Z",
+          "deactivated": true,
+          "nextUpdate": "2025-08-29T17:46:40Z",
+          "nextVersionId": "1",
+          "vectorCurrent": {
+            "effective": "retired"
+          },
+          "vectorKeys": [
+            {
+              "id": "#8a95c8ed588306ea88860b54eb0c65e77dfab999789cc5e6ca008799",
+              "purposes": [
+                "authentication",
+                "assertion",
+                "transaction"
+              ],
+              "type": "Ed25519"
+            }
+          ],
+          "vectorLedger": {
+            "blockHash": "199bf7987c00d2cb5ff99a4da199d1ed0fea2e955d6ad096654e22a0898f05b0",
+            "blockHeight": 100,
+            "confirmations": 900,
+            "outputIndex": 0,
+            "slot": 1000,
+            "txId": "a1979ac06076b6412c21f7882e00bcf0baf3f790ea4db800ac36b70aeeb5289e"
+          },
+          "vectorOrigin": "native",
+          "vectorParties": [
+            {
+              "notBefore": "1970-01-01T00:00:00Z",
+              "rights": [
+                "suspend",
+                "revoke"
+              ],
+              "role": "accountable",
+              "signer": "fd5939fb5601e5b41eee666dba14c0a7d151d4cd9b0e16691ce3a9a4"
+            }
+          ],
+          "vectorProfile": {
+            "capabilities": [
+              "ocr.extract.v1",
+              "llm.text.generate.v1"
+            ],
+            "createdAt": "2025-08-29T16:56:40Z",
+            "description": "An agent for resolver tests.",
+            "endpoint": "https://agent.example.org/a2a",
+            "framework": "vector-agent-template",
+            "name": "test-agent"
+          },
+          "vectorStatus": {
+            "effective": "active",
+            "status": "active"
+          },
+          "versionId": "0"
+        },
+        "didResolutionMetadata": {
+          "contentType": "application/did"
+        }
+      }
+    },
+    {
+      "did": "did:vector:5a7daa99bd816214a018ef9fd3448efb05d84cb8406fc63732f0058642b51825",
+      "options": {
+        "versionTime": "2025-08-29T17:46:41Z"
+      },
+      "httpStatus": 410,
+      "result": {
+        "didDocument": null,
+        "didDocumentMetadata": {
+          "canonicalId": "did:vector:5a7daa99bd816214a018ef9fd3448efb05d84cb8406fc63732f0058642b51825",
+          "created": "2025-08-29T16:56:40Z",
+          "deactivated": true,
+          "updated": "2025-08-29T17:46:40Z",
+          "vectorCurrent": {
+            "effective": "retired"
+          },
+          "vectorLedger": {
+            "blockHash": "72193bccd7c332615b5d0b72fa8945453a13a71e663f410c32d1b957b29c6c21",
+            "blockHeight": 400,
+            "confirmations": 600,
+            "outputIndex": 0,
+            "slot": 4000,
+            "txId": "500ad5cf9c25e8f2d3a5212a24fe796da4d5610c9faa49721be50de88a60e937"
+          },
+          "vectorOrigin": "native",
+          "vectorProfile": {
+            "createdAt": "2025-08-29T16:56:40Z",
+            "name": "test-agent"
+          },
+          "vectorStatus": {
+            "at": "2025-08-29T17:46:40Z",
+            "effective": "retired",
+            "status": "retired",
+            "successor": "did:vector:c198a7178c4e56940179b42aaf3ba6f7b10a7e22824cd664515497e74393e010"
+          },
+          "versionId": "1"
+        },
+        "didResolutionMetadata": {}
       }
     }
   ]

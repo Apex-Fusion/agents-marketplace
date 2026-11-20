@@ -1,6 +1,6 @@
 {
   "name": "revoked-invalid-from",
-  "description": "An agent that its Accountable Party revoked for key compromise, invalid from a time between version 0 and version 1. Version 0 keeps its document; version 1 is invalidated.",
+  "description": "An agent that its Accountable Party revoked for key compromise, invalid from a time between version 0 and version 1. Version 0 keeps its document; version 1 is invalidated. The `versionTime` requests are one second before the invalid-from time, at it, at the revocation and one second after it: from the invalid-from time on, the document is null.",
   "specification": "docs/did-vector-method.md",
   "comparison": "Resolve each request against the ledger (as of its tip) and the settings. The JCS (RFC 8785) serialisation of the result must equal that of `result`, except the error `title` (Part 1 Section 8.2).",
   "settings": {
@@ -267,6 +267,7 @@
           "canonicalId": "did:vector:23199970ad693449bb77cf740d1e57845268237657c1153c6662834eed651ac0",
           "created": "2025-08-29T16:56:40Z",
           "deactivated": true,
+          "nextUpdate": "2025-08-29T17:13:20Z",
           "nextVersionId": "1",
           "vectorCurrent": {
             "effective": "revoked"
@@ -337,6 +338,7 @@
           "canonicalId": "did:vector:23199970ad693449bb77cf740d1e57845268237657c1153c6662834eed651ac0",
           "created": "2025-08-29T16:56:40Z",
           "deactivated": true,
+          "nextUpdate": "2025-08-29T17:30:00Z",
           "nextVersionId": "2",
           "updated": "2025-08-29T17:13:20Z",
           "vectorCurrent": {
@@ -391,6 +393,286 @@
             "status": "active"
           },
           "versionId": "1"
+        },
+        "didResolutionMetadata": {}
+      }
+    },
+    {
+      "did": "did:vector:23199970ad693449bb77cf740d1e57845268237657c1153c6662834eed651ac0",
+      "options": {
+        "versionTime": "2025-08-29T17:04:59Z"
+      },
+      "httpStatus": 410,
+      "result": {
+        "didDocument": {
+          "@context": "https://www.w3.org/ns/did/v1.1",
+          "assertionMethod": [
+            "#8a95c8ed588306ea88860b54eb0c65e77dfab999789cc5e6ca008799"
+          ],
+          "authentication": [
+            "#8a95c8ed588306ea88860b54eb0c65e77dfab999789cc5e6ca008799"
+          ],
+          "capabilityInvocation": [
+            "#0d6a577e9441ad8ed9663931906e4d43ece8f82c712b1d0235affb06"
+          ],
+          "id": "did:vector:23199970ad693449bb77cf740d1e57845268237657c1153c6662834eed651ac0",
+          "verificationMethod": [
+            {
+              "controller": "did:vector:23199970ad693449bb77cf740d1e57845268237657c1153c6662834eed651ac0",
+              "id": "did:vector:23199970ad693449bb77cf740d1e57845268237657c1153c6662834eed651ac0#0d6a577e9441ad8ed9663931906e4d43ece8f82c712b1d0235affb06",
+              "publicKeyMultibase": "z6Mkon3Necd6NkkyfoGoHxid2znGc59LU3K7mubaRcFbLfLX",
+              "type": "Multikey"
+            },
+            {
+              "controller": "did:vector:23199970ad693449bb77cf740d1e57845268237657c1153c6662834eed651ac0",
+              "id": "did:vector:23199970ad693449bb77cf740d1e57845268237657c1153c6662834eed651ac0#8a95c8ed588306ea88860b54eb0c65e77dfab999789cc5e6ca008799",
+              "publicKeyMultibase": "z6MkvRXNYcE7MMduynWTgeKbDaT1iijDSC8pZqXZc8rHPrf2",
+              "type": "Multikey"
+            }
+          ]
+        },
+        "didDocumentMetadata": {
+          "canonicalId": "did:vector:23199970ad693449bb77cf740d1e57845268237657c1153c6662834eed651ac0",
+          "created": "2025-08-29T16:56:40Z",
+          "deactivated": true,
+          "nextUpdate": "2025-08-29T17:13:20Z",
+          "nextVersionId": "1",
+          "vectorCurrent": {
+            "effective": "revoked"
+          },
+          "vectorKeys": [
+            {
+              "id": "#8a95c8ed588306ea88860b54eb0c65e77dfab999789cc5e6ca008799",
+              "purposes": [
+                "authentication",
+                "assertion",
+                "transaction"
+              ],
+              "type": "Ed25519"
+            }
+          ],
+          "vectorLedger": {
+            "blockHash": "199bf7987c00d2cb5ff99a4da199d1ed0fea2e955d6ad096654e22a0898f05b0",
+            "blockHeight": 100,
+            "confirmations": 900,
+            "outputIndex": 0,
+            "slot": 1000,
+            "txId": "56f73ce7225c86bb063e074a5b1a874454b953615c30bdb435b9f06537949bcc"
+          },
+          "vectorOrigin": "native",
+          "vectorParties": [
+            {
+              "notBefore": "1970-01-01T00:00:00Z",
+              "rights": [
+                "suspend",
+                "revoke"
+              ],
+              "role": "accountable",
+              "signer": "fd5939fb5601e5b41eee666dba14c0a7d151d4cd9b0e16691ce3a9a4"
+            }
+          ],
+          "vectorProfile": {
+            "capabilities": [
+              "ocr.extract.v1",
+              "llm.text.generate.v1"
+            ],
+            "createdAt": "2025-08-29T16:56:40Z",
+            "description": "An agent for resolver tests.",
+            "endpoint": "https://agent.example.org/a2a",
+            "framework": "vector-agent-template",
+            "name": "test-agent"
+          },
+          "vectorStatus": {
+            "effective": "active",
+            "invalidFrom": "2025-08-29T17:05:00Z",
+            "status": "active"
+          },
+          "versionId": "0"
+        },
+        "didResolutionMetadata": {
+          "contentType": "application/did"
+        }
+      }
+    },
+    {
+      "did": "did:vector:23199970ad693449bb77cf740d1e57845268237657c1153c6662834eed651ac0",
+      "options": {
+        "versionTime": "2025-08-29T17:05:00Z"
+      },
+      "httpStatus": 410,
+      "result": {
+        "didDocument": null,
+        "didDocumentMetadata": {
+          "canonicalId": "did:vector:23199970ad693449bb77cf740d1e57845268237657c1153c6662834eed651ac0",
+          "created": "2025-08-29T16:56:40Z",
+          "deactivated": true,
+          "nextUpdate": "2025-08-29T17:13:20Z",
+          "nextVersionId": "1",
+          "vectorCurrent": {
+            "effective": "revoked"
+          },
+          "vectorKeys": [
+            {
+              "id": "#8a95c8ed588306ea88860b54eb0c65e77dfab999789cc5e6ca008799",
+              "purposes": [
+                "authentication",
+                "assertion",
+                "transaction"
+              ],
+              "type": "Ed25519"
+            }
+          ],
+          "vectorLedger": {
+            "blockHash": "199bf7987c00d2cb5ff99a4da199d1ed0fea2e955d6ad096654e22a0898f05b0",
+            "blockHeight": 100,
+            "confirmations": 900,
+            "outputIndex": 0,
+            "slot": 1000,
+            "txId": "56f73ce7225c86bb063e074a5b1a874454b953615c30bdb435b9f06537949bcc"
+          },
+          "vectorOrigin": "native",
+          "vectorParties": [
+            {
+              "notBefore": "1970-01-01T00:00:00Z",
+              "rights": [
+                "suspend",
+                "revoke"
+              ],
+              "role": "accountable",
+              "signer": "fd5939fb5601e5b41eee666dba14c0a7d151d4cd9b0e16691ce3a9a4"
+            }
+          ],
+          "vectorProfile": {
+            "capabilities": [
+              "ocr.extract.v1",
+              "llm.text.generate.v1"
+            ],
+            "createdAt": "2025-08-29T16:56:40Z",
+            "description": "An agent for resolver tests.",
+            "endpoint": "https://agent.example.org/a2a",
+            "framework": "vector-agent-template",
+            "name": "test-agent"
+          },
+          "vectorStatus": {
+            "effective": "revoked",
+            "effectiveReason": "invalidated",
+            "invalidFrom": "2025-08-29T17:05:00Z",
+            "status": "active"
+          },
+          "versionId": "0"
+        },
+        "didResolutionMetadata": {}
+      }
+    },
+    {
+      "did": "did:vector:23199970ad693449bb77cf740d1e57845268237657c1153c6662834eed651ac0",
+      "options": {
+        "versionTime": "2025-08-29T17:30:00Z"
+      },
+      "httpStatus": 410,
+      "result": {
+        "didDocument": null,
+        "didDocumentMetadata": {
+          "canonicalId": "did:vector:23199970ad693449bb77cf740d1e57845268237657c1153c6662834eed651ac0",
+          "created": "2025-08-29T16:56:40Z",
+          "deactivated": true,
+          "nextUpdate": "2025-08-29T17:30:00Z",
+          "nextVersionId": "2",
+          "updated": "2025-08-29T17:13:20Z",
+          "vectorCurrent": {
+            "effective": "revoked"
+          },
+          "vectorKeys": [
+            {
+              "id": "#8a95c8ed588306ea88860b54eb0c65e77dfab999789cc5e6ca008799",
+              "purposes": [
+                "authentication",
+                "assertion",
+                "transaction"
+              ],
+              "type": "Ed25519"
+            }
+          ],
+          "vectorLedger": {
+            "blockHash": "56afe9ae2ba5e60144b2934735ff8647ac243702bcc46122e1329f63dadebe30",
+            "blockHeight": 200,
+            "confirmations": 800,
+            "outputIndex": 0,
+            "slot": 2000,
+            "txId": "a1979ac06076b6412c21f7882e00bcf0baf3f790ea4db800ac36b70aeeb5289e"
+          },
+          "vectorOrigin": "native",
+          "vectorParties": [
+            {
+              "notBefore": "1970-01-01T00:00:00Z",
+              "rights": [
+                "suspend",
+                "revoke"
+              ],
+              "role": "accountable",
+              "signer": "fd5939fb5601e5b41eee666dba14c0a7d151d4cd9b0e16691ce3a9a4"
+            }
+          ],
+          "vectorProfile": {
+            "capabilities": [
+              "ocr.extract.v1",
+              "llm.text.generate.v1"
+            ],
+            "createdAt": "2025-08-29T16:56:40Z",
+            "description": "An agent for resolver tests.",
+            "endpoint": "https://agent.example.org/a2a",
+            "framework": "vector-agent-template",
+            "name": "revoked-agent"
+          },
+          "vectorStatus": {
+            "effective": "revoked",
+            "effectiveReason": "invalidated",
+            "invalidFrom": "2025-08-29T17:05:00Z",
+            "status": "active"
+          },
+          "versionId": "1"
+        },
+        "didResolutionMetadata": {}
+      }
+    },
+    {
+      "did": "did:vector:23199970ad693449bb77cf740d1e57845268237657c1153c6662834eed651ac0",
+      "options": {
+        "versionTime": "2025-08-29T17:30:01Z"
+      },
+      "httpStatus": 410,
+      "result": {
+        "didDocument": null,
+        "didDocumentMetadata": {
+          "canonicalId": "did:vector:23199970ad693449bb77cf740d1e57845268237657c1153c6662834eed651ac0",
+          "created": "2025-08-29T16:56:40Z",
+          "deactivated": true,
+          "updated": "2025-08-29T17:30:00Z",
+          "vectorCurrent": {
+            "effective": "revoked"
+          },
+          "vectorLedger": {
+            "blockHash": "cdd45b7129580f83e44ba102b15c52048fc01672d3fa2a16101a447eb4448e51",
+            "blockHeight": 300,
+            "confirmations": 700,
+            "outputIndex": 0,
+            "slot": 3000,
+            "txId": "500ad5cf9c25e8f2d3a5212a24fe796da4d5610c9faa49721be50de88a60e937"
+          },
+          "vectorOrigin": "native",
+          "vectorProfile": {
+            "createdAt": "2025-08-29T16:56:40Z",
+            "name": "revoked-agent"
+          },
+          "vectorStatus": {
+            "at": "2025-08-29T17:30:00Z",
+            "by": "fd5939fb5601e5b41eee666dba14c0a7d151d4cd9b0e16691ce3a9a4",
+            "effective": "revoked",
+            "invalidFrom": "2025-08-29T17:05:00Z",
+            "reason": "keyCompromise",
+            "status": "revoked"
+          },
+          "versionId": "2"
         },
         "didResolutionMetadata": {}
       }

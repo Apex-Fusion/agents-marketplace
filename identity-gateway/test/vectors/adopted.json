@@ -1,6 +1,6 @@
 {
   "name": "adopted",
-  "description": "A legacy record (versions 0 and 1) adopted after the cutoff slot (version 2). Resolved in the canonical and the legacy form, and at times before the cutoff slot and before the adoption.",
+  "description": "A legacy record (versions 0 and 1) adopted after the cutoff slot (version 2). Resolved in the canonical and the legacy form, and at times before the cutoff slot, before the adoption, at the adoption and one second after it.",
   "specification": "docs/did-vector-method.md",
   "comparison": "Resolve each request against the ledger (as of its tip) and the settings. The JCS (RFC 8785) serialisation of the result must equal that of `result`, except the error `title` (Part 1 Section 8.2).",
   "settings": {
@@ -425,6 +425,7 @@
           "equivalentId": [
             "did:vector:agent:be1a0a2912da180757ed3cd61b56bb8eab0188c19dc3c0e3912d2c01:04ee87eab3b01b3e7bf42307ce78810bf86ef5b59eb0b8a0dee254fd68d3e2c1"
           ],
+          "nextUpdate": "2025-08-29T18:20:00Z",
           "nextVersionId": "2",
           "updated": "2025-08-29T17:30:00Z",
           "vectorCurrent": {
@@ -494,6 +495,7 @@
           "equivalentId": [
             "did:vector:agent:be1a0a2912da180757ed3cd61b56bb8eab0188c19dc3c0e3912d2c01:04ee87eab3b01b3e7bf42307ce78810bf86ef5b59eb0b8a0dee254fd68d3e2c1"
           ],
+          "nextUpdate": "2025-08-29T18:20:00Z",
           "nextVersionId": "2",
           "updated": "2025-08-29T17:30:00Z",
           "vectorCurrent": {
@@ -524,6 +526,174 @@
             "status": "active"
           },
           "versionId": "1"
+        },
+        "didResolutionMetadata": {
+          "contentType": "application/did"
+        }
+      }
+    },
+    {
+      "did": "did:vector:04ee87eab3b01b3e7bf42307ce78810bf86ef5b59eb0b8a0dee254fd68d3e2c1",
+      "options": {
+        "versionTime": "2025-08-29T18:20:00Z"
+      },
+      "httpStatus": 200,
+      "result": {
+        "didDocument": {
+          "@context": "https://www.w3.org/ns/did/v1.1",
+          "assertionMethod": [
+            "#a7c847fe7a4d7cc59897e34146d4204dc72aa7bb3802228324d3b6de"
+          ],
+          "authentication": [
+            "#a7c847fe7a4d7cc59897e34146d4204dc72aa7bb3802228324d3b6de"
+          ],
+          "capabilityInvocation": [
+            "#a7c847fe7a4d7cc59897e34146d4204dc72aa7bb3802228324d3b6de"
+          ],
+          "id": "did:vector:04ee87eab3b01b3e7bf42307ce78810bf86ef5b59eb0b8a0dee254fd68d3e2c1",
+          "verificationMethod": [
+            {
+              "controller": "did:vector:04ee87eab3b01b3e7bf42307ce78810bf86ef5b59eb0b8a0dee254fd68d3e2c1",
+              "id": "did:vector:04ee87eab3b01b3e7bf42307ce78810bf86ef5b59eb0b8a0dee254fd68d3e2c1#a7c847fe7a4d7cc59897e34146d4204dc72aa7bb3802228324d3b6de",
+              "publicKeyMultibase": "z6Mkfmm57fsb6VL7zVusP8zeA9SYkCKdvUhby2G7Yh8vvQ1P",
+              "type": "Multikey"
+            }
+          ]
+        },
+        "didDocumentMetadata": {
+          "canonicalId": "did:vector:04ee87eab3b01b3e7bf42307ce78810bf86ef5b59eb0b8a0dee254fd68d3e2c1",
+          "created": "2025-08-29T17:13:20Z",
+          "equivalentId": [
+            "did:vector:agent:be1a0a2912da180757ed3cd61b56bb8eab0188c19dc3c0e3912d2c01:04ee87eab3b01b3e7bf42307ce78810bf86ef5b59eb0b8a0dee254fd68d3e2c1"
+          ],
+          "nextUpdate": "2025-08-29T18:20:00Z",
+          "nextVersionId": "2",
+          "updated": "2025-08-29T17:30:00Z",
+          "vectorCurrent": {
+            "effective": "active"
+          },
+          "vectorLedger": {
+            "blockHash": "cdd45b7129580f83e44ba102b15c52048fc01672d3fa2a16101a447eb4448e51",
+            "blockHeight": 300,
+            "confirmations": 700,
+            "outputIndex": 0,
+            "slot": 3000,
+            "txId": "a1979ac06076b6412c21f7882e00bcf0baf3f790ea4db800ac36b70aeeb5289e"
+          },
+          "vectorOrigin": "adopted",
+          "vectorProfile": {
+            "capabilities": [
+              "document-extraction"
+            ],
+            "createdAt": "2025-08-29T17:13:20Z",
+            "description": "A record of the legacy registry.",
+            "endpoint": "https://legacy.example.org/agent",
+            "framework": "custom",
+            "name": "Legacy Agent v2"
+          },
+          "vectorStatus": {
+            "effective": "suspended",
+            "effectiveReason": "unaccountable",
+            "status": "active"
+          },
+          "versionId": "1"
+        },
+        "didResolutionMetadata": {
+          "contentType": "application/did"
+        }
+      }
+    },
+    {
+      "did": "did:vector:04ee87eab3b01b3e7bf42307ce78810bf86ef5b59eb0b8a0dee254fd68d3e2c1",
+      "options": {
+        "versionTime": "2025-08-29T18:20:01Z"
+      },
+      "httpStatus": 200,
+      "result": {
+        "didDocument": {
+          "@context": "https://www.w3.org/ns/did/v1.1",
+          "assertionMethod": [
+            "#8a95c8ed588306ea88860b54eb0c65e77dfab999789cc5e6ca008799"
+          ],
+          "authentication": [
+            "#8a95c8ed588306ea88860b54eb0c65e77dfab999789cc5e6ca008799"
+          ],
+          "capabilityInvocation": [
+            "#0d6a577e9441ad8ed9663931906e4d43ece8f82c712b1d0235affb06"
+          ],
+          "id": "did:vector:04ee87eab3b01b3e7bf42307ce78810bf86ef5b59eb0b8a0dee254fd68d3e2c1",
+          "verificationMethod": [
+            {
+              "controller": "did:vector:04ee87eab3b01b3e7bf42307ce78810bf86ef5b59eb0b8a0dee254fd68d3e2c1",
+              "id": "did:vector:04ee87eab3b01b3e7bf42307ce78810bf86ef5b59eb0b8a0dee254fd68d3e2c1#0d6a577e9441ad8ed9663931906e4d43ece8f82c712b1d0235affb06",
+              "publicKeyMultibase": "z6Mkon3Necd6NkkyfoGoHxid2znGc59LU3K7mubaRcFbLfLX",
+              "type": "Multikey"
+            },
+            {
+              "controller": "did:vector:04ee87eab3b01b3e7bf42307ce78810bf86ef5b59eb0b8a0dee254fd68d3e2c1",
+              "id": "did:vector:04ee87eab3b01b3e7bf42307ce78810bf86ef5b59eb0b8a0dee254fd68d3e2c1#8a95c8ed588306ea88860b54eb0c65e77dfab999789cc5e6ca008799",
+              "publicKeyMultibase": "z6MkvRXNYcE7MMduynWTgeKbDaT1iijDSC8pZqXZc8rHPrf2",
+              "type": "Multikey"
+            }
+          ]
+        },
+        "didDocumentMetadata": {
+          "canonicalId": "did:vector:04ee87eab3b01b3e7bf42307ce78810bf86ef5b59eb0b8a0dee254fd68d3e2c1",
+          "created": "2025-08-29T17:13:20Z",
+          "equivalentId": [
+            "did:vector:agent:be1a0a2912da180757ed3cd61b56bb8eab0188c19dc3c0e3912d2c01:04ee87eab3b01b3e7bf42307ce78810bf86ef5b59eb0b8a0dee254fd68d3e2c1"
+          ],
+          "updated": "2025-08-29T18:20:00Z",
+          "vectorCurrent": {
+            "effective": "active"
+          },
+          "vectorKeys": [
+            {
+              "id": "#8a95c8ed588306ea88860b54eb0c65e77dfab999789cc5e6ca008799",
+              "purposes": [
+                "authentication",
+                "assertion",
+                "transaction"
+              ],
+              "type": "Ed25519"
+            }
+          ],
+          "vectorLedger": {
+            "blockHash": "e321bf621ad1a948083c5328ebf28f7a9ff53dfbd5b0e0e45429fac63e8e19e8",
+            "blockHeight": 600,
+            "confirmations": 400,
+            "outputIndex": 0,
+            "slot": 6000,
+            "txId": "500ad5cf9c25e8f2d3a5212a24fe796da4d5610c9faa49721be50de88a60e937"
+          },
+          "vectorOrigin": "adopted",
+          "vectorParties": [
+            {
+              "notBefore": "1970-01-01T00:00:00Z",
+              "rights": [
+                "suspend",
+                "revoke"
+              ],
+              "role": "accountable",
+              "signer": "fd5939fb5601e5b41eee666dba14c0a7d151d4cd9b0e16691ce3a9a4"
+            }
+          ],
+          "vectorProfile": {
+            "capabilities": [
+              "ocr.extract.v1",
+              "llm.text.generate.v1"
+            ],
+            "createdAt": "2025-08-29T18:20:00Z",
+            "description": "An agent for resolver tests.",
+            "endpoint": "https://agent.example.org/a2a",
+            "framework": "vector-agent-template",
+            "name": "test-agent"
+          },
+          "vectorStatus": {
+            "effective": "active",
+            "status": "active"
+          },
+          "versionId": "2"
         },
         "didResolutionMetadata": {
           "contentType": "application/did"

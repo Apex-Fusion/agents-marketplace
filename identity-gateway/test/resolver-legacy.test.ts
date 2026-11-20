@@ -109,7 +109,7 @@ describe("legacy record", () => {
     const earlier = await resolveIn(b, LEGACY_DID, { versionId: "0" });
     expect(httpStatus(earlier)).toBe(410);
     expect(earlier.didDocument?.verificationMethod).toEqual([method(LEGACY_DID, LEGACY_OWNER)]);
-    expect(earlier.didDocumentMetadata).toMatchObject({ nextVersionId: "1", vectorCurrent: { effective: "retired" } });
+    expect(earlier.didDocumentMetadata).toMatchObject({ nextVersionId: "1", nextUpdate: formatTime(timeAt(300)), vectorCurrent: { effective: "retired" } });
   });
 
   test("an unconfirmed deregistration is Suspended (deactivationPending) and the view has no controller key", async () => {
@@ -259,6 +259,7 @@ describe("adopted record", () => {
       vectorOrigin: "adopted",
       vectorProfile: { name: "Legacy Agent v2", createdAt: formatTime(timeAt(200)) },
       nextVersionId: "2",
+      nextUpdate: formatTime(timeAt(600)),
     });
     expect(v1.didDocument?.verificationMethod).toEqual([method(DID, LEGACY_OWNER)]);
   });

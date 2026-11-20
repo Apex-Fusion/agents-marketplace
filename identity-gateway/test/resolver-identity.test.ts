@@ -122,7 +122,7 @@ describe("native record", () => {
     expect(now.didDocumentMetadata.vectorProfile?.name).toBe("renamed");
 
     const first = await resolveIn(b, DID, { versionId: "0" });
-    expect(first.didDocumentMetadata).toMatchObject({ versionId: "0", nextVersionId: "1", vectorProfile: { name: "test-agent" } });
+    expect(first.didDocumentMetadata).toMatchObject({ versionId: "0", nextVersionId: "1", nextUpdate: formatTime(timeAt(200)), vectorProfile: { name: "test-agent" } });
     expect(first.didDocumentMetadata.updated).toBeUndefined();
     expect(first.didDocumentMetadata.vectorLedger?.blockHeight).toBe(100);
     expect(errorType(await resolveIn(b, DID, { versionId: "2" }))).toBe("NOT_FOUND");

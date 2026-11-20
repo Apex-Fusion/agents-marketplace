@@ -157,9 +157,17 @@ export function scenarios(): Scenario[] {
     list.push({
       name: "revoked-invalid-from",
       description:
-        "An agent that its Accountable Party revoked for key compromise, invalid from a time between version 0 and version 1. Version 0 keeps its document; version 1 is invalidated.",
+        "An agent that its Accountable Party revoked for key compromise, invalid from a time between version 0 and version 1. Version 0 keeps its document; version 1 is invalidated. The `versionTime` requests are one second before the invalid-from time, at it, at the revocation and one second after it: from the invalid-from time on, the document is null.",
       builder: b,
-      requests: [{ did: did(id) }, { did: did(id), options: { versionId: "0" } }, { did: did(id), options: { versionId: "1" } }],
+      requests: [
+        { did: did(id) },
+        { did: did(id), options: { versionId: "0" } },
+        { did: did(id), options: { versionId: "1" } },
+        { did: did(id), options: { versionTime: formatTime(timeAt(150) - 1000) } },
+        { did: did(id), options: { versionTime: formatTime(timeAt(150)) } },
+        { did: did(id), options: { versionTime: formatTime(timeAt(300)) } },
+        { did: did(id), options: { versionTime: formatTime(timeAt(300) + 1000) } },
+      ],
     });
   }
 
@@ -172,9 +180,15 @@ export function scenarios(): Scenario[] {
     b.update(id, tombstoneOf(identityDatum(), { type: "Retired", at: timeAt(400), successor }), { height: 400 });
     list.push({
       name: "retired-successor",
-      description: "An agent that its controller retired, naming a live root agent as successor.",
+      description:
+        "An agent that its controller retired, naming a live root agent as successor. The `versionTime` requests are before the retirement, at it and one second after it: only the last one has no document.",
       builder: b,
-      requests: [{ did: did(id) }, { did: did(id), options: { versionTime: formatTime(timeAt(300)) } }],
+      requests: [
+        { did: did(id) },
+        { did: did(id), options: { versionTime: formatTime(timeAt(300)) } },
+        { did: did(id), options: { versionTime: formatTime(timeAt(400)) } },
+        { did: did(id), options: { versionTime: formatTime(timeAt(400) + 1000) } },
+      ],
     });
   }
 
@@ -187,13 +201,15 @@ export function scenarios(): Scenario[] {
     list.push({
       name: "adopted",
       description:
-        "A legacy record (versions 0 and 1) adopted after the cutoff slot (version 2). Resolved in the canonical and the legacy form, and at times before the cutoff slot and before the adoption.",
+        "A legacy record (versions 0 and 1) adopted after the cutoff slot (version 2). Resolved in the canonical and the legacy form, and at times before the cutoff slot, before the adoption, at the adoption and one second after it.",
       builder: b,
       requests: [
         { did: did(id) },
         { did: legacyForm(id) },
         { did: did(id), options: { versionTime: formatTime(timeAt(400)) } },
         { did: did(id), options: { versionTime: formatTime(timeAt(550)) } },
+        { did: did(id), options: { versionTime: formatTime(timeAt(600)) } },
+        { did: did(id), options: { versionTime: formatTime(timeAt(600) + 1000) } },
       ],
     });
   }
@@ -205,9 +221,15 @@ export function scenarios(): Scenario[] {
     b.legacyDeregister(id, { height: 450, vkeys: [LEGACY_OWNER] });
     list.push({
       name: "legacy-deregistered",
-      description: "A legacy record that its owner deregistered: a version with status Retired; the DID is deactivated.",
+      description:
+        "A legacy record that its owner deregistered: a version with status Retired; the DID is deactivated. The `versionTime` requests are at the deregistration and one second after it.",
       builder: b,
-      requests: [{ did: legacyForm(id) }, { did: legacyForm(id), options: { versionId: "0" } }],
+      requests: [
+        { did: legacyForm(id) },
+        { did: legacyForm(id), options: { versionId: "0" } },
+        { did: legacyForm(id), options: { versionTime: formatTime(timeAt(450)) } },
+        { did: legacyForm(id), options: { versionTime: formatTime(timeAt(450) + 1000) } },
+      ],
     });
   }
 

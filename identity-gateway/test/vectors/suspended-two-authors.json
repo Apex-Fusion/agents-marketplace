@@ -285,6 +285,7 @@
         "didDocumentMetadata": {
           "canonicalId": "did:vector:8589e6e354f5f8fd4cf413d961abd35735a2aa9af4d012e2f63f304310e2f4d0",
           "created": "2025-08-29T16:56:40Z",
+          "nextUpdate": "2025-08-29T19:11:40Z",
           "nextVersionId": "1",
           "vectorCurrent": {
             "effective": "suspended"
