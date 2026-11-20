@@ -18,15 +18,17 @@
 // - A follow step. The lists follow the chain. The timer ticks every REFRESH_TICK_MS, and every
 //   STATUS_LIST_FOLLOW_SECONDS it runs a step. A step is a pass (resolver.ts). It reads the new tip
 //   and the list of records. Then it reads the effective status of each record that is not final and
-//   of each record that has a new index. A record is final when its status is Revoked or Retired.
-//   The identity contract allows only Reclaim and SetSuccessor on an ended record, and the history of
-//   a legacy record ends with the burn of its token. So a step does not read a final record. The
-//   status comes from `currentStatus`, as in a build. So the lists apply the rule of the resolver
-//   itself: 30 confirmations for the end of a record and for the lift of a hold, the block time of
-//   the tip for the end of a hold, and the status of the parent for a subagent. A pass keeps its
-//   ledger reads. So a step asks Koios again only about a record whose tokens moved, whose newest
-//   transaction has fewer than 30 confirmations, or that no output holds. At most one step runs at a
-//   time. A step that fails leaves the lists as they are.
+//   of each record that has a new index.
+//   A record is final when its status is Revoked or Retired. The identity contract allows only
+//   Reclaim and SetSuccessor on an ended record. The history of a legacy record ends with the burn
+//   of its token. So a step does not read a final record.
+//   The status comes from `currentStatus`, as in a build. So the lists apply the rules of the
+//   resolver itself. The end of a record and the lift of a hold wait for 30 confirmations. The end
+//   of a hold depends on the block time of the tip. A subagent takes the status of its parent.
+//   A pass keeps its ledger reads. So a step asks Koios again about a record only in three cases:
+//   its tokens moved, its newest transaction has fewer than 30 confirmations, or no output holds its
+//   tokens.
+//   At most one step runs at a time. A step that fails leaves the lists as they are.
 // - A full build. It is one pass over every record (one tip, kept ledger reads). It makes the first
 //   lists, and it repairs the lists when the steps cannot. At most one build runs at a time. At most
 //   one starts in each refresh interval (STATUS_LIST_REFRESH_SECONDS), also after a failed build. The
@@ -438,15 +440,13 @@ export class StatusLists {
     return this.indexBuild;
   }
 
-  /** The block time of a tip (POSIX ms): the ledger point of a state. The genesis values come from the ledger source once. */
-  private async blockTime(tip: ChainTip): Promise<number> {
-    this.network ??= this.ctx.chain.genesis();
-    try {
-      return blockTimeMs(tip.slot, await this.network);
-    } catch (e) {
+  /** The genesis values of the ledger source, read once: the block time of a tip needs them. A failed read is not kept. */
+  private genesis(): Promise<GenesisParameters> {
+    this.network ??= this.ctx.chain.genesis().catch((e: unknown) => {
       this.network = null;
       throw e;
-    }
+    });
+    return this.network;
   }
 
   /**
@@ -481,6 +481,8 @@ export class StatusLists {
       try {
         const previous = this.checkedAt === null ? "no lists yet" : `the lists are ${seconds(startedAt - this.checkedAt)} s old`;
         this.ctx.info?.(`identity-gateway: status lists: build started (${reason}): ${previous}`);
+        // The block time of the tip needs the genesis values: a build that cannot read them stops before its long reads.
+        const network = await this.genesis();
         const { indices, list } = await this.buildIndex();
         const entries = [...indices];
         const listCount = entries.reduce((count, [, i]) => Math.max(count, listPosition(i).n + 1), 1);
@@ -489,7 +491,7 @@ export class StatusLists {
           const { n, p } = listPosition(index);
           values[n]![p] = value;
         });
-        const state: ListState = { tip: list.tip, asOf: await this.blockTime(list.tip), indices, values };
+        const state: ListState = { tip: list.tip, asOf: blockTimeMs(list.tip.slot, network), indices, values };
         const endedAt = this.ctx.now();
         // The build replaces the newest state; the next follow step starts from it.
         this.state = state;
@@ -543,6 +545,7 @@ export class StatusLists {
     if (base === null) return;
     const startedAt = this.ctx.now();
     try {
+      const network = await this.genesis();
       const list = await this.ctx.records.listRecords();
       const { tip } = list;
       if (tip.blockHeight < base.tip.blockHeight || (tip.blockHeight === base.tip.blockHeight && tip.blockHash === base.tip.blockHash)) {
@@ -558,7 +561,7 @@ export class StatusLists {
       const read = [...plan.again, ...plan.added];
       const results: Array<[number, StatusValue]> = [];
       await readStatuses(this.ctx.records, list, read, (index, value) => results.push([index, value]));
-      const asOf = await this.blockTime(tip);
+      const asOf = blockTimeMs(tip.slot, network);
       if (this.state !== base) return;
       const { state, changed } = advance(base, list, plan.added, results, asOf);
       const endedAt = this.ctx.now();

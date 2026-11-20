@@ -780,6 +780,20 @@ describe("failures", () => {
     await agree(rig, [A, B]);
   });
 
+  test("a build that cannot read the genesis values stops before its long reads, and the next build reads them again", async () => {
+    const [A] = ["a"].map(id) as [string];
+    const b = roots(A);
+    const rig = new Rig(b);
+    b.chain.failing.add("genesis");
+    await expect(rig.lists.refresh()).rejects.toThrow("Koios genesis answered HTTP 503");
+    expect(b.chain.calls).toEqual(["genesis"]);
+    expect(rig.logs).toEqual(["identity-gateway: status lists not rebuilt after 0.0 s: Koios genesis answered HTTP 503"]);
+    b.chain.failing.delete("genesis");
+    rig.clock.now += 60_000;
+    await rig.lists.refresh();
+    expect(typeof (await rig.lists.tokenStatusList(0))).toBe("string");
+  });
+
   test.each<[string, ChainMethod]>([
     ["the tip", "tip"],
     ["the asset index", "policyAssets"],
