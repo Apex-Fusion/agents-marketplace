@@ -9,7 +9,8 @@ Run: `cd contracts/identity-marketplace && aiken check -D`.
 | `lib/identity_marketplace/escrow/rules.ak` | The escrow rules. The validator calls `spend`. | 0 |
 | `lib/identity_marketplace/escrow/fixtures.ak` | Test data. A `Case` is a datum, a redeemer and a transaction that pass. | 0 |
 | `lib/identity_marketplace/escrow/ported_tests.ak` | The 17 legacy escrow tests, ported. | 17 |
-| `lib/identity_marketplace/escrow/rule_tests.ak` | Positive controls and the §12.1 escrow attacks. | 108 |
+| `lib/identity_marketplace/escrow/rule_tests.ak` | Positive controls and the §12.1 escrow attacks. | 118 |
+| `lib/identity_marketplace/escrow/cut_tests.ak` | A payment from a vault when a delegation or an identity ends: the sequence with no delegation, the time edges, the return to the vault. | 12 |
 | `validators/escrow.ak` | Validator wiring, other purposes, §12.4 benchmark. | 10 |
 | `lib/identity_marketplace/advert/rules.ak` | The advert rules, the 9 legacy advert tests (ported) and 7 new tests. | 16 |
 | `validators/advert.ak` | Validator wiring and other purposes. | 7 |
@@ -70,6 +71,33 @@ Rule checks that are kept from the legacy escrow have the ported tests (signers,
 | RetireAdvert | `retire_advert_happy_path`, `advert_spend_runs_the_rules` |
 
 Other checks: `escrow_spend_without_datum_fails` (a spend without a datum fails) and `fixtures_match_constants` (the test data agrees with the constants of `rule_tests`).
+
+## When a delegation or an identity ends while an escrow is open
+
+A vault Pay writes the escrow with the delegate key as `buyer_pkh`. It also writes the vault as `refund`, with the datum `Returned { owner }`. The escrow rules read no delegation and no identity of the buyer. So an `Undelegate`, or the end of the buyer's record, does not stop an escrow that is open.
+
+`cut_tests.ak` builds such an escrow (`paid_by_vault`) and tests each part of what the escrow does then. Each edge test shows that the time at the edge passes and that the millisecond on the other side fails. The edge tests use closed validity ranges, as `fixtures.validity_between` builds them. The tests of Accept, Claim and Submit also use an open upper bound: the last valid time is then one millisecond before the bound.
+
+| Part | Tests |
+|---|---|
+| Claim, Submit and Accept run one after the other with no delegation in any transaction. A delegation in the transaction changes nothing. | `vault_paid_escrow_runs_to_accept_without_a_delegation` |
+| The supplier signs Claim and Submit. Only the delegate key signs Accept. The supplier and the vault owner cannot sign it. | `vault_paid_escrow_steps_need_their_own_signer` |
+| Accept pays the buyer bond to the vault, with the datum that the vault Pay wrote. The delegate key cannot take the bond. | `accept_returns_the_buyer_bond_to_the_vault_owner`; also `accept_with_vault_refund`, `accept_with_refund_rejects_payout_to_buyer_key`, `accept_with_refund_rejects_wrong_datum` |
+| Accept reads no record of the buyer. It runs after the record is revoked (with an "invalid from" time before the Accept, or without one) and after it is retired. Release reads no record either. | `accept_ignores_the_revoked_record_of_the_buyer`; `release_does_not_read_registry` |
+| The supplier can Claim and Submit until `deliver_by`, and not one millisecond after. | `claim_stops_after_deliver_by`, `submit_stops_after_deliver_by`; also `claim_rejects_after_deliver_by` |
+| The delegate key can Accept until `submitted_at + 600,000` ms, and not one millisecond after. | `accept_window_closes_600_000_ms_after_submit`; also `accept_rejects_after_window` |
+| The supplier can Release from `submitted_at + 600,000` ms, and the window has no end date. | `release_window_opens_600_000_ms_after_submit`; also `release_rejects_before_window`, `release_with_refund_set` |
+| The last Accept is at `deliver_by + 600,000` ms. The Release can start at that time. | `accept_ends_600_000_ms_after_deliver_by_at_the_latest` |
+| Anybody can Reclaim an Open or Claimed escrow from `deliver_by`, and not before. The whole value goes to the vault. | `reclaim_of_vault_paid_escrow_waits_for_deliver_by`; also `reclaim_with_refund_without_any_signature`, `reclaim_with_refund_returns_input_ap3x`, `reclaim_with_refund_rejects_less_than_full_refund` |
+| Nobody can Reclaim a Submitted escrow. | `reclaim_rejects_submitted_vault_paid_escrow` (with the vault refund); `reclaim_rejects_submitted_escrow` (without a refund) |
+| RefundRevoked returns an Open or Claimed escrow of a revoked supplier to the vault. | `refund_revoked_to_vault_refund`, `refund_revoked_open_escrow_of_revoked_agent`, `refund_revoked_claimed_escrow_of_revoked_agent`, `refund_revoked_rejects_wrong_refund_address_or_datum` |
+| RefundRevoked returns a Submitted escrow only when the record of the supplier is revoked with an "invalid from" time at or before the Submit. | `refund_revoked_returns_submitted_vault_paid_escrow_to_the_vault`; also `refund_revoked_submitted_invalid_from_at_submission`, `refund_revoked_submitted_invalid_from_before_submission`, `refund_revoked_submitted_rejects_no_invalid_from`, `refund_revoked_submitted_rejects_invalid_from_after_submission`, `refund_revoked_submitted_rejects_retired_agent`, `refund_allowed_by_state_and_status` |
+
+The vault and the delegation decide the other parts. Their tests are in other modules:
+
+- A vault Pay stops after an `Undelegate`: `pay_after_undelegate` (`vault/tests.ak`), `use_after_parent_undelegate` (`delegation/tests.ak`).
+- A vault Pay sets `deliver_by` at most 7 days after its upper bound: `pay_escrow_deliver_by_at_7_days`, `pay_escrow_deliver_by_beyond_7_days` (`vault/tests.ak`).
+- The owner closes the vault output that holds a refund, also after an `Undelegate`: `close_returned_by_principal`, `close_returned_by_agent_controller`, `close_after_undelegate`. The delegate key cannot close it: `close_by_delegate`.
 
 ## §6.2 advert rules
 
