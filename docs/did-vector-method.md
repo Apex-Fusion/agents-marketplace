@@ -325,6 +325,7 @@ If the resolver cannot read the ledger, it returns `INTERNAL_ERROR`. It never re
 - **Adoption not yet confirmed.** When the base is a legacy version and the adoption is a pending version, the view is computed from the base and the pending legacy versions before the adoption, with the rules above. The adoption and the later versions do not count until the adoption is confirmed.
 - **End of a legacy record.** That version has no datum. As a base, it shows only `createdAt` in the profile. As a pending version, it removes every key, capability and party from the view.
 - **Legacy versions.** The controller key of a legacy version is the key that Section 8.1 finds for the owner hash.
+- **Delay.** A resolver counts the delay of a change from the moment that the block with the change is at the tip of its data source. A change that reduces what a record allows shows at once: the next resolution shows it. An end shows at once as a suspension (`deactivationPending`). Every other change waits for 30 confirmations: the end itself (Revoked or Retired), the lift of a hold, and each addition to what a record allows. Section 9 gives the delay that a relying party sees through the services that publish status.
 
 ### 7.3 Effective status
 
@@ -344,7 +345,7 @@ A legacy version names no Accountable Party. For a view that is a legacy version
 
 The DID is deactivated at `t` when the effective status at `t` is Revoked or Retired.
 
-**Version options.** A result for `versionId` or `versionTime` describes time `t`. It also carries the effective status without options (`vectorCurrent`, Section 8.2). Its `deactivated` metadata is `true` when the DID is deactivated at `t` or now, and then its HTTP status is 410 (Section 7.4). Its document is `null` only when the DID is deactivated at `t`. DID Resolution returns no document for a deactivated DID; this method returns the document at `t`, so that verifiers can check signatures made before the end.
+**Version options.** A result for `versionId` or `versionTime` describes time `t`. It also carries the effective status without options (`vectorCurrent`, Section 8.2). Its `deactivated` metadata is `true` when the DID is deactivated at `t` or now, and then its HTTP status is 410 (Section 7.4). Its document is `null` only when the DID is deactivated at `t`. DID Resolution returns no document for a deactivated DID; this method returns the document at `t`, so that verifiers can check signatures made before the end. To check a signature that was made at time S, a verifier resolves the DID with `versionTime` set to S. DID Core accepts the document when `updated` is before S and `nextUpdate` is after S. For version 0, `created` takes the place of `updated`. When `nextUpdate` equals S, an update happened in that second, and the check fails. Section 9 gives the full check.
 
 **Relying parties.** A relying party MUST NOT accept a new action by a key unless a resolution without version options gives effective status Active and lists the key with the needed purpose. It MUST NOT take version options for this check from a DID URL that the signer chose.
 
@@ -413,6 +414,7 @@ Errors and results with `deactivated: true` always get the resolution result. Th
 | `updated` | Version time of the base. Not present for version 0. |
 | `versionId` | The base version (Section 7.2), as a decimal string. |
 | `nextVersionId` | Present when a later confirmed version exists. |
+| `nextUpdate` | Version time of the version that `nextVersionId` names. Present when `nextVersionId` is present. |
 | `deactivated` | `true` when the DID is deactivated at `t`, or, for a request with a version option, now (Section 7.3). |
 | `vectorCurrent` | Requests with a version option only: `{ effective, effectiveReason }` of the same DID without options. |
 | `canonicalId` | `did:vector:<vector-id>` |
@@ -431,6 +433,7 @@ Errors and results with `deactivated: true` always get the resolution result. Th
 
 - A signer is shown as a key hash, as `script:<script hash>`, or as `controller`. A reason is shown as its name in Appendix A of the implementation plan; a code without a name there is shown as a decimal string. Key hashes, script hashes and transaction IDs are lowercase hexadecimal.
 - Times use the form `YYYY-MM-DDThh:mm:ssZ` (UTC). Milliseconds are rounded down to whole seconds. The block time is the system start plus the slot number in seconds.
+- `updated` and `nextUpdate` are version times, so they are block times. A version counts for `versionTime` only when its version time is before the requested time. So `updated` is before the requested time, and `nextUpdate` is not before it. `nextUpdate` equals the requested time when the next version has that version time. Two versions of one block have the same version time. For the first of them, `updated` and `nextUpdate` are equal, and no `versionTime` selects it.
 - A text field or capability item that is not valid UTF-8, or that contains a surrogate code point or a noncharacter (RFC 7493), is left out.
 - In every object of this section, a member whose value is `false`, none, an empty string or an empty list is left out.
 
@@ -448,7 +451,7 @@ A profile and an organisation name are statements of the record's controller and
 
 **One controller key.** A thief who holds the controller key controls the identity. The thief can change keys, the profile and the controller, and the controller change also cancels a pending recovery. The thief can also name a successor, if the controller did not name one before. The thief can remove a party only after 7 days' notice, unless the party agrees. During that time, a party with the revoke right can revoke the identity. Organisations SHOULD therefore appoint an Accountable Party with the revoke right whose key is held apart from the controller key. If the owner loses the controller key, guardians can install a new one after 7 days. Without guardians, the record freezes.
 
-**Listed keys.** A key acts only for its purposes. A thief who holds a listed key acts for the agent within those purposes until the controller removes the key. Removal works only forward: earlier signatures stay valid. A verifier that must know whether a key was listed at a given time resolves the DID with `versionTime`. For a new action, the verifier also needs the current status (Section 7.3). For a compromise, the controller or an Accountable Party revokes the identity with an "invalid from" time. That time also applies to all subagents.
+**Listed keys.** A key acts only for its purposes. A thief who holds a listed key acts for the agent within those purposes until the controller removes the key. Removal works only forward: earlier signatures stay valid. A verifier that must know whether a key was listed at a given time S resolves the DID with `versionTime` set to S. It accepts the key when the document lists the key with the needed purpose, `updated` (`created` for version 0) is before S, and `nextUpdate` is after S, as DID Core requires in "Revocation in Trustless Systems". It also compares S with `vectorStatus.invalidFrom`: a signature made at or after that time is invalid. A result without `nextUpdate` shows the newest confirmed version; `vectorPending` lists later versions that are not confirmed. For a new action, the verifier also needs the current status (Section 7.3). For a compromise, the controller or an Accountable Party revokes the identity with an "invalid from" time. That time also applies to all subagents.
 
 **Proof of possession.** Each Ed25519 key signs the transaction that adds it. The ledger cannot check P-256 signatures, so a P-256 key carries a signature that resolvers check. A resolver does not show a P-256 key with an invalid proof.
 
@@ -470,7 +473,9 @@ A profile and an organisation name are statements of the record's controller and
 
 **Deletion.** Nobody can delete a record. The token is never burned, and a tombstone stays.
 
-**Ledger reorganisation.** A recent change can disappear when the ledger selects another chain. Resolvers show changes that reduce what a record allows at once, and other changes only after 30 confirmations (Section 7.2). A final action shows as a suspension until it has 30 confirmations, so a rollback rarely leaves a wrong deactivation. A rollback deeper than 30 blocks can still undo a confirmed change. With k = 2160, a change is final with overwhelming probability after 2160 blocks.
+**Ledger reorganisation.** A recent change can disappear when the ledger selects another chain. Resolvers show changes that reduce what a record allows from the first resolution that reads their block, and other changes only after 30 confirmations (Section 7.2). A final action shows as a suspension until it has 30 confirmations, so a rollback rarely leaves a wrong deactivation. A rollback deeper than 30 blocks can still undo a confirmed change. With k = 2160, a change is final with overwhelming probability after 2160 blocks.
+
+**Delay of a status change.** A relying party sees a change after a delay. The delay depends on the path. It counts from the moment that the block with the change is at the tip of the data source of the service. A resolver shows a hold at once. It shows an end as a suspension at once, and as Revoked or Retired after 30 confirmations. It shows the lift of a hold after 30 confirmations. With the default settings of the Foundation gateway, the status lists show a hold at most 16 seconds after that moment, and the lift of a hold, a revocation or a retirement at most 256 seconds after it. A resolver needs at most 240 seconds for 30 confirmations. These numbers are computed. They assume the usual rate of blocks, because no rule fixes the time of a block. Nobody measures them while the gateway runs. They do not count the cache of a reader: a reader can keep a status list for 60 seconds. Introspection of a gateway token reads the status of each agent of the token on every call, and, for a delegation token, the delegation chain. So a cut delegation makes its tokens inactive at once. A verifier that checks a token only locally sees a change when the token expires. A token lasts at most 5 minutes. The gateway publishes the bound of each path at each surface, with its formula, at `https://id.vector.apexfusion.org/policy`. That table is the live and complete one.
 
 **Amplification.** Resolution itself needs no fetch. A resolver that verifies domains or detects protocols fetches URLs that registrants choose. Such a resolver MUST:
 
@@ -506,6 +511,6 @@ A profile and an organisation name are statements of the record's controller and
 | Contracts (Aiken) | `contracts/identity-marketplace/` in https://github.com/Apex-Fusion/agents-marketplace |
 | Resolver and gateway | `identity-gateway/` in the same repository. Licence: Apache-2.0, pending Foundation approval. |
 | Public resolver | `https://id.vector.apexfusion.org/1.0/identifiers/{did}` |
-| Universal Resolver driver | Not published yet. It follows the registration. |
+| Universal Resolver driver | Planned. It is not published yet. |
 
-Registration entry: `methods/vector.json` in `w3c/did-extensions`, proposed in [pull request 769](https://github.com/w3c/did-extensions/pull/769).
+Registration entry: `methods/vector.json` in `w3c/did-extensions`. [Pull request 769](https://github.com/w3c/did-extensions/pull/769) is merged, so the method is registered in the DID Extensions registry. That registry is a W3C Group Note. W3C itself does not endorse it.

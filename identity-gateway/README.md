@@ -60,8 +60,9 @@ Every variable is optional, except that a deployed identity registry needs both
 | `GATEWAY_ED25519_KEY_FILE` / `GATEWAY_P256_KEY_FILE` | none | PEM private key files of the gateway keys (Part 2 Section 8.2): PKCS#8, or SEC1 for P-256. The gateway refuses a file that its group or other users can read or write (use mode 600 or 400, owned by the container user). Set both or neither; without them the M4 services are off and agent cards answer 503. |
 | `GATEWAY_VECTOR_ID` | none | The gateway's own identifier (64 hex), required with the key files. Key IDs are `did:vector:<id>#<key hash>`, and the gateway's DID issues credentials. |
 | `DELEGATION_POLICY_ID` / `DELEGATION_ADDRESS` | none | The delegation contract (policy ID = script hash; the address must be its enterprise address). Without it, delegation tokens are refused. Mainnet: `bdc16990b844a8860f28c51bb0e6a469c84bebcd57db699ce204785a` / `addr1wx7uz6vshpz23ps09rz3hv8x535usjlte4tak6vuugz8sks9wdc5c`. |
-| `STATUS_LIST_REFRESH_SECONDS` | `60` | How old built status lists and the status-list index are before a request builds them again (1 to 2700). It is also the `ttl` of the lists. |
-| `STATUS_LIST_BACKGROUND_REFRESH_SECONDS` | `600` | How old built status lists are before the timer builds them again, with no request (60 to 2700, and not below `STATUS_LIST_REFRESH_SECONDS`). The gateway refuses a value that breaks the timing rule: see "Status list timing". |
+| `STATUS_LIST_REFRESH_SECONDS` | `60` | How old the status lists and the status-list index are before a request builds them again (1 to 2400). The age counts from the last read of the chain, by a build or a follow step. For the lists, the limit is the longer of this value and two follow intervals. It is also the `ttl` of the lists, and the longest `max-age` of a list response. |
+| `STATUS_LIST_BACKGROUND_REFRESH_SECONDS` | `600` | How long after the end of a full build the timer starts the next full build, with no request (60 to 2400, and not below `STATUS_LIST_REFRESH_SECONDS`). The gateway refuses a value that breaks the timing rule: see "Status list timing". |
+| `STATUS_LIST_FOLLOW_SECONDS` | `10` | How often the timer reads the changes of the chain into the status lists: 0, or a multiple of 10 up to 300. With 0, the lists change only when a build ends. See "Status list timing". |
 
 The testnet uses the same network magic as mainnet. So the resolver compares all four genesis values
 with the values that Koios reports (`/genesis`). If one differs, every resolution is
@@ -84,6 +85,11 @@ with the values that Koios reports (`/genesis`). If one differs, every resolutio
 - Status: 200 found (also Suspended), 410 `deactivated: true`, 400 `INVALID_DID` /
   `INVALID_OPTIONS`, 404 `NOT_FOUND`, 406 `REPRESENTATION_NOT_SUPPORTED`, 501
   `METHOD_NOT_SUPPORTED` / `FEATURE_NOT_SUPPORTED`, 500 `INTERNAL_ERROR`.
+- A result has `updated`, the version time of its version, except for version 0. A result with a later
+  confirmed version also has `nextUpdate`, the version time of that version. To check a signature that
+  was made at time S, resolve with `versionTime` set to S. The document is the right one when
+  `updated` (`created` for version 0) is before S and `nextUpdate` is after S. Compare S also with
+  `vectorStatus.invalidFrom`: a signature made at or after that time is invalid.
 - `GET /healthz` answers 200 and reads nothing from the ledger.
 
 The gateway writes no request log. It logs errors without the requested DID.
@@ -103,11 +109,11 @@ the agent does not qualify, 410 when the DID is deactivated, 500 when the ledger
 | `GET /agents/{id}/agent-card.json` | Listed A2A agents | A2A v1.0 agent card: on-chain name and description, the interfaces on the endpoint's origin and the default modes from the detected card, the on-chain capabilities as skills, `version` = versionId, `documentationUrl` = the resolution URL of the DID, `provider` = a verified organisation. Signed as A2A Section 8.4 specifies (JWS over the JCS form, `alg` EdDSA, `typ` JOSE, `kid`, `jku` = `/.well-known/jwks.json`). 503 when no signing key is configured. `application/a2a-agent-card+json` when the client asks for it, else `application/json`. The gateway signs a card once for each check of the agent and record state, and serves that card again. |
 | `GET /agents/{id}/server-card` | Listed MCP agents | MCP Server Card v1 (SEP-2127): `name` = `<reverse gateway host>/{id}`, description of at most 100 characters, `remotes` = the endpoint with the protocol versions it named, `_meta` with the DID. |
 | `GET /v0/servers`, `GET /v0.1/servers` | Listed MCP agents | MCP Registry list `{servers: [{server, _meta}], metadata: {count, nextCursor?}}` with server.json entries (schema 2025-12-11). Query: `limit` (1-100, default 30), `cursor`, `search` (name substring), `version` (`latest` or exact), `updated_since` (RFC 3339). |
-| `GET /.well-known/ai-catalog.json` | Listed A2A and MCP agents | AI Catalog 1.0, `application/ai-catalog+json`: one entry per agent, `identifier` = `urn:air:<gateway host>:agent:{id}`, `type` and `url` of its agent card or server card, `tags` = capabilities, `updatedAt`. |
-| `GET /.well-known/ard.json` | Listed A2A and MCP agents | ARD v0.91 manifest `{entries}` with `displayName`, `description`, `capabilities` and `metadata {did, protocol}`. |
+| `GET /.well-known/ai-catalog.json` | Listed A2A and MCP agents | AI Catalog 0.9 (the release candidate of version 1.0), `application/ai-catalog+json`: one entry per agent. `identifier` = `urn:air:<gateway host>:{id}`, where `{id}` is the id of the agent's DID. `type` and `url` of its agent card or server card, `tags` = capabilities, `updatedAt`, and `extensions` = `{"<gateway host in reverse DNS order>": {"did": "did:vector:{id}"}}` (on the Foundation gateway the key is `org.apexfusion.vector.id`). |
+| `GET /.well-known/ard.json` | Listed A2A and MCP agents | ARD v0.91 manifest `{entries}` with `identifier` (as in the AI Catalog), `displayName`, `description`, `capabilities` and `metadata {did, protocol}`. |
 | `GET /agents/{id}/oasf.json` | Listed agents | OASF record (schema 1.1.0): profile, `skills` mapped from known capability names, the endpoint as `url` locator, `annotations` with the DID, the protocol and the capabilities. |
 | `GET /agents/{id}/registration.json` | Listed agents | ERC-8004 registration file: `services` (A2A, MCP or web, then OASF and DID), `active`, `registrations [{agentId, agentRegistry}]`. `agentId` is the identifier as a decimal integer (78 digits at most, so read it with a big-integer JSON reader). `agentRegistry` is `vector:mainnet:<identity policy>`, or the legacy policy for a legacy record. |
-| `GET /policy` | | The listing rule, the fetch rules, the confirmation rule, the request-log statement, `ACCESS_LOG_RETENTION` and the limits as numbers. |
+| `GET /policy` | | The listing rule, the fetch rules, the confirmation rule, the request-log statement, `ACCESS_LOG_RETENTION` and the limits as numbers. Also the bound of each revocation path at each surface (`revocationBounds`) and the bound for an open escrow (`escrowBound`). The numbers of `revocationBounds` follow `STATUS_LIST_FOLLOW_SECONDS`, `STATUS_LIST_REFRESH_SECONDS`, `STATUS_LIST_BACKGROUND_REFRESH_SECONDS` and `FETCH_SCAN_INTERVAL_S`. |
 
 The gateway's own JWK set (`GET /.well-known/jwks.json`) belongs to the M4 services. The renderings
 sign agent cards with the M4 Ed25519 key (`main.ts` passes `keys.ed25519` as their signer).
@@ -134,24 +140,43 @@ and the status lists are public and cacheable.
 | `GET /status/tsl/{n}` | | `application/statuslist+jwt`: 2 bits per entry, 0 valid, 1 invalid (Revoked or Retired), 2 suspended. An entry also reads 2 while an access token that names it was revoked by a status change and can still be accepted (until its `exp` plus 30 s), also after the agent is Active again; new tokens of that agent read 2 for that time too. |
 | `GET /agents/{id}/credential` | | `application/vc+jwt`: a VC 2.0 credential of the gateway's DID with the subject DID, `created`, `origin` and, for a subagent, `parent`; two `BitstringStatusListEntry` items. 409 when the agent is not Active, 410 when deactivated. |
 
-Index i of `listRecords()` is in list n = floor(i / 131,072) at position i mod 131,072. The first
-build starts with the services. After that, a build starts in two cases: a request finds lists that
-are older than `STATUS_LIST_REFRESH_SECONDS`, or the timer finds lists that are older than
-`STATUS_LIST_BACKGROUND_REFRESH_SECONDS`. The timer checks the lists every 10 s, so the lists are
-built again also when no request comes (see "Status list timing"). Until a build ends, requests get
-the previous lists, which stay valid for one hour (`exp`, `validUntil`). At most one build runs at a
-time, and at most one starts in each refresh interval, also after a failed build. A failed build
-keeps the previous lists, and the timer goes on. Without valid lists, a request waits up to 10 s for
-the running build, then it is 503. After a failed build, a request without valid lists is 503 at
-once, until the next build starts. A build is one pass over the records (see "Chain data") and
-reads only the effective status of each record (`currentStatus`, no legacy key search). A status
-other than Active
-that the gateway sees (at introspection, or in the status watcher every 30 s) revokes every token of
-that agent issued up to then. A token revoked on its own (`/revoke`, or a delegation that no longer
-passes) shows only in introspection. Replay stores, nonces and issued tokens are in memory: a restart
-makes earlier tokens and nonces inactive. A single-use value (the `jti` of a subject token, a client
-assertion or a DPoP proof, a used nonce) goes into the replay store only after the request
-authenticated, and the store keeps a 128-bit digest of each value.
+Index i of `listRecords()` is in list n = floor(i / 131,072) at position i mod 131,072. The bits of
+a list are the effective statuses of the records as of one ledger tip, the ledger point of the list.
+`iat` and `validFrom` are the block time of that tip. A list is valid for one hour after its ledger
+point (`exp`, `validUntil`). The ledger point never goes back: a state with an earlier block time or
+a lower block height than the lists that readers have is not published.
+
+Two things make the lists. A *follow step* runs every `STATUS_LIST_FOLLOW_SECONDS`. It reads the new
+tip and the list of records. Then it reads the effective status of each record that is not final and
+of each record that got its index. A record is final when its status is Revoked or Retired. A *full
+build* is one pass over every record. It makes the first lists, and it repairs the lists when the
+steps cannot. Both read only the effective status of each record (`currentStatus`, no legacy key
+search), as of the tip that they read first.
+
+The first build starts with the services. After that, a build starts in three cases. The last build
+ended `STATUS_LIST_BACKGROUND_REFRESH_SECONDS` ago (the timer checks every 10 s). A request finds
+lists that no step and no build has read from the chain for longer than `STATUS_LIST_REFRESH_SECONDS`
+(or two follow intervals, when that is longer): the steps fail. A step finds that an index changed or
+that a record left the list. At most one build runs at a time. A build that the timer or a request
+starts waits until one refresh interval has passed since the last build started, also after a failed
+build. A build that a step starts (the repair build) starts as soon as no build runs; after a failed
+build it waits for one refresh interval too. At most one step runs at a time. A failed build or step
+keeps the previous lists, and the timer goes on. Until a build ends, requests get the previous lists.
+Without valid lists, a request waits up to 10 s for the running build, then it is 503. After a failed
+build, a request without valid lists is 503 at once, until the next build starts.
+
+A status other than Active that the gateway sees (at introspection, or in the status watcher every
+30 s) revokes every token of that agent issued up to then. A token revoked on its own (`/revoke`, or
+a delegation that no longer passes) shows only in introspection. Introspection reads the status of
+each agent that the token names on every call, and, for a delegation token, the delegation chain. So
+a cut delegation makes the tokens under it inactive at once: the first call after the block with the
+cut is at the Koios tip. A verifier that checks a token only locally (the signature and `exp`) sees a
+change only when the token expires. A token lasts at most 5 minutes. A verifier that also reads the
+status list sees a change of an agent after the delay of the list (see "Status list timing"), but it
+never sees a cut delegation: the lists show agents, not delegations. Replay stores, nonces and issued
+tokens are in memory: a restart makes earlier tokens and nonces inactive. A single-use value (the
+`jti` of a subject token, a client assertion or a DPoP proof, a used nonce) goes into the replay
+store only after the request authenticated, and the store keeps a 128-bit digest of each value.
 
 A delegation token needs the whole chain to pass the use checks of Part 2 Section 5.2, as the
 delegation contract applies them: each delegation is authentic, unspent and has 30 confirmations;
@@ -168,51 +193,125 @@ scan; the per-agent renderings read the record at the current tip.
 
 ### Status list timing
 
-A signed list is valid for 3600 s after the end of its build. A reader always gets the last lists,
-also while a new build runs. So a reader waits for a build only when no list is valid: after a
-start, until the first build ends, or after builds that fail for longer than the lists stay valid.
+The bits of a list are the effective statuses as of one ledger tip, its ledger point. `iat` and
+`validFrom` are the block time of that tip. The ledger point never goes back. A signed list is valid
+for 3600 s after its ledger point (`exp`, `validUntil`). A reader always gets the last valid lists,
+also while a build runs. So a reader waits for a build only when no list is valid: after a start,
+until the first build ends, or after steps and builds that fail for longer than the lists stay valid.
+When the tip of the ledger source is older than 3600 s, no list is valid. Readers then get 503 with
+`Retry-After: 5`, and the error output has this line:
 
-The timer keeps the lists valid when nobody asks for them. It checks the lists every 10 s and
-starts a build when they are as old as `STATUS_LIST_BACKGROUND_REFRESH_SECONDS`. A request that
-finds lists older than `STATUS_LIST_REFRESH_SECONDS` starts a build in the same way. So while
-readers ask for the lists, a build starts as soon as the lists are as old as the refresh interval.
-The timer is the only trigger when nobody asks. A failed build keeps the last lists. The timer tries
-again when one refresh interval has passed since the failed build started.
+    identity-gateway: status lists unavailable: no valid status lists: the ledger tip is older than 3600 s
 
-The rule: the interval, the delay of the check and the time of a build must fit in the validity of
-a list.
+The lists are back at the first step or build that reads a tip that is less than 3600 s old.
 
-    background interval + 10 s + time of the build <= 3600 s
+The lists follow the chain. Every `STATUS_LIST_FOLLOW_SECONDS` (10 s) the timer runs a follow step. A
+step makes 5 Koios calls (the tip, two asset indexes, two holder pages) and 3 more for each record
+that it reads again. A record is read again when its tokens moved, when its newest transaction has
+fewer than 30 confirmations, or when no output holds its tokens. A record with the status Revoked or
+Retired is final: a step does not read it. The status is the status of the resolver, so the end of a
+record and the lift of a hold show after 30 confirmations, and a subagent follows its parent.
 
-The gateway allows 900 s for the check and the build together. So each interval is at most 2700 s,
-and the gateway refuses a longer one when it starts. The message names the setting. The default of
-600 s leaves time for a build that is much longer than 900 s, and for several failed builds in a
-row. A longer interval means fewer Koios calls, because each build is one pass over every record
-(see "Chain data").
+A change shows in the lists after its block is at the tip of the ledger source (Koios). With the
+default settings, these are the bounds:
+
+| Change | The list shows it | Typical | At most |
+|---|---|---|---|
+| A hold (controller, party or Module-1) | suspension bit set | 6 s | 16 s (11 s when no full build runs) |
+| A hold that ends by time | suspension bit cleared | not given | 24 s after its end time |
+| The lift of a hold | suspension bit cleared | 122 s | 256 s |
+| A revocation or a retirement | suspension bit set, then revocation bit set and suspension bit cleared | 6 s, then 122 s | 16 s, then 256 s |
+
+A change of a parent shows for each subagent with the same bounds as for the parent. The numbers are
+computed from the settings in force and from planning values for the time of a step and the time
+between blocks. Nobody measures them while the gateway runs. They do not count the cache of a
+reader. A list response has `Cache-Control: public, max-age=<n>`, where n is the smaller of
+`STATUS_LIST_REFRESH_SECONDS` (60 s) and the seconds left until the list expires. So a reader can
+keep a list for 60 s at most, and never past its `exp`. `GET /policy` gives the bounds of every
+revocation path at every surface, with their formulas, for the settings that the gateway runs with
+(`revocationBounds`). It is the live and complete table.
+
+When the steps fail, the lists keep their last state, and a full build repairs them. With
+`STATUS_LIST_FOLLOW_SECONDS=0`, only a full build changes the lists. A change then shows after two
+builds, the build interval and one tick of the timer: 2 × the time of a build +
+`STATUS_LIST_BACKGROUND_REFRESH_SECONDS` + 10 s. The time of a build is not fixed, so `/policy`
+gives no number then.
+
+In a rare case, the records do not fit the lists any more. This happens after a rollback of more than
+30 blocks, or when Koios gives an answer that misses a record: an index changes, or a record leaves
+the list. The steps cannot go on then. The lists stay valid and keep their last good state: no bit
+changes, and `iat` does not move. A repair build reads every record again. It starts as soon as no
+build runs, and after a failed build it waits one refresh interval. The table gives the bound for the
+repaired lists, counted from the moment that the block is at the Koios tip. `F` is
+`STATUS_LIST_FOLLOW_SECONDS`, `S` is the time of one step (about 1 s, and about 5 s while a build
+runs), `d` is the time of a full build (241 s to 474 s measured), and `R` is
+`STATUS_LIST_REFRESH_SECONDS`.
+
+| Case | The repaired lists come within | With the measured times (computed) |
+|---|---|---|
+| No build runs when the step sees the problem | `F + S + d` | 252 s to 485 s |
+| A build runs when the step sees the problem | `2d + F + S` | 497 s to 963 s |
+| A repair build fails | add `R` for each failed try, and the time of the next full build | |
+
+The log has a line about this problem at once, and then one line for each refresh interval at most
+(see the log lines below). The reason in it is `an index changed` or `a record left the list`.
+
+The full build is the safety net. The timer starts it when the last build ended
+`STATUS_LIST_BACKGROUND_REFRESH_SECONDS` ago. A request starts it when no step and no build has read
+the chain for `STATUS_LIST_REFRESH_SECONDS` (or two follow intervals, when that is longer). A build
+makes about 2,300 Koios calls and takes 4 to 8 minutes. The lists that it makes are as old as the
+build when it ends, so the rule is
+
+    background interval + 10 s + time of the build + age of the bits at the end of the build <= 3600 s
+
+The gateway allows 1200 s for the last three terms together. So each interval is at most 2400 s, and
+the gateway refuses a longer one when it starts. The message names the setting. At the longest
+interval, a build of up to 590 s keeps a valid list at every moment, also with
+`STATUS_LIST_FOLLOW_SECONDS=0`. The default of 600 s allows a build of up to 1490 s (both computed).
+A longer interval means fewer Koios calls. A build of 241 s makes 2,312 calls: at 600 s that is
+about 2.7 calls per second of the 10 that the gateway may use.
 
 Each build writes two lines to the error output. The word in brackets tells what started the build:
-`start` (the first build of the services), `timer` or `request`. The first line below is written
-once, when the services start. The `not rebuilt` line says that a build failed and gives the reason;
-the last lists stay. The last line is a warning: the build was so long that a list can expire before
-the next build ends. Use a shorter `STATUS_LIST_BACKGROUND_REFRESH_SECONDS` then. The lines hold no
-list content and no identifier.
+`start` (the first build of the services), `timer`, `request`, `repair` (a step found that the
+records do not fit the lists) or `call` (code asked for the build). The first two lines below are
+written once, when the services start. The `not rebuilt` line says that a build failed and gives the
+reason; the last lists stay. A step writes a line in three cases: a bit changed; the step failed (the
+`not followed` line, one line for each refresh interval at most; the lists keep their last state); or
+the records do not fit the lists. The `unavailable` line comes with each 503 for a list. The last line
+is a warning: the build was so long that a list can expire before the next build ends. Use a shorter
+`STATUS_LIST_BACKGROUND_REFRESH_SECONDS` then. The lines hold no list content and no identifier.
 
     identity-gateway: status lists: the timer builds them again when they are older than <seconds> s; a list is valid for <seconds> s
+    identity-gateway: status lists: they follow the chain: the timer reads the changes every <seconds> s
+    identity-gateway: status lists: they do not follow the chain: only a build changes them
     identity-gateway: status lists: build started (timer): the lists are <seconds> s old
     identity-gateway: status lists: build ended after <seconds> s: <count> records
     identity-gateway: status lists not rebuilt after <seconds> s: <reason>
+    identity-gateway: status lists: followed to block <height> after <seconds> s: <count> of <count> records changed
+    identity-gateway: status lists not followed after <seconds> s: <reason>
+    identity-gateway: status lists: the records do not fit the lists (<reason>); the lists do not change until a full build ends
+    identity-gateway: status lists unavailable: <reason>
     identity-gateway: status lists: the build took <seconds> s, and the interval is <seconds> s. A list is valid for <seconds> s, so a list can expire before the next build ends. Use a shorter STATUS_LIST_BACKGROUND_REFRESH_SECONDS.
 
 ## Background jobs (Part 1 Section 9, Part 2 Sections 8.5 and 8.6)
 
 A scan runs at start and every `FETCH_SCAN_INTERVAL_S`; it is one pass over the records (see "Chain
 data"). It reads the current record of every identifier and starts a check for each Active record
-that has no facts yet, that changed (a new base
-or pending version), or whose facts are a day old. Requests never fetch: they read the stored facts,
+that has no facts yet, that changed (a new base or pending version), or whose last check is due again
+(see below). Requests never fetch: they read the stored facts,
 and a fact counts only while its inputs still apply to the view that the answer shows (the same
 endpoint, a domain that the view still names, a signing key that is still an assertion key of the
 view). A result for `versionId` or `versionTime` applies the facts to the view at that version or
 time.
+
+A check is due again one day after it ended. A check whose detection found no protocol is due
+sooner: 10 minutes after it ended, then 20, 40 and 80 minutes, and so on (twice as long after each
+such check in a row), but never more than one day. A record change starts the waits again. The first
+scan after the due time starts the check. The facts are in memory, so a start of the gateway starts
+every check again. A check that found no protocol writes one line to the error output. It names the
+host and the reason, and never a DID:
+
+    identity-gateway: background check found no protocol at <host> (<reason>); the next check is in <minutes> minutes
 
 - **Protocol detection:** A2A (`<endpoint origin>/.well-known/agent-card.json` is a valid agent card
   with an interface on that origin), then MCP (`server/discover` of revision 2026-07-28, then
@@ -280,8 +379,9 @@ output, so a pass reads a record again only when the holders of its tokens chang
 transaction has fewer than 30 confirmations, or when no output holds its tokens. A read that started
 before a pass read its tip serves that pass only when the holders vouch for it. `main.ts` gives the
 scan and the M4 services one resolver, so they share these reads; the request path has its own
-resolver and cache. The timer of the status lists starts one pass in each background interval when
-nobody asks for the lists, so a longer `STATUS_LIST_BACKGROUND_REFRESH_SECONDS` means fewer passes.
+resolver and cache. The timer of the status lists starts one full pass in each background interval,
+and one follow step in each follow interval. A step makes 5 calls and 3 more for each record that it
+reads again, so a longer `STATUS_LIST_BACKGROUND_REFRESH_SECONDS` means fewer passes.
 
 Measured on mainnet (826 records, 2026-11-03). Before: the start scan made 4,110 Koios calls (one
 tip, two asset histories, one transaction read and one block read for each record) in about 10 s,
@@ -289,6 +389,10 @@ and each status-list build 3,333. Now: the start (the first scan and the first s
 together) makes 3,328 calls at 10 calls per second; a later scan or build makes 5 calls (1 tip, 2
 asset indexes, 2 holder pages) and 3 more for each record that it reads again. A resolution makes
 4 calls at a new tip and 1 at the same tip, as before.
+
+Measured on mainnet with 874 records: a first status-list build makes 2,647 calls in 263 s. A later
+build makes 2,312 calls in 241 s, because 769 of the records have no output that holds their tokens,
+so a build reads each of them again. A follow step makes 5 calls in about 0.6 s.
 
 The legacy key search reads the blocks of a record's transactions newest first, in windows of 1, 2,
 4 and so on up to 64 blocks. A window is one Koios read and one Ogmios session; in the session, a
@@ -321,12 +425,13 @@ of `contracts/identity-marketplace/fixtures/`.
 | Every request is 500 `INTERNAL_ERROR` | The log line names the failed read. Koios or Ogmios is down or slow, or the genesis values differ from the configuration (wrong `KOIOS_URL`, or testnet). |
 | The log shows "Koios … answered HTTP 429" | Koios refused the gateway or another client of the same Koios: the gateway pauses all Koios calls (10 s, then 20, 40 and 60 s) and makes the refused calls again. Requests in a pause longer than 15 s are 500. If it happens without other clients, lower `KOIOS_RATE_PER_SECOND`. |
 | Status lists are 503 after a start | The first build reads every record once (minutes at 10 Koios calls per second). Requests are 503 until it ends; then they are 200. The timer keeps the lists valid from then on. |
-| Status lists are 503 although the gateway runs for a long time | No list is valid: the builds fail, or a build is longer than the lists stay valid. Look for `status lists not rebuilt` and `the build took` in the log (see "Status list timing"). A failed build is tried again one refresh interval after it started. For a build that is too long for the interval, set a shorter `STATUS_LIST_BACKGROUND_REFRESH_SECONDS`. If a build takes longer than 3600 s, find why Koios is slow. |
+| Status lists are 503 although the gateway runs for a long time | No list is valid: the builds fail, a build is longer than the lists stay valid, or the ledger tip is older than 3600 s. The lists are valid for 3600 s after the block time of the tip that they read, so a Koios that stays at one tip for an hour makes them expire. Look for `status lists not rebuilt`, `the build took` and `status lists unavailable: no valid status lists: the ledger tip is older than 3600 s` in the log (see "Status list timing"), and find why Koios does not move. A failed build is tried again one refresh interval after it started. For a build that is too long for the interval, set a shorter `STATUS_LIST_BACKGROUND_REFRESH_SECONDS`. If a build takes longer than 3600 s, find why Koios is slow. |
+| A change shows late in the status lists | Look for `status lists not followed` and `the records do not fit the lists` in the log. Koios is slow or down, or the records changed after a rollback: the lists keep the last state, and a full build repairs them (see "Status list timing" for the bounds). With `STATUS_LIST_FOLLOW_SECONDS=0`, only a build changes the lists, so a change takes minutes. |
 | Legacy DIDs have no keys and `controllerKeyNotFound` | No vkey witness of the record's own token transactions has the owner hash (Part 1 Section 8.1). The key appears after the owner key signs a transaction of the record. |
 | 500 only for legacy DIDs | Ogmios is not reachable from the container. Check `OGMIOS_URL`. |
 | `NOT_FOUND` for a new record | A version shows after 30 confirmations. Wait, or check the mint with Koios. |
 | The process exits at start | A configuration value is invalid; the message names it (for example `IDENTITY_ADDRESS` that is not the address of `IDENTITY_POLICY_ID`). |
-| An agent is not in the catalogs, or its card is 404 "not listed (…)" | The reason names the failed condition of the listing rule (`notIndependent`, `notActive`, `notReachable`). For `notReachable`: the last detection failed, or the endpoint changed and the next scan has not checked it yet. Resolve the DID: `vectorProfile.protocol` and `vectorFetched` show the last successful detection. A host gets at most one fetch each minute, so a check of many agents on one host takes minutes. |
+| An agent is not in the catalogs, or its card is 404 "not listed (…)" | The reason names the failed condition of the listing rule (`notIndependent`, `notActive`, `notReachable`). For `notReachable`: the last detection failed, or the endpoint changed and the next scan has not checked it yet. Resolve the DID: `vectorProfile.protocol` and `vectorFetched` show the last successful detection. A host gets at most one fetch each minute, so a check of many agents on one host takes minutes. After a gateway start, every check starts again, because the facts are in memory. A card that goes live after a check is found by a later check: after 10 minutes at the earliest, then after longer waits. The log line `background check found no protocol at <host> (<reason>); the next check is in <n> minutes` names the reason. |
 | A web agent is not in the catalogs | The AI Catalog and ARD formats list A2A agent cards and MCP server cards only. Its other renderings (`did.json`, `oasf.json`, `registration.json`) work. |
 | Agent cards are 503 | No Ed25519 signing key is configured: set `GATEWAY_ED25519_KEY_FILE`, `GATEWAY_P256_KEY_FILE` and `GATEWAY_VECTOR_ID`. |
 | The process exits with "key file … is readable by its group or by other users" | Make the key file readable only by the container user (mode 600 or 400). |

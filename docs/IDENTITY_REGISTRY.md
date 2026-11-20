@@ -452,6 +452,20 @@ pub type VaultSpend { Pay  Close }
 - Escrow refunds arrive at `VA` as `Returned` outputs. Only the owner can spend them, so a refund never raises what the delegate can spend.
 - The limits apply to each `Live` output. An owner who opens several vaults for one delegation adds their limits.
 
+**Who refuses.** The vault contract is the authority for a vault payment. It applies its rules to every transaction, whoever builds it. It refuses a payment above `per_tx`, a spending above `total` in the period, a delegation whose delegator is not the owner, a vault input with an asset other than AP3X, an escrow output above 10,000 AP3X, and a delegation that fails the use checks of §5.2. A builder or a signer can check the same rules first. The MCP builder `vector_build_vault_pay` does this, so that a refusal names the rule. A local signer can also have its own spend limits. These are not the limits of a delegation. With `ledger_decides: true`, the builder skips these checks and its listing checks, and shows the verdict of the node. The node runs the vault script on the draft transaction. Its verdict names the validator that failed, with its purpose and its index. It does not name the rule, because the deployed scripts carry no trace messages. Without the listing checks, a payment can lock funds in an escrow that no supplier can claim. The funds then come back only from `deliver_by` on.
+
+**When a delegation or an identity ends.**
+
+1. Cutting a delegation (`Undelegate`) stops new vault payments under it, and under every delegation below it, from the block that carries the cut.
+2. An escrow that a vault paid before the cut runs by the escrow rules (§6.1). These rules read neither the delegation nor the buyer's identity.
+3. The supplier can Claim and Submit until `deliver_by`. A vault payment sets `deliver_by` at most 7 days after the end of its own validity range. The hosted builders use the advert's processing window plus 3 minutes, at most 24 hours and 3 minutes.
+4. The delegate key can Accept until 10 minutes after Submit. From that time on, the supplier can Release. Release has no end time, and it also gives the supplier the buyer bond.
+5. When an escrow is not submitted by `deliver_by`, anybody can return all of it to the vault from `deliver_by` on. The refund goes to the vault as a `Returned` output, and only the vault owner can take it (vault Close).
+6. So the outcome of each escrow is fixed at most 10 minutes after its `deliver_by`. One exception: when the supplier's record is later revoked with an invalid-from time at or before the Submit, anybody can return the escrow to the vault (`RefundRevoked`) while the escrow is still unspent. The first transaction that spends the escrow wins.
+7. A revoked or suspended buyer agent does not stop an Accept. A refusal would not protect the principal: 10 minutes after Submit the supplier can Release and also take the buyer bond.
+8. In the same way, a supplier that is revoked after Submit can still Release. When its revocation has an invalid-from time at or before the Submit, anybody can also return the escrow to the vault (`RefundRevoked`). The first transaction that spends the escrow wins.
+9. This is a deliberate choice: escrows that were paid before a cut run to their end. A policy that stops all work in flight when a root delegation is replaced works differently.
+
 ### 5.4 Presentation
 
 The gateway's token service (§8.6) issues an RFC 8693 token for a delegation only after it checks the whole chain. The claims follow RFC 8693 §4.1 (decision of 2026-11-02; the first text had `sub` and `act` the other way round):
@@ -509,7 +523,25 @@ Its payouts are a full refund.
 
 The buyer funds all three amounts when it posts the escrow (`packages/shared/src/tx/escrow/postEscrow.ts`), so every refund returns all three. Filip's draft split the supplier bond on the assumption that suppliers fund it. They do not.
 
-Accept and Release keep their current rules, with the payout rules above. Accept, Reclaim and Release do not read the registry. Claim and Submit keep `agent_id` and `refund` unchanged. If the owner removes the supplier key or the agent stops being Active, Claim and Submit stop, and the buyer gets the funds back by `RefundRevoked` or Reclaim.
+**What the escrow reads.** The escrow reads no delegation and no record of the buyer. Accept, Reclaim and Release read no reference input. Claim and Submit read the record of the supplier. RefundRevoked reads the status of the record of the supplier. A cut delegation, or a buyer that is revoked or retired, does not stop an escrow that is open. §5.3 gives the bound.
+
+**Times.** The table gives the time rule and the signer of each redeemer. Times are in milliseconds. `lo` and `hi` are the finite bounds of the validity range, which is at most 1 hour. `submitted_at` is the upper bound of the Submit transaction.
+
+| Redeemer | Time rule | Signer |
+|---|---|---|
+| Claim, Submit | `hi <= deliver_by` | the supplier key |
+| Accept | `hi <= submitted_at + 600,000` | `buyer_pkh`; for a vault payment, the delegate key |
+| Release | `lo >= submitted_at + 600,000`; no end date | the supplier key |
+| Reclaim (state Open or Claimed) | `lo >= deliver_by` | the buyer key when `refund` is not set; nobody when it is set |
+| RefundRevoked | none | nobody |
+
+An exclusive bound counts as the nearest time inside the range: an exclusive upper bound `u` counts as `u - 1`, and an exclusive lower bound `l` counts as `l + 1`.
+
+Accept and Release keep their current rules, with the payout rules above. Accept, Reclaim and Release do not read the registry. Claim and Submit keep `agent_id` and `refund` unchanged. If the owner removes the supplier key or the agent stops being Active, Claim and Submit stop. What the buyer gets back then depends on the state of the escrow:
+
+- **Open or Claimed.** From `deliver_by` on, Reclaim returns the whole escrow. Anybody can submit it when `refund` is set. RefundRevoked returns the escrow at any time when the record of the supplier is Revoked or Retired.
+- **Submitted.** There is no Reclaim. The buyer key (for a vault payment, the delegate key) can Accept for 10 minutes. From then on, the supplier can Release, with no end date, and Release also gives the supplier the buyer bond. RefundRevoked returns the escrow only when the record of the supplier is Revoked with an "invalid from" time at or before `submitted_at`. In that case, Release is still possible after the 10 minutes. The first transaction that spends the escrow wins.
+- **Where a return goes.** When `refund` is set, each return goes to the refund address with the refund datum. For a vault payment, this is the vault with `Returned { owner }`, and the owner closes it (§5.3).
 
 ### 6.2 New advert
 
@@ -631,6 +663,7 @@ All three modules get new deployments in this phase. They use `vector_identity` 
   - the legacy key search limited to the record's own token transactions up to the last transaction that the base version owns;
   - a legacy deregistration as a version with status Retired, and a legacy token outside an authentic output as Suspended (`notAuthentic`);
   - the new metadata;
+  - `nextUpdate` in the metadata, the version time of the next confirmed version, so that a verifier can check a signature made at a time (Part 1 §7.3 and §9);
   - the options `versionId`, `versionTime`, `expandRelativeUrls` and `noCache`, `vectorCurrent`, and the errors `FEATURE_NOT_SUPPORTED`, `INVALID_OPTIONS` and `METHOD_NOT_SUPPORTED` in the order of Part 1 §7.1;
   - a failed Koios or Ogmios read gives `INTERNAL_ERROR`.
 - Rename "generation" in the code to the registry names.
@@ -640,14 +673,15 @@ All three modules get new deployments in this phase. They use `vector_identity` 
 ### 8.4 Confirmation wait and listing rule
 
 - Everything that the gateway issues uses the view without options (Part 1 §7.2–7.3).
-- **Status lists.** A Revoked or Retired effective status sets the revocation bit. Part 1 gives that status only after 30 confirmations, because the bit cannot be cleared. A Suspended effective status, including `deactivationPending`, sets the suspension bit.
+- **Status lists.** A Revoked or Retired effective status sets the revocation bit and clears the suspension bit. Part 1 gives that status only after 30 confirmations, because the revocation bit cannot be cleared. A Suspended effective status, including `deactivationPending`, sets the suspension bit. The bits of a list are the effective statuses as of one ledger tip. `iat` and `validFrom` are the block time of that tip, and a list is valid for one hour after it. The ledger point never goes back. The gateway reads the changes of the chain into the lists every 10 seconds with the rules of the resolver. A full pass over every record repairs the lists.
+  - **Delay.** The delay of a change counts from the moment that its block is at the tip of the ledger source. With the default settings, a hold sets the suspension bit at most 16 seconds later (11 seconds when no full pass runs). A revocation or a retirement sets the suspension bit in the same time. The lift of a hold, and the revocation or retirement itself, need 30 confirmations: their bits change at most 256 seconds after that moment. If the records no longer fit the lists (after a rollback of more than 30 blocks, or a wrong answer of the ledger source), the lists keep their last state until a full pass ends: at most 485 seconds when no full pass runs, and at most 963 seconds when one runs. These numbers are computed from the settings and from planning values. The last two use 474 seconds for a full pass, the longest time measured. Nobody measures the numbers while the gateway runs. The cache of a reader (60 seconds) comes on top. `/policy` gives the bound of every revocation path at every surface, with its formula. It is the live and complete table.
 - **Listing rule.** Catalogs, the MCP subregistry and DNS-AID list only agents that meet all of these conditions:
   - independent;
   - effective status Active;
   - a reachable endpoint.
 - `vector_discover_agents` reads the indexer, which applies the advert listing rule (§6.2).
 - Attestations are marked `firstParty` when the issuer and the subject share a party key or the controller, or when the issuer key is a key of the subject. Attestations without `issuer_id` are marked `unattributed`. These marks are hints, not guarantees.
-- The policy is published at `/policy`.
+- The policy is published at `/policy`. It also gives the bound of each revocation path at each surface and the bound for an open escrow.
 
 ### 8.5 Renderings and endpoint detection
 
@@ -656,7 +690,7 @@ All three modules get new deployments in this phase. They use `vector_identity` 
   - **MCP:** the endpoint answers an MCP discovery request: first `server/discover` (MCP revision 2026-07-28, which removed `initialize`), then an `initialize` request of revision 2025-11-25.
   - **Web:** neither check succeeds.
 - **Fetch rules** (Part 1 §9, amplification). Detection and domain linkage run as background jobs, never during a request. They fetch only `https` URLs whose host resolves to a public unicast address, checked for each connection and each redirect. They do not follow a redirect to another host. Each fetch is limited to 1 MiB and 10 seconds, with at most one fetch per host each minute.
-- **Rechecks.** The gateway checks again daily and after each record change. The result goes to `vectorFetched`.
+- **Rechecks.** The gateway checks again one day after the end of the last check and after each record change. After a check whose detection found no protocol, it checks again after 10 minutes, then after 20, 40 and 80 minutes, and so on: the wait doubles with each such check in a row, up to one day. Each wait counts from the end of the last check. The result goes to `vectorFetched`.
 - **Rendering source.** Renderings use the on-chain profile, the detected protocol and the listed keys.
 
 | Rendering | Path | Standard |
@@ -665,7 +699,7 @@ All three modules get new deployments in this phase. They use `vector_identity` 
 | Agent card | `GET /agents/{id}/agent-card.json`, signed (JWS, Ed25519); A2A agents only, because an A2A card needs an A2A interface | A2A |
 | MCP server card | `GET /agents/{id}/server-card` (MCP agents only) | MCP Server Cards |
 | MCP subregistry | `GET /v0/servers` | MCP Registry API |
-| Catalogs | `GET /.well-known/ai-catalog.json`, `GET /.well-known/ard.json`; they list A2A agents through the agent card and MCP agents through the server card, so web agents do not appear | AI Catalog, ARD |
+| Catalogs | `GET /.well-known/ai-catalog.json`, `GET /.well-known/ard.json`; they list A2A agents through the agent card and MCP agents through the server card, so web agents do not appear. An entry has the identifier `urn:air:<gateway host>:{id}`, where `{id}` is the id of the DID. The AI Catalog entry carries the DID in `extensions`. The AI Catalog `specVersion` is 0.9. | AI Catalog, ARD |
 | OASF record | `GET /agents/{id}/oasf.json` | OASF |
 | ERC-8004 file | `GET /agents/{id}/registration.json` (`agentId` = the identifier as an unsigned 256-bit integer, in decimal; `agentRegistry = vector:mainnet:<identity policy>`, provisional until a CAIP namespace for Vector exists; the network magic cannot identify Vector) | ERC-8004 |
 | JWKS | `GET /agents/{id}/jwks.json`, `GET /.well-known/jwks.json` | RFC 7517 |
@@ -676,9 +710,9 @@ All three modules get new deployments in this phase. They use `vector_identity` 
 |---|---|---|
 | Authorisation server metadata | `GET /.well-known/oauth-authorization-server` | RFC 8414 |
 | Token service | `POST /token` | RFC 8693, `subject_token_type = urn:ietf:params:oauth:token-type:jwt`. The subject token is a JWT signed (EdDSA) by an authentication key of the agent, with `iss = sub = did:vector:<id>`, `aud = https://id.vector.apexfusion.org/token`, `exp − iat ≤ 5 min` and a single-use `jti` (kept for at least the token lifetime). RFC 7523 client assertions follow the same rules. Issued tokens use ES256, last at most 5 minutes, and carry `cnf.jkt` (RFC 9449) and a Token Status List claim. Without a delegation, `sub = did:vector:<id>`; with a delegation, `sub`, `act` and `authorization_details` follow §5.4. |
-| Introspection, revocation | `POST /introspect`, `POST /revoke` | RFC 7662, RFC 7009. Tokens issued by the gateway only. A change that makes the agent's effective status other than Active revokes all tokens of that agent. |
+| Introspection, revocation | `POST /introspect`, `POST /revoke` | RFC 7662, RFC 7009. Tokens issued by the gateway only. A change that makes the agent's effective status other than Active revokes all tokens of that agent. Introspection reads the status of each agent that the token names on every call, and, for a delegation token, the delegation chain. So a cut delegation makes its tokens inactive at once: from the first call after its block is at the tip of the ledger source. A verifier that checks a token only locally sees a change when the token expires: a token lasts at most 5 minutes. |
 | SPIFFE | `POST /spiffe/x509-svid`, `POST /spiffe/jwt-svid`, `GET /spiffe/bundle` | An X.509-SVID needs a CSR and a signature by an authentication key over the CSR public key and a single-use gateway nonce (at most 5 minutes old). P-256; one URI SAN `spiffe://id.vector.apexfusion.org/agent/{id}`; lifetime at most 1 hour; `noRevAvail`. JWT-SVIDs use ES256. The bundle endpoint uses the `https_web` profile with refresh hint 300 s. |
-| Status lists | `GET /status/bsl/{n}`, `GET /status/tsl/{n}` | W3C Bitstring Status List (revocation and suspension purposes) and IETF Token Status List (2 bits: 0 valid, 1 invalid, 2 suspended), signed with ES256. Each list has 131,072 entries. Index `i` is in list `n = floor(i / 131,072)` at position `i mod 131,072`. |
+| Status lists | `GET /status/bsl/{n}`, `GET /status/tsl/{n}` | W3C Bitstring Status List (revocation and suspension purposes) and IETF Token Status List (2 bits: 0 valid, 1 invalid, 2 suspended), signed with ES256. Each list has 131,072 entries. Index `i` is in list `n = floor(i / 131,072)` at position `i mod 131,072`. Each list is as of one ledger tip: `iat` (Token Status List) and `validFrom` (Bitstring Status List) are the block time of that tip, and `exp` and `validUntil` are one hour later. With the default settings, a hold shows in the lists at most 16 seconds after its block is at the tip of the ledger source. The lift of a hold, a revocation and a retirement need 30 confirmations: they show at most 256 seconds after that moment. A revocation or a retirement shows as a suspension first, in the time of a hold. These numbers are computed (§8.4), and they do not count the 60-second cache of a reader. `/policy` gives the complete table. |
 | Identity credential | `GET /agents/{id}/credential` | A W3C VC 2.0 credential issued by the gateway's DID, with `credentialStatus` entries for both status-list purposes |
 | Domain linkage | background job | Checks `https://<domain>/.well-known/did-configuration.json` (a Domain Linkage Credential signed by an assertion key) or a DNS TXT record `_did.<domain>` that names the DID. Domains come from the endpoint host and from party organisation identifiers. Verified domains go to `alsoKnownAs`. Verified organisations get `organisationVerified: true`. The fetch rules of §8.5 apply. |
 
@@ -929,6 +963,7 @@ The tests are in `tests/legacy-registry/` (offline, `aiken tx simulate`). Result
 - Resolver tests cover:
   - native, adopted, legacy, deregistered and deactivated records, and a legacy token in an output that is not authentic;
   - `versionId` and `versionTime`, also before an adoption, before the cutoff slot of an adopted record, later than the tip, for an unconfirmed version, and before a revocation, a hold, a retirement or an epoch end (`vectorCurrent`, `deactivated`);
+  - `updated` and `nextUpdate` at the edges of a version: the first version, a version in the middle, the current version, two updates in one block, a request at the time of an update, a revoked or retired DID before its end, and a time at or after an "invalid from" time;
   - views with pending versions: new and removed keys and parties, holds set and lifted, a controller change, a final action, an adoption;
   - an "invalid from" time applied to earlier versions and to subagents;
   - `NOT_FOUND`, `INVALID_DID` (also with an uppercase character), `INVALID_OPTIONS` (bad values, dates such as `2026-02-30`, repeated options, both version options), `METHOD_NOT_SUPPORTED`, `FEATURE_NOT_SUPPORTED` (checked before `INVALID_OPTIONS`) and query parameters;
