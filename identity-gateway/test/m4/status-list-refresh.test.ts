@@ -1,13 +1,16 @@
 // The background refresh of the status lists: a timer builds the lists again when they are older than
 // the background interval, so that a list is rebuilt without a request, and a reader never gets a list
 // that is too old for its validity. The tests use a fake chain, the clock of the harness (`h.now`)
-// and fake interval timers: one tick of the timer is REFRESH_TICK_MS of fake time.
+// and fake interval timers: one tick of the timer is REFRESH_TICK_MS of fake time, and the chain
+// gets one block in each tick. The lists do not follow the chain here (followMs 0), so that only the
+// builds change them; status-list-follow.test.ts covers the follow steps.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { BUILD_WAIT_MS, LIST_VALIDITY_MS, REFRESH_TICK_MS } from "../../src/m4/status-lists.js";
 import type { ChainMethod, FakeChain } from "../support/chain.js";
-import { LedgerBuilder, identityDatum, idOf } from "../support/ledger.js";
-import { decodeJwt, nowS, startGateway, stopGateways, type GatewayOptions, type Harness } from "./support.js";
+import { LedgerBuilder, identityDatum, idOf, timeAt } from "../support/ledger.js";
+import { BLOCK_MS } from "./status-list-support.js";
+import { NOW, decodeJwt, nowS, startGateway, stopGateways, type GatewayOptions, type Harness } from "./support.js";
 
 /** The background interval of most tests, and the default of the setting. */
 const INTERVAL = 600_000;
@@ -57,7 +60,7 @@ const startsOf = (h: Harness): string[] => h.info.flatMap((line) => /build start
 const services: Harness[] = [];
 
 async function gateway(b: LedgerBuilder, options: GatewayOptions = {}): Promise<Harness> {
-  const h = await startGateway(b, { backgroundRefreshMs: INTERVAL, ...options });
+  const h = await startGateway(b, { backgroundRefreshMs: INTERVAL, followMs: 0, ...options });
   services.push(h);
   return h;
 }
@@ -69,11 +72,18 @@ async function startedGateway(b: LedgerBuilder, options: GatewayOptions = {}): P
   return h;
 }
 
-/** Moves the clock of the services and the fake timers together, one tick at a time. */
+/** The height of the tip when the clock is `now`: the block time of the tip is 10 s before the clock, as at the start of the harness. */
+const tipAt = (now: number): number => 1000 + Math.floor((now - NOW) / BLOCK_MS);
+
+/** The ledger point (POSIX s) of lists that a build reads at the tip that the chain has now: the block time of that tip. */
+const pointS = (h: Harness): number => nowS(timeAt(h.builder.chain.tipInfo.blockHeight));
+
+/** Moves the clock of the services, the chain and the fake timers together, one tick at a time. */
 async function advance(h: Harness, ms: number): Promise<void> {
   for (let left = ms; left > 0; left -= REFRESH_TICK_MS) {
     const step = Math.min(left, REFRESH_TICK_MS);
     h.now += step;
+    h.builder.tip(tipAt(h.now));
     await vi.advanceTimersByTimeAsync(step);
   }
 }
@@ -128,7 +138,7 @@ describe("the timer", () => {
     expect(reads(h, "policyAssets")).toBe(4);
     // The first request finds the new lists and starts no build.
     const jwt = await h.services.statusLists.tokenStatusList(0);
-    expect(decodeJwt(jwt ?? "").payload.iat).toBe(nowS(h.now));
+    expect(decodeJwt(jwt ?? "").payload.iat).toBe(pointS(h));
     expect(startsOf(h)).toEqual(["start", "timer"]);
     // One interval later, the timer builds again.
     await advance(h, INTERVAL);
@@ -179,7 +189,7 @@ describe("the timer", () => {
     expect(startsOf(h)).toEqual(["start", "timer", "timer"]);
     const after = await h.services.statusLists.tokenStatusList(0);
     expect(after).not.toBe(before);
-    expect(decodeJwt(after ?? "").payload.iat).toBe(nowS(h.now));
+    expect(decodeJwt(after ?? "").payload.iat).toBe(pointS(h));
   });
 
   test("stopping the services clears the timer, and the timer does not keep the process alive", async () => {
@@ -218,6 +228,8 @@ describe("a reader and a build that takes longer than a request waits", () => {
     // The timer starts a build, which waits for the ledger for 11 minutes, longer than a request waits.
     await advance(h, INTERVAL);
     expect(startsOf(h)).toEqual(["start", "timer"]);
+    // The build reads the tip when it starts.
+    const startPoint = pointS(h);
     await advance(h, 11 * MINUTE);
     expect(11 * MINUTE).toBeGreaterThan(BUILD_WAIT_MS);
     const during = await within(
@@ -230,7 +242,9 @@ describe("a reader and a build that takes longer than a request waits", () => {
     await h.services.statusLists.idle();
     const after = await (await fetch(`${h.url}/status/tsl/0`)).text();
     expect(after).not.toBe(first);
-    expect(decodeJwt(after).payload.iat).toBe(nowS(h.now));
+    // The lists are as of the tip that the build read when it started, 11 minutes before its end.
+    expect(decodeJwt(after).payload.iat).toBe(startPoint);
+    expect(startPoint).toBeLessThan(pointS(h));
   });
 
   test("without valid lists, a request waits for the running build at most BUILD_WAIT_MS; the build goes on, and its lists are kept", async () => {
@@ -258,17 +272,24 @@ describe("a reader and a build that takes longer than a request waits", () => {
 });
 
 describe("the timing rule", () => {
-  /** The ends of the builds (fake clock, ms) while `hours` pass; a build takes `buildMs` and ends at a tick. */
+  /**
+   * The ends of the builds (fake clock, ms) while `hours` pass; a build takes `buildMs` and ends at a
+   * tick. At every tick, the lists that readers get must be valid: a list is valid for
+   * LIST_VALIDITY_MS after the block time of the tip that its build read when it started.
+   */
   async function simulate(h: Harness, gate: Gate | null, buildMs: number, hours: number, onTick: (elapsed: number) => void = () => undefined): Promise<number[]> {
     const ends: number[] = [];
     let builds = startsOf(h).length;
     let startedAt: number | null = h.now;
+    let running = timeAt(tipAt(h.now));
+    let served = -Infinity;
     for (let elapsed = 0; elapsed < hours * 3_600_000; elapsed += REFRESH_TICK_MS) {
       onTick(elapsed);
       await advance(h, REFRESH_TICK_MS);
       if (startsOf(h).length > builds) {
         builds = startsOf(h).length;
         startedAt = h.now;
+        running = timeAt(tipAt(h.now));
       }
       if (startedAt !== null && h.now - startedAt >= buildMs) {
         gate?.open();
@@ -276,9 +297,12 @@ describe("the timing rule", () => {
         gate?.shutNow();
         startedAt = null;
       }
-      if (h.info.filter((line) => line.includes("build ended")).length > ends.length) ends.push(h.now);
+      if (h.info.filter((line) => line.includes("build ended")).length > ends.length) {
+        ends.push(h.now);
+        served = running;
+      }
       // The lists of the last finished build are valid now: the ones that readers get.
-      if (ends.length > 0) expect(h.now - ends[ends.length - 1]!, `at ${elapsed / MINUTE} minutes`).toBeLessThan(LIST_VALIDITY_MS);
+      if (ends.length > 0) expect(h.now - served, `at ${elapsed / MINUTE} minutes`).toBeLessThan(LIST_VALIDITY_MS);
     }
     return ends;
   }

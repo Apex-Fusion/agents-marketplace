@@ -160,34 +160,40 @@ describe("status values", () => {
 });
 
 describe("GET /status/tsl/{n}", () => {
-  test("a statuslist+jwt token signed with ES256 (draft-ietf-oauth-status-list-21 Section 5.1)", async () => {
+  test("a statuslist+jwt token signed with ES256 (draft-ietf-oauth-status-list-21 Section 5.1); iat is the block time of the tip", async () => {
     const h = await startGateway(ledger());
     const { jwt, payload } = await tokenStatusList(h);
     expect(verifiedByGateway(jwt)).toBe(true);
     expect(decodeJwt(jwt).header).toEqual({ alg: "ES256", kid: gatewayKeys().p256.kid, typ: "statuslist+jwt" });
+    // The tip of the ledger is block 1000; the clock is 10 s later. The bits are the ledger at that tip.
     expect(payload).toEqual({
       iss: BASE,
       sub: `${BASE}/status/tsl/0`,
-      iat: nowS(h.now),
-      exp: nowS(h.now) + 3600,
+      iat: nowS(timeAt(1000)),
+      exp: nowS(timeAt(1000)) + 3600,
       ttl: 60,
       status_list: { bits: 2, lst: expect.any(String) },
     });
+    expect(nowS(timeAt(1000))).toBe(nowS(h.now) - 10);
     // ZLIB format (RFC 1950), highest compression.
     expect(Buffer.from(text(at(payload, "status_list", "lst")), "base64url").subarray(0, 2).toString("hex")).toBe("78da");
   });
 
   test("after the refresh interval a request gets the previous lists at once and starts a build; later requests get the new lists", async () => {
-    const h = await startGateway(ledger());
-    const first = (await tokenStatusList(h)).jwt;
+    const b = ledger();
+    const h = await startGateway(b);
+    const first = await tokenStatusList(h);
     h.now += 30_000;
-    expect((await tokenStatusList(h)).jwt).toBe(first);
+    expect((await tokenStatusList(h)).jwt).toBe(first.jwt);
+    // The chain has a new block when the request finds old lists.
+    b.tip(1010);
     h.now += 31_000;
-    expect((await tokenStatusList(h)).jwt).toBe(first);
+    expect((await tokenStatusList(h)).jwt).toBe(first.jwt);
     await h.services.statusLists.refresh(); // joins the build that the request started
     const rebuilt = await tokenStatusList(h);
-    expect(rebuilt.jwt).not.toBe(first);
-    expect(rebuilt.payload.iat).toBe(nowS(h.now));
+    expect(rebuilt.jwt).not.toBe(first.jwt);
+    expect(first.payload.iat).toBe(nowS(timeAt(1000)));
+    expect(rebuilt.payload.iat).toBe(nowS(timeAt(1010)));
   });
 
   test("a list that does not exist is 404; other paths and methods are refused", async () => {
@@ -377,8 +383,8 @@ describe("GET /status/bsl/{n}", () => {
       id: `${BASE}/status/bsl/0`,
       type: ["VerifiableCredential", "BitstringStatusListCredential"],
       issuer: `did:vector:${GATEWAY_ID}`,
-      validFrom: formatTime(h.now),
-      validUntil: formatTime(h.now + 3_600_000),
+      validFrom: formatTime(timeAt(1000)),
+      validUntil: formatTime(timeAt(1000) + 3_600_000),
       credentialSubject: {
         id: `${BASE}/status/bsl/0#list`,
         type: "BitstringStatusList",

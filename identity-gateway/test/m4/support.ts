@@ -110,6 +110,8 @@ export interface GatewayOptions {
   readonly refreshMs?: number;
   /** How old lists are before the timer builds them again (ms); default: the setting's default. */
   readonly backgroundRefreshMs?: number;
+  /** How often the timer reads the changes of the chain into the lists (ms; 0: never); default: the setting's default. */
+  readonly followMs?: number;
 }
 
 export async function startGateway(builder: LedgerBuilder, options: GatewayOptions = {}): Promise<Harness> {
@@ -125,6 +127,7 @@ export async function startGateway(builder: LedgerBuilder, options: GatewayOptio
       delegation: options.delegations === false ? null : DELEGATION,
       statusListRefreshMs: options.refreshMs ?? 60_000,
       ...(options.backgroundRefreshMs === undefined ? {} : { statusListBackgroundRefreshMs: options.backgroundRefreshMs }),
+      ...(options.followMs === undefined ? {} : { statusListFollowMs: options.followMs }),
     },
     keys: gatewayKeys(),
     records: resolver,

@@ -25,6 +25,12 @@ export interface M4Settings {
    * DEFAULT_BACKGROUND_REFRESH_MS. The timing rule in status-lists.ts gives its limits.
    */
   readonly statusListBackgroundRefreshMs?: number;
+  /**
+   * How often the timer reads the changes of the chain into the status lists (STATUS_LIST_FOLLOW_SECONDS):
+   * a multiple of the timer tick. 0: the lists change only when a build ends. Default:
+   * DEFAULT_FOLLOW_MS. The timing rule in status-lists.ts gives its limits.
+   */
+  readonly statusListFollowMs?: number;
 }
 
 /** The resolver core functions that the M4 services use. `VectorResolver` implements them. */
