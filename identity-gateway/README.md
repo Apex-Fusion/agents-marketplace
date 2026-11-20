@@ -249,14 +249,15 @@ changes, and `iat` does not move. A repair build reads every record again. It st
 build runs, and after a failed build it waits one refresh interval. The table gives the bound for the
 repaired lists, counted from the moment that the block is at the Koios tip. `F` is
 `STATUS_LIST_FOLLOW_SECONDS`, `S` is the time of one step (1 s, and 6 s while a build runs), `d` is
-the time of a full build (474 s, the longest that was measured), and `R` is
-`STATUS_LIST_REFRESH_SECONDS` (60 s).
+the time of a full build (474 s, the longest that was measured), and `R` is the refresh interval,
+`STATUS_LIST_REFRESH_SECONDS` (60 s): the least time between the starts of two full builds, also
+after a failed build.
 
 | Case | The repaired lists come within | With these values (computed) |
 |---|---|---|
 | No build runs when the step sees the problem | `F + S + d` | 485 s |
 | A build runs when the step sees the problem | `2d + F + S` | 964 s |
-| A repair build fails | add `R` for each failed try, and the time of the next full build | `R` is 60 s |
+| A repair build fails | add `d + R` for each failed try: its run time and one refresh interval | 534 s for each failed try |
 
 The log has a line about this problem at once, and then one line for each refresh interval at most
 (see the log lines below). The reason in it is `an index changed` or `a record left the list`.
