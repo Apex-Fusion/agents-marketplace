@@ -1,9 +1,9 @@
 // The background jobs (Part 2 Section 8.5): checks only for Active records, never during a request,
-// daily and after each record change; their results reach the resolver through the facts provider.
+// daily (sooner after a check that found no protocol) and after each record change; their results reach the resolver through the facts provider.
 
 import { describe, expect, test } from "vitest";
 import { FactsStore, factInputs } from "../../src/fetch/facts.js";
-import { FetchScheduler, type RecordSource } from "../../src/fetch/scheduler.js";
+import { DAY_MS, FetchScheduler, recheckDelayMs, type RecordSource } from "../../src/fetch/scheduler.js";
 import { PassFailed, VectorResolver } from "../../src/resolve/resolver.js";
 import { formatTime } from "../../src/resolve/time.js";
 import {
@@ -186,6 +186,145 @@ describe("background checks", () => {
   });
 });
 
+describe("an endpoint that answers nothing at the first check", () => {
+  /** An Active record whose host exists but serves no card, no MCP server and no page: every probe answers 404. */
+  function silentHost() {
+    const net = new FakeNet().host("agent.example.org");
+    const b = new LedgerBuilder();
+    b.register(ID, identityDatum({ endpoint: utf8("https://agent.example.org/a2a") }), { height: 100 });
+    const store = new FactsStore();
+    const resolver = new VectorResolver(b.chain, b.settings, { fetchedFacts: store.provider, log: () => undefined });
+    const logs: string[] = [];
+    const scheduler = new FetchScheduler(resolver, store, { fetcher: net.fetcher(), txt: net.txt, clock: net.clock, legacyPolicyId: LEGACY.policyId }, { log: (m) => logs.push(m) });
+    return { net, b, store, scheduler, logs };
+  }
+  const MINUTE = 60_000;
+
+  test("the operator publishes the card after the first check: a scan an hour later finds it; the gateway does not wait a day", async () => {
+    const { net, store, scheduler } = silentHost();
+    expect(await scheduler.scan()).toEqual({ records: 1, started: [ID] });
+    await scheduler.idle();
+    expect(store.get(ID)?.detection).toMatchObject({ protocol: null, failure: "the endpoint answered HTTP 404" });
+
+    net.json("https://agent.example.org/.well-known/agent-card.json", CARD);
+    net.clock.t += 3_600_000;
+    expect((await scheduler.scan()).started).toEqual([ID]);
+    await scheduler.idle();
+    expect(store.get(ID)?.detection).toMatchObject({ protocol: "a2a", failure: null });
+  });
+
+  test("a check that finds nothing is repeated after 10 minutes, then after twice as long each time, and after a day at most; the wait counts from the end of the check", async () => {
+    const { net, store, scheduler } = silentHost();
+    await scheduler.scan();
+    await scheduler.idle();
+    expect(store.get(ID)).toMatchObject({ failedChecks: 1 });
+    for (const [index, minutes] of [10, 20, 40, 80, 160, 320, 640, 1280, 1440, 1440].entries()) {
+      const ended = store.get(ID)!.endedAt;
+      expect(ended).toBeGreaterThan(store.get(ID)!.checkedAt);
+      expect(recheckDelayMs(store.get(ID)!, DAY_MS)).toBe(minutes * MINUTE);
+      net.clock.t = ended + minutes * MINUTE - 1;
+      expect((await scheduler.scan()).started).toEqual([]);
+      net.clock.t = ended + minutes * MINUTE;
+      expect((await scheduler.scan()).started).toEqual([ID]);
+      await scheduler.idle();
+      expect(store.get(ID)).toMatchObject({ failedChecks: index + 2 });
+    }
+  });
+
+  test("a check that finds a protocol is repeated after a day; one failure after it starts the waits at 10 minutes again", async () => {
+    const { net, store, scheduler } = silentHost();
+    net.json("https://agent.example.org/.well-known/agent-card.json", CARD);
+    await scheduler.scan();
+    await scheduler.idle();
+    expect(store.get(ID)).toMatchObject({ failedChecks: 0, detection: { protocol: "a2a" } });
+    expect(recheckDelayMs(store.get(ID)!, DAY_MS)).toBe(DAY_MS);
+    net.clock.t = store.get(ID)!.endedAt + 11 * MINUTE;
+    expect((await scheduler.scan()).started).toEqual([]);
+
+    net.handlers.delete("GET https://agent.example.org/.well-known/agent-card.json");
+    net.clock.t = store.get(ID)!.endedAt + DAY_MS;
+    expect((await scheduler.scan()).started).toEqual([ID]);
+    await scheduler.idle();
+    expect(store.get(ID)).toMatchObject({ failedChecks: 1, detection: { protocol: null } });
+
+    net.json("https://agent.example.org/.well-known/agent-card.json", CARD);
+    net.clock.t = store.get(ID)!.endedAt + 10 * MINUTE;
+    expect((await scheduler.scan()).started).toEqual([ID]);
+    await scheduler.idle();
+    expect(store.get(ID)).toMatchObject({ failedChecks: 0, detection: { protocol: "a2a" } });
+    expect(recheckDelayMs(store.get(ID)!, DAY_MS)).toBe(DAY_MS);
+  });
+
+  test("a record change starts a check at once and the waits start again at 10 minutes; a record without an endpoint waits a day", async () => {
+    const { net, b, store, scheduler } = silentHost();
+    for (let i = 0; i < 3; i++) {
+      await scheduler.scan();
+      await scheduler.idle();
+      net.clock.t = store.get(ID)!.endedAt + Number(recheckDelayMs(store.get(ID)!, DAY_MS));
+    }
+    expect(store.get(ID)).toMatchObject({ failedChecks: 3 });
+
+    b.update(ID, identityDatum({ endpoint: utf8("https://moved.example.org/a2a") }), { height: 950 });
+    b.tip(1001);
+    net.host("moved.example.org");
+    expect((await scheduler.scan()).started).toEqual([ID]);
+    await scheduler.idle();
+    expect(store.get(ID)).toMatchObject({ failedChecks: 1, detection: { endpoint: "https://moved.example.org/a2a", protocol: null } });
+
+    b.update(ID, identityDatum({ endpoint: new Uint8Array() }), { height: 960 });
+    b.tip(1010);
+    net.clock.t = store.get(ID)!.endedAt + 1;
+    expect((await scheduler.scan()).started).toEqual([ID]);
+    await scheduler.idle();
+    expect(store.get(ID)).toMatchObject({ failedChecks: 0, detection: null });
+    net.clock.t = store.get(ID)!.endedAt + 11 * MINUTE;
+    expect((await scheduler.scan()).started).toEqual([]);
+  });
+
+  test("a host that does not resolve is repeated like any other failure", async () => {
+    const net = new FakeNet();
+    const b = new LedgerBuilder();
+    b.register(ID, identityDatum({ endpoint: utf8("https://gone.example.org/") }), { height: 100 });
+    const store = new FactsStore();
+    const scheduler = new FetchScheduler(new VectorResolver(b.chain, b.settings), store, { fetcher: net.fetcher(), txt: net.txt, clock: net.clock, legacyPolicyId: LEGACY.policyId }, { log: () => undefined });
+    await scheduler.scan();
+    await scheduler.idle();
+    expect(store.get(ID)).toMatchObject({ failedChecks: 1, detection: { protocol: null, failure: "the host name does not resolve" } });
+    net.host("gone.example.org");
+    net.json("https://gone.example.org/.well-known/agent-card.json", { ...CARD, supportedInterfaces: [{ url: "https://gone.example.org/a2a", protocolBinding: "JSONRPC", protocolVersion: "1.0" }] });
+    net.clock.t = store.get(ID)!.endedAt + 10 * MINUTE;
+    expect((await scheduler.scan()).started).toEqual([ID]);
+    await scheduler.idle();
+    expect(store.get(ID)).toMatchObject({ failedChecks: 0, detection: { protocol: "a2a" } });
+  });
+
+  test("each such check is logged with the host, the reason and the next wait, and without the DID or any control character", async () => {
+    const { net, store, scheduler, logs } = silentHost();
+    await scheduler.scan();
+    await scheduler.idle();
+    expect(logs).toEqual(["identity-gateway: background check found no protocol at agent.example.org (the endpoint answered HTTP 404); the next check is in 10 minutes"]);
+    net.clock.t = store.get(ID)!.endedAt + 10 * MINUTE;
+    await scheduler.scan();
+    await scheduler.idle();
+    expect(logs).toHaveLength(2);
+    expect(logs[1]).toContain("the next check is in 20 minutes");
+    expect(logs.join("\n")).not.toContain(ID);
+
+    const hostile = new FakeNet().host("evil.example.org");
+    hostile.on("https://evil.example.org/.well-known/agent-card.json", () => {
+      throw new Error("line one\nidentity-gateway: forged line\u0007");
+    });
+    const b = new LedgerBuilder();
+    b.register(idOf("hostile endpoint"), identityDatum({ endpoint: utf8("https://evil.example.org/") }), { height: 100 });
+    const hostileLogs: string[] = [];
+    const other = new FetchScheduler(new VectorResolver(b.chain, b.settings), new FactsStore(), { fetcher: hostile.fetcher(), txt: hostile.txt, clock: hostile.clock, legacyPolicyId: LEGACY.policyId }, { log: (m) => hostileLogs.push(m) });
+    await other.scan();
+    await other.idle();
+    expect(hostileLogs).toHaveLength(1);
+    expect(hostileLogs[0]).not.toMatch(/[\n\u0007]/);
+  });
+});
+
 test("the job's own handler sees the fetch rules: a check of an endpoint on a private address does not connect", async () => {
   const net = new FakeNet().host("internal.example.org", "10.0.0.7");
   const touched: Handler = () => ({ status: 200 });
@@ -193,9 +332,11 @@ test("the job's own handler sees the fetch rules: a check of an endpoint on a pr
   const b = new LedgerBuilder();
   b.register(ID, identityDatum({ controller: CONTROLLER, endpoint: utf8("https://internal.example.org/") }), { height: 100 });
   const store = new FactsStore();
-  const scheduler = new FetchScheduler(new VectorResolver(b.chain, b.settings), store, { fetcher: net.fetcher(), txt: net.txt, clock: net.clock, legacyPolicyId: LEGACY.policyId });
+  const logs: string[] = [];
+  const scheduler = new FetchScheduler(new VectorResolver(b.chain, b.settings), store, { fetcher: net.fetcher(), txt: net.txt, clock: net.clock, legacyPolicyId: LEGACY.policyId }, { log: (m) => logs.push(m) });
   await scheduler.scan();
   await scheduler.idle();
   expect(net.calls).toEqual([]);
   expect(store.get(ID)?.detection).toMatchObject({ protocol: null, failure: "the host resolves to an address that is not public unicast" });
+  expect(logs).toEqual(["identity-gateway: background check found no protocol at internal.example.org (the host resolves to an address that is not public unicast); the next check is in 10 minutes"]);
 });

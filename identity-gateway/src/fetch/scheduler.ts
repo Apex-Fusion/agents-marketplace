@@ -1,9 +1,11 @@
 // The background jobs of Part 2 Section 8.5: a periodic scan reads the current record (the view
 // without options) of every identifier, and starts a check for each record whose effective status
-// is Active when it has no facts yet, after each record change, and when its facts are a day old.
-// A check detects the endpoint's protocol and verifies the record's domains. Requests never start a
-// check; they read the facts store. A scan is one pass over the records (one tip; resolver.ts), and
-// its Koios reads go in the background lane (chain/limiter.ts), after the reads of requests.
+// is Active when it has no facts yet, after each record change, and when its last check is due again.
+// A check detects the endpoint's protocol and verifies the record's domains. It is due again a day
+// after it ended, and sooner when its detection found no protocol (`recheckDelayMs`): the endpoint
+// can go live at any moment, and the ledger does not say when. Requests never start a check; they
+// read the facts store. A scan is one pass over the records (one tip; resolver.ts), and its Koios
+// reads go in the background lane (chain/limiter.ts), after the reads of requests.
 
 import { inBackground } from "../chain/limiter.js";
 import type { RecordList } from "../resolve/records.js";
@@ -27,13 +29,19 @@ export interface CheckDeps {
   readonly clock: Clock;
 }
 
-/** One background check of a record: protocol detection, then each domain in order. Never throws. */
-export async function checkRecord(deps: CheckDeps, record: CurrentRecord, inputs: FactInputs): Promise<RecordFacts> {
+/**
+ * One background check of a record: protocol detection, then each domain in order. Never throws.
+ * `previous` is the facts of the record before this check: the failed checks in a row count only for
+ * one state of the record.
+ */
+export async function checkRecord(deps: CheckDeps, record: CurrentRecord, inputs: FactInputs, previous?: RecordFacts): Promise<RecordFacts> {
   const checkedAt = deps.clock.now();
   const detection = inputs.endpoint === null ? null : await detectProtocol(deps.fetcher, inputs.endpoint, checkedAt);
   const domains: DomainCheck[] = [];
   for (const domain of inputs.domains) domains.push(await checkDomain(deps, domain, inputs.subject, deps.clock.now()));
-  return { vectorId: record.vectorId, changeKey: changeKey(record), checkedAt, detection, domains };
+  const key = changeKey(record);
+  const failedChecks = detection !== null && detection.protocol === null ? (previous?.changeKey === key ? previous.failedChecks : 0) + 1 : 0;
+  return { vectorId: record.vectorId, changeKey: key, checkedAt, endedAt: deps.clock.now(), failedChecks, detection, domains };
 }
 
 export interface ListingSnapshot {
@@ -46,7 +54,7 @@ export interface ListingSnapshot {
 export interface SchedulerOptions {
   /** Default 600 s. */
   readonly scanIntervalMs?: number;
-  /** Facts older than this are checked again. Default one day (Part 2 Section 8.5). */
+  /** The wait after a check that found a protocol, and the longest wait after one that found none. Default one day (Part 2 Section 8.5). */
   readonly recheckMs?: number;
   /** Records read at the same time during a scan. Default 4. */
   readonly scanConcurrency?: number;
@@ -54,6 +62,21 @@ export interface SchedulerOptions {
 }
 
 export const DAY_MS = 86_400_000;
+
+/** The wait before the first repeat of a check whose detection found no protocol. */
+export const FIRST_RETRY_MS = 600_000;
+
+/**
+ * How long after a check ended the next check is due. After a check that found a protocol, or had no
+ * endpoint to check, it is `recheckMs`. After a check whose detection found no protocol it is shorter:
+ * FIRST_RETRY_MS after the first such check, then twice as long after each further one in a row, and
+ * never more than `recheckMs`. Without this, an endpoint that goes live just after a check (a card
+ * published a few minutes late, a host that was down for a moment) stays unlisted for a day.
+ */
+export function recheckDelayMs(facts: Pick<RecordFacts, "detection" | "failedChecks">, recheckMs: number): number {
+  if (facts.detection === null || facts.detection.protocol !== null) return recheckMs;
+  return Math.min(recheckMs, FIRST_RETRY_MS * 2 ** (Math.max(1, facts.failedChecks) - 1));
+}
 
 export class FetchScheduler {
   private readonly scanIntervalMs: number;
@@ -145,14 +168,36 @@ export class FetchScheduler {
     for (const record of records) {
       if (record.effective.status !== "active" || this.jobs.has(record.vectorId)) continue;
       const facts = this.store.get(record.vectorId);
-      if (facts && facts.changeKey === changeKey(record) && now - facts.checkedAt < this.recheckMs) continue;
+      if (facts && facts.changeKey === changeKey(record) && now < facts.endedAt + recheckDelayMs(facts, this.recheckMs)) continue;
       started.push(record.vectorId);
-      const job = checkRecord(this.deps, record, factInputs(record, this.deps.legacyPolicyId))
-        .then((result) => this.store.set(result))
+      const job = checkRecord(this.deps, record, factInputs(record, this.deps.legacyPolicyId), facts)
+        .then((result) => {
+          this.store.set(result);
+          this.logNoProtocol(result);
+        })
         .catch((e: unknown) => this.log(`identity-gateway: background check failed: ${e instanceof Error ? e.message : String(e)}`))
         .finally(() => this.jobs.delete(record.vectorId));
       this.jobs.set(record.vectorId, job);
     }
     return { records: records.length, started };
+  }
+
+  /**
+   * One log line for a check whose detection found no protocol, so that an operator can see why an agent
+   * is not listed. It names the host and the failure, never a DID. The failure text can come from the
+   * network, so the line keeps printable ASCII only.
+   */
+  private logNoProtocol(facts: RecordFacts): void {
+    const { detection } = facts;
+    if (detection === null || detection.protocol !== null) return;
+    let host: string;
+    try {
+      host = new URL(detection.endpoint).host;
+    } catch {
+      host = "an endpoint that is not a URL";
+    }
+    const reason = (detection.failure ?? "no check succeeded").replace(/[^\x20-\x7e]/g, "?").slice(0, 200);
+    const minutes = Math.round(recheckDelayMs(facts, this.recheckMs) / 60_000);
+    this.log(`identity-gateway: background check found no protocol at ${host} (${reason}); the next check is in ${minutes} minutes`);
   }
 }

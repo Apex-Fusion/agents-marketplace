@@ -36,8 +36,12 @@ export interface RecordFacts {
   readonly vectorId: string;
   /** The record state that the check used (see `changeKey`). */
   readonly changeKey: string;
-  /** POSIX milliseconds. */
+  /** Start of the check, POSIX milliseconds. */
   readonly checkedAt: number;
+  /** End of the check, POSIX milliseconds. The wait for the next check counts from here: a check can run for minutes, because a host gets one fetch each minute. */
+  readonly endedAt: number;
+  /** Checks in a row for this record state whose detection found no protocol; 0 when the last one found a protocol or the record has no endpoint. */
+  readonly failedChecks: number;
   readonly detection: Detection | null;
   readonly domains: readonly DomainCheck[];
 }
