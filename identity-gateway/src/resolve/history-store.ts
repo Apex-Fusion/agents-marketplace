@@ -12,6 +12,10 @@
 // - Kept inputs that the holders vouch for serve only when their newest transaction has 30
 //   confirmations at the pass's tip (Part 1 Section 2): no rollback of a younger block can leave
 //   them stale.
+// - A read stays in the store only when it has the transaction of each output that held the tokens
+//   when the read started. Else the asset index of the ledger source was behind the holders, and the
+//   read shows an older ledger. Such a read serves the pass that asked for it, and the next pass
+//   reads again.
 // Requests (resolveDid, and the record calls without a list) do not use this store.
 
 import type { ChainSource } from "../chain/types.js";
@@ -35,6 +39,22 @@ interface Kept {
   readonly holders: string | undefined;
 }
 
+/**
+ * True when the read has the transaction of each output in `holders`, or when there is no holder to
+ * check. `holders` is the text of `holdersKey` in resolver.ts: parts that are separated by spaces,
+ * each `<policy ID>:<transaction hash>#<output index>@<block height>`. A part in another format
+ * does not count as covered.
+ */
+function covers(inputs: HistoryInputs, holders: string | undefined): boolean {
+  if (holders === undefined || holders === "") return true;
+  const known = new Set(inputs.txs.map((tx) => tx.txHash));
+  return holders.split(" ").every((part) => {
+    const from = part.indexOf(":") + 1;
+    const to = part.indexOf("#");
+    return from > 0 && to > from && known.has(part.slice(from, to));
+  });
+}
+
 interface Reading {
   readonly mark: number;
   readonly holders: string | undefined;
@@ -56,7 +76,7 @@ export class HistoryStore {
     for (const id of this.kept.keys()) if (!vectorIds.has(id)) this.kept.delete(id);
   }
 
-  /** The inputs of a record's history for a pass: kept ones when they still apply, else a new read. */
+  /** The inputs of a record's history for a pass: kept ones when they still apply, else a new read (kept when it `covers` the holders). */
   async inputs(chain: ChainSource, registries: RegistrySettings, vectorId: string, pass: PassView): Promise<HistoryInputs> {
     const kept = this.kept.get(vectorId);
     if (kept && this.serves(kept, pass)) return kept.inputs;
@@ -67,7 +87,7 @@ export class HistoryStore {
     try {
       const inputs = await read.inputs;
       const current = this.kept.get(vectorId);
-      if (!current || current.mark < read.mark) this.kept.set(vectorId, { inputs, mark: read.mark, holders: read.holders });
+      if (covers(inputs, read.holders) && (!current || current.mark < read.mark)) this.kept.set(vectorId, { inputs, mark: read.mark, holders: read.holders });
       return inputs;
     } finally {
       if (this.reading.get(vectorId) === read) this.reading.delete(vectorId);
