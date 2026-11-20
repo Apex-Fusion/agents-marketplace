@@ -1,10 +1,13 @@
 // GET /policy (Part 1 Section 10; Part 2 Sections 8.1, 8.4 and 8.5): the listing rule, the fetch
-// rules, the confirmation rule and the retention of the web proxy's access log.
+// rules, the confirmation rule, the retention of the web proxy's access log, the bound of each
+// revocation path at each surface, and the bound for an open escrow. The text of an earlier member
+// changes only when the rule that it states changes; other readers use these members.
 
 import { FETCH_LIMITS } from "../fetch/fetcher.js";
-import { DAY_MS } from "../fetch/scheduler.js";
+import { DAY_MS, FIRST_RETRY_MS } from "../fetch/scheduler.js";
 import { CONFIRMATION_DEPTH } from "../resolve/settings.js";
 import type { RenderConfig } from "./config.js";
+import { ESCROW_BOUND, ESCROW_BOUND_ABOUT, revocationBounds } from "./policy-bounds.js";
 
 export function policyDocument(config: RenderConfig): Record<string, unknown> {
   return {
@@ -20,7 +23,8 @@ export function policyDocument(config: RenderConfig): Record<string, unknown> {
       "It does not follow a redirect to another host. " +
       `Each fetch is limited to ${FETCH_LIMITS.maxBytes} bytes (1 MiB) and ${FETCH_LIMITS.timeoutMs / 1000} seconds. ` +
       `It makes at most one fetch to a host each ${FETCH_LIMITS.hostIntervalMs / 1000} seconds. ` +
-      "It checks each Active agent again every day and after each change of its record.",
+      "It checks each Active agent again every day and after each change of its record. " +
+      `After a check that found no protocol, it checks again after ${FIRST_RETRY_MS / 60_000} minutes, then after twice as long each time, but never later than a day after the last check.`,
     confirmationRule:
       "Everything that the gateway issues uses the view without resolution options. " +
       "A change that reduces what a record allows takes effect at once. " +
@@ -34,7 +38,10 @@ export function policyDocument(config: RenderConfig): Record<string, unknown> {
       fetchIntervalPerHostSeconds: FETCH_LIMITS.hostIntervalMs / 1000,
       maxRedirects: FETCH_LIMITS.maxRedirects,
       recheckSeconds: DAY_MS / 1000,
+      firstRetrySeconds: FIRST_RETRY_MS / 1000,
       confirmations: CONFIRMATION_DEPTH,
     },
+    revocationBounds: revocationBounds(config),
+    escrowBound: { about: ESCROW_BOUND_ABOUT, sentences: ESCROW_BOUND },
   };
 }

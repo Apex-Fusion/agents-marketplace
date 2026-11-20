@@ -479,13 +479,38 @@ describe("GET /policy", () => {
       status: 200,
       body: {
         listingRule: expect.stringContaining("independent"),
-        fetchRules: expect.stringContaining("public unicast"),
+        fetchRules: expect.stringMatching(/public unicast.*checks again after 10 minutes, then after twice as long each time, but never later than a day after the last check\.$/),
         confirmationRule: expect.stringContaining("30 confirmations"),
         requestLog: "The gateway writes no request log. It logs errors without the requested DID.",
         accessLogRetention: CONFIG.accessLogRetention,
-        limits: { fetchMaxBytes: 1_048_576, fetchTimeoutSeconds: 10, fetchIntervalPerHostSeconds: 60, maxRedirects: 5, recheckSeconds: 86_400, confirmations: 30 },
+        limits: { fetchMaxBytes: 1_048_576, fetchTimeoutSeconds: 10, fetchIntervalPerHostSeconds: 60, maxRedirects: 5, recheckSeconds: 86_400, firstRetrySeconds: 600, confirmations: 30 },
       },
     });
+  });
+
+  test("the revocation bounds and the escrow bound are in the body; the render config of this test has no M4 services, so the M4 surfaces say so", async () => {
+    const { body, response } = await json("/policy");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(body).toMatchObject({
+      revocationBounds: {
+        paths: {
+          controllerSuspend: {
+            startEvent: "The block that carries the Suspend transaction.",
+            surfaces: {
+              resolver: { effect: "applies", seconds: 0 },
+              contracts: { effect: "applies", seconds: 0 },
+              statusLists: { effect: "notOffered", seconds: null },
+              catalogs: { effect: "applies", formula: "2 * scanSeconds + scanIntervalSeconds" },
+            },
+          },
+          holdLift: { surfaces: { resolver: { effect: "applies", seconds: 240 } } },
+        },
+        terms: { confirmations: { value: 30 }, scanIntervalSeconds: { value: 600 } },
+      },
+      escrowBound: { sentences: expect.arrayContaining([expect.stringContaining("`Undelegate`")]) },
+    });
+    const { escrowBound } = body as { escrowBound: { sentences: string[] } };
+    expect(escrowBound.sentences).toHaveLength(9);
   });
 });
 

@@ -39,7 +39,8 @@ const server = createResolverServer(resolver, {
       facts,
       snapshot: () => jobs?.snapshot ?? { scannedAt: null, records: [] },
       settings: config.resolver,
-      config: renderConfig,
+      // /policy computes the bounds of the status lists, tokens, credentials and SVIDs from the M4 settings in force.
+      config: { ...renderConfig, m4: m4?.context.settings ?? null },
       // The Ed25519 key of the gateway (Part 2 Section 8.2) signs agent cards; without it they answer 503.
       signer: m4?.context.keys.ed25519 ?? null,
     }),

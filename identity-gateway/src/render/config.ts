@@ -1,5 +1,7 @@
 // Runtime configuration of the renderings, the policy page and the background jobs.
 
+import type { M4Settings } from "../m4/context.js";
+
 export interface RenderConfig {
   /** Public HTTPS origin of the gateway (GATEWAY_BASE_URL). It names the did:web aliases, catalog URLs and MCP server names. */
   readonly baseUrl: string;
@@ -9,6 +11,13 @@ export interface RenderConfig {
   readonly fetchJobs: boolean;
   /** Time between background scans (FETCH_SCAN_INTERVAL_S, default 600 seconds). */
   readonly scanIntervalMs: number;
+  /**
+   * The settings of the M4 services in force (main.ts passes `m4.context.settings`). /policy computes the
+   * bounds of the status lists, tokens, credentials and SVIDs from them. Null or missing: the M4 services
+   * do not run, and /policy says so. `loadRenderConfig` does not read it: the M4 configuration has its own
+   * loader (m4/config.ts).
+   */
+  readonly m4?: M4Settings | null;
 }
 
 export const DEFAULT_BASE_URL = "https://id.vector.apexfusion.org";
