@@ -1,8 +1,9 @@
+import fc from "fast-check";
 import { describe, expect, test } from "vitest";
 import { httpStatus } from "../src/resolve/resolver.js";
 import { formatTime } from "../src/resolve/time.js";
 import { CONTROLLER_2, LedgerBuilder, PARTY_KEY, identityDatum, idOf, keySigner, timeAt, utf8 } from "./support/ledger.js";
-import { didOf, errorType, resolveIn, tombstoneOf } from "./support/resolve.js";
+import { didOf, errorType, resolveIn, resolverFor, tombstoneOf } from "./support/resolve.js";
 
 // `updated` and `nextUpdate` (DID Core, "Revocation in Trustless Systems"). A verifier of a signature
 // made at time S resolves with `versionTime` S. It accepts the document when `updated` is before S and
@@ -148,6 +149,16 @@ describe("a next version that is not confirmed yet", () => {
     expect((await resolveIn(b, DID, { versionId: "0" })).didDocumentMetadata).toMatchObject({ nextVersionId: "1", nextUpdate: stamp(990) });
     expect((await resolveIn(b, DID, { versionTime: stamp(985) })).didDocumentMetadata).toMatchObject({ versionId: "0", nextUpdate: stamp(990) });
     expect((await resolveIn(b, DID)).didDocumentMetadata).toMatchObject({ versionId: "1", updated: stamp(990) });
+  });
+
+  test("29 confirmations give no nextUpdate; 30 give it", async () => {
+    const b = new LedgerBuilder();
+    b.register(ID, named("zero"), { height: 100 });
+    b.update(ID, named("one"), { height: 990 });
+    b.tip(1019);
+    expect((await resolveIn(b, DID, { versionId: "0" })).didDocumentMetadata.nextUpdate).toBeUndefined();
+    b.tip(1020);
+    expect((await resolveIn(b, DID, { versionId: "0" })).didDocumentMetadata.nextUpdate).toBe(stamp(990));
   });
 });
 
@@ -346,11 +357,13 @@ describe("a time at or after the invalid-from time of a revocation", () => {
 describe("a subagent", () => {
   const PARENT = idOf("version times parent");
   const CHILD = idOf("version times child");
+  const childDatum = (name: string) =>
+    identityDatum({ lineage: { type: "Subagent", parent: PARENT, parentEpoch: 0, depth: 1 }, endpoint: new Uint8Array(), controller: CONTROLLER_2, name: utf8(name) });
 
   test("has the times of its own versions: an update of its parent is not an update of the subagent", async () => {
     const b = new LedgerBuilder();
     b.register(PARENT, identityDatum(), { height: 100 });
-    b.register(CHILD, identityDatum({ lineage: { type: "Subagent", parent: PARENT, parentEpoch: 0, depth: 1 }, endpoint: new Uint8Array(), controller: CONTROLLER_2 }), { height: 150 });
+    b.register(CHILD, childDatum("child"), { height: 150 });
     b.update(PARENT, identityDatum({ subagentEpoch: 1 }), { height: 400 });
     const result = await resolveIn(b, didOf(CHILD), { versionTime: stamp(300) });
     expect(httpStatus(result)).toBe(410);
@@ -358,5 +371,74 @@ describe("a subagent", () => {
     expect(result.didDocumentMetadata).toMatchObject({ versionId: "0", vectorStatus: { effective: "active" }, vectorCurrent: { effective: "revoked", effectiveReason: "parentRevoked" } });
     expect(result.didDocumentMetadata.updated).toBeUndefined();
     expect(result.didDocumentMetadata.nextUpdate).toBeUndefined();
+  });
+
+  test("a time at or after the invalid-from time of its parent gives no document; the times stay those of the subagent", async () => {
+    const b = new LedgerBuilder();
+    b.register(PARENT, identityDatum(), { height: 100 });
+    b.register(CHILD, childDatum("child"), { height: 150 });
+    b.update(CHILD, childDatum("child one"), { height: 250 });
+    b.update(PARENT, tombstoneOf(identityDatum(), { type: "Revoked", by: keySigner(PARTY_KEY), reason: 1, at: timeAt(399), invalidFrom: timeAt(200), successor: null }), { height: 400 });
+    const before = await resolveIn(b, didOf(CHILD), { versionTime: stamp(200, -1) });
+    expect(before.didDocument).not.toBeNull();
+    expect(before.didDocumentMetadata).toMatchObject({ versionId: "0", nextVersionId: "1", nextUpdate: stamp(250), vectorStatus: { effective: "active" } });
+    const at = await resolveIn(b, didOf(CHILD), { versionTime: stamp(200) });
+    expect(at.didDocument).toBeNull();
+    expect(at.didDocumentMetadata).toMatchObject({ versionId: "0", nextUpdate: stamp(250), vectorStatus: { effective: "revoked", effectiveReason: "parentRevoked" } });
+    const later = await resolveIn(b, didOf(CHILD), { versionTime: stamp(300) });
+    expect(later.didDocument).toBeNull();
+    expect(later.didDocumentMetadata).toMatchObject({ versionId: "1", updated: stamp(250) });
+    expect(later.didDocumentMetadata.nextUpdate).toBeUndefined();
+  });
+});
+
+describe("any history", () => {
+  /** Each step is 0 (another transaction of the same block) or 1 to 3 (blocks later). */
+  const steps = fc.array(fc.constantFrom(0, 0, 1, 2, 3), { maxLength: 7 });
+
+  test("updated and nextUpdate are the version times that the versionTime rule and the version number pick", async () => {
+    await fc.assert(
+      fc.asyncProperty(steps, async (history) => {
+        const b = new LedgerBuilder();
+        const heights = [100];
+        b.register(ID, named("version 0"), { height: 100 });
+        let txIndex = 0;
+        for (const [i, step] of history.entries()) {
+          const height = heights[i]! + step * 10;
+          txIndex = step === 0 ? txIndex + 1 : 0;
+          heights.push(height);
+          b.update(ID, named(`version ${i + 1}`), { height, txIndex });
+        }
+        const times = heights.map((height) => timeAt(height));
+        // `base` is the number of the version that the request picks, or null when no version is before the requested time.
+        const requests: Array<{ options: Record<string, string>; base: number | null }> = [];
+        for (const time of times) {
+          for (const seconds of [-1, 0, 1]) {
+            const requested = time + seconds * 1000;
+            const counted = times.filter((t) => t < requested).length;
+            requests.push({ options: { versionTime: formatTime(requested) }, base: counted === 0 ? null : counted - 1 });
+          }
+        }
+        times.forEach((_time, version) => requests.push({ options: { versionId: String(version) }, base: version }));
+
+        const resolver = resolverFor(b);
+        for (const { options, base } of requests) {
+          const result = await resolver.resolveDid(DID, options);
+          if (base === null) {
+            expect(errorType(result)).toBe("NOT_FOUND");
+            continue;
+          }
+          const { versionId, updated, nextVersionId, nextUpdate } = result.didDocumentMetadata;
+          const hasNext = base + 1 < times.length;
+          expect({ versionId, updated, nextVersionId, nextUpdate }).toEqual({
+            versionId: String(base),
+            updated: base > 0 ? formatTime(times[base]!) : undefined,
+            nextVersionId: hasNext ? String(base + 1) : undefined,
+            nextUpdate: hasNext ? formatTime(times[base + 1]!) : undefined,
+          });
+        }
+      }),
+      { numRuns: 60 },
+    );
   });
 });
