@@ -674,7 +674,7 @@ All three modules get new deployments in this phase. They use `vector_identity` 
 
 - Everything that the gateway issues uses the view without options (Part 1 §7.2–7.3).
 - **Status lists.** A Revoked or Retired effective status sets the revocation bit and clears the suspension bit. Part 1 gives that status only after 30 confirmations, because the revocation bit cannot be cleared. A Suspended effective status, including `deactivationPending`, sets the suspension bit. The bits of a list are the effective statuses as of one ledger tip. `iat` and `validFrom` are the block time of that tip, and a list is valid for one hour after it. The ledger point never goes back. The gateway reads the changes of the chain into the lists every 10 seconds with the rules of the resolver. A full pass over every record repairs the lists.
-  - **Delay.** The delay of a change counts from the moment that its block is at the tip of the ledger source. With the default settings, a hold sets the suspension bit at most 16 seconds later (11 seconds when no full pass runs). A revocation or a retirement sets the suspension bit in the same time. The lift of a hold, and the revocation or retirement itself, need 30 confirmations: their bits change at most 256 seconds after that moment. If the records no longer fit the lists (after a rollback of more than 30 blocks, or a wrong answer of the ledger source), the lists keep their last state until a full pass ends: at most 485 seconds when no full pass runs, and at most 963 seconds when one runs. These numbers are computed from the settings and from planning values. The last two use 474 seconds for a full pass, the longest time measured. Nobody measures the numbers while the gateway runs. The cache of a reader (60 seconds) comes on top. `/policy` gives the bound of every revocation path at every surface, with its formula. It is the live and complete table.
+  - **Delay.** The delay of a change counts from the moment that its block is at the tip of the ledger source. With the default settings, a hold sets the suspension bit at most 16 seconds later (11 seconds when no full pass runs). A revocation or a retirement sets the suspension bit in the same time. The lift of a hold, and the revocation or retirement itself, need 30 confirmations: their bits change at most 256 seconds after that moment. If the records no longer fit the lists (after a rollback of more than 30 blocks, or a wrong answer of the ledger source), the lists keep their last state until a full pass ends: at most 485 seconds when no full pass runs, and at most 964 seconds when one runs. These numbers are computed from the settings and from planning values. The last two use 474 seconds for a full pass, the longest time measured. Nobody measures the numbers while the gateway runs. The cache of a reader (60 seconds) comes on top. `/policy` gives the bound of every revocation path at every surface, with its formula. It is the live and complete table.
 - **Listing rule.** Catalogs, the MCP subregistry and DNS-AID list only agents that meet all of these conditions:
   - independent;
   - effective status Active;
@@ -815,7 +815,8 @@ Before the next push, remove the local work that the private note lists, in this
 - Read tools:
   - `vector_resolve_did` (new) returns the DID resolution result from the gateway;
   - `vector_get_agent_profile` accepts both DID forms;
-  - `vector_discover_agents` reads the indexer.
+  - `vector_discover_agents` reads the indexer;
+  - `vector_verify_signature_at` (new) checks a signature, a key and a time with the rules of Part 1 §7.2 ("Checking a signature at a time"). It builds and signs nothing. It gives VALID, INVALID with a reason, or NOT CHECKED. It gives NOT CHECKED for a time that is less than 10 minutes before now, for a gateway that is more than 30 blocks behind the node of the server, and for a gateway that gives no `nextUpdate` when the time is before the latest version.
 - `vector_build_message_agent` is retired.
 - `vector_build_deregister_agent` stays for legacy records that do not adopt.
 - The registry constants of the legacy registry move into one separate module. Only legacy reads, adoption and legacy deregistration use it.
@@ -860,7 +861,7 @@ One combined release, in this order:
    - Remove the local work (§9.7). Do this first, because the permalink needs a push.
    - Filip completes the name check.
    - The Foundation sets the licence of the Part 1 text.
-   - Register `did:vector` with W3C, using a permalink to Part 1. The identity registry's values are "published at deployment" until step 3.
+   - The registry entry of `did:vector` is merged in the W3C DID Extensions registry (pull request 769). It links to the Part 1 text on the `main` branch. The identity registry's values are "published at deployment" until step 3.
 2. **Contracts**, in two parts (decision of 2026-11-03):
    - **Identity side:**
      - fix the cutoff slot and build the allowlist (§9.1);
@@ -875,7 +876,7 @@ One combined release, in this order:
      Until the seal, no `Script` party can be appointed (§3.8). Every other identity action works.
 3. **Publication:**
    - Add the policy ID, the address, the cutoff slot, the allowlist and its root, the configuration policy and, after the module side, the Module-1 hash to Part 1 §4 and to every consumer.
-   - Send a second pull request to `w3c/did-extensions` that moves the permalink to that commit.
+   - The registry entry (pull request 769, merged) links to the Part 1 text on the `main` branch, so it shows this change.
 4. **Off-chain release:**
    - the gateway (resolver, renderings, M4 services) and the indexer with its backfill;
    - the MCP packages and both SDKs;
@@ -884,7 +885,7 @@ One combined release, in this order:
 5. **Records:** our agents adopt (§9.1). Our supplier records are registered (§9.2). The gateway registers itself (§8.2).
 6. **Smoke test** (§12.6).
 7. **Escrow switch:** as soon as our supplier records and new adverts exist (§9.3). Switch and drain (§9.6).
-8. **Universal Resolver:** after the W3C merge, submit the driver (§8.8). Its test identifiers are one live native DID, one adopted DID, one legacy DID and one deactivated DID.
+8. **Universal Resolver:** the W3C registry entry is merged (pull request 769). The driver is planned and not published: submit it (§8.8). Its test identifiers are one live native DID, one adopted DID, one legacy DID and one deactivated DID.
 
 Use the selective release procedure for every service. A push to `main` must never start image builds on the production host.
 
@@ -1074,7 +1075,7 @@ The tests are in `tests/legacy-registry/` (offline, `aiken tx simulate`). Result
 | Module-1 verdict policy: the action and the duration for each challenge outcome (§3.8) | David, module owners |
 | Module change list for the module owners | David |
 | Foundation approval of Apache-2.0 for `identity-gateway` | David |
-| Contact email for the W3C and DIF entries | David |
+| Contact email for the DIF entry (the W3C entry is merged, pull request 769, with its contact) | David |
 | npm and PyPI publication rights | David |
 | The switch date | David (decided 2026-11-03: as soon as our supplier records and new adverts exist) |
 | Retention time of the Traefik access log on the gateway host | David (decided 2026-11-03: 7 days) |

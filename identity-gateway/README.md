@@ -89,7 +89,11 @@ with the values that Koios reports (`/genesis`). If one differs, every resolutio
   confirmed version also has `nextUpdate`, the version time of that version. To check a signature that
   was made at time S, resolve with `versionTime` set to S. The document is the right one when
   `updated` (`created` for version 0) is before S and `nextUpdate` is after S. Compare S also with
-  `vectorStatus.invalidFrom`: a signature made at or after that time is invalid.
+  `vectorStatus.invalidFrom`: a signature made at or after that time is invalid. A client that checks
+  a signature at a time reads `versionId`, `updated`, `nextUpdate`, `vectorStatus` (with
+  `invalidFrom`) and `vectorLedger` of the answer. `blockHeight` plus `confirmations` of
+  `vectorLedger` give the tip of the gateway. The tool `vector_verify_signature_at` of the MCP server
+  does this.
 - `GET /healthz` answers 200 and reads nothing from the ledger.
 
 The gateway writes no request log. It logs errors without the requested DID.
@@ -113,7 +117,7 @@ the agent does not qualify, 410 when the DID is deactivated, 500 when the ledger
 | `GET /.well-known/ard.json` | Listed A2A and MCP agents | ARD v0.91 manifest `{entries}` with `identifier` (as in the AI Catalog), `displayName`, `description`, `capabilities` and `metadata {did, protocol}`. |
 | `GET /agents/{id}/oasf.json` | Listed agents | OASF record (schema 1.1.0): profile, `skills` mapped from known capability names, the endpoint as `url` locator, `annotations` with the DID, the protocol and the capabilities. |
 | `GET /agents/{id}/registration.json` | Listed agents | ERC-8004 registration file: `services` (A2A, MCP or web, then OASF and DID), `active`, `registrations [{agentId, agentRegistry}]`. `agentId` is the identifier as a decimal integer (78 digits at most, so read it with a big-integer JSON reader). `agentRegistry` is `vector:mainnet:<identity policy>`, or the legacy policy for a legacy record. |
-| `GET /policy` | | The listing rule, the fetch rules, the confirmation rule, the request-log statement, `ACCESS_LOG_RETENTION` and the limits as numbers. Also the bound of each revocation path at each surface (`revocationBounds`) and the bound for an open escrow (`escrowBound`). The numbers of `revocationBounds` follow `STATUS_LIST_FOLLOW_SECONDS`, `STATUS_LIST_REFRESH_SECONDS`, `STATUS_LIST_BACKGROUND_REFRESH_SECONDS` and `FETCH_SCAN_INTERVAL_S`. |
+| `GET /policy` | | The listing rule, the fetch rules (with the repeat of a check that found no protocol), the confirmation rule, the request-log statement, `ACCESS_LOG_RETENTION` and the limits as numbers (with `firstRetrySeconds`). Also the bound of each revocation path at each surface (`revocationBounds`) and the bound for an open escrow (`escrowBound`). The numbers of `revocationBounds` follow `STATUS_LIST_FOLLOW_SECONDS`, `STATUS_LIST_REFRESH_SECONDS`, `STATUS_LIST_BACKGROUND_REFRESH_SECONDS` and `FETCH_SCAN_INTERVAL_S`. |
 
 The gateway's own JWK set (`GET /.well-known/jwks.json`) belongs to the M4 services. The renderings
 sign agent cards with the M4 Ed25519 key (`main.ts` passes `keys.ed25519` as their signer).
@@ -234,8 +238,9 @@ revocation path at every surface, with their formulas, for the settings that the
 When the steps fail, the lists keep their last state, and a full build repairs them. With
 `STATUS_LIST_FOLLOW_SECONDS=0`, only a full build changes the lists. A change then shows after two
 builds, the build interval and one tick of the timer: 2 × the time of a build +
-`STATUS_LIST_BACKGROUND_REFRESH_SECONDS` + 10 s. The time of a build is not fixed, so `/policy`
-gives no number then.
+`STATUS_LIST_BACKGROUND_REFRESH_SECONDS` + 10 s. With a build of 474 s (the longest that was
+measured) and the default interval, a hold shows in at most 1,558 s, and a lift or a revocation in at
+most 1,798 s (computed).
 
 In a rare case, the records do not fit the lists any more. This happens after a rollback of more than
 30 blocks, or when Koios gives an answer that misses a record: an index changes, or a record leaves
@@ -243,15 +248,15 @@ the list. The steps cannot go on then. The lists stay valid and keep their last 
 changes, and `iat` does not move. A repair build reads every record again. It starts as soon as no
 build runs, and after a failed build it waits one refresh interval. The table gives the bound for the
 repaired lists, counted from the moment that the block is at the Koios tip. `F` is
-`STATUS_LIST_FOLLOW_SECONDS`, `S` is the time of one step (about 1 s, and about 5 s while a build
-runs), `d` is the time of a full build (241 s to 474 s measured), and `R` is
-`STATUS_LIST_REFRESH_SECONDS`.
+`STATUS_LIST_FOLLOW_SECONDS`, `S` is the time of one step (1 s, and 6 s while a build runs), `d` is
+the time of a full build (474 s, the longest that was measured), and `R` is
+`STATUS_LIST_REFRESH_SECONDS` (60 s).
 
-| Case | The repaired lists come within | With the measured times (computed) |
+| Case | The repaired lists come within | With these values (computed) |
 |---|---|---|
-| No build runs when the step sees the problem | `F + S + d` | 252 s to 485 s |
-| A build runs when the step sees the problem | `2d + F + S` | 497 s to 963 s |
-| A repair build fails | add `R` for each failed try, and the time of the next full build | |
+| No build runs when the step sees the problem | `F + S + d` | 485 s |
+| A build runs when the step sees the problem | `2d + F + S` | 964 s |
+| A repair build fails | add `R` for each failed try, and the time of the next full build | `R` is 60 s |
 
 The log has a line about this problem at once, and then one line for each refresh interval at most
 (see the log lines below). The reason in it is `an index changed` or `a record left the list`.
