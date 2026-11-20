@@ -151,7 +151,7 @@ describe("status values", () => {
     expect([bsl.bit(i), bsl.bit(LIST_SIZE + i)]).toEqual([0, 1]);
     expect((await tokenStatusList(h)).values(i)).toBe(STATUS.suspended);
     b.tip(1020);
-    h.now += 61_000;
+    h.now = timeAt(1020) + 10_000;
     await h.services.statusLists.refresh();
     bsl = await bitstringList(h);
     expect([bsl.bit(i), bsl.bit(LIST_SIZE + i)]).toEqual([1, 0]);
@@ -287,7 +287,7 @@ describe("builds", () => {
     // 50 confirmations, its mint gets an index. R.pending (50 confirmations too) is not read again.
     b.update(R.active, tombstoneOf(identityDatum(), revocation(1002)), { height: 1002 });
     b.tip(1040);
-    h.now += 61_000;
+    h.now = timeAt(1040) + 10_000;
     await h.services.statusLists.refresh();
     expect(reads(h, "assetTxHashes")).toBe(2 * EXPECTED.length + 6);
     const index = await indices(h);

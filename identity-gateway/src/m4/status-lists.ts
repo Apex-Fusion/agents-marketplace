@@ -47,9 +47,13 @@
 // unless its ledger point is older than the ledger point of their lists. A ledger point is older when
 // its block time is earlier or its block height is lower: after a switch to another fork, the tip can
 // have a higher block and an earlier block time. So the ledger point of the lists never goes back,
-// and a build that ends after newer steps does not take them back. The next step goes on from the
-// build. Until a build ends, requests get the previous lists. Without valid lists, a request waits
-// up to 10 s for a running build.
+// and a build that ends after newer steps does not take them back. Lists that expired are the
+// exception: no reader gets them, so the next state replaces them, whatever its ledger point. The
+// next step goes on from the build. Until a build ends, requests get the previous lists. Without
+// valid lists, a request waits up to 10 s for a running build.
+// A tip with a block time more than MAX_TIP_AHEAD_MS after the clock cannot be real: the ledger
+// source or the clock is wrong. A step or a build that reads such a tip fails, and the lists stay as
+// they are. The log has the failure: one line for each refresh interval at most for the steps.
 // Timing rule. A build ends with lists that are as old as the build plus the age of the tip that it
 // read first. The timer starts the next build when the last one ended as long ago as the background
 // interval, at most one tick late. The old lists are still valid when the new ones are there, and no
@@ -157,6 +161,8 @@ export const LIST_VALIDITY_MS = 3_600_000;
 export const BUILD_WAIT_MS = 10_000;
 /** The timer checks the age of the lists this often. */
 export const REFRESH_TICK_MS = 10_000;
+/** A tip with a block time more than this after the clock cannot be real: the ledger source or the clock is wrong. */
+const MAX_TIP_AHEAD_MS = 60_000;
 /** The time that the timing rule allows for the check of the timer, for one build and for the age of its bits, together. */
 export const BUILD_ALLOWANCE_MS = 1_200_000;
 /** The longest interval of both settings: the validity of a list less the allowance. */
@@ -201,6 +207,16 @@ type BuildReason = "start" | "timer" | "request" | "repair" | "call";
 
 /** Milliseconds as seconds with one decimal, for the log. */
 const seconds = (ms: number): string => (ms / 1000).toFixed(1);
+
+/**
+ * The block time of a tip (POSIX ms): the ledger point of lists. A tip with a block time more than
+ * MAX_TIP_AHEAD_MS after `now` is a failed read.
+ */
+function tipTime(tip: ChainTip, network: GenesisParameters, now: number): number {
+  const asOf = blockTimeMs(tip.slot, network);
+  if (asOf > now + MAX_TIP_AHEAD_MS) throw new Error(`the block time of the ledger tip is ${seconds(asOf - now)} s after the clock`);
+  return asOf;
+}
 
 /** The value of `promise`; an error when it takes longer than `ms`. */
 async function within<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
@@ -463,15 +479,17 @@ export class StatusLists {
   }
 
   /**
-   * The lists that readers get from `state`. A state with an older ledger point than the lists that
-   * readers have does not replace them: it has an earlier block time or a lower block height. The
-   * next state with a ledger point that is not older does. The held entries of revoked tokens are
-   * part of the Token Status List values.
+   * The lists that readers get from `state`. While the lists that readers have are valid, a state
+   * with an older ledger point does not replace them: it has an earlier block time or a lower block
+   * height. The next state with a ledger point that is not older does. Lists that expired are
+   * replaced at once, whatever the ledger point of the new state: no reader gets an expired list.
+   * The held entries of revoked tokens are part of the Token Status List values.
    */
   private publish(state: ListState): Lists {
+    const now = this.ctx.now();
     const current = this.lists;
-    if (current !== null && (state.asOf < current.state.asOf || state.tip.blockHeight < current.state.tip.blockHeight)) return current;
-    const held = this.heldEntries(this.ctx.now());
+    if (current !== null && now < current.expiresAt && (state.asOf < current.state.asOf || state.tip.blockHeight < current.state.tip.blockHeight)) return current;
+    const held = this.heldEntries(now);
     let tokenValues = state.values;
     if (held.size > 0) {
       tokenValues = state.values.map((v) => v.slice());
@@ -495,9 +513,10 @@ export class StatusLists {
       try {
         const previous = this.checkedAt === null ? "no lists yet" : `the lists are ${seconds(startedAt - this.checkedAt)} s old`;
         this.ctx.info?.(`identity-gateway: status lists: build started (${reason}): ${previous}`);
-        // The block time of the tip needs the genesis values: a build that cannot read them stops before its long reads.
+        // The block time of the tip needs the genesis values. A build that cannot read them, or that reads a tip that cannot be real, stops before its long reads.
         const network = await this.genesis();
         const { indices, list } = await this.buildIndex();
+        const asOf = tipTime(list.tip, network, this.ctx.now());
         const entries = [...indices];
         const listCount = entries.reduce((count, [, i]) => Math.max(count, listPosition(i).n + 1), 1);
         const values = Array.from({ length: listCount }, () => new Uint8Array(LIST_SIZE));
@@ -505,7 +524,7 @@ export class StatusLists {
           const { n, p } = listPosition(index);
           values[n]![p] = value;
         });
-        const state: ListState = { tip: list.tip, asOf: blockTimeMs(list.tip.slot, network), indices, values };
+        const state: ListState = { tip: list.tip, asOf, indices, values };
         const endedAt = this.ctx.now();
         // The build replaces the newest state; the next follow step starts from it.
         this.state = state;
@@ -554,7 +573,8 @@ export class StatusLists {
   /**
    * One follow step (see the head of this file): the new tip and list of records, then the status of
    * each record that is not final and of each new record, as of that tip. Nothing changes when a read
-   * fails. A build that ends while the step reads makes the step useless, and the step ends.
+   * fails, or when the tip cannot be real. A build that ends while the step reads makes the step
+   * useless, and the step ends.
    */
   private async followOnce(): Promise<void> {
     const base = this.state;
@@ -571,6 +591,8 @@ export class StatusLists {
         this.checkedAt = this.ctx.now();
         return;
       }
+      // A tip that cannot be real fails the step before it takes anything from the list of records.
+      const asOf = tipTime(tip, network, this.ctx.now());
       const plan = planFollow(base, list);
       if (plan.mismatch !== null) {
         this.repair(plan.mismatch);
@@ -579,7 +601,6 @@ export class StatusLists {
       const read = [...plan.again, ...plan.added];
       const results: Array<[number, StatusValue]> = [];
       await readStatuses(this.ctx.records, list, read, (index, value) => results.push([index, value]));
-      const asOf = blockTimeMs(tip.slot, network);
       if (this.state !== base) return;
       const { state, changed } = advance(base, list, plan.added, results, asOf);
       const endedAt = this.ctx.now();

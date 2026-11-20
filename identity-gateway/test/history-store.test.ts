@@ -1,10 +1,11 @@
-// The history store (history-store.ts): a history read stays between passes only when it has the
-// transaction of each output that holds the tokens. A read from an asset index that is behind the
-// list of holders serves its own pass, and the next pass reads again.
+// The history store (history-store.ts): a history read stays between passes only when the history
+// of each registry has the transaction of each output that holds the tokens of that registry. A read
+// from an asset index that is behind the list of holders serves its own pass, and the next pass
+// reads again.
 
 import { describe, expect, test } from "vitest";
 import { VectorResolver } from "../src/resolve/resolver.js";
-import { LedgerBuilder, identityDatum, idOf, timeAt } from "./support/ledger.js";
+import { LedgerBuilder, identityDatum, idOf, legacyDatum, timeAt } from "./support/ledger.js";
 
 const A = idOf("store a");
 const B = idOf("store b");
@@ -72,5 +73,48 @@ describe("a history read that a pass keeps", () => {
     expect(await statusOfB(resolver)).toBe("active");
     expect(await statusOfB(resolver)).toBe("active");
     expect(reads()).toBe(3 * afterFirst);
+  });
+
+  test.each<[string, "identity" | "legacy", (b: LedgerBuilder, id: string) => { txHash: string }]>([
+    [
+      // The adoption is the newest transaction. The legacy history has it as the burn, and the identity history as the mint.
+      "an identity history that is behind does not pass for the legacy history that has the same transaction",
+      "identity",
+      (b, id) => {
+        b.legacyRegister(id, legacyDatum(), { height: 50 });
+        return b.adopt(id, identityDatum(), { height: 1001 });
+      },
+    ],
+    [
+      // The move of the token to a wallet is the newest transaction.
+      "a legacy history that is behind does not pass for the identity history",
+      "legacy",
+      (b, id) => {
+        b.legacyRegister(id, legacyDatum(), { height: 50 });
+        return b.moveOut(id, { height: 1001 });
+      },
+    ],
+  ])("has the transactions of each registry whose token the holders hold: %s", async (_name, behindRegistry, makeNewest) => {
+    const b = new LedgerBuilder();
+    const id = idOf("store registry");
+    const newest = makeNewest(b, id);
+    b.tip(1100);
+    const behindPolicy = b.settings.registries[behindRegistry]!.policyId;
+    let behind = true;
+    const read = b.chain.assetTxHashes.bind(b.chain);
+    b.chain.assetTxHashes = async (policyId, assetName) => {
+      const hashes = await read(policyId, assetName);
+      return behind && policyId === behindPolicy ? hashes.filter((hash) => hash !== newest.txHash) : hashes;
+    };
+    const recordIn = async (resolver: VectorResolver) => resolver.currentRecord(id, await resolver.listRecords());
+    const resolver = new VectorResolver(b.chain, b.settings, { log: () => undefined });
+
+    // The first pass has a record without the newest transaction, which is not the record of the ledger.
+    const partial = await recordIn(resolver);
+    behind = false;
+    const fresh = await recordIn(new VectorResolver(b.chain, b.settings, { log: () => undefined }));
+    expect(partial).not.toEqual(fresh);
+    // The next pass reads the history of that registry again and gives the record of the ledger.
+    expect(await recordIn(resolver)).toEqual(fresh);
   });
 });

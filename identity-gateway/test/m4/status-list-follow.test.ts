@@ -612,6 +612,82 @@ describe("what the lists claim", () => {
     await rig.lists.refresh();
     expect(await rig.decoded()).toEqual(later);
   });
+
+  test("a tip with a block time more than a minute after the clock is a failed read: nothing is published, the log has one line for each refresh interval, and the real tip is followed", async () => {
+    const [A, B] = ["a", "b"].map(id) as [string, string];
+    const b = roots(A, B);
+    const rig = await new Rig(b).start();
+    const [ia, ib] = (await indicesOf(rig, [A, B])) as [number, number];
+    await rig.tick();
+    const first = await rig.decoded();
+
+    // Block 1002 has a hold on B. The ledger source shows a tip for it with a block time one day after the clock.
+    b.update(B, identityDatum({ status: hold(timeAt(1002) + 3_600_000) }), { height: 1002 });
+    b.chain.tipInfo = { blockHeight: 1002, blockHash: "ee".repeat(32), slot: slotAt(1001) + 86_400 };
+    // Seven steps fail. The log has the first one and the one 60 s later.
+    for (let k = 0; k < 7; k++) await rig.idleTick();
+    expect(rig.logs).toEqual([
+      "identity-gateway: status lists not followed after 0.0 s: the block time of the ledger tip is 86380.0 s after the clock",
+      "identity-gateway: status lists not followed after 0.0 s: the block time of the ledger tip is 86320.0 s after the clock",
+    ]);
+    // The lists are as before. The request finds them unread for 80 s, and the build that it starts fails on the same tip.
+    expect(await rig.decoded()).toEqual(first);
+    await rig.lists.idle();
+    expect(rig.starts()).toEqual(["start", "request"]);
+    expect(rig.logs).toHaveLength(3);
+    expect(rig.logs[2]).toBe("identity-gateway: status lists not rebuilt after 0.0 s: the block time of the ledger tip is 86320.0 s after the clock");
+    expect(await rig.values([ia, ib])).toEqual([0, 0]);
+
+    // The real tip: the hold shows at the next step.
+    rig.moveTo(1002);
+    await rig.idleTick();
+    expect(await rig.values([ia, ib])).toEqual([0, 2]);
+    expect((await rig.decoded()).iat).toBe(nowS(timeAt(1002)));
+  });
+
+  test("a tip 59 or 60 s after the clock is read, and a tip 61 s after the clock is a failed read, for a step and for a build", async () => {
+    const [A, B] = ["a", "b"].map(id) as [string, string];
+    const b = roots(A, B);
+    const rig = await new Rig(b).start();
+    await rig.tick();
+    // The clock is 10 s after block 1001, so a tip is `seconds` after the clock when its slot is 10 + `seconds` after that block.
+    const tipAhead = (height: number, seconds: number) => ({ blockHeight: height, blockHash: "ee".repeat(32), slot: slotAt(1001) + 10 + seconds });
+    b.chain.tipInfo = tipAhead(1002, 61);
+    await expect(rig.lists.follow()).rejects.toThrow("the block time of the ledger tip is 61.0 s after the clock");
+    await expect(rig.lists.refresh()).rejects.toThrow("the block time of the ledger tip is 61.0 s after the clock");
+    // The ledger point of a step is 59 s after the clock, and the ledger point of a build is 60 s after it.
+    b.chain.tipInfo = tipAhead(1002, 59);
+    await rig.lists.follow();
+    expect((await rig.decoded()).iat).toBe(nowS(rig.clock.now + 59_000));
+    b.chain.tipInfo = tipAhead(1003, 60);
+    await rig.lists.refresh();
+    expect((await rig.decoded()).iat).toBe(nowS(rig.clock.now + 60_000));
+  });
+
+  test("lists that expired are replaced by the next state, also when it has a lower block height: one tip with an impossible height does not freeze the lists for good", async () => {
+    const [A, B] = ["a", "b"].map(id) as [string, string];
+    const b = roots(A, B);
+    const rig = await new Rig(b).start();
+    const [ia, ib] = (await indicesOf(rig, [A, B])) as [number, number];
+    await rig.tick();
+    // One tip has the block height 2,000,000 and the block time of block 1001. A block time that is not earlier is published.
+    b.chain.tipInfo = { blockHeight: 2_000_000, blockHash: "ff".repeat(32), slot: slotAt(1001) };
+    await rig.idleTick();
+    // The real chain goes on. Block 1002 has a hold on B. A full build reads the real tip, but its lists have a lower block height.
+    b.update(B, identityDatum({ status: hold(timeAt(1002) + 100 * LIST_VALIDITY_MS) }), { height: 1002 });
+    rig.moveTo(1002);
+    await rig.lists.refresh();
+    expect(await rig.values([ia, ib])).toEqual([0, 0]);
+    // The lists that readers have stay until they expire, an hour after block 1001.
+    const expiry = timeAt(1001) + LIST_VALIDITY_MS;
+    while (rig.clock.now + REFRESH_TICK_MS < expiry) await rig.tick();
+    expect(await rig.values([ia, ib])).toEqual([0, 0]);
+    // The first step after that replaces them, and the hold shows.
+    await rig.tick(2);
+    expect(rig.clock.now).toBeGreaterThanOrEqual(expiry);
+    expect(await rig.values([ia, ib])).toEqual([0, 2]);
+    expect((await rig.decoded()).iat).toBeGreaterThan(nowS(timeAt(1001)));
+  });
 });
 
 describe("a build and the follow steps", () => {
