@@ -58,9 +58,18 @@ function write(res: ServerResponse, response: M4Response, extra: Record<string, 
   res.end(response.body);
 }
 
-const signedList = (contentType: string, refreshMs: number, signed: string | null): M4Response => {
+/** The seconds until a signed status list is no longer valid: its `exp` (Token Status List) or `validUntil` (Bitstring Status List credential). 0 when it names no time. */
+function secondsLeft(signed: string, now: number): number {
+  const claims = JSON.parse(Buffer.from(signed.split(".")[1] ?? "", "base64url").toString("utf8")) as { exp?: unknown; validUntil?: unknown };
+  const until = typeof claims.exp === "number" ? claims.exp * 1000 : Date.parse(String(claims.validUntil));
+  return Number.isFinite(until) ? Math.max(0, Math.floor((until - now) / 1000)) : 0;
+}
+
+/** A signed list. A cache keeps it for the refresh interval, and not beyond the end of its validity. */
+const signedList = (contentType: string, refreshMs: number, signed: string | null, now: number): M4Response => {
   if (signed === null) throw new M4Error(404, "not_found", "no such status list");
-  return { status: 200, headers: { "content-type": contentType, ...publicData(Math.max(1, Math.round(refreshMs / 1000))) }, body: signed };
+  const maxAge = Math.min(Math.max(1, Math.round(refreshMs / 1000)), secondsLeft(signed, now));
+  return { status: 200, headers: { "content-type": contentType, ...publicData(maxAge) }, body: signed };
 };
 
 export function m4Routes(services: M4Services): Route {
@@ -74,7 +83,7 @@ export function m4Routes(services: M4Services): Route {
       context.log(`identity-gateway: status lists unavailable: ${e instanceof Error ? e.message : String(e)}`);
       throw unavailable("the status lists could not be built from the ledger");
     }
-    return signedList(kind === "bsl" ? "application/vc+jwt" : "application/statuslist+jwt", refreshMs, signed);
+    return signedList(kind === "bsl" ? "application/vc+jwt" : "application/statuslist+jwt", refreshMs, signed, context.now());
   };
 
   const fixed: Record<string, Endpoint> = {

@@ -196,6 +196,24 @@ describe("GET /status/tsl/{n}", () => {
     expect(rebuilt.payload.iat).toBe(nowS(timeAt(1010)));
   });
 
+  test("max-age is the refresh interval, and the seconds left when the list expires sooner; both formats", async () => {
+    const h = await startGateway(ledger());
+    const cacheControl = async (path: string): Promise<string | null> => (await fetch(`${h.url}${path}`)).headers.get("cache-control");
+    expect(await cacheControl("/status/tsl/0")).toBe("public, max-age=60");
+    expect(await cacheControl("/status/bsl/0")).toBe("public, max-age=60");
+    // The lists are valid until an hour after the block time of the tip. 59 s before that time, the refresh interval is not the shorter time any more.
+    h.now = timeAt(1000) + 3_600_000 - 59_000;
+    expect(await cacheControl("/status/tsl/0")).toBe("public, max-age=59");
+    // 20 s before that time, a cache may keep a list for 20 s.
+    h.now = timeAt(1000) + 3_600_000 - 20_000;
+    expect(await cacheControl("/status/tsl/0")).toBe("public, max-age=20");
+    expect(await cacheControl("/status/bsl/0")).toBe("public, max-age=20");
+    // Less than a second before that time, a cache keeps a list for no time.
+    h.now = timeAt(1000) + 3_600_000 - 500;
+    expect(await cacheControl("/status/tsl/0")).toBe("public, max-age=0");
+    expect(await cacheControl("/status/bsl/0")).toBe("public, max-age=0");
+  });
+
   test("a list that does not exist is 404; other paths and methods are refused", async () => {
     const h = await startGateway(ledger());
     const missing = await fetch(`${h.url}/status/tsl/1`);
