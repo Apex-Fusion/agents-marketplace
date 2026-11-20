@@ -260,7 +260,7 @@ describe("an endpoint that answers nothing at the first check", () => {
     for (let i = 0; i < 3; i++) {
       await scheduler.scan();
       await scheduler.idle();
-      net.clock.t = store.get(ID)!.endedAt + Number(recheckDelayMs(store.get(ID)!, DAY_MS));
+      net.clock.t = store.get(ID)!.endedAt + recheckDelayMs(store.get(ID)!, DAY_MS);
     }
     expect(store.get(ID)).toMatchObject({ failedChecks: 3 });
 
@@ -279,6 +279,26 @@ describe("an endpoint that answers nothing at the first check", () => {
     expect(store.get(ID)).toMatchObject({ failedChecks: 0, detection: null });
     net.clock.t = store.get(ID)!.endedAt + 11 * MINUTE;
     expect((await scheduler.scan()).started).toEqual([]);
+  });
+
+  test("repeated checks of two records on one host keep the rule of one fetch each minute for the host", async () => {
+    const net = new FakeNet().host("shared.example.org");
+    const b = new LedgerBuilder();
+    b.register(ID, identityDatum({ endpoint: utf8("https://shared.example.org/one") }), { height: 100 });
+    b.register(idOf("second scheduled agent"), identityDatum({ endpoint: utf8("https://shared.example.org/two") }), { height: 101 });
+    const store = new FactsStore();
+    const scheduler = new FetchScheduler(new VectorResolver(b.chain, b.settings), store, { fetcher: net.fetcher(), txt: net.txt, clock: net.clock, legacyPolicyId: LEGACY.policyId }, { log: () => undefined });
+    for (let pass = 0; pass < 4; pass++) {
+      const before = { at: net.clock.now(), calls: net.calls.length };
+      expect((await scheduler.scan()).started).toHaveLength(2);
+      await scheduler.idle();
+      // Each record makes 5 fetches: four probes and the DID configuration. The test clock advances by each wait of the host limit.
+      const made = net.calls.length - before.calls;
+      expect(made).toBe(10);
+      expect(net.clock.now() - before.at).toBeGreaterThanOrEqual((made - 1) * 60_000);
+      const last = Math.max(...store.ids().map((id) => store.get(id)!.endedAt));
+      net.clock.t = last + 10 * MINUTE * 2 ** pass;
+    }
   });
 
   test("a host that does not resolve is repeated like any other failure", async () => {
