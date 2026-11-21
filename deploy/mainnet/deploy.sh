@@ -9,8 +9,10 @@
 #   1. Fetches origin/main and hard-resets the checkout to it.
 #   2. Diffs old..new to work out which compose projects actually need a
 #      rebuild (gateway vs suppliers vs buyer vs indexer ...). Changes under
-#      packages/, patches/, contracts/ or the root manifests rebuild everything,
-#      because every Dockerfile COPYs those into its build context.
+#      packages/, patches/, the two contracts/*/plutus.json blueprints or the
+#      root manifests rebuild everything, because every Dockerfile COPYs those
+#      into its build context. Test-only paths (see TEST_ONLY_RE) are dropped
+#      from the diff first: a change of tests alone restarts nothing.
 #   3. Builds affected images first (all 17 supplier projects share one
 #      Dockerfile/context, so build #2..#17 are layer-cache hits), THEN does a
 #      rolling `up -d` so the downtime window is restart-only, not build+restart.
@@ -71,11 +73,20 @@ else
   git reset --hard "$NEW"
 fi
 
-CHANGED=$(git diff --name-only "$OLD" "$NEW" || true)
+CHANGED_ALL=$(git diff --name-only "$OLD" "$NEW" || true)
+
+# Test-only paths cannot change a running service: no image runs them. Drop
+# them before the project selection. FORCE=1 still redeploys everything.
+TEST_ONLY_RE='^tests/|(^|/)test/|(^|/)__tests__/|\.(test|spec)\.[cm]?[jt]sx?$|(^|/)tsconfig\.test\.json$|^vitest\.[^/]*$'
+CHANGED=$(printf '%s\n' "$CHANGED_ALL" | grep -vE "$TEST_ONLY_RE" || true)
+TOTAL=$(printf '%s\n' "$CHANGED_ALL" | grep -c . || true)
+IGNORED=$(printf '%s\n' "$CHANGED_ALL" | grep -cE "$TEST_ONLY_RE" || true)
+echo "changed paths: $TOTAL, test-only paths ignored: $IGNORED"
 [ "$FORCE" = "1" ] && [ -z "$CHANGED" ] && CHANGED="(forced)"
 
-# Paths COPY'd into every image's build context (see */Dockerfile).
-SHARED_RE='^(packages/|patches/|contracts/|package\.json$|pnpm-lock\.yaml$|pnpm-workspace\.yaml$|tsconfig\.base\.json$|\.npmrc$)'
+# Paths COPY'd into every image's build context (see */Dockerfile). Below
+# contracts/ the images copy only the two plutus.json blueprints.
+SHARED_RE='^(packages/|patches/|contracts/[^/]+/plutus\.json$|package\.json$|pnpm-lock\.yaml$|pnpm-workspace\.yaml$|tsconfig\.base\.json$|\.npmrc$)'
 
 changed_matches() { # changed_matches <ere> -> 0 if any changed path matches
   [ "$FORCE" = "1" ] && return 0

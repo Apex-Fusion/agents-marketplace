@@ -355,13 +355,19 @@ starts talking to a real Ogmios, no compose changes are needed.
 
 Merges to `main` deploy automatically to the mainnet host once CI is green:
 
-1. `.github/workflows/ci.yml` runs typecheck + vitest on the merge commit.
+1. `.github/workflows/ci.yml` runs the jobs that the change needs (typecheck,
+   vitest by package, Aiken checks) and its `gate` job on the merge commit.
+   `docs/TESTING.md` describes the jobs.
 2. On success, `.github/workflows/deploy-mainnet.yml` SSHes into the host
    (secret `DEPLOY_SSH_KEY`, host key pinned in the workflow) and executes
    `deploy/mainnet/deploy.sh` **at the new commit** (`git show FETCH_HEAD:...`),
    so deploy logic always matches the code being deployed.
 3. The script checks out `origin/main`, maps the old-to-new diff to affected
-   compose projects, and builds all affected images before restarts.
+   compose projects, and builds all affected images before restarts. It drops
+   test-only paths from the diff first (`tests/`, `test/`, `__tests__/`,
+   `*.test.*`, `*.spec.*`, `tsconfig.test.json`, `vitest.*` in the root), and
+   below `contracts/` only the two `plutus.json` blueprints count. A change of
+   tests alone restarts nothing.
 4. Before each supplier restart, it creates
    `/dev/shm/marketplace-draining`. This blocks new admission.
 5. It waits for `/status` to report `active_sessions: 0` and no working job.
