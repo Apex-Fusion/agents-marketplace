@@ -1,0 +1,263 @@
+name: Nightly
+
+# The full run at 02:30 UTC from the default branch: the whole vitest suite with TEST_DEPTH=nightly, the type check of the test
+# files (report only), `aiken check` of both contracts on aiken v1.1.21 (the compiler of the deployed contracts) in 4 shards with
+# one thread each, a new random seed and 100 property iterations, the blueprint diffs, and the check of the CBOR fixtures.
+#
+# The job `plan` skips everything when the head of the branch already has a successful nightly run, and draws the seed.
+# The job `report` opens or updates ONE issue with the label `nightly-failure` (assigned to dcejtlin-apex) when a job failed, and
+# closes it when the run is green. A red nightly run does not stop a deploy. The runners have no `gh`: the report uses
+# scripts/ci/nightly.mjs, which calls the REST API with the token of the run.
+#
+# A manual run (workflow_dispatch) never skips. The design is in docs/TEST-REVISION.md; the commands are in docs/TESTING.md.
+
+on:
+  schedule:
+    - cron: '30 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  actions: read
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: plan
+    runs-on: self-hosted
+    timeout-minutes: 5
+    outputs:
+      skip: ${{ steps.plan.outputs.skip }}
+      seed: ${{ steps.plan.outputs.seed }}
+    steps:
+      - name: Checkout the CI scripts
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts/ci
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Check for a green run of this commit, draw the seed
+        id: plan
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/ci/nightly.mjs plan
+
+  vitest:
+    name: vitest, all files, TEST_DEPTH=nightly (Node 20)
+    needs: plan
+    if: needs.plan.outputs.skip != 'true'
+    runs-on: self-hosted
+    timeout-minutes: 45
+    env:
+      TEST_DEPTH: nightly
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup aiken
+        uses: ./.github/actions/setup-aiken
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.2
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Vitest (pnpm test)
+        env:
+          VITEST_MODE: all
+        run: node scripts/ci/vitest-run.mjs
+
+      - name: Vitest legacy registry scripts
+        run: pnpm exec vitest run --config tests/legacy-registry/vitest.config.ts
+
+      - name: Vitest escrow and advert builder evaluation
+        run: pnpm exec vitest run --config tests/identity-builders/vitest.config.ts
+
+      - name: Vitest vectors, benchmarks and resolver properties
+        run: pnpm exec vitest run --config tests/identity-vectors/vitest.config.ts
+
+      - name: Vitest deployment tool
+        run: pnpm exec vitest run --config tests/identity-deploy/vitest.config.ts
+
+  typecheck-tests:
+    name: type check of the test files (report only)
+    needs: plan
+    if: needs.plan.outputs.skip != 'true'
+    runs-on: self-hosted
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.2
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Report only until phase 4 of docs/TEST-REVISION.md fixed the type errors of the test files. Then remove continue-on-error.
+      # The tsc matcher of setup-node would turn each error line into an annotation: remove it. The job summary has the counts.
+      - name: Typecheck of the test files (report only)
+        continue-on-error: true
+        run: |
+          echo "::remove-matcher owner=tsc::"
+          node scripts/ci/tsc-report.mjs \
+            tests/tsconfig.json \
+            gateway/tsconfig.test.json \
+            paper2agent/tsconfig.test.json \
+            tests/legacy-registry/tsconfig.json \
+            tests/identity-builders/tsconfig.json \
+            tests/identity-vectors/tsconfig.json \
+            tests/identity-deploy/tsconfig.json
+
+  # aiken v1.1.21, the compiler of the deployed contracts. One thread each; the seed is new each night and printed.
+  aiken-check:
+    name: aiken check (shard ${{ matrix.shard }} of 4, v1.1.21)
+    needs: plan
+    if: needs.plan.outputs.skip != 'true'
+    runs-on: self-hosted
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup aiken
+        uses: ./.github/actions/setup-aiken
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Cache aiken packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/aiken/packages
+          key: aiken-packages-${{ hashFiles('contracts/*/aiken.lock') }}
+
+      - name: Aiken check, shard ${{ matrix.shard }} of 4 (seed ${{ needs.plan.outputs.seed }})
+        run: scripts/aiken-check --shard ${{ matrix.shard }} --of 4 --seed ${{ needs.plan.outputs.seed }} --max-success 100
+
+  legacy-contract:
+    name: legacy contract (aiken check, v1.1.21)
+    needs: plan
+    if: needs.plan.outputs.skip != 'true'
+    runs-on: self-hosted
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup aiken
+        uses: ./.github/actions/setup-aiken
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Cache aiken packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/aiken/packages
+          key: aiken-packages-${{ hashFiles('contracts/*/aiken.lock') }}
+
+      - name: Aiken check (contracts/marketplace, seed ${{ needs.plan.outputs.seed }})
+        run: scripts/aiken-check --project contracts/marketplace --all --seed ${{ needs.plan.outputs.seed }} --max-success 100
+
+  blueprints:
+    name: blueprint diffs and CBOR fixtures (v1.1.21)
+    needs: plan
+    if: needs.plan.outputs.skip != 'true'
+    runs-on: self-hosted
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup aiken
+        uses: ./.github/actions/setup-aiken
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Cache aiken packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/aiken/packages
+          key: aiken-packages-${{ hashFiles('contracts/*/aiken.lock') }}
+
+      - name: Aiken build (contracts/identity-marketplace)
+        working-directory: contracts/identity-marketplace
+        run: aiken build
+
+      - name: Committed identity blueprint equals the build
+        working-directory: contracts/identity-marketplace
+        run: git diff --exit-code plutus.json
+
+      - name: Aiken build (contracts/marketplace)
+        working-directory: contracts/marketplace
+        run: aiken build
+
+      - name: Committed legacy blueprint equals the build
+        working-directory: contracts/marketplace
+        run: git diff --exit-code plutus.json
+
+      - name: CBOR fixtures equal the Aiken tests
+        run: node contracts/identity-marketplace/fixtures/generate.mjs --check
+
+  report:
+    name: report
+    if: ${{ always() }}
+    needs: [plan, vitest, typecheck-tests, aiken-check, legacy-contract, blueprints]
+    runs-on: self-hosted
+    timeout-minutes: 10
+    steps:
+      - name: Checkout the CI scripts
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts/ci
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Open, update or close the issue nightly-failure
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          NEEDS: ${{ toJSON(needs) }}
+          SEED: ${{ needs.plan.outputs.seed }}
+          ASSIGNEE: dcejtlin-apex
+        run: node scripts/ci/nightly.mjs report
