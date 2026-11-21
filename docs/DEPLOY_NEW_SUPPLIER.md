@@ -362,7 +362,9 @@ requires `tx:retire-advert` (refunds the advert bond) + a fresh post-advert
 ## 6. Ongoing operations
 
 - **Update**: stop new admission before any restart. Create
-  `/dev/shm/marketplace-draining` in the supplier container. Wait until
+  `/dev/shm/marketplace-draining` in the supplier container. This path is the
+  default of `DRAIN_MARKER_PATH`. Leave that variable unset on a live supplier,
+  because the deploy script and these steps use the default path. Wait until
   `/status` reports `active_sessions: 0` and `status` is `free` or `offline`.
   Treat an unreadable response, an unknown value, or a timeout as failure.
   Leave the old container running. After a successful recreate, the tmpfs

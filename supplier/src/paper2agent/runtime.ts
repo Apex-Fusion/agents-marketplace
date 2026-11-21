@@ -32,6 +32,8 @@ export interface ToolRuntimeDeps {
   agentId?: string;
   /** Default: the chain record lookup and the env identity blueprint (IDENTITY_POLICY_ID). */
   identity?: SupplierIdentity;
+  /** The drain marker (DRAIN_MARKER_PATH): while a file exists there, the runtime refuses new work. */
+  drainMarkerPath: string;
 }
 
 /** The free-call reply: the validated tool output and its measured runtime. */
@@ -40,8 +42,6 @@ export interface ToolCallResult {
   result: JsonObject;
   wallclock_ms: number;
 }
-
-const DRAIN_MARKER_PATH = "/dev/shm/marketplace-draining";
 
 export class ToolAdmissionError extends Error {
   constructor(readonly status: number, readonly reason: string, readonly job?: ToolJob) {
@@ -161,7 +161,7 @@ export class Paper2AgentRuntime {
   }
 
   private async admitJob(refHeader: unknown, body: unknown): Promise<ToolJob> {
-    if (this.closing || existsSync(DRAIN_MARKER_PATH)) throw new ToolAdmissionError(503, "supplier_draining");
+    if (this.closing || existsSync(this.deps.drainMarkerPath)) throw new ToolAdmissionError(503, "supplier_draining");
     const refText = escrowRefText(refHeader);
     const [txHash, indexText] = refText.split("#");
     const escrowRef = { txHash, index: Number(indexText) };
@@ -260,7 +260,7 @@ export class Paper2AgentRuntime {
 
   private async callTool(body: unknown): Promise<ToolCallResult> {
     if (!this.freeCalls) throw new ToolAdmissionError(404, "not_found");
-    if (this.closing || existsSync(DRAIN_MARKER_PATH)) throw new ToolAdmissionError(503, "supplier_draining");
+    if (this.closing || existsSync(this.deps.drainMarkerPath)) throw new ToolAdmissionError(503, "supplier_draining");
     let request;
     try { request = parsePaper2AgentRequest(this.manifest, body); }
     catch { throw new ToolAdmissionError(400, "invalid_tool_request"); }

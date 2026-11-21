@@ -79,7 +79,8 @@ async function main(startHealth: typeof startDecoderHealth = startDecoderHealth)
   const jobs = new JobStore();
   const paper2agent = cfg.capabilityKind === "paper2agent"
     ? await Paper2AgentRuntime.create({ chain, state, supplierKey, networkId: cfg.networkId,
-      advertRef: cfg.advertRef, config: cfg.paper2agent!, agentId: cfg.agentId, identity })
+      advertRef: cfg.advertRef, config: cfg.paper2agent!, agentId: cfg.agentId, identity,
+      drainMarkerPath: cfg.drainMarkerPath })
     : undefined;
   let reseller: ResellerRuntime | undefined;
   if (cfg.reseller) {

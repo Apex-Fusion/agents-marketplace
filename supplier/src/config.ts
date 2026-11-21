@@ -67,6 +67,12 @@
  *                          — periodic wallet self-consolidate tick interval
  *                            (default 600_000 = 10 min). "0" disables the
  *                            ticker. Only fires while LIVE_CHAIN=1.
+ *   DRAIN_MARKER_PATH      — file whose existence makes the supplier refuse new work
+ *                            (503 supplier_draining). Default
+ *                            /dev/shm/marketplace-draining, the file that deploy.sh and
+ *                            the drain procedures create in the container. Production
+ *                            sets nothing; a test host that holds that file sets
+ *                            another path.
  *   AGENT_ID               — the supplier's own agent: 64 lowercase hex characters
  *                            (the identifier that tx:register-record prints). The
  *                            supplier works a new (16-field) escrow only for its own
@@ -93,6 +99,9 @@ const TX_HASH_RE = /^[0-9a-fA-F]{64}$/;
 const NON_NEG_INT_RE = /^(?:0|[1-9]\d*)$/;
 const POS_INT_RE = /^[1-9]\d*$/;
 const USD_RE = /^(?:0|[1-9]\d*)(?:\.\d{1,9})?$/;
+
+/** The drain marker that deploy.sh and the drain procedures create in the container. */
+const DEFAULT_DRAIN_MARKER_PATH = "/dev/shm/marketplace-draining";
 
 /** Lowercased hostname of a URL, or "" if it doesn't parse. */
 function hostnameOf(url: string): string {
@@ -332,6 +341,13 @@ export interface SupplierConfig {
    * Default 600_000 (10 min). Only fires while liveChain=true.
    */
   walletHealthIntervalMs: number;
+  /**
+   * While a file exists at this path, the supplier refuses new work with
+   * 503 supplier_draining. Env: DRAIN_MARKER_PATH. Default
+   * /dev/shm/marketplace-draining: deploy.sh creates that file in the container
+   * before a restart, so production sets nothing.
+   */
+  drainMarkerPath: string;
   /** Optional balance-aware provider resale mode. Null preserves legacy behavior. */
   reseller: ResellerConfig | null;
   paper2agent?: Paper2AgentConfig;
@@ -676,6 +692,9 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
     walletHealthIntervalMs = Number(whIntervalStr);
   }
 
+  // DRAIN_MARKER_PATH — an empty value counts as unset, so the drain gate stays on at the default path.
+  const drainMarkerPath = env.DRAIN_MARKER_PATH || DEFAULT_DRAIN_MARKER_PATH;
+
   const resellerFields = [
     "RESELLER_DATABASE_URL",
     "RESELLER_RESERVE_USD",
@@ -831,6 +850,7 @@ export function loadConfig(env: Record<string, string | undefined>): SupplierCon
     revisionProbeMode,
     liveChain,
     walletHealthIntervalMs,
+    drainMarkerPath,
     reseller,
     paper2agent,
   };

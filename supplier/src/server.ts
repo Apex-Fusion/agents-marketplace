@@ -105,7 +105,6 @@ export interface SupplierDeps {
 
 const ESCROW_REF_RE = /^[0-9a-fA-F]{64}#(?:0|[1-9]\d*)$/;
 const UUID_V4_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/;
-const DRAIN_MARKER_PATH = "/dev/shm/marketplace-draining";
 const RESPONSE_REQUEST_FIELDS: Record<string, true> = {
   input: true,
   instructions: true,
@@ -175,7 +174,7 @@ function makeCapabilityHandler(deps: ResolvedDeps) {
   return async (_req: Request, res: Response, next: NextFunction) => {
     try {
       res.setHeader("Cache-Control", "no-store");
-      if (existsSync(DRAIN_MARKER_PATH)) {
+      if (existsSync(deps.config.drainMarkerPath)) {
         return jsonError(res, 503, "supplier_draining", "supplier is draining");
       }
 
@@ -313,7 +312,7 @@ function makeChatHandler(deps: ResolvedDeps) {
     let evidenceRecorded = false;
     let evidenceEscrowRef: string | null = null;
     try {
-      if (existsSync(DRAIN_MARKER_PATH)) {
+      if (existsSync(deps.config.drainMarkerPath)) {
         return jsonError(res, 503, "supplier_draining", "supplier is draining");
       }
       // ── 1. Header validation ──────────────────────────────────────────
@@ -1320,7 +1319,7 @@ function makeChatSessionHandlers(deps: ResolvedDeps) {
     // record takes ownership) — the catch-all only releases its own.
     let acquiredRef: string | null = null;
     try {
-      if (existsSync(DRAIN_MARKER_PATH)) {
+      if (existsSync(deps.config.drainMarkerPath)) {
         return jsonError(res, 503, "supplier_draining", "supplier is draining");
       }
       // ── 1. Header ───────────────────────────────────────────────────
