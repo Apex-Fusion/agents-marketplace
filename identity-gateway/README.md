@@ -93,7 +93,11 @@ with the values that Koios reports (`/genesis`). If one differs, every resolutio
   a signature at a time reads `versionId`, `updated`, `nextUpdate`, `vectorStatus` (with
   `invalidFrom`) and `vectorLedger` of the answer. `blockHeight` plus `confirmations` of
   `vectorLedger` give the tip of the gateway. The tool `vector_verify_signature_at` of the MCP server
-  does this.
+  does this. A recipe with every step is in
+  [docs/KEY_HISTORY_RECIPE.md](../docs/KEY_HISTORY_RECIPE.md).
+- A 410 carries the result in its body, also the document of an earlier `versionTime`. Some HTTP
+  clients hide that body by default (`axios` throws; Rust `ssi` `HTTPDIDResolver` and DIF
+  `web-did-resolver` drop it). Read the body of the 410 response.
 - `GET /healthz` answers 200 and reads nothing from the ledger.
 
 The gateway writes no request log. It logs errors without the requested DID.
