@@ -1,34 +1,58 @@
 name: Set up aiken
 description: >-
-  Installs the pinned aiken release binary for Linux x86_64
+  Installs a pinned aiken release binary for Linux x86_64
   (https://github.com/aiken-lang/aiken/releases), checks its sha256, caches it
-  and puts it on PATH. contracts/identity-marketplace/aiken.toml pins the same
-  compiler version.
+  and puts it on PATH. contracts/identity-marketplace/aiken.toml pins
+  compiler v1.1.21, the default of this action: the deployed contracts, the
+  blueprint and `aiken tx simulate` use it. v1.1.24 is only for `aiken check`
+  (scripts/aiken-check runs it on a temporary copy with its own compiler line).
 
 inputs:
   version:
-    description: Release tag of aiken-lang/aiken.
+    description: >-
+      Release tag of aiken-lang/aiken. v1.1.21 (default) and v1.1.24 have a
+      checksum in this action. Another tag needs the input sha256.
     default: v1.1.21
   sha256:
-    description: sha256 of aiken-x86_64-unknown-linux-musl.tar.gz of that release.
-    default: 9fe0bb94efbb79f4d351664def3da0d58c7e30716fcb65590ff9b6c6b0ffb715
+    description: >-
+      sha256 of aiken-x86_64-unknown-linux-musl.tar.gz of that release. Leave it
+      empty for v1.1.21 and v1.1.24.
+    default: ""
 
 runs:
   using: composite
   steps:
+    - name: Find the sha256 of the release asset
+      id: pin
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        SHA256: ${{ inputs.sha256 }}
+      run: |
+        set -euo pipefail
+        if [ -z "$SHA256" ]; then
+          # Same value as the file aiken-x86_64-unknown-linux-musl.tar.gz.sha256 of each release.
+          case "$VERSION" in
+            v1.1.21) SHA256=9fe0bb94efbb79f4d351664def3da0d58c7e30716fcb65590ff9b6c6b0ffb715 ;;
+            v1.1.24) SHA256=c378acccdaf9533f3375ea623c948d3dcb21f7e8c5ecbb741162c53653470b13 ;;
+            *) echo "::error::This action has no sha256 for aiken $VERSION. Add it here or pass the input sha256."; exit 1 ;;
+          esac
+        fi
+        echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+
     - name: Restore aiken from the cache
       id: cache
       uses: actions/cache@v4
       with:
         path: ${{ runner.tool_cache }}/aiken/${{ inputs.version }}
-        key: aiken-${{ inputs.version }}-x86_64-unknown-linux-musl-${{ inputs.sha256 }}
+        key: aiken-${{ inputs.version }}-x86_64-unknown-linux-musl-${{ steps.pin.outputs.sha256 }}
 
     - name: Download aiken and check its sha256
       if: steps.cache.outputs.cache-hit != 'true'
       shell: bash
       env:
         VERSION: ${{ inputs.version }}
-        SHA256: ${{ inputs.sha256 }}
+        SHA256: ${{ steps.pin.outputs.sha256 }}
         DEST: ${{ runner.tool_cache }}/aiken/${{ inputs.version }}
       run: |
         set -euo pipefail
