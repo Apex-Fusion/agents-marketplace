@@ -5,11 +5,15 @@
  * It needs Node 20 and no packages. It runs `pnpm`, so run it from the repository root after `pnpm install`.
  *
  * Environment:
- *   VITEST_MODE     "all" runs `pnpm test`. "selected" runs the files of VITEST_FILES.
- *   VITEST_FILES    the selected test files, one on each line.
- *   VITEST_EXCLUDE  test files to leave out, one on each line. The vitest filter is a substring match, so "gateway/test/a.test.ts"
- *                   also matches "identity-gateway/test/a.test.ts": the list names the files that must not run.
- *   VITEST_REPORT   path of the JSON report (default: $RUNNER_TEMP/vitest-result.json).
+ *   VITEST_MODE      "all" runs every test file of the projects. "selected" runs the files of VITEST_FILES.
+ *   VITEST_PROJECTS  the vitest projects to run (vitest.workspace.ts), names separated by spaces, commas or lines, for example
+ *                    "unit ui". Empty: all projects (`pnpm test`).
+ *   VITEST_FILES     the selected test files, one on each line.
+ *   VITEST_EXCLUDE   test files to leave out, one on each line. The vitest filter is a substring match, so "gateway/test/a.test.ts"
+ *                    also matches "identity-gateway/test/a.test.ts": the list names the files that must not run. This script does
+ *                    not read the list: vitest.workspace.ts does. The option `--exclude` of the command line reaches no project of
+ *                    a workspace.
+ *   VITEST_REPORT    path of the JSON report (default: $RUNNER_TEMP/vitest-result.json).
  *
  * The run fails when vitest fails, when it ran no file although the mode asked for tests, or (mode "selected") when the files
  * that ran are not the files of the list. It writes the 10 slowest test files to the job summary ($GITHUB_STEP_SUMMARY).
@@ -22,11 +26,17 @@ import { pathToFileURL } from "node:url";
 
 const lines = (text) => (text ?? "").split("\n").map((line) => line.trim()).filter(Boolean);
 
+/** The names of a list that spaces, commas or lines separate. */
+export const words = (text) => (text ?? "").split(/[\s,]+/).filter(Boolean);
+
 /** The command that runs the tests: [program, arguments]. */
-export function buildCommand(mode, files, exclude, reportPath) {
-  const reporters = ["--reporter=default", "--reporter=json", `--outputFile.json=${reportPath}`];
-  if (mode === "all") return ["pnpm", ["test", ...reporters]];
-  if (mode === "selected") return ["pnpm", ["exec", "vitest", "run", ...files, ...exclude.flatMap((file) => ["--exclude", file]), ...reporters]];
+export function buildCommand(mode, files, reportPath, projects = []) {
+  const flags = [
+    ...projects.flatMap((name) => ["--project", name]),
+    "--reporter=default", "--reporter=json", `--outputFile.json=${reportPath}`,
+  ];
+  if (mode === "all") return ["pnpm", ["test", ...flags]];
+  if (mode === "selected") return ["pnpm", ["exec", "vitest", "run", ...files, ...flags]];
   throw new Error(`VITEST_MODE must be "all" or "selected", not "${mode}"`);
 }
 
@@ -58,11 +68,11 @@ export function slowest(files, count = 10) {
   return [...files].sort((a, b) => b.ms - a.ms || a.path.localeCompare(b.path)).slice(0, count);
 }
 
-export function summaryText(mode, report, files, problems) {
+export function summaryText(mode, report, files, problems, projects = []) {
   const out = [
     "### Vitest",
     "",
-    `Mode: \`${mode}\`. Files run: ${files.length}. Tests: ${report.numPassedTests ?? 0} passed, ${report.numFailedTests ?? 0} failed, ${report.numPendingTests ?? 0} skipped.`,
+    `Mode: \`${mode}\`. Projects: ${projects.length > 0 ? projects.join(", ") : "all"}. Files run: ${files.length}. Tests: ${report.numPassedTests ?? 0} passed, ${report.numFailedTests ?? 0} failed, ${report.numPendingTests ?? 0} skipped.`,
     "",
     "The 10 slowest test files:",
     "",
@@ -77,13 +87,13 @@ export function summaryText(mode, report, files, problems) {
 function main() {
   const mode = process.env.VITEST_MODE ?? "";
   const expected = lines(process.env.VITEST_FILES);
-  const exclude = lines(process.env.VITEST_EXCLUDE);
+  const projects = words(process.env.VITEST_PROJECTS);
   const reportPath = process.env.VITEST_REPORT ?? join(process.env.RUNNER_TEMP ?? tmpdir(), "vitest-result.json");
   if (mode === "selected" && expected.length === 0) {
     console.error("VITEST_MODE is selected but VITEST_FILES is empty");
     process.exit(1);
   }
-  const [program, args] = buildCommand(mode, expected, exclude, reportPath);
+  const [program, args] = buildCommand(mode, expected, reportPath, projects);
   rmSync(reportPath, { force: true });
   console.log(`$ ${program} ${args.join(" ")}`);
   const run = spawnSync(program, args, { stdio: "inherit", env: process.env });
@@ -99,7 +109,7 @@ function main() {
   const report = JSON.parse(readFileSync(reportPath, "utf8"));
   const files = parseReport(report, process.cwd());
   const problems = checkRun(mode, expected, files);
-  const text = summaryText(mode, report, files, problems);
+  const text = summaryText(mode, report, files, problems, projects);
   console.log(text);
   if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, text);
   for (const problem of problems) console.log(`::error::${problem}`);

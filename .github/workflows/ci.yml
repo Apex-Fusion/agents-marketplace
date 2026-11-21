@@ -137,10 +137,12 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # mode all: `pnpm test`. mode selected: the files of the job `changes`. The run fails when it ran no file.
-      - name: Vitest
+      # The projects `unit` and `ui` of vitest.workspace.ts. The project `aiken-eval` runs in the job `aiken-eval`.
+      # mode all: every file of the two projects. mode selected: the files of the job `changes`. The run fails when it ran no file.
+      - name: Vitest (projects unit and ui)
         env:
           VITEST_MODE: ${{ needs.changes.outputs.vitest_mode }}
+          VITEST_PROJECTS: unit ui
           VITEST_FILES: ${{ needs.changes.outputs.vitest_files }}
           VITEST_EXCLUDE: ${{ needs.changes.outputs.vitest_exclude }}
         run: node scripts/ci/vitest-run.mjs
@@ -186,20 +188,18 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Vitest legacy registry scripts
-        run: pnpm exec vitest run --config tests/legacy-registry/vitest.config.ts
-
-      - name: Vitest escrow and advert builder evaluation
-        run: pnpm exec vitest run --config tests/identity-builders/vitest.config.ts
-
-      - name: Vitest vectors, benchmarks and resolver properties
-        run: pnpm exec vitest run --config tests/identity-vectors/vitest.config.ts
-
       - name: Typecheck the deployment tool
         run: pnpm exec tsc -p tests/identity-deploy/tsconfig.json
 
-      - name: Vitest deployment tool (plan, seal and publish transactions, allowlist, resume)
-        run: pnpm exec vitest run --config tests/identity-deploy/vitest.config.ts
+      # The project `aiken-eval` of vitest.workspace.ts: tests/legacy-registry (the deployed legacy registry script and adoption),
+      # tests/identity-builders (escrow and advert with the shared builders), tests/identity-vectors (vectors, benchmarks, resolver
+      # properties) and tests/identity-deploy (the deployment tool: plan, seal and publish transactions, allowlist, resume).
+      # The run fails when it ran no file.
+      - name: Vitest (project aiken-eval)
+        env:
+          VITEST_MODE: all
+          VITEST_PROJECTS: aiken-eval
+        run: node scripts/ci/vitest-run.mjs
 
       - name: CBOR fixtures equal the Aiken tests
         run: node contracts/identity-marketplace/fixtures/generate.mjs --check

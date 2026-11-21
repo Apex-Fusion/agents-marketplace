@@ -79,22 +79,12 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Vitest (pnpm test)
+      # All three projects of vitest.workspace.ts (unit, ui, aiken-eval), with TEST_DEPTH=nightly from the env of the job.
+      # The run fails when it ran no file.
+      - name: Vitest (pnpm test, all projects)
         env:
           VITEST_MODE: all
         run: node scripts/ci/vitest-run.mjs
-
-      - name: Vitest legacy registry scripts
-        run: pnpm exec vitest run --config tests/legacy-registry/vitest.config.ts
-
-      - name: Vitest escrow and advert builder evaluation
-        run: pnpm exec vitest run --config tests/identity-builders/vitest.config.ts
-
-      - name: Vitest vectors, benchmarks and resolver properties
-        run: pnpm exec vitest run --config tests/identity-vectors/vitest.config.ts
-
-      - name: Vitest deployment tool
-        run: pnpm exec vitest run --config tests/identity-deploy/vitest.config.ts
 
   typecheck-tests:
     name: type check of the test files (report only)

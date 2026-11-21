@@ -10,7 +10,7 @@ transaction goes to a network. All keys are throwaway test keys.
 From the repository root (once: `npx -y pnpm@10.33.2 install --frozen-lockfile --prefer-offline`):
 
 ```sh
-npx vitest run --config tests/legacy-registry/vitest.config.ts
+npx vitest run --project aiken-eval tests/legacy-registry/
 ```
 
 - Requirements: `aiken` v1.1.21 on `PATH` (`blueprint.test.ts` checks the version) and Node 20 or later. No network.

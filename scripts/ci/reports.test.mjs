@@ -2,17 +2,26 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { describe as describeErrors, parseErrors, summaryText as tscSummary } from "./tsc-report.mjs";
-import { buildCommand, checkRun, parseReport, slowest, summaryText } from "./vitest-run.mjs";
+import { buildCommand, checkRun, parseReport, slowest, summaryText, words } from "./vitest-run.mjs";
 
-test("buildCommand: all runs `pnpm test`, selected runs the listed files and excludes the others", () => {
-  const [program, args] = buildCommand("all", [], [], "/tmp/r.json");
+test("buildCommand: all runs `pnpm test`, selected runs the listed files, each project is a --project flag", () => {
+  const [program, args] = buildCommand("all", [], "/tmp/r.json");
   assert.equal(program, "pnpm");
   assert.deepEqual(args, ["test", "--reporter=default", "--reporter=json", "--outputFile.json=/tmp/r.json"]);
-  const [, selected] = buildCommand("selected", ["a.test.ts", "b/c.test.ts"], ["x/a.test.ts"], "/tmp/r.json");
+  const [, projects] = buildCommand("all", [], "/tmp/r.json", ["unit", "ui"]);
+  assert.deepEqual(projects, ["test", "--project", "unit", "--project", "ui", "--reporter=default", "--reporter=json", "--outputFile.json=/tmp/r.json"]);
+  const [, selected] = buildCommand("selected", ["a.test.ts", "b/c.test.ts"], "/tmp/r.json", ["unit", "ui"]);
   assert.deepEqual(selected, [
-    "exec", "vitest", "run", "a.test.ts", "b/c.test.ts", "--exclude", "x/a.test.ts", "--reporter=default", "--reporter=json", "--outputFile.json=/tmp/r.json",
+    "exec", "vitest", "run", "a.test.ts", "b/c.test.ts", "--project", "unit", "--project", "ui", "--reporter=default", "--reporter=json", "--outputFile.json=/tmp/r.json",
   ]);
-  assert.throws(() => buildCommand("none", [], [], "/tmp/r.json"), /VITEST_MODE/);
+  assert.throws(() => buildCommand("none", [], "/tmp/r.json"), /VITEST_MODE/);
+});
+
+test("words: names that spaces, commas or lines separate", () => {
+  assert.deepEqual(words("unit ui"), ["unit", "ui"]);
+  assert.deepEqual(words("unit,ui\n aiken-eval "), ["unit", "ui", "aiken-eval"]);
+  assert.deepEqual(words(""), []);
+  assert.deepEqual(words(undefined), []);
 });
 
 test("parseReport: relative paths, durations and test counts", () => {

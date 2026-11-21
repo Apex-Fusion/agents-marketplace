@@ -3,13 +3,15 @@
 #
 # It reads the files that changed against the merge base with origin/main (committed, staged, unstaged and untracked files) and
 # runs three kinds of command through `rx`:
-#   1. vitest on the changed files and on the tests that import them:
-#        rx pnpm exec vitest related --run <changed code files> [always-run tests]
+#   1. vitest on the changed files and on the tests that import them (the projects `unit` and `ui` of vitest.workspace.ts):
+#        rx pnpm exec vitest related --run --project unit --project ui <changed code files> [always-run tests]
 #   2. the typecheck of the source of each changed package:
 #        rx pnpm --filter ./<package> typecheck
 #   3. `aiken check` of each changed Aiken area, with one thread and aiken v1.1.24 (the compiler of the pull request gate):
 #        rx RAYON_NUM_THREADS=1 mise exec github:aiken-lang/aiken@1.1.24 node@20 -- scripts/aiken-check --modules <area>[,<area>]
-# A changed test folder of the 4 aiken vitest configs runs that config. The command line of each step is printed before it runs.
+# A changed file below one of the 4 folders of the project `aiken-eval` runs that project on the changed folders:
+#        rx pnpm exec vitest run --project aiken-eval <folder>...
+# The command line of each step is printed before it runs.
 #
 # It never runs the full suite, and it never runs a test on this computer. When `rx` fails (exit status 125) the command did not
 # run: push the branch and let CI test (docs/TESTING.md). CI runs the same steps by package, and the nightly run runs everything.
@@ -30,7 +32,7 @@ do_aiken=1
 always_run=(tests/unit/decoder-sites.test.ts)
 aiken_version=1.1.24
 
-usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -75,21 +77,21 @@ in_code_roots() { [[ "$1" =~ ^(packages|buyer|gateway|supplier|paper2agent|index
 # ── 1. vitest ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 vitest_files=()
 package_src_changed=0
-eval_configs=()
-add_eval_config() {
-  local config=$1 known
-  for known in "${eval_configs[@]:-}"; do [ "$known" = "$config" ] && return; done
-  eval_configs+=("$config")
+eval_dirs=()
+add_eval_dir() {
+  local dir="$1/" known
+  for known in "${eval_dirs[@]:-}"; do [ "$known" = "$dir" ] && return; done
+  eval_dirs+=("$dir")
 }
 for path in "${existing[@]}"; do
   case "$path" in
     tests/legacy-registry/*|tests/identity-builders/*|tests/identity-vectors/*|tests/identity-deploy/*)
-      add_eval_config "$(echo "$path" | cut -d/ -f1-2)/vitest.config.ts" ;;
-    contracts/identity-marketplace/deploy/*) add_eval_config tests/identity-deploy/vitest.config.ts ;;
-    contracts/identity-marketplace/bench/*) add_eval_config tests/identity-vectors/vitest.config.ts ;;
+      add_eval_dir "$(echo "$path" | cut -d/ -f1-2)" ;;
+    contracts/identity-marketplace/deploy/*) add_eval_dir tests/identity-deploy ;;
+    contracts/identity-marketplace/bench/*) add_eval_dir tests/identity-vectors ;;
   esac
   case "$path" in
-    tests/legacy-registry/*|tests/identity-builders/*|tests/identity-vectors/*|tests/identity-deploy/*) ;; # run by their own config
+    tests/legacy-registry/*|tests/identity-builders/*|tests/identity-vectors/*|tests/identity-deploy/*) ;; # run by the project aiken-eval
     *)
       if is_code "$path" && in_code_roots "$path"; then
         vitest_files+=("$path")
@@ -171,12 +173,10 @@ run_step() { # run_step <name> <command...>
 rx_cmd=(rx "${rx_host[@]}")
 
 if [ "$do_vitest" -eq 1 ] && [ "${#vitest_files[@]}" -gt 0 ]; then
-  run_step "vitest related" "${rx_cmd[@]}" pnpm exec vitest related --run "${vitest_files[@]}"
+  run_step "vitest related" "${rx_cmd[@]}" pnpm exec vitest related --run --project unit --project ui "${vitest_files[@]}"
 fi
-if [ "$do_vitest" -eq 1 ]; then
-  for config in "${eval_configs[@]:-}"; do
-    [ -n "$config" ] && run_step "vitest $config" "${rx_cmd[@]}" pnpm exec vitest run --config "$config"
-  done
+if [ "$do_vitest" -eq 1 ] && [ "${#eval_dirs[@]}" -gt 0 ]; then
+  run_step "vitest aiken-eval ${eval_dirs[*]}" "${rx_cmd[@]}" pnpm exec vitest run --project aiken-eval "${eval_dirs[@]}"
 fi
 if [ "$do_typecheck" -eq 1 ] && [ "${#packages[@]}" -gt 0 ]; then
   filters=()
