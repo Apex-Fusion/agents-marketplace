@@ -98,11 +98,33 @@ export const statusValue = (effective: EffectiveStatus): StatusValue =>
 /** Where an index is: list n, position p. */
 export const listPosition = (index: number): { n: number; p: number } => ({ n: Math.floor(index / LIST_SIZE), p: index % LIST_SIZE });
 
+/**
+ * Calls `use(p, v)` for each entry `v` of `values` that is not zero, with its position `p`, in the
+ * order of the positions. A full list has 131,072 entries and almost all of them are zero. The scan
+ * reads 16 entries at a time, as 4 words of 32 bits, and skips each group that is zero. It reads
+ * each entry of the other groups.
+ */
+function eachNonZero(values: Uint8Array, use: (p: number, v: number) => void): void {
+  const { length } = values;
+  let p = 0;
+  // A view of 32-bit words needs an offset that is a multiple of 4. Else the last loop reads each entry.
+  if (values.byteOffset % 4 === 0) {
+    const groups = Math.floor(length / 16);
+    const words = new Uint32Array(values.buffer, values.byteOffset, 4 * groups);
+    for (let g = 0; g < groups; g++) {
+      if ((words[4 * g]! | words[4 * g + 1]! | words[4 * g + 2]! | words[4 * g + 3]!) === 0) continue;
+      for (let q = 16 * g; q < 16 * g + 16; q++) if (values[q] !== 0) use(q, values[q]!);
+    }
+    p = 16 * groups;
+  }
+  for (; p < length; p++) if (values[p] !== 0) use(p, values[p]!);
+}
+
 /** The uncompressed Token Status List byte array: 2 bits per entry, entry 0 in the least significant bits of byte 0. */
 export function tokenStatusBytes(values: Uint8Array): Buffer {
   const bytes = Buffer.alloc((LIST_SIZE * 2) / 8);
-  values.forEach((v, p) => {
-    if (v !== 0) bytes[p >> 2]! |= (v & 0b11) << ((p & 3) * 2);
+  eachNonZero(values, (p, v) => {
+    bytes[p >> 2]! |= (v & 0b11) << ((p & 3) * 2);
   });
   return bytes;
 }
@@ -113,7 +135,7 @@ export function bitstring(values: Uint8Array): Buffer {
   const set = (i: number): void => {
     bits[i >> 3]! |= 0x80 >> (i & 7);
   };
-  values.forEach((v, p) => {
+  eachNonZero(values, (p, v) => {
     if (v === STATUS.invalid) set(p);
     else if (v === STATUS.suspended) set(LIST_SIZE + p);
   });
