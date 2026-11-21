@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { ALWAYS_RUN, analyse, buildGraph, isAikenTest, isDoc, isRootTest, isTestPath, lineClass, outputs } from "./changes.mjs";
+import { ALWAYS_RUN, analyse, buildGraph, isAikenTest, isDoc, isTestPath, isUnitUiTest, lineClass, outputs } from "./changes.mjs";
 
 const pkg = (name, deps = {}, exports = undefined) => JSON.stringify({ name, dependencies: deps, ...(exports ? { exports } : {}) });
 
@@ -15,6 +15,7 @@ const TREE = {
   "pnpm-workspace.yaml": 'packages:\n  - "packages/*"\n  - "buyer"\n  - "gateway"\n  - "identity-gateway"\n  - "indexer-ui"\n\nonlyBuiltDependencies:\n  - better-sqlite3\n',
   "package.json": "{}",
   "vitest.config.ts": "export default {};",
+  "vitest.workspace.ts": "export default [];",
   "tests/setup.ts": "",
   "packages/shared/package.json": pkg("@marketplace/shared", {}, { ".": "./src/index.ts", "./tx": "./src/tx/index.ts" }),
   "packages/shared/src/index.ts": 'export * from "./util.js";\n',
@@ -167,7 +168,7 @@ test("a change of the CI files selects every job; a change of the root config se
     assert.equal(result.vitestMode, "all", path);
     assert.deepEqual([result.runTypecheck, result.aikenEval, result.contractsIdentity, result.contractsLegacy], [true, true, true, true], path);
   }
-  for (const path of ["package.json", "vitest.config.ts", "tests/setup.ts", "tests/identity-deploy/vitest.config.ts", "pnpm-lock.yaml", "tsconfig.base.json", "patches/x.patch"]) {
+  for (const path of ["package.json", "vitest.config.ts", "vitest.workspace.ts", "tests/setup.ts", "pnpm-lock.yaml", "tsconfig.base.json", "patches/x.patch"]) {
     const result = run([path]);
     assert.equal(result.vitestMode, "all", path);
     assert.equal(result.aikenEval, true, path);
@@ -175,7 +176,7 @@ test("a change of the CI files selects every job; a change of the root config se
   }
 });
 
-test("a change of a test of the 4 folders runs the job aiken-eval and no root test but the always-run list", () => {
+test("a change of a test of the 4 folders runs the job aiken-eval and no test of the projects unit and ui but the always-run list", () => {
   const result = run(["tests/legacy-registry/x.test.ts"]);
   assert.equal(result.aikenEval, true);
   assert.deepEqual(result.vitestFiles, ["tests/unit/decoder-sites.test.ts"]);
@@ -211,7 +212,7 @@ test("a package export with a star maps the subpath of an import to the file (ea
 
 test("path classes", () => {
   // The test-only rule is the one of deploy/mainnet/deploy.sh (TEST_ONLY_RE).
-  for (const path of ["tests/unit/a.ts", "gateway/test/x.ts", "supplier/src/__tests__/a.ts", "packages/shared/src/a.test.ts", "buyer/src/ui/A.test.tsx", "gateway/tsconfig.test.json", "vitest.config.ts", "tests/tsconfig.json"]) {
+  for (const path of ["tests/unit/a.ts", "gateway/test/x.ts", "supplier/src/__tests__/a.ts", "packages/shared/src/a.test.ts", "buyer/src/ui/A.test.tsx", "gateway/tsconfig.test.json", "vitest.config.ts", "vitest.workspace.ts", "tests/tsconfig.json"]) {
     assert.equal(isTestPath(path), true, path);
   }
   for (const path of ["gateway/src/contest.ts", "supplier/src/attest/a.ts", "contracts/identity-marketplace/lib/a.ak", "packages/shared/src/tx/index.ts", ".github/workflows/ci.yml", "tsconfig.base.json"]) {
@@ -234,13 +235,21 @@ test("path classes", () => {
   assert.equal(lineClass("pnpm-lock.yaml"), "other");
   assert.equal(lineClass("docs/a.md"), "other");
   assert.equal(lineClass("tests/fixtures/golden/x.hex"), "other");
-  // The root vitest config runs these.
-  assert.equal(isRootTest("tests/unit/a.test.tsx"), true);
-  assert.equal(isRootTest("gateway/test/a.test.ts"), true);
-  assert.equal(isRootTest("gateway/test/a.test.tsx"), false);
-  assert.equal(isRootTest("tests/legacy-registry/a.test.ts"), false);
-  assert.equal(isRootTest("scripts/ci/gate.test.mjs"), false);
-  assert.equal(isRootTest("indexer-ui/src/a.test.ts"), false);
+  // The projects unit and ui run these. The folders are the ones of vitest.workspace.ts.
+  assert.equal(isUnitUiTest("tests/unit/a.test.ts"), true);
+  assert.equal(isUnitUiTest("tests/unit/a.test.tsx"), true);
+  assert.equal(isUnitUiTest("gateway/test/a.test.ts"), true);
+  assert.equal(isUnitUiTest("identity-gateway/test/a.test.ts"), true);
+  assert.equal(isUnitUiTest("packages/shared/src/a.test.ts"), true);
+  assert.equal(isUnitUiTest("paper2agent/test/a.test.ts"), true);
+  assert.equal(isUnitUiTest("gateway/test/a.test.tsx"), false);
+  assert.equal(isUnitUiTest("tests/legacy-registry/a.test.ts"), false);
+  assert.equal(isUnitUiTest("scripts/ci/gate.test.mjs"), false);
+  assert.equal(isUnitUiTest("indexer-ui/src/a.test.ts"), false);
+  // The folders that no test file uses are not in the projects: buyer, supplier, indexer, tests/ogmios, tests/lifecycle.
+  for (const path of ["buyer/src/a.test.ts", "buyer/src/ui/A.test.tsx", "supplier/src/a.test.ts", "indexer/src/a.test.ts", "tests/ogmios/a.test.ts", "tests/lifecycle/a.test.ts"]) {
+    assert.equal(isUnitUiTest(path), false, path);
+  }
 });
 
 test("the command line writes GITHUB_OUTPUT in the delimiter form for the lists", () => {

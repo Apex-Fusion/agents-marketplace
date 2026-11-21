@@ -1,6 +1,6 @@
 # Testing and CI
 
-This file lists the tiers, the commands, the selection rule of the gate, the Aiken shards, the coverage guard and the nightly run.
+This file lists the tiers, the commands, the vitest projects, the test depth, the selection rule of the gate, the Aiken shards, the coverage guard and the nightly run.
 The rules for agents are in `AGENTS.md`. The reasons for each choice are in `docs/TEST-REVISION.md`.
 
 ## 1. Tiers
@@ -22,7 +22,10 @@ All commands that load the CPU run on a build host through `rx` (`rx --help`).
 |---|---|
 | The tests, the typecheck and the Aiken area that your change reaches | `scripts/test-changed` (add `--dry-run` to see the commands) |
 | One test file | `rx pnpm exec vitest run tests/unit/<file>.test.ts` |
-| The tests that import one source file | `rx pnpm exec vitest related --run <source file>` |
+| The tests that import one source file | `rx pnpm exec vitest related --run --project unit --project ui <source file>` |
+| One vitest project | `rx pnpm exec vitest run --project unit` (also `ui`, `aiken-eval`; section "Vitest projects") |
+| The 4 Aiken folders, or one of them | `rx pnpm exec vitest run --project aiken-eval [tests/identity-deploy/]` |
+| The deep variants of a test file | `rx TEST_DEPTH=nightly pnpm exec vitest run <file>` (section "Test depth") |
 | The typecheck of one package | `rx pnpm --filter ./<package folder> typecheck` |
 | The typecheck of all source | `rx pnpm -r typecheck` |
 | The typecheck of the test files (report only) | `rx node scripts/ci/tsc-report.mjs tests/tsconfig.json gateway/tsconfig.test.json paper2agent/tsconfig.test.json` |
@@ -34,6 +37,51 @@ All commands that load the CPU run on a build host through `rx` (`rx --help`).
 | The tests of the CI scripts | `rx node --test scripts/ci/*.test.mjs` |
 | Coverage before and after a pruning change | `scripts/coverage-diff` (section 7) |
 
+### Vitest projects
+
+`vitest.workspace.ts` defines three projects. `pnpm test` (`vitest run`) runs all three. `vitest.config.ts` holds only the options of
+the whole run (`passWithNoTests`, `cacheDir`): vitest 2 gives a project none of its options.
+
+| Project | Test files | Environment | Time limit of a test | Needs |
+|---|---|---|---|---|
+| `unit` | The `.test.ts` files of `tests/unit`, `packages`, `gateway`, `paper2agent` and `identity-gateway` | Node | 20 s (the first transaction build of a worker loads the lucid WASM) | `aiken` v1.1.21 on `PATH` for `tests/unit/identity-tx-*.test.ts` and `tests/unit/paper2agent-identity-e2e.test.ts` |
+| `ui` | The `.test.tsx` files of `tests/unit` | happy-dom | 20 s | `tests/setup.ts` loads the matchers of jest-dom. No other project loads it. |
+| `aiken-eval` | `tests/legacy-registry`, `tests/identity-builders`, `tests/identity-vectors`, `tests/identity-deploy` | Node | 300 s | `aiken` v1.1.21 on `PATH`, no network |
+
+Run one project with `--project <name>`. Repeat the flag for more projects. A path filter works across the projects, so
+`vitest run tests/identity-deploy/` runs that folder and needs no `--config`. The job `vitest` of the gate runs `unit` and `ui`.
+The job `aiken-eval` runs `aiken-eval`. The nightly run runs all three.
+
+A new test folder needs entries in three places: the `include` of its project in `vitest.workspace.ts`, `UNIT_UI_TEST_ROOTS` or
+`EVAL_DIRS` in `scripts/ci/changes.mjs`, and, for `aiken-eval`, the cases of `scripts/test-changed`. A test file outside these folders
+runs in no project. The alias block of the lucid entry points is in `vitest.workspace.ts`, once.
+
+### Test depth
+
+A deep variant of a test (bigger data, more property runs) runs only at night. `.github/workflows/nightly.yml` sets
+`TEST_DEPTH=nightly`. No other run sets it. `tests/depth.ts` exports `nightly`, which is true when `TEST_DEPTH=nightly`:
+
+```ts
+import { nightly } from "../depth"; // from a file in tests/unit; the path depends on the folder of the test
+
+const runs = nightly ? 1_000 : 100; // an example: the deep number only at night
+```
+
+Rules:
+
+- Deep sizes and more property runs belong to the night only. The pull request and the agent loop run the small variant, which
+  checks the same rule with a few cases.
+- Each property test prints its seed and gives the same seed to `fc.assert`. The log of a red night run then names the seed. To
+  repeat the run, put that seed in the options of `fc.assert`:
+
+  ```ts
+  const seed = Date.now();
+  console.info(`seed ${seed}`);
+  await fc.assert(property, { seed, numRuns: nightly ? 1_000 : 100 });
+  ```
+
+- Run the deep variants of one file on a build host with `rx TEST_DEPTH=nightly pnpm exec vitest run <file>`.
+
 ## 3. The pull request gate
 
 The workflow `CI` has the same triggers as before: a push on `main`, and each pull request. The jobs:
@@ -42,8 +90,8 @@ The workflow `CI` has the same triggers as before: a push on `main`, and each pu
 |---|---|---|
 | `changes` | Always | Lists the changed files (the pull request from the merge base to the head, a push from `before` to the new commit; every file when `before` is missing). Runs `scripts/ci/changes.mjs`. Tests the CI scripts first. |
 | `typecheck` | The change is not docs only | `pnpm -r typecheck` (blocking). Then the type check of the test files in report mode: `tests/tsconfig.json`, `gateway/tsconfig.test.json`, `paper2agent/tsconfig.test.json` and three folder configs. The error count of each config is in the job summary. |
-| `vitest` | The selection is not empty | The selected test files, or `pnpm test` when the selection is `all`. Fails when it runs no file. The 10 slowest test files are in the job summary. |
-| `aiken-eval` | `contracts/identity-marketplace/` changed, or a file that the tests of the 4 aiken vitest folders reach | `aiken build` with the blueprint diff, the 4 aiken vitest configs, `tsc -p tests/identity-deploy/tsconfig.json`, and `fixtures/generate.mjs --check`. Aiken v1.1.21. |
+| `vitest` | The selection is not empty | The projects `unit` and `ui`: the selected test files, or every file of the two projects when the selection is `all`. Fails when it runs no file. The 10 slowest test files are in the job summary. |
+| `aiken-eval` | `contracts/identity-marketplace/` changed, or a file that the tests of the project `aiken-eval` reach | `aiken build` with the blueprint diff, the project `aiken-eval` (the 4 folders, one run, the 10 slowest files in the job summary), `tsc -p tests/identity-deploy/tsconfig.json`, and `fixtures/generate.mjs --check`. Aiken v1.1.21. |
 | `aiken-check` | The identity contract changed, or the Aiken tool changed | 4 shards of `scripts/aiken-check`, aiken v1.1.24, one fixed seed. |
 | `legacy-contract` | `contracts/marketplace/` changed, or the Aiken tool changed | `scripts/aiken-check --project contracts/marketplace --all` on aiken v1.1.24, then `aiken build` on v1.1.21 with the blueprint diff (a v1.1.21 build equals the committed `plutus.json` byte for byte). |
 | `gate` | Always (`if: always()`) | Reads the result of each job (`scripts/ci/gate.mjs`). |
@@ -73,21 +121,22 @@ the graph follows each quoted text that names a file or a folder of the reposito
    text, so no import reaches it).
 6. A change below `contracts/identity-marketplace/` also selects the test files that read the blueprints
    (`contracts/*/plutus.json`) or `fixtures/cbor-fixtures.json` themselves. A change of a blueprint selects each test that reaches it.
-7. A change of the root build or test config selects everything (`pnpm test`): `package.json`, `pnpm-lock.yaml`,
-   `pnpm-workspace.yaml`, `tsconfig.base.json`, `.npmrc`, `.nvmrc`, `patches/**`, any vitest config, `tests/setup.ts`. A change of
-   `.github/**` or `scripts/ci/**` selects everything and switches on every job.
+7. A change of the root build or test config selects everything (`all`): `package.json`, `pnpm-lock.yaml`,
+   `pnpm-workspace.yaml`, `tsconfig.base.json`, `.npmrc`, `.nvmrc`, `patches/**`, any `vitest.*` file (`vitest.config.ts`,
+   `vitest.workspace.ts`), `tests/setup.ts`. A change of `.github/**` or `scripts/ci/**` selects everything and switches on every job.
 8. A change of documents only (`*.md`, `docs/**`, images, `LICENSE`) selects nothing and runs no job. A document that a test names
    by its path is not "documents only".
 
 The vitest filter is a substring match on the path: `gateway/test/http.test.ts` also matches `identity-gateway/test/http.test.ts`.
-`changes.mjs` lists the files that the filter would add by mistake in `vitest_exclude`, and `scripts/ci/vitest-run.mjs` passes them
-as `--exclude`. The run fails when the files that ran are not exactly the selected files.
+`changes.mjs` lists the files that the filter would add by mistake in `vitest_exclude`. `scripts/ci/vitest-run.mjs` gives the list
+to the run in the variable `VITEST_EXCLUDE`, and `vitest.workspace.ts` reads it (the option `--exclude` of the command line reaches
+no project of a workspace). The run fails when the files that ran are not exactly the selected files.
 
 Known gap (design risk 1): a test that depends on a package without an import (a file that a path built from parts names, a process
 that it starts) can miss the gate. The nightly run finds it. Add the test to the always-run list in `scripts/ci/changes.mjs`
 (`ALWAYS_RUN`) when it must never miss.
 
-Other jobs, same rule: `aiken-eval` also runs when a file that the tests of the 4 aiken vitest folders reach changes (for example
+Other jobs, same rule: `aiken-eval` also runs when a file that the tests of the project `aiken-eval` reach changes (for example
 `packages/shared/src/**`, `identity-gateway/src/**`). `aiken-check` runs for `contracts/identity-marketplace/{lib,validators}/**`,
 `aiken.toml`, `aiken.lock`, `plutus.json`, `aiken-shards.json`, `scripts/aiken-check`. `legacy-contract` runs for
 `contracts/marketplace/**` and for the same tool files.
@@ -102,7 +151,7 @@ Other jobs, same rule: `aiken-eval` also runs when a file that the tests of the 
 
 | Use | Compiler | Where |
 |---|---|---|
-| `aiken build`, the blueprint diffs, `fixtures/generate.mjs`, `aiken tx simulate` (the 4 vitest folders and 7 root tests), the nightly `aiken check` | v1.1.21 (the compiler of the deployed contracts; `compiler = "v1.1.21"` in both `aiken.toml` files) | `aiken-eval`, `vitest`, nightly |
+| `aiken build`, the blueprint diffs, `fixtures/generate.mjs`, `aiken tx simulate` (the project `aiken-eval` and 7 test files of the project `unit`), the nightly `aiken check` | v1.1.21 (the compiler of the deployed contracts; `compiler = "v1.1.21"` in both `aiken.toml` files) | `aiken-eval`, `vitest`, nightly |
 | `aiken check` in the gate and in the agent loop | v1.1.24, on a temporary copy of the project whose `aiken.toml` says `compiler = "v1.1.24"` | `aiken-check`, `legacy-contract`, `scripts/test-changed` |
 
 v1.1.24 compiles other code for 6 of the 8 validators of the identity project. So its `aiken check` is a faster check of the same
@@ -140,7 +189,7 @@ it, and puts it in the issue. To repeat a night: run the same shard with that se
 `.github/workflows/nightly.yml` runs at 02:30 UTC from the default branch, and by hand (`workflow_dispatch`, never skipped).
 The job `plan` skips the run when the head of the branch already has a successful nightly run, and draws the seed. The jobs:
 
-- `vitest`: `pnpm test` and the 4 aiken configs, with `TEST_DEPTH=nightly` (deep variants, used from phase 2);
+- `vitest`: `pnpm test` (the three projects `unit`, `ui` and `aiken-eval`), with `TEST_DEPTH=nightly` (the deep variants of "Test depth");
 - `typecheck-tests`: the type check of the test files, report only;
 - `aiken-check`: 4 shards on aiken v1.1.21, one thread, the seed of the night, `--max-success 100`;
 - `legacy-contract`: the legacy contract on v1.1.21;
@@ -169,7 +218,8 @@ scripts/coverage-diff --base <ref> --md-out table.md --json-out result.json
 ```
 
 Put the table in the text of the pull request. The script needs `rx` and a git worktree. It runs the same v8 coverage of the default
-suite twice: on a temporary worktree of the base commit, and on the head (the worktree with its uncommitted changes). With two answering
+suite (the projects `unit` and `ui`; the base commit needs `vitest.workspace.ts`) twice: on a temporary worktree of the base commit,
+and on the head (the worktree with its uncommitted changes). With two answering
 build hosts the runs go at the same time; `--host NAME` runs both one after the other on one host. A file lost coverage when, for lines
 or for branches, the percentage fell by more than `--epsilon` (default 0.005 points) AND the file has more uncovered items than
 before: the v8 provider changes the branch count of a file by a few between two runs of the same code, so a fall with no new

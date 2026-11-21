@@ -16,11 +16,11 @@
  * Outputs (all strings):
  *   docs_only           "true" when no changed path can change a test or a build.
  *   run_typecheck       "true" for any change that is not docs only.
- *   vitest_mode         "none", "all" (`pnpm test`) or "selected" (the files of vitest_files).
+ *   vitest_mode         "none", "all" (every test file of the projects unit and ui) or "selected" (the files of vitest_files).
  *   vitest_count        number of selected files.
  *   vitest_files        the selected test files, one on each line.
  *   vitest_exclude      test files that the substring filter of vitest would add by mistake, one on each line.
- *   aiken_eval          "true" when the job `aiken-eval` runs (blueprint build, the 4 vitest folders, generator check).
+ *   aiken_eval          "true" when the job `aiken-eval` runs (blueprint build, the vitest project aiken-eval, generator check).
  *   contracts_identity  "true" when the job `aiken-check` runs (aiken tests of contracts/identity-marketplace).
  *   contracts_legacy    "true" when the job `legacy-contract` runs (contracts/marketplace).
  *   test_lines, source_lines   added lines of test code and of source code (git numstat; 0 without git).
@@ -49,13 +49,12 @@ import { pathToFileURL } from "node:url";
 /** Test files that run with every selection. They scan the text of the repository, so no import reaches them. */
 export const ALWAYS_RUN = ["tests/unit/decoder-sites.test.ts"];
 
-/** Folders that have their own vitest config. The job `aiken-eval` runs them; the root config does not. */
+/** The folders of the vitest project `aiken-eval` (vitest.workspace.ts). The job `aiken-eval` runs them; the projects `unit` and `ui` do not. */
 export const EVAL_DIRS = ["tests/legacy-registry", "tests/identity-builders", "tests/identity-vectors", "tests/identity-deploy"];
 
-/** Where the root vitest config looks for tests: a folder prefix and the extensions of its test files. */
-const ROOT_TEST_ROOTS = [
-  ["tests/unit/", "tsx"], ["tests/ogmios/", "ts"], ["tests/lifecycle/", "ts"], ["packages/", "ts"], ["buyer/", "tsx"],
-  ["gateway/", "ts"], ["supplier/", "ts"], ["paper2agent/", "ts"], ["indexer/", "ts"], ["identity-gateway/", "ts"],
+/** Where the projects `unit` and `ui` (vitest.workspace.ts) look for tests: a folder prefix and the extensions of its test files. */
+const UNIT_UI_TEST_ROOTS = [
+  ["tests/unit/", "tsx"], ["packages/", "ts"], ["gateway/", "ts"], ["paper2agent/", "ts"], ["identity-gateway/", "ts"],
 ];
 
 /** A change below these paths selects the test files that read the listed data files. */
@@ -70,7 +69,7 @@ const CONTRACT_READERS = [
   { when: /^contracts\/marketplace\//, reads: ["contracts/marketplace/plutus.json"] },
 ];
 
-/** A change of one of these selects all tests (and the typecheck and the jobs of the 4 vitest folders). */
+/** A change of one of these selects all tests (and the typecheck and the job aiken-eval). */
 const ROOT_CONFIG_RES = [
   /^package\.json$/, /^pnpm-lock\.yaml$/, /^pnpm-workspace\.yaml$/, /^tsconfig\.base\.json$/, /^\.npmrc$/, /^\.nvmrc$/, /^patches\//,
   /(^|\/)vitest\.[^/]+$/, /^tests\/setup\.ts$/,
@@ -116,11 +115,11 @@ export function lineClass(path) {
   return isTestPath(path) || isAikenTest(path) ? "test" : "source";
 }
 
-/** True when the root vitest config (`pnpm test`) runs the file. */
-export function isRootTest(path) {
+/** True when the projects `unit` and `ui` (the job `vitest`) run the file. */
+export function isUnitUiTest(path) {
   if (path.includes("/node_modules/") || path.includes("/dist/")) return false;
   if (EVAL_DIRS.some((dir) => path.startsWith(`${dir}/`))) return false;
-  const root = ROOT_TEST_ROOTS.find(([prefix]) => path.startsWith(prefix));
+  const root = UNIT_UI_TEST_ROOTS.find(([prefix]) => path.startsWith(prefix));
   if (root === undefined) return false;
   return root[1] === "tsx" ? /\.(?:test|spec)\.tsx?$/.test(path) : /\.(?:test|spec)\.ts$/.test(path);
 }
@@ -350,8 +349,8 @@ export function analyse({ changed: changedInput, files, read, lines = { test: 0,
   const graph = buildGraph(files, read);
   const changed = [...new Set(changedInput.filter((path) => path !== ""))].sort();
   const present = changed.filter((path) => graph.fileSet.has(path));
-  const rootTests = files.filter(isRootTest).sort();
-  const rootTestSet = new Set(rootTests);
+  const unitUiTests = files.filter(isUnitUiTest).sort();
+  const unitUiTestSet = new Set(unitUiTests);
   const reasons = new Map();
   const why = (test, reason) => {
     if (!reasons.has(test)) reasons.set(test, new Set());
@@ -366,7 +365,7 @@ export function analyse({ changed: changedInput, files, read, lines = { test: 0,
 
   // A document that a test names (by its path) is not "docs only": that test must run.
   const docReaders = new Set();
-  for (const path of changed.filter(isDoc)) for (const test of rootTests) if (graph.reads(test, path)) docReaders.add(test);
+  for (const path of changed.filter(isDoc)) for (const test of unitUiTests) if (graph.reads(test, path)) docReaders.add(test);
   const docsOnly = code.length === 0 && docReaders.size === 0;
 
   const result = {
@@ -412,7 +411,7 @@ export function analyse({ changed: changedInput, files, read, lines = { test: 0,
   result.packagesChanged = [...changedPackages].sort();
   result.packagesSelected = [...selectedPackages].sort();
 
-  for (const test of rootTests) {
+  for (const test of unitUiTests) {
     // 2. the import graph reaches a source file of a selected package, or a changed path
     for (const file of graph.reach(test).files) {
       const pkg = graph.packageOf(file);
@@ -426,21 +425,21 @@ export function analyse({ changed: changedInput, files, read, lines = { test: 0,
     for (const dir of selectedPackages) if (test.startsWith(`${dir}/`)) why(test, `test of ${dir}`);
   }
   // 4. changed test files
-  for (const path of present) if (rootTestSet.has(path)) why(path, "changed");
+  for (const path of present) if (unitUiTestSet.has(path)) why(path, "changed");
   // 5. the always-run list
-  for (const test of ALWAYS_RUN) if (rootTestSet.has(test)) why(test, "always");
+  for (const test of ALWAYS_RUN) if (unitUiTestSet.has(test)) why(test, "always");
   // 6. the test files that read the blueprints and the CBOR fixtures themselves
   for (const { when, reads } of CONTRACT_READERS) {
     if (!touches(when)) continue;
-    for (const test of rootTests) for (const data of reads) if (graph.reads(test, data, true)) why(test, `reads ${data}`);
+    for (const test of unitUiTests) for (const data of reads) if (graph.reads(test, data, true)) why(test, `reads ${data}`);
   }
 
-  result.vitestFiles = [...reasons.keys()].filter((test) => rootTestSet.has(test)).sort();
+  result.vitestFiles = [...reasons.keys()].filter((test) => unitUiTestSet.has(test)).sort();
   result.vitestMode = result.vitestFiles.length > 0 ? "selected" : "none";
   // The filter of vitest is a substring match on the path: "gateway/test/a.test.ts" also matches "identity-gateway/test/a.test.ts".
   const chosen = new Set(result.vitestFiles);
   const lower = result.vitestFiles.map((file) => file.toLowerCase());
-  result.vitestExclude = rootTests.filter((test) => !chosen.has(test) && lower.some((file) => test.toLowerCase().includes(file)));
+  result.vitestExclude = unitUiTests.filter((test) => !chosen.has(test) && lower.some((file) => test.toLowerCase().includes(file)));
   return finish(result, reasons);
 }
 

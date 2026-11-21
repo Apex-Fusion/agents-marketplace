@@ -14,5 +14,5 @@
       "@lucid-evolution/plutus": ["../packages/shared/node_modules/@lucid-evolution/plutus"]
     }
   },
-  "include": ["unit/**/*.ts", "unit/**/*.tsx", "fixtures/**/*.ts", "setup.ts"]
+  "include": ["unit/**/*.ts", "unit/**/*.tsx", "fixtures/**/*.ts", "setup.ts", "depth.ts"]
 }

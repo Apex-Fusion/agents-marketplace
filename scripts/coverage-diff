@@ -2,9 +2,10 @@
 // scripts/coverage-diff: compare the line and branch coverage of a base commit and the head.
 //
 // The head is the current worktree, with the uncommitted changes. The base is a temporary git
-// worktree of the base commit. Each side runs the default test suite with the v8 coverage
-// provider on a build host (`rx`) and writes one coverage-summary.json. The script compares the
-// two summaries file by file and prints a markdown table for the text of a pull request.
+// worktree of the base commit. Each side runs the default test suite (the vitest projects `unit`
+// and `ui`) with the v8 coverage provider on a build host (`rx`) and writes one
+// coverage-summary.json. The script compares the two summaries file by file and prints a markdown
+// table for the text of a pull request.
 //
 // A guarded file is a source file of tests/coverage-guard.json (money, signature, key and
 // chain decoding code). When a guarded file loses line or branch coverage, the script exits 1.
@@ -39,10 +40,12 @@ const TOP_DROPS = 15;
 const RUN_TIMEOUT_MS = 30 * 60 * 1000;
 const WORK_DIR = ".vitest-cache/coverage-diff";
 
-// The coverage run. It must stay the same on both sides.
+// The coverage run. It must stay the same on both sides. The projects `unit` and `ui` are the tests that `pnpm test` ran before
+// the project `aiken-eval` was part of it; the project `aiken-eval` needs aiken on PATH. A base commit that has no
+// vitest.workspace.ts has no such projects: the run on that side finds no test file.
 const COVERAGE_INCLUDE = ["*/src/**", "packages/shared/src/**"];
 const COVERAGE_COMMAND = [
-  "pnpm", "exec", "vitest", "run",
+  "pnpm", "exec", "vitest", "run", "--project", "unit", "--project", "ui",
   "--coverage", "--coverage.provider=v8", "--coverage.reporter=json-summary",
   ...COVERAGE_INCLUDE.map((pattern) => `--coverage.include=${pattern}`),
 ];
@@ -50,7 +53,7 @@ const INCLUDED_PATH = /^(?:[^/]+|packages\/shared)\/src\/./;
 
 const HELP = `Usage: scripts/coverage-diff [options]
 
-Run the default test suite with line and branch coverage on a base commit and on the head.
+Run the default test suite (the vitest projects unit and ui) with line and branch coverage on a base commit and on the head.
 Compare the two results file by file. Print a markdown table for the text of a pull request.
 
 The head is the current worktree, with the uncommitted changes. The base is a temporary

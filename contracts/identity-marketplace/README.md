@@ -49,24 +49,25 @@ git diff --exit-code plutus.json    # the committed blueprint must equal the bui
 
 Aiken v1.1.21, Plutus V3, aiken-lang/stdlib v3.1.0, aiken-lang/fuzz v2.2.0.
 
-These suites run the compiled scripts with `aiken tx simulate`. Run them from the repository root after `pnpm install`. They need `aiken` v1.1.21 on PATH and no network:
+These suites run the compiled scripts with `aiken tx simulate`. They are the vitest project `aiken-eval` (`vitest.workspace.ts`). Run them from the repository root after `pnpm install`. They need `aiken` v1.1.21 on PATH and no network:
 
 ```sh
-npx vitest run --config tests/legacy-registry/vitest.config.ts     # deployed legacy registry script and adoption (§12.2)
-npx vitest run --config tests/identity-builders/vitest.config.ts   # new escrow and advert with the shared builders (§6)
-npx vitest run --config tests/identity-vectors/vitest.config.ts    # vectors, benchmarks, resolver properties (§12.3, §12.4)
+npx vitest run --project aiken-eval tests/legacy-registry/     # deployed legacy registry script and adoption (§12.2)
+npx vitest run --project aiken-eval tests/identity-builders/   # new escrow and advert with the shared builders (§6)
+npx vitest run --project aiken-eval tests/identity-vectors/    # vectors, benchmarks, resolver properties (§12.3, §12.4)
+npx vitest run --project aiken-eval                            # all four folders, with tests/identity-deploy
 ```
 
-The root `pnpm test` also needs `aiken`: `tests/unit/identity-tx-*.test.ts` and `tests/unit/paper2agent-identity-e2e.test.ts` evaluate builder transactions. CI (`.github/workflows/ci.yml`) installs the pinned aiken release (`.github/actions/setup-aiken`) and runs all of the commands above.
+`pnpm test` runs the project `aiken-eval` and the projects `unit` and `ui`. It also needs `aiken`: `tests/unit/identity-tx-*.test.ts` and `tests/unit/paper2agent-identity-e2e.test.ts` evaluate builder transactions. CI (`.github/workflows/ci.yml`) installs the pinned aiken release (`.github/actions/setup-aiken`) and runs all of these tests.
 
 ## Benchmarks, vectors and properties
 
 | Folder | Content | Run | Regenerate |
 |---|---|---|---|
-| `bench/` | The benchmarks of §12.4: complete signed transactions with the applied scripts of `plutus.json` (test parameters), evaluated with `aiken tx simulate`. `results.json` holds the execution units and sizes. | `npx vitest run --config tests/identity-vectors/vitest.config.ts` (`bench.test.ts` runs each case again and compares the result with `results.json`) | `npx tsx contracts/identity-marketplace/bench/run.ts` writes `results.json`. Do this after a change to a validator or to `plutus.json`, then commit `results.json`. |
-| `vectors/` | The published vectors of §12.4: `identifiers.json`, `allowlist.json`, `attestation-envelope.json`, `status-lists.json` | `npx vitest run --config tests/identity-vectors/vitest.config.ts`, and `aiken check -D` (`published_vectors.ak`) | `npx tsx tests/identity-vectors/generate.ts` writes the vectors and `lib/identity_marketplace/properties/published_vectors.ak` (it uses `aiken fmt`). Compare each changed vector with Part 1 and Part 2 before you commit it. |
+| `bench/` | The benchmarks of §12.4: complete signed transactions with the applied scripts of `plutus.json` (test parameters), evaluated with `aiken tx simulate`. `results.json` holds the execution units and sizes. | `npx vitest run --project aiken-eval tests/identity-vectors/` (`bench.test.ts` runs each case again and compares the result with `results.json`) | `npx tsx contracts/identity-marketplace/bench/run.ts` writes `results.json`. Do this after a change to a validator or to `plutus.json`, then commit `results.json`. |
+| `vectors/` | The published vectors of §12.4: `identifiers.json`, `allowlist.json`, `attestation-envelope.json`, `status-lists.json` | `npx vitest run --project aiken-eval tests/identity-vectors/`, and `aiken check -D` (`published_vectors.ak`) | `npx tsx tests/identity-vectors/generate.ts` writes the vectors and `lib/identity_marketplace/properties/published_vectors.ak` (it uses `aiken fmt`). Compare each changed vector with Part 1 and Part 2 before you commit it. |
 | `lib/identity_marketplace/properties/` | The Aiken property tests of §12.3 (aiken-lang/fuzz, 100 runs each) and the generated `published_vectors.ak` | `aiken check -D -m identity_marketplace/properties` | Only `published_vectors.ak` is generated (see `vectors/`). |
 
 ## Deployment
 
-`deploy/` holds the identity-side deployment tool of Part 2 §11 step 2: allowlist, seed, plan, reference scripts, configuration seal and the read-only check. The runbook is [`deploy/README.md`](deploy/README.md). Its tests: `npx vitest run --config tests/identity-deploy/vitest.config.ts`.
+`deploy/` holds the identity-side deployment tool of Part 2 §11 step 2: allowlist, seed, plan, reference scripts, configuration seal and the read-only check. The runbook is [`deploy/README.md`](deploy/README.md). Its tests: `npx vitest run --project aiken-eval tests/identity-deploy/`.

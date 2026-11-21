@@ -156,7 +156,7 @@ The release spends 191.248410 AP3X for good. The seed must hold at least 2.31128
 
 ```sh
 npx tsc -p tests/identity-deploy/tsconfig.json
-npx vitest run --config tests/identity-deploy/vitest.config.ts
+npx vitest run --project aiken-eval tests/identity-deploy/
 ```
 
 The tests need `aiken` v1.1.21 on PATH and no network. They compare the plan with `aiken blueprint apply`, run the seed, publish and seal transactions through `aiken tx simulate` (`evaluateBuiltTx` of `tests/legacy-registry/harness/identity.ts`), compare the allowlist roots with `vectors/allowlist.json`, and run the whole release over an in-memory ledger (resume, build mode, seal-seed guard).
