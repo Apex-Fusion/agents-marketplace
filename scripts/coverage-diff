@@ -1,0 +1,722 @@
+#!/usr/bin/env node
+// scripts/coverage-diff: compare the line and branch coverage of a base commit and the head.
+//
+// The head is the current worktree, with the uncommitted changes. The base is a temporary git
+// worktree of the base commit. Each side runs the default test suite with the v8 coverage
+// provider on a build host (`rx`) and writes one coverage-summary.json. The script compares the
+// two summaries file by file and prints a markdown table for the text of a pull request.
+//
+// A guarded file is a source file of tests/coverage-guard.json (money, signature, key and
+// chain decoding code). When a guarded file loses line or branch coverage, the script exits 1.
+// Run `scripts/coverage-diff --help` for the options and the exit status.
+//
+// Facts that the code relies on:
+// - The keys of a coverage summary are absolute paths of the copy on the build host. The script
+//   changes them to paths relative to the repository root (see `relativeKeys`).
+// - `rx` copies the worktree to the same path on the build host and installs the dependencies
+//   there. The base worktree is a second root, so the base run starts `rx` in the base folder.
+//   Then `rx` installs the dependencies of the base copy by itself.
+// - The base copy is below /tmp. On build-0 and build-1, /tmp is on another disk than the home
+//   folder, so pnpm cannot link from its store in the home folder. It makes a second store in
+//   /tmp/.pnpm-store (about 420 MB, kept) and links the base copy from it. The script removes the
+//   base copy on the build host at the end of the run.
+// - Git ignores .vitest-cache, so the reports and the logs stay out of every commit.
+
+import { spawn, spawnSync } from "node:child_process";
+import { copyFileSync, createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
+import { parseArgs } from "node:util";
+
+const EXIT_OK = 0;
+const EXIT_DROP = 1;
+const EXIT_USAGE = 2;
+const EXIT_RUN = 3;
+
+const DEFAULT_EPSILON = 0.005;
+const DEFAULT_GUARD = "tests/coverage-guard.json";
+const AREAS = new Set(["money", "signature", "chain-decoding", "key"]);
+const TOP_DROPS = 15;
+const RUN_TIMEOUT_MS = 30 * 60 * 1000;
+const WORK_DIR = ".vitest-cache/coverage-diff";
+
+// The coverage run. It must stay the same on both sides.
+const COVERAGE_INCLUDE = ["*/src/**", "packages/shared/src/**"];
+const COVERAGE_COMMAND = [
+  "pnpm", "exec", "vitest", "run",
+  "--coverage", "--coverage.provider=v8", "--coverage.reporter=json-summary",
+  ...COVERAGE_INCLUDE.map((pattern) => `--coverage.include=${pattern}`),
+];
+const INCLUDED_PATH = /^(?:[^/]+|packages\/shared)\/src\/./;
+
+const HELP = `Usage: scripts/coverage-diff [options]
+
+Run the default test suite with line and branch coverage on a base commit and on the head.
+Compare the two results file by file. Print a markdown table for the text of a pull request.
+
+The head is the current worktree, with the uncommitted changes. The base is a temporary
+worktree of the base commit. Both runs use "rx" on the build hosts.
+
+Options:
+  --base REF         The base commit or ref. Default: the merge base of HEAD and origin/main.
+  --guard FILE       The list of guarded files. Default: ${DEFAULT_GUARD} in the repository root.
+  --host NAME        The rx host for both runs. Default: two different hosts at the same time,
+                     when two hosts answer. With one host, the runs go one after the other.
+  --base-summary F   Do not run the base. Read this coverage-summary.json.
+  --head-summary F   Do not run the head. Read this coverage-summary.json.
+  --json-out FILE    Write the comparison as JSON.
+  --md-out FILE      Write the markdown table to FILE too.
+  --epsilon X        A fall of less than X percentage points is not a drop. Default: ${DEFAULT_EPSILON}.
+  -h, --help         Show this text.
+
+Exit status:
+  0  No guarded file lost line or branch coverage.
+  1  A guarded file lost coverage, or a guarded file is missing at the head,
+     or the guard list names a file that no summary holds.
+  2  Usage error.
+  3  A run failed: rx exit status 125, a failed test run, or no summary.
+
+Rule:
+  A file lost coverage when, for the lines or for the branches, two things are true. The
+  percentage fell by more than the epsilon, and the file has more uncovered items than before.
+  The v8 provider changes the number of branches of a file by a few between two runs of the same
+  code. So a fall of a percentage with no new uncovered item is not a drop.
+
+Files:
+  .vitest-cache/coverage-diff/<head|base>/coverage-summary.json  The summary of each run.
+  .vitest-cache/coverage-diff/<head|base>.log                    The output of each run.
+`;
+
+class UsageError extends Error {}
+class RunError extends Error {}
+
+const children = new Set();
+let interrupted = false;
+
+function note(message) {
+  process.stderr.write(`coverage-diff: ${message}\n`);
+}
+
+// ---- Command line ----------------------------------------------------------------------------
+
+function parseCli(argv) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args: argv,
+      allowPositionals: false,
+      strict: true,
+      options: {
+        base: { type: "string" },
+        guard: { type: "string" },
+        host: { type: "string" },
+        "base-summary": { type: "string" },
+        "head-summary": { type: "string" },
+        "json-out": { type: "string" },
+        "md-out": { type: "string" },
+        epsilon: { type: "string" },
+        help: { type: "boolean", short: "h" },
+      },
+    }).values;
+  } catch (error) {
+    throw new UsageError(`${error.message.split("\n")[0].replace(/\.$/, "")}. Run scripts/coverage-diff --help.`);
+  }
+  const epsilon = parsed.epsilon === undefined ? DEFAULT_EPSILON : Number(parsed.epsilon);
+  if (!Number.isFinite(epsilon) || epsilon < 0 || String(parsed.epsilon).trim() === "") {
+    throw new UsageError("The option --epsilon needs a number that is 0 or more.");
+  }
+  for (const name of ["base-summary", "head-summary"]) {
+    if (parsed[name] !== undefined && !existsSync(parsed[name])) {
+      throw new UsageError(`The file ${parsed[name]} of --${name} does not exist.`);
+    }
+  }
+  return { ...parsed, epsilon };
+}
+
+// ---- Git -------------------------------------------------------------------------------------
+
+function git(args, cwd, { allowFailure = false } = {}) {
+  const result = spawnSync("git", args, { cwd, encoding: "utf8", maxBuffer: 1 << 28 });
+  if (result.error || result.status !== 0) {
+    if (allowFailure) return null;
+    throw new UsageError(`git ${args.join(" ")} failed: ${(result.stderr || result.error?.message || "").trim()}`);
+  }
+  return result.stdout;
+}
+
+function repositoryRoot() {
+  const output = spawnSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" });
+  if (output.error || output.status !== 0) {
+    throw new UsageError("This folder is not in a git worktree. Run the command in the repository.");
+  }
+  return output.stdout.trim();
+}
+
+function resolveBase(root, ref, haveSummary) {
+  if (ref !== undefined) {
+    const commit = git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], root, { allowFailure: true });
+    if (!commit) throw new UsageError(`The ref ${ref} is not a commit of this repository.`);
+    return { commit: commit.trim(), label: `\`${ref}\`` };
+  }
+  const commit = git(["merge-base", "HEAD", "origin/main"], root, { allowFailure: true });
+  if (commit) return { commit: commit.trim(), label: "the merge base of HEAD and origin/main" };
+  if (haveSummary) return { commit: null, label: "the base summary file" };
+  throw new UsageError("There is no merge base of HEAD and origin/main. Use --base REF.");
+}
+
+function filesOfHead(root) {
+  return new Set(git(["ls-files", "-z", "--cached"], root).split("\0").filter(Boolean));
+}
+
+function filesOfCommit(root, commit) {
+  if (!commit) return new Set();
+  return new Set(git(["ls-tree", "-r", "-z", "--name-only", commit], root).split("\0").filter(Boolean));
+}
+
+function isDirty(root) {
+  return git(["status", "--porcelain"], root).trim() !== "";
+}
+
+// ---- Guard list ------------------------------------------------------------------------------
+
+function loadGuard(file) {
+  let data;
+  try {
+    data = JSON.parse(readFileSync(file, "utf8"));
+  } catch (error) {
+    throw new UsageError(`Cannot read the guard list ${file}: ${error.message}`);
+  }
+  if (!data || !Array.isArray(data.files) || data.files.length === 0) {
+    throw new UsageError(`${file}: the key "files" must be a list with at least one entry.`);
+  }
+  const guard = new Map();
+  data.files.forEach((entry, index) => {
+    const path = entry?.path;
+    if (typeof path !== "string" || path === "" || path.startsWith("/") || path.includes("\\") || path.split("/").includes("..")) {
+      throw new UsageError(`${file}: files[${index}] has no valid path.`);
+    }
+    if (!INCLUDED_PATH.test(path)) {
+      throw new UsageError(`${file}: ${path} is not below <package>/src/. The coverage run does not include it.`);
+    }
+    if (!AREAS.has(entry.area)) {
+      throw new UsageError(`${file}: ${path} has area ${JSON.stringify(entry.area)}. Use one of: ${[...AREAS].join(", ")}.`);
+    }
+    if (typeof entry.reason !== "string" || entry.reason.trim() === "") {
+      throw new UsageError(`${file}: ${path} has no reason.`);
+    }
+    if (guard.has(path)) throw new UsageError(`${file}: ${path} is in the list two times.`);
+    guard.set(path, { path, area: entry.area, reason: entry.reason });
+  });
+  return guard;
+}
+
+function checkGuardPaths(guard, file, headFiles, baseFiles) {
+  const unknown = [...guard.keys()].filter((path) => !headFiles.has(path) && !baseFiles.has(path));
+  if (unknown.length > 0) {
+    throw new UsageError(`${file}: these files are not tracked at the base or at the head: ${unknown.join(", ")}.`);
+  }
+}
+
+// ---- Build hosts and runs --------------------------------------------------------------------
+
+// The hosts that answer `rx --status`, with the least loaded host first.
+function listHosts() {
+  const output = spawnSync("rx", ["--status"], { encoding: "utf8", timeout: 60_000 });
+  const hosts = [];
+  for (const line of (output.stdout ?? "").split("\n")) {
+    const match = /^([A-Za-z0-9._-]+): \d+ threads, load ([0-9.]+)/.exec(line);
+    if (match) hosts.push({ name: match[1], load: Number(match[2]) });
+  }
+  return hosts.sort((a, b) => a.load - b.load);
+}
+
+// Choose the host of each side. `parallel` is true only when the two sides use different hosts.
+function chooseHosts(hostOption, runHead, runBase) {
+  if (hostOption !== undefined) return { head: hostOption, base: hostOption, parallel: false };
+  if (!(runHead && runBase)) return { head: undefined, base: undefined, parallel: false };
+  const hosts = listHosts();
+  if (hosts.length >= 2) return { head: hosts[0].name, base: hosts[1].name, parallel: true };
+  if (hosts.length === 1) return { head: hosts[0].name, base: hosts[0].name, parallel: false };
+  return { head: undefined, base: undefined, parallel: false };
+}
+
+// Run one command. Write all its output to a log file. Forward the lines of rx itself to stderr.
+// Return the exit status and the build host that rx used: the first message of rx names it.
+function runLogged(command, args, { cwd, logFile, label }) {
+  return new Promise((done) => {
+    mkdirSync(dirname(logFile), { recursive: true });
+    const log = createWriteStream(logFile);
+    log.on("error", (error) => note(`Cannot write ${logFile}: ${error.message}`));
+    const child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+    children.add(child);
+    const result = { status: null, signal: null, timedOut: false, spawnError: null, host: null };
+    let pending = "";
+    let finished = false;
+    const timer = setTimeout(() => {
+      result.timedOut = true;
+      child.kill("SIGTERM");
+    }, RUN_TIMEOUT_MS);
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      children.delete(child);
+      log.end(() => done(result));
+    };
+    child.stdout.on("data", (chunk) => log.write(chunk));
+    child.stderr.on("data", (chunk) => {
+      log.write(chunk);
+      const lines = (pending + chunk.toString("utf8")).split("\n");
+      pending = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith("rx: ")) continue;
+        result.host ??= /^rx: ([A-Za-z0-9._-]+): /.exec(line)?.[1] ?? null;
+        note(`${label}: ${line.slice(4, 200)}`);
+      }
+    });
+    child.on("error", (error) => {
+      result.spawnError = error;
+      if (child.pid === undefined) finish();
+    });
+    child.on("close", (status, signal) => {
+      result.status = status;
+      result.signal = signal;
+      finish();
+    });
+  });
+}
+
+function tailOf(file, count) {
+  try {
+    return readFileSync(file, "utf8").split("\n").slice(-count).join("\n");
+  } catch {
+    return "";
+  }
+}
+
+// Run the coverage of one side in the worktree `side.dir`. `rx` copies the summary file back.
+// Set `side.summary`, `side.seconds` and `side.host`.
+async function runSide(side, host, logFile) {
+  const report = `${WORK_DIR}/${side.name}`;
+  rmSync(join(side.dir, report), { recursive: true, force: true });
+  const args = [...(host ? ["--host", host] : []), "--pull", report, ...COVERAGE_COMMAND, `--coverage.reportsDirectory=${report}`];
+  note(`${side.name}: start the coverage run${host ? ` on ${host}` : ""}.`);
+  const started = Date.now();
+  const result = await runLogged("rx", args, { cwd: side.dir, logFile, label: side.name });
+  side.seconds = (Date.now() - started) / 1000;
+  side.host = result.host ?? host ?? null;
+  if (result.spawnError) throw new RunError(`Cannot start rx (${result.spawnError.message}). Install rx first.`);
+  if (result.timedOut) throw new RunError(`The ${side.name} run took more than ${RUN_TIMEOUT_MS / 60000} minutes and was stopped.`);
+  if (result.status !== 0) {
+    note(`The last lines of ${logFile}:`);
+    process.stderr.write(`${tailOf(logFile, 40)}\n`);
+    const cause = result.status === 125 ? "rx failed, and the command did not run or its result is not known" : `the command ended with status ${result.status ?? result.signal}`;
+    // A failed test run makes no coverage report. Some tests have a time limit (for example
+    // packages/shared/src/cbor-depth.test.ts), and they fail when the build host is busy.
+    const hint = result.status === 1 ? " A test with a time limit can fail on a busy build host. Run the command again." : "";
+    throw new RunError(`The ${side.name} run failed: ${cause}. The output is in ${logFile}.${hint}`);
+  }
+  const summary = join(side.dir, report, "coverage-summary.json");
+  if (!existsSync(summary)) throw new RunError(`The ${side.name} run made no ${summary}. The output is in ${logFile}.`);
+  side.summary = summary;
+  note(`${side.name}: the coverage run ended after ${side.seconds.toFixed(1)} s${side.host ? ` on ${side.host}` : ""}.`);
+}
+
+// Remove the temporary folder of the base run on the build host. It holds the copy of the base
+// worktree with its node_modules (about 430 MB). `rx` keeps a copy for 14 days, and each run of
+// this script uses a new folder. The command runs in the base worktree: `rx` needs a worktree.
+async function removeRemoteCopy(tree, host, logFile) {
+  if (!host) {
+    note(`The build host of the base run is not known. Run "rx --gc" later to remove ${tree.temp} there.`);
+    return;
+  }
+  const args = ["--host", host, "--no-sync", "--no-prepare", "sh", "-c", 'rm -rf "$1"', "sh", tree.temp];
+  const result = await runLogged("rx", args, { cwd: tree.dir, logFile, label: "cleanup" });
+  if (result.status !== 0) note(`Cannot remove ${tree.temp} on ${host}. Run "rx --gc" later.`);
+}
+
+// ---- Summaries -------------------------------------------------------------------------------
+
+// The summary rounds a percentage down to two decimals, as istanbul does. `shown` follows it.
+// `pct` is one exact division, with no rounding. The comparison uses `pct`.
+function makeMetric(covered, total, summaryPct) {
+  if (total > 0) {
+    return { covered, total, pct: (100 * covered) / total, shown: Math.floor((1000 * 100 * covered) / total / 10) / 100 };
+  }
+  const empty = Number.isFinite(summaryPct) ? summaryPct : 100;
+  return { covered, total, pct: empty, shown: empty };
+}
+
+function metric(entry) {
+  if (!entry || !Number.isFinite(entry.total) || !Number.isFinite(entry.covered)) return null;
+  return makeMetric(entry.covered, entry.total, entry.pct);
+}
+
+function readSummary(file) {
+  let data;
+  try {
+    data = JSON.parse(readFileSync(file, "utf8"));
+  } catch (error) {
+    throw new RunError(`Cannot read the coverage summary ${file}: ${error.message}`);
+  }
+  if (!data || typeof data !== "object" || Array.isArray(data)) throw new RunError(`${file} is not a coverage summary.`);
+  const entries = new Map();
+  for (const [key, value] of Object.entries(data)) {
+    if (key === "total") continue;
+    const lines = metric(value?.lines);
+    const branches = metric(value?.branches);
+    if (!lines || !branches) throw new RunError(`${file}: the entry ${key} has no line or branch numbers.`);
+    entries.set(key, { lines, branches });
+  }
+  if (entries.size === 0) throw new RunError(`${file} holds no file.`);
+  return entries;
+}
+
+// Change the absolute keys of a summary to paths relative to the repository root.
+// The root of the summary is unknown: it is the folder of the build host. For each key, the
+// longest suffix that is a tracked file gives a candidate root. The most frequent candidate wins.
+function relativeKeys(entries, tracked, file) {
+  const votes = new Map();
+  for (const key of entries.keys()) {
+    if (!key.startsWith("/")) continue;
+    for (let at = key.indexOf("/"); at !== -1; at = key.indexOf("/", at + 1)) {
+      if (tracked.has(key.slice(at + 1))) {
+        const prefix = key.slice(0, at + 1);
+        votes.set(prefix, (votes.get(prefix) ?? 0) + 1);
+        break;
+      }
+    }
+  }
+  let prefix = "";
+  let best = 0;
+  for (const [candidate, count] of votes) {
+    if (count > best) {
+      prefix = candidate;
+      best = count;
+    }
+  }
+  const relative = new Map();
+  let outside = 0;
+  for (const [key, value] of entries) {
+    if (!key.startsWith("/")) relative.set(key, value);
+    else if (prefix !== "" && key.startsWith(prefix)) relative.set(key.slice(prefix.length), value);
+    else outside += 1;
+  }
+  if (relative.size === 0) throw new RunError(`${file}: no file of the summary is a tracked file of this repository.`);
+  if (outside > 0) note(`${file}: ${outside} file(s) are outside the root ${prefix || "(unknown)"} and are left out.`);
+  return relative;
+}
+
+// ---- Comparison ------------------------------------------------------------------------------
+
+function sum(entries, name) {
+  let covered = 0;
+  let total = 0;
+  for (const entry of entries.values()) {
+    covered += entry[name].covered;
+    total += entry[name].total;
+  }
+  return makeMetric(covered, total, 100);
+}
+
+function sameCounts(a, b) {
+  return a.lines.covered === b.lines.covered && a.lines.total === b.lines.total &&
+    a.branches.covered === b.branches.covered && a.branches.total === b.branches.total;
+}
+
+// A file lost coverage in one metric (lines or branches) when two things are true:
+//   1. The percentage fell by more than epsilon.
+//   2. The file has more uncovered items than before.
+// The second condition ignores a noise of the v8 provider. The number of branches of a file
+// changes by a few between two runs of the same code, and the percentage then moves with no new
+// uncovered branch. When a test no longer covers an item and the source is the same, the file has
+// one more uncovered item. So a lost test still shows.
+function lost(before, after, epsilon) {
+  return before.pct - after.pct > epsilon && after.total - after.covered > before.total - before.covered;
+}
+
+function compare(base, head, guard, epsilon) {
+  const rows = [];
+  for (const path of new Set([...base.keys(), ...head.keys()])) {
+    const before = base.get(path) ?? null;
+    const after = head.get(path) ?? null;
+    const guarded = guard.has(path);
+    const row = { path, guarded, area: guard.get(path)?.area ?? null, base: before, head: after, delta: null, fall: 0, changed: true, flag: "" };
+    if (before && after) {
+      row.delta = { lines: after.lines.pct - before.lines.pct, branches: after.branches.pct - before.branches.pct };
+      const linesLost = lost(before.lines, after.lines, epsilon);
+      const branchesLost = lost(before.branches, after.branches, epsilon);
+      row.fall = Math.max(linesLost ? -row.delta.lines : 0, branchesLost ? -row.delta.branches : 0);
+      row.changed = !sameCounts(before, after);
+      if (linesLost || branchesLost) row.flag = guarded ? "DROP" : "drop";
+      else if (row.changed) row.flag = "ok";
+    } else if (!before) {
+      row.flag = "new";
+    } else {
+      row.flag = guarded ? "REMOVED" : "removed";
+    }
+    rows.push(row);
+  }
+  return rows.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+}
+
+// ---- Output ----------------------------------------------------------------------------------
+
+function pct(entry) {
+  return entry ? entry.shown.toFixed(2) : "-";
+}
+
+function shownDelta(before, after) {
+  return Math.round((after.shown - before.shown) * 100) / 100;
+}
+
+function signed(value) {
+  if (value === null) return "-";
+  const shown = Math.abs(value) < 0.005 ? 0 : value;
+  return `${shown > 0 ? "+" : ""}${shown.toFixed(2)}`;
+}
+
+function count(value) {
+  return value.toLocaleString("en-US");
+}
+
+function tableRow(row) {
+  const lines = row.delta ? signed(shownDelta(row.base.lines, row.head.lines)) : "-";
+  const branches = row.delta ? signed(shownDelta(row.base.branches, row.head.branches)) : "-";
+  return `| \`${row.path}\` | ${pct(row.base?.lines)} | ${pct(row.head?.lines)} | ${lines} | ${pct(row.base?.branches)} | ${pct(row.head?.branches)} | ${branches} | ${row.flag} |`;
+}
+
+// The numbers behind a flagged file, so that a reader can tell a lost test from a run noise.
+function detail(row) {
+  if (!row.head) return `- \`${row.path}\`: the head has no coverage data for this file.`;
+  const text = (name) => {
+    const before = row.base[name];
+    const after = row.head[name];
+    const more = after.total - after.covered - (before.total - before.covered);
+    return `${name} ${before.covered} of ${before.total} covered at the base, ${after.covered} of ${after.total} at the head, uncovered ${more > 0 ? "+" : ""}${more}`;
+  };
+  return `- \`${row.path}\`: ${text("lines")}; ${text("branches")}.`;
+}
+
+const TABLE_HEAD = [
+  "| file | base lines % | head lines % | delta | base branches % | head branches % | delta | flag |",
+  "|---|---:|---:|---:|---:|---:|---:|---|",
+];
+
+function totalCell(entry) {
+  return `${entry.shown.toFixed(2)} % (${count(entry.covered)} of ${count(entry.total)})`;
+}
+
+function render({ baseLabel, headLabel, epsilon, totals, rows, missing, failures }) {
+  const guardedRows = rows.filter((row) => row.guarded);
+  const changedGuarded = guardedRows.filter((row) => row.changed);
+  const drops = failures.length;
+  const others = rows
+    .filter((row) => !row.guarded && row.flag === "drop")
+    .sort((a, b) => b.fall - a.fall || (a.path < b.path ? -1 : 1));
+  const added = rows.filter((row) => !row.guarded && row.flag === "new").length;
+  const removed = rows.filter((row) => !row.guarded && row.flag === "removed").length;
+  const out = [];
+  out.push("## Coverage change", "");
+  out.push(`Base: ${baseLabel}. Head: ${headLabel}.`);
+  out.push("Both sides ran the default test suite with the v8 coverage provider.");
+  out.push(`A file lost coverage when its percentage of lines or branches fell by more than ${epsilon} points, and it has more uncovered lines or branches than before.`);
+  out.push("A fall with no new uncovered item is not a drop. The v8 provider changes the number of branches of a file by a few between two runs.");
+  out.push("Flags: DROP, a guarded file lost coverage. REMOVED, a guarded file has no data at the head. drop, another file lost coverage. new, the file has no data at the base. ok, the numbers changed and the file lost nothing.", "");
+  out.push("| metric | base | head | delta |", "|---|---:|---:|---:|");
+  for (const [title, name] of [["Lines", "lines"], ["Branches", "branches"]]) {
+    out.push(`| ${title} | ${totalCell(totals.base[name])} | ${totalCell(totals.head[name])} | ${signed(shownDelta(totals.base[name], totals.head[name]))} |`);
+  }
+  out.push("", "### Guarded files", "");
+  if (changedGuarded.length === 0) {
+    out.push(`All ${guardedRows.length} guarded files with coverage data did not change.`);
+  } else {
+    out.push(`${changedGuarded.length} of ${guardedRows.length} guarded files changed. ${guardedRows.length - changedGuarded.length} did not change.`, "");
+    out.push(...TABLE_HEAD);
+    const order = (row) => (row.flag === "DROP" || row.flag === "REMOVED" ? 0 : 1);
+    for (const row of [...changedGuarded].sort((a, b) => order(a) - order(b) || b.fall - a.fall || (a.path < b.path ? -1 : 1))) {
+      out.push(tableRow(row));
+    }
+  }
+  const flagged = guardedRows.filter((row) => row.flag === "DROP" || row.flag === "REMOVED");
+  if (flagged.length > 0) {
+    out.push("", "Numbers of the guarded files that lost coverage:", "");
+    for (const row of flagged) out.push(detail(row));
+  }
+  if (missing.length > 0) {
+    out.push("", "### Guard list errors", "");
+    out.push("No coverage summary holds these guarded files. Fix the guard list.", "");
+    for (const path of missing) out.push(`- \`${path}\``);
+  }
+  out.push("", "### Other files with the largest drop", "");
+  if (others.length === 0) {
+    out.push("No other file lost coverage.");
+  } else {
+    out.push(`${others.length} other file(s) lost coverage.${others.length > TOP_DROPS ? ` The table shows the ${TOP_DROPS} largest drops.` : ""}`, "");
+    out.push(...TABLE_HEAD);
+    for (const row of others.slice(0, TOP_DROPS)) out.push(tableRow(row));
+  }
+  out.push("", `Other source files: ${added} new, ${removed} removed.`, "");
+  if (drops > 0) out.push(`RESULT: GUARDED DROP in ${drops} file(s)`);
+  else if (missing.length > 0) out.push(`RESULT: GUARD LIST ERROR in ${missing.length} path(s)`);
+  else out.push("RESULT: no guarded file lost coverage");
+  return out.join("\n");
+}
+
+function writeOutput(file, text) {
+  mkdirSync(dirname(resolve(file)), { recursive: true });
+  writeFileSync(file, text);
+}
+
+// ---- Main ------------------------------------------------------------------------------------
+
+// The temporary worktree of the base. The exit handler removes it when main() cannot.
+let baseTree = null;
+
+function cleanLocal() {
+  const tree = baseTree;
+  baseTree = null;
+  if (!tree) return;
+  const removed = spawnSync("git", ["worktree", "remove", "--force", tree.dir], { cwd: tree.root, encoding: "utf8" });
+  if (removed.status !== 0) {
+    rmSync(tree.dir, { recursive: true, force: true });
+    spawnSync("git", ["worktree", "prune"], { cwd: tree.root });
+  }
+  rmSync(tree.temp, { recursive: true, force: true });
+}
+
+async function main() {
+  const cli = parseCli(process.argv.slice(2));
+  if (cli.help) {
+    process.stdout.write(HELP);
+    return EXIT_OK;
+  }
+  const root = repositoryRoot();
+  const guardFile = cli.guard === undefined ? join(root, DEFAULT_GUARD) : resolve(cli.guard);
+  const guard = loadGuard(guardFile);
+  const base = resolveBase(root, cli.base, cli["base-summary"] !== undefined);
+  const headFiles = filesOfHead(root);
+  const baseFiles = filesOfCommit(root, base.commit);
+  checkGuardPaths(guard, guardFile, headFiles, baseFiles);
+
+  const headCommit = git(["rev-parse", "HEAD"], root).trim();
+  const dirty = isDirty(root);
+  const runHead = cli["head-summary"] === undefined;
+  const runBase = cli["base-summary"] === undefined;
+  const workDir = join(root, WORK_DIR);
+  const sides = {
+    head: { name: "head", dir: root, summary: cli["head-summary"] ?? null, seconds: null, host: null },
+    base: { name: "base", dir: null, summary: cli["base-summary"] ?? null, seconds: null, host: null },
+  };
+  let cleanup = null;
+
+  try {
+    if (runBase) {
+      if (!base.commit) throw new UsageError("The base commit is not known. Use --base REF.");
+      const temp = mkdtempSync("/tmp/coverage-diff-");
+      baseTree = { root, temp, dir: join(temp, "base") };
+      git(["worktree", "add", "--quiet", "--detach", baseTree.dir, base.commit], root);
+      sides.base.dir = baseTree.dir;
+    }
+    const hosts = chooseHosts(cli.host, runHead, runBase);
+    const headJob = () => runSide(sides.head, hosts.head, join(workDir, "head.log"));
+    const baseJob = async () => {
+      try {
+        await runSide(sides.base, hosts.base, join(workDir, "base.log"));
+        // Keep a copy of the summary: the base worktree goes away at the end of the run.
+        const saved = join(workDir, "base", "coverage-summary.json");
+        mkdirSync(dirname(saved), { recursive: true });
+        copyFileSync(sides.base.summary, saved);
+        sides.base.summary = saved;
+      } finally {
+        cleanup = removeRemoteCopy(baseTree, sides.base.host ?? hosts.base, join(workDir, "cleanup.log"));
+      }
+    };
+    const errors = [];
+    const attempt = async (work) => {
+      try {
+        await work();
+      } catch (error) {
+        errors.push(error);
+      }
+    };
+    if (hosts.parallel) {
+      await Promise.all([attempt(headJob), attempt(baseJob)]);
+    } else {
+      if (runHead) await attempt(headJob);
+      if (runBase && errors.length === 0) await attempt(baseJob);
+    }
+    if (errors.length > 0) throw errors[0];
+
+    const tracked = new Set([...headFiles, ...baseFiles]);
+    const baseEntries = relativeKeys(readSummary(sides.base.summary), tracked, sides.base.summary);
+    const headEntries = relativeKeys(readSummary(sides.head.summary), tracked, sides.head.summary);
+    const rows = compare(baseEntries, headEntries, guard, cli.epsilon);
+    const missing = [...guard.keys()].filter((path) => !baseEntries.has(path) && !headEntries.has(path));
+    const failed = rows.filter((row) => row.guarded && (row.flag === "DROP" || row.flag === "REMOVED"));
+    const totals = {
+      base: { lines: sum(baseEntries, "lines"), branches: sum(baseEntries, "branches") },
+      head: { lines: sum(headEntries, "lines"), branches: sum(headEntries, "branches") },
+    };
+    const short = (commit) => commit.slice(0, 7);
+    const fromFile = (file) => `the summary file \`${basename(file)}\``;
+    const baseLabel = cli["base-summary"] !== undefined ? fromFile(cli["base-summary"]) : `${base.label} (\`${short(base.commit)}\`)`;
+    const headLabel = cli["head-summary"] !== undefined ? fromFile(cli["head-summary"]) : `\`${short(headCommit)}\`${dirty ? " with the uncommitted changes of the worktree" : ""}`;
+    const markdown = render({ baseLabel, headLabel, epsilon: cli.epsilon, totals, rows, missing, failures: failed });
+    process.stdout.write(`${markdown}\n`);
+    if (cli["md-out"] !== undefined) writeOutput(cli["md-out"], `${markdown}\n`);
+    const exit = failed.length > 0 || missing.length > 0 ? EXIT_DROP : EXIT_OK;
+    if (cli["json-out"] !== undefined) {
+      const side = (info, commit) => ({ commit, summary: info.summary, host: info.host, seconds: info.seconds, ran: info.seconds !== null });
+      const json = {
+        base: side(sides.base, base.commit),
+        head: { ...side(sides.head, headCommit), uncommitted_changes: dirty },
+        epsilon: cli.epsilon,
+        totals,
+        guard: {
+          file: guardFile,
+          files: guard.size,
+          changed: rows.filter((row) => row.guarded && row.changed).length,
+          dropped: failed.map((row) => row.path),
+          missing_in_both_summaries: missing,
+        },
+        files: rows.map((row) => ({ path: row.path, guarded: row.guarded, area: row.area, flag: row.flag, changed: row.changed, base: row.base, head: row.head, delta: row.delta })),
+        exit,
+      };
+      writeOutput(cli["json-out"], `${JSON.stringify(json, null, 2)}\n`);
+    }
+    return exit;
+  } finally {
+    if (cleanup) await cleanup;
+    cleanLocal();
+  }
+}
+
+process.on("exit", cleanLocal);
+
+for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143]]) {
+  process.on(signal, () => {
+    interrupted = true;
+    process.exitCode = code;
+    // The `finally` block of main() removes the base worktree when the children have ended.
+    for (const child of children) child.kill("SIGTERM");
+  });
+}
+
+main().then(
+  (code) => {
+    if (!interrupted) process.exitCode = code;
+  },
+  (error) => {
+    if (interrupted) return;
+    if (error instanceof UsageError) {
+      note(error.message);
+      process.exitCode = EXIT_USAGE;
+    } else if (error instanceof RunError) {
+      note(error.message);
+      process.exitCode = EXIT_RUN;
+    } else {
+      note(`Unexpected error: ${error?.stack ?? error}`);
+      process.exitCode = EXIT_RUN;
+    }
+  },
+);

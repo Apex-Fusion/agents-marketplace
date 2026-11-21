@@ -1,0 +1,212 @@
+#!/usr/bin/env bash
+# scripts/test-changed: the agent loop. It tests what the change reaches, on a build host, and nothing else.
+#
+# It reads the files that changed against the merge base with origin/main (committed, staged, unstaged and untracked files) and
+# runs three kinds of command through `rx`:
+#   1. vitest on the changed files and on the tests that import them:
+#        rx pnpm exec vitest related --run <changed code files> [always-run tests]
+#   2. the typecheck of the source of each changed package:
+#        rx pnpm --filter ./<package> typecheck
+#   3. `aiken check` of each changed Aiken area, with one thread and aiken v1.1.24 (the compiler of the pull request gate):
+#        rx RAYON_NUM_THREADS=1 mise exec github:aiken-lang/aiken@1.1.24 node@20 -- scripts/aiken-check --modules <area>[,<area>]
+# A changed test folder of the 4 aiken vitest configs runs that config. The command line of each step is printed before it runs.
+#
+# It never runs the full suite, and it never runs a test on this computer. When `rx` fails (exit status 125) the command did not
+# run: push the branch and let CI test (docs/TESTING.md). CI runs the same steps by package, and the nightly run runs everything.
+#
+# Usage: scripts/test-changed [--base REF] [--host NAME] [--dry-run] [--no-vitest] [--no-typecheck] [--no-aiken] [-h]
+#   --base REF     compare with the merge base of HEAD and REF (default origin/main)
+#   --host NAME    pass `--host NAME` to rx
+#   --dry-run      print the commands, run none
+set -uo pipefail
+
+base_ref=origin/main
+rx_host=()
+dry_run=0
+do_vitest=1
+do_typecheck=1
+do_aiken=1
+# Tests that CI runs with every selection (ALWAYS_RUN of scripts/ci/changes.mjs): they scan the text of the repository.
+always_run=(tests/unit/decoder-sites.test.ts)
+aiken_version=1.1.24
+
+usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; }
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --base) base_ref=${2:?--base needs a ref}; shift 2 ;;
+    --host) rx_host=(--host "${2:?--host needs a name}"); shift 2 ;;
+    --dry-run) dry_run=1; shift ;;
+    --no-vitest) do_vitest=0; shift ;;
+    --no-typecheck) do_typecheck=0; shift ;;
+    --no-aiken) do_aiken=0; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "test-changed: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+cd "$(git rev-parse --show-toplevel)" || exit 2
+command -v rx >/dev/null || { echo "test-changed: rx is not installed. Push the branch and let CI test." >&2; exit 125; }
+
+base=$(git merge-base HEAD "$base_ref" 2>/dev/null) || {
+  echo "test-changed: no merge base with $base_ref. Run: git fetch origin main" >&2
+  exit 2
+}
+
+# The changed paths: the working tree against the merge base (committed, staged, unstaged), plus untracked files.
+mapfile -t changed < <({ git diff --name-only --no-renames "$base"; git ls-files --others --exclude-standard; } | LC_ALL=C sort -u)
+existing=()
+for path in "${changed[@]}"; do
+  [ -n "$path" ] && [ -f "$path" ] && existing+=("$path")
+done
+echo "test-changed: ${#changed[@]} changed path(s) against $(git rev-parse --short "$base") ($base_ref), ${#existing[@]} still exist"
+if [ "${#changed[@]}" -eq 0 ]; then
+  echo "test-changed: nothing to test."
+  exit 0
+fi
+
+is_test_path() { # a test file or a file in a test folder
+  [[ "$1" =~ (^|/)(tests?|__tests__)/ ]] || [[ "$1" =~ \.(test|spec)\.[cm]?[jt]sx?$ ]]
+}
+is_code() { [[ "$1" =~ \.([cm]?[jt]s|[jt]sx)$ ]]; }
+# Only the code below these folders can be in the import graph of a test.
+in_code_roots() { [[ "$1" =~ ^(packages|buyer|gateway|supplier|paper2agent|indexer|indexer-ui|wallet-monitor|identity-gateway|tests|contracts)/ ]]; }
+
+# ── 1. vitest ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+vitest_files=()
+package_src_changed=0
+eval_configs=()
+add_eval_config() {
+  local config=$1 known
+  for known in "${eval_configs[@]:-}"; do [ "$known" = "$config" ] && return; done
+  eval_configs+=("$config")
+}
+for path in "${existing[@]}"; do
+  case "$path" in
+    tests/legacy-registry/*|tests/identity-builders/*|tests/identity-vectors/*|tests/identity-deploy/*)
+      add_eval_config "$(echo "$path" | cut -d/ -f1-2)/vitest.config.ts" ;;
+    contracts/identity-marketplace/deploy/*) add_eval_config tests/identity-deploy/vitest.config.ts ;;
+    contracts/identity-marketplace/bench/*) add_eval_config tests/identity-vectors/vitest.config.ts ;;
+  esac
+  case "$path" in
+    tests/legacy-registry/*|tests/identity-builders/*|tests/identity-vectors/*|tests/identity-deploy/*) ;; # run by their own config
+    *)
+      if is_code "$path" && in_code_roots "$path"; then
+        vitest_files+=("$path")
+        is_test_path "$path" || package_src_changed=1
+      fi ;;
+  esac
+done
+if [ "$package_src_changed" -eq 1 ]; then
+  for path in "${always_run[@]}"; do vitest_files+=("$path"); done
+fi
+
+# ── 2. packages ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+packages=()
+add_package() {
+  local dir=$1 known
+  for known in "${packages[@]:-}"; do [ "$known" = "$dir" ] && return; done
+  packages+=("$dir")
+}
+for path in "${existing[@]}" "${changed[@]}"; do
+  is_code "$path" || continue
+  case "$path" in
+    packages/*/*) dir=$(echo "$path" | cut -d/ -f1-2) ;;
+    */*) dir=${path%%/*} ;;
+    *) continue ;;
+  esac
+  [ -f "$dir/package.json" ] || continue
+  # The typecheck of a package reads its source. identity-gateway also reads its tests (its tsconfig includes them).
+  if is_test_path "$path" && [ "$dir" != identity-gateway ]; then continue; fi
+  add_package "$dir"
+done
+
+# ── 3. Aiken ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+areas=()
+legacy_changed=0
+plan_changed=0
+add_area() {
+  local area=$1 known
+  for known in "${areas[@]:-}"; do [ "$known" = "$area" ] && return; done
+  areas+=("$area")
+}
+for path in "${changed[@]}"; do
+  case "$path" in
+    contracts/identity-marketplace/lib/*.ak|contracts/identity-marketplace/validators/*.ak)
+      module=${path#contracts/identity-marketplace/lib/}
+      module=${module#contracts/identity-marketplace/validators/}
+      module=${module%.ak}
+      # identity_marketplace/escrow/rule_tests -> identity_marketplace/escrow; identity_marketplace/common stays; escrow stays.
+      add_area "$(echo "$module" | cut -d/ -f1-2)" ;;
+    contracts/identity-marketplace/aiken-shards.json|contracts/identity-marketplace/aiken.toml|contracts/identity-marketplace/aiken.lock|scripts/aiken-check)
+      plan_changed=1 ;;
+    contracts/marketplace/*) legacy_changed=1 ;;
+  esac
+done
+
+# ── Run ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+declare -a step_names=()
+declare -a step_status=()
+failed=0
+rx_failed=0
+
+run_step() { # run_step <name> <command...>
+  local name=$1
+  shift
+  printf '+'
+  printf ' %q' "$@"
+  printf '\n'
+  if [ "$dry_run" -eq 1 ]; then
+    step_names+=("$name"); step_status+=("dry run")
+    return 0
+  fi
+  "$@"
+  local status=$?
+  step_names+=("$name"); step_status+=("$status")
+  if [ "$status" -eq 125 ]; then rx_failed=1; fi
+  if [ "$status" -ne 0 ]; then failed=1; fi
+  return 0
+}
+
+rx_cmd=(rx "${rx_host[@]}")
+
+if [ "$do_vitest" -eq 1 ] && [ "${#vitest_files[@]}" -gt 0 ]; then
+  run_step "vitest related" "${rx_cmd[@]}" pnpm exec vitest related --run "${vitest_files[@]}"
+fi
+if [ "$do_vitest" -eq 1 ]; then
+  for config in "${eval_configs[@]:-}"; do
+    [ -n "$config" ] && run_step "vitest $config" "${rx_cmd[@]}" pnpm exec vitest run --config "$config"
+  done
+fi
+if [ "$do_typecheck" -eq 1 ] && [ "${#packages[@]}" -gt 0 ]; then
+  filters=()
+  for dir in "${packages[@]}"; do filters+=(--filter "./$dir"); done
+  run_step "typecheck ${packages[*]}" "${rx_cmd[@]}" pnpm "${filters[@]}" typecheck
+fi
+if [ "$do_aiken" -eq 1 ]; then
+  if [ "${#areas[@]}" -gt 0 ]; then
+    modules=$(IFS=,; echo "${areas[*]}")
+    run_step "aiken check $modules" "${rx_cmd[@]}" RAYON_NUM_THREADS=1 mise exec "github:aiken-lang/aiken@$aiken_version" node@20 -- scripts/aiken-check --modules "$modules" --seed 358316146
+  fi
+  if [ "$legacy_changed" -eq 1 ]; then
+    run_step "aiken check legacy" "${rx_cmd[@]}" RAYON_NUM_THREADS=1 mise exec "github:aiken-lang/aiken@$aiken_version" node@20 -- scripts/aiken-check --project contracts/marketplace --all --seed 358316146
+  fi
+  if [ "$plan_changed" -eq 1 ]; then
+    run_step "aiken shard plan" "${rx_cmd[@]}" node scripts/aiken-check --check-plan
+  fi
+fi
+
+if [ "${#step_names[@]}" -eq 0 ]; then
+  echo "test-changed: no test, typecheck or Aiken step applies to these changes."
+  exit 0
+fi
+
+echo
+echo "test-changed: result"
+for i in "${!step_names[@]}"; do printf '  %-48s %s\n' "${step_names[$i]}" "${step_status[$i]}"; done
+if [ "$rx_failed" -eq 1 ]; then
+  echo "test-changed: rx failed (exit status 125): the command did not run. Do not run the tests on this computer." >&2
+  echo "test-changed: push the branch and let CI test." >&2
+  exit 125
+fi
+exit "$failed"
