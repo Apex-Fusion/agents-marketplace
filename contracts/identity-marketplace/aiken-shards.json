@@ -1,0 +1,130 @@
+{
+  "description": "Plan of the shards of scripts/aiken-check. Each shard is one CI job. A string in modules is the name of a module. The shard runs all tests of that module. An object with module and tests is a module with a list of some of its tests. The shard runs only these tests. This plan splits only the property tests in this way. Each test of the project is in exactly one shard. The script checks this against the .ak files before each run. If you add, rename or delete a module, change this file. If you add, rename or delete a test of a split module, change this file. Then run: scripts/aiken-check --check-plan. estimated_seconds is the wall time of the shard in seconds, for each aiken version. The 4 shards ran at the same time on one host with one thread for each shard. The split is by cost. The cost of a module is its collect time plus its test time with aiken v1.1.21.",
+  "shards": [
+    {
+      "shard": 1,
+      "estimated_seconds": {
+        "v1.1.21": 160,
+        "v1.1.24": 60
+      },
+      "modules": [
+        "advert",
+        "identity_marketplace/common",
+        "identity_marketplace/delegation/pattern",
+        "identity_marketplace/escrow/cut_tests",
+        "identity_marketplace/escrow/rule_tests",
+        "identity_marketplace/identity/tests/benchmarks",
+        "identity_marketplace/identity/tests/register",
+        {
+          "module": "identity_marketplace/properties/records",
+          "tests": [
+            "prop_other_authors_holds_never_removed",
+            "prop_tombstone_spends_stay_terminal"
+          ]
+        },
+        {
+          "module": "identity_marketplace/properties/vault",
+          "tests": [
+            "prop_returned_vault_never_spendable_by_delegate"
+          ]
+        },
+        "identity_marketplace/vault/tests"
+      ]
+    },
+    {
+      "shard": 2,
+      "estimated_seconds": {
+        "v1.1.21": 154,
+        "v1.1.24": 59
+      },
+      "modules": [
+        "escrow",
+        "identity_marketplace/attestation/tests",
+        "identity_marketplace/config/tests",
+        "identity_marketplace/escrow/ported_tests",
+        "identity_marketplace/identity/tests/datum",
+        "identity_marketplace/identity/tests/scope",
+        "identity_marketplace/identity/tests/update",
+        {
+          "module": "identity_marketplace/properties/records",
+          "tests": [
+            "prop_other_authors_holds_kept",
+            "prop_token_name_never_changes"
+          ]
+        },
+        {
+          "module": "identity_marketplace/properties/vault",
+          "tests": [
+            "prop_returned_vault_closes_by_owner"
+          ]
+        },
+        "vault"
+      ]
+    },
+    {
+      "shard": 3,
+      "estimated_seconds": {
+        "v1.1.21": 155,
+        "v1.1.24": 67
+      },
+      "modules": [
+        "attestation",
+        "config",
+        "delegation",
+        "identity",
+        "identity_marketplace/advert/rules",
+        "identity_marketplace/delegation/tests",
+        "identity_marketplace/identity/tests/adopt",
+        "identity_marketplace/identity/tests/holds",
+        {
+          "module": "identity_marketplace/properties/effective",
+          "tests": [
+            "prop_old_epoch_subagent_is_revoked"
+          ]
+        },
+        {
+          "module": "identity_marketplace/properties/records",
+          "tests": [
+            "prop_only_controller_reduces_value",
+            "prop_other_actions_never_touch_holds",
+            "prop_tombstone_never_returns_to_live"
+          ]
+        }
+      ]
+    },
+    {
+      "shard": 4,
+      "estimated_seconds": {
+        "v1.1.21": 161,
+        "v1.1.24": 68
+      },
+      "modules": [
+        "identity_marketplace/cbor_fixtures",
+        "identity_marketplace/identity/tests/recovery",
+        "identity_marketplace/identity/tests/status",
+        {
+          "module": "identity_marketplace/properties/effective",
+          "tests": [
+            "prop_child_never_better_than_parent"
+          ]
+        },
+        "identity_marketplace/properties/published_vectors",
+        {
+          "module": "identity_marketplace/properties/records",
+          "tests": [
+            "prop_created_at_never_changes",
+            "prop_other_authors_holds_never_shortened"
+          ]
+        },
+        {
+          "module": "identity_marketplace/properties/transitions",
+          "tests": [
+            "prop_holds_unchanged_transitions_pass",
+            "prop_transitions_pass"
+          ]
+        },
+        "vector_identity"
+      ]
+    }
+  ]
+}

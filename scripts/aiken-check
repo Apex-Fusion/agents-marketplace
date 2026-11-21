@@ -1,0 +1,1166 @@
+#!/usr/bin/env node
+// aiken-check: run `aiken check` fast and exact.
+//
+// One tool for four callers:
+//   - the pull request gate: 4 shards in 4 CI jobs;
+//   - the nightly run: the same 4 shards with another aiken version;
+//   - the agent loop: only the modules that changed;
+//   - a project with no plan (contracts/marketplace): all tests.
+//
+// What it does, in this order:
+//   1. It reads the test definitions of each .ak file (static parse).
+//   2. It builds exact `-m` filters for the selected tests. It checks the
+//      filters against the static parse with the matching rules of aiken,
+//      before it runs aiken.
+//   3. It copies the inputs of aiken to a temp dir. No file of the project
+//      changes.
+//   4. It runs `aiken check -D` in the copy with one thread.
+//   5. It compares the JSON report of aiken with the expected tests. The run
+//      passes only when both sets of tests are equal.
+//
+// Run `scripts/aiken-check --help` for the options.
+//
+// This file has no extension and the root package.json sets "type": "module".
+// So Node reads it as an ES module.
+
+import { spawn, spawnSync } from "node:child_process";
+import { randomInt } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const DEFAULT_PROJECT = "contracts/identity-marketplace";
+const PLAN_NAME = "aiken-shards.json";
+
+// Aiken reads the tests from these folders.
+const SOURCE_DIRS = ["lib", "validators"];
+// Aiken reads these folders and files. Nothing else of the project matters.
+const COPIED_DIRS = ["lib", "validators", "env"];
+const COPIED_FILES = ["aiken.toml", "aiken.lock"];
+
+// Aiken ignores a .ak file with another path form and warns about it.
+// Source: is_aiken_path in crates/aiken-project/src/lib.rs.
+const VALID_MODULE_PATH = /^([a-z][-_a-z0-9]*\/)*[a-z][-_a-z0-9]*(\.[-_a-z0-9]*)*\.ak$/;
+
+const EXIT = { pass: 0, fail: 1, usage: 2, tool: 3 };
+
+const MAX_FAILURES_SHOWN = 20;
+const MAX_LINES_PER_FAILURE = 40;
+const MAX_STDERR_LINES = 60;
+const MAX_PROBLEMS_SHOWN = 30;
+const MAX_STDERR_BYTES = 1_000_000;
+
+const HELP = `aiken-check: run "aiken check" fast and exact.
+
+Usage:
+  scripts/aiken-check --shard N --of M [options]
+  scripts/aiken-check --all [options]
+  scripts/aiken-check --modules SUBSTR[,SUBSTR...] [options]
+  scripts/aiken-check --check-plan [options]
+
+Modes (give one):
+  --shard N --of M  Run shard N of the plan. N counts from 1. M is the number
+                    of shards in the plan.
+  --all             Run every test of the project. The project needs no plan.
+  --modules LIST    Run every test of each module whose name contains one
+                    SUBSTR of the list. Example: --modules identity_marketplace/escrow
+  --check-plan      Check the plan against the .ak files. Run no aiken.
+
+Options:
+  --project DIR     The aiken project. Default: ${DEFAULT_PROJECT}.
+                    A relative path starts at the repository root.
+  --seed N          Seed of the property tests (0 to 4294967295).
+                    Default: a random seed. The script always prints the seed.
+  --max-success N   Iterations of each property test. Aiken default: 100.
+  --aiken PATH      The aiken binary. Default: aiken on PATH.
+                    A path with a "/" starts at the current directory.
+  --plan FILE       The plan. Default: <project>/${PLAN_NAME}.
+                    A relative path starts at the repository root.
+  --keep            Keep the temp copy and print its path.
+  --json-out FILE   Write the JSON report of aiken to FILE.
+                    A relative path starts at the current directory.
+  -h, --help        Show this text.
+
+Exit status:
+  0  All expected tests passed.
+  1  A test failed, the tests differ from the static parse, or the plan is
+     not valid.
+  2  Usage error.
+  3  Tool error: no aiken, aiken crashed, or aiken printed no JSON report.
+
+How it works:
+  The script reads the test definitions of the .ak files. It builds exact
+  "-m" filters and checks them before the run. It copies aiken.toml,
+  aiken.lock and the .ak files to a temp dir. If the "compiler" line of
+  aiken.toml names another version than the binary, the script changes that
+  line in the copy only. It runs "aiken check -D" with RAYON_NUM_THREADS=1.
+  The run passes only when aiken reports exactly the expected tests and all
+  of them pass.
+`;
+
+// ---------------------------------------------------------------------------
+// Errors and output
+// ---------------------------------------------------------------------------
+
+// `summary` is the short reason that the final line shows. It defaults to the
+// first line of the message.
+class CheckError extends Error {
+  constructor(message, exitCode = EXIT.fail, summary = message.split("\n")[0]) {
+    super(message);
+    this.exitCode = exitCode;
+    this.summary = summary;
+  }
+}
+
+const usageError = (message) => new CheckError(message, EXIT.usage);
+const toolError = (message) => new CheckError(message, EXIT.tool);
+
+// A closed pipe (for example `| head`) must not crash the script.
+process.stdout.on("error", () => {});
+process.stderr.on("error", () => {});
+
+function out(line = "") {
+  process.stdout.write(`${line}\n`);
+}
+
+function note(line) {
+  process.stderr.write(`aiken-check: ${line}\n`);
+}
+
+function seconds(milliseconds) {
+  return (milliseconds / 1000).toFixed(1);
+}
+
+function toPosix(file) {
+  return file.split(path.sep).join("/");
+}
+
+function plural(count, one, many = `${one}s`) {
+  return `${count} ${count === 1 ? one : many}`;
+}
+
+function isObject(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// Quotes an argument for the command line that the script prints.
+function shellQuote(argument) {
+  return /^[A-Za-z0-9_@%+=:,./-]+$/.test(argument) ? argument : `'${argument.replaceAll("'", "'\\''")}'`;
+}
+
+function tailLines(text, limit) {
+  const lines = text.replace(/\s+$/, "").split("\n");
+  return lines.length <= limit ? lines : [`... (${lines.length - limit} earlier lines left out)`, ...lines.slice(-limit)];
+}
+
+// ---------------------------------------------------------------------------
+// Command line
+// ---------------------------------------------------------------------------
+
+const VALUE_OPTIONS = {
+  "--shard": "shard",
+  "--of": "of",
+  "--modules": "modules",
+  "--project": "project",
+  "--seed": "seed",
+  "--max-success": "maxSuccess",
+  "--aiken": "aiken",
+  "--plan": "plan",
+  "--json-out": "jsonOut",
+};
+
+const FLAG_OPTIONS = {
+  "--all": "all",
+  "--check-plan": "checkPlan",
+  "--keep": "keep",
+  "--help": "help",
+  "-h": "help",
+};
+
+function parseInteger(option, text, min, max = Number.MAX_SAFE_INTEGER) {
+  if (!/^\d+$/.test(text)) throw usageError(`${option} needs an integer, not "${text}"`);
+  const value = Number(text);
+  if (value < min || value > max) {
+    throw usageError(`${option} must be ${max === Number.MAX_SAFE_INTEGER ? `at least ${min}` : `from ${min} to ${max}`}, not ${text}`);
+  }
+  return value;
+}
+
+function parseArgs(argv) {
+  const args = {
+    shard: null,
+    of: null,
+    all: false,
+    modules: null,
+    checkPlan: false,
+    project: null,
+    seed: null,
+    maxSuccess: null,
+    aiken: "aiken",
+    plan: null,
+    keep: false,
+    jsonOut: null,
+    help: false,
+  };
+  const given = new Set();
+
+  for (let index = 0; index < argv.length; index += 1) {
+    let name = argv[index];
+    let value = null;
+    const equals = name.startsWith("--") ? name.indexOf("=") : -1;
+    if (equals !== -1) {
+      value = name.slice(equals + 1);
+      name = name.slice(0, equals);
+    }
+    if (given.has(name)) throw usageError(`${name} is given twice`);
+    given.add(name);
+
+    if (!name.startsWith("-")) throw usageError(`unexpected argument ${name}`);
+    if (Object.hasOwn(FLAG_OPTIONS, name)) {
+      if (value !== null) throw usageError(`${name} takes no value`);
+      args[FLAG_OPTIONS[name]] = true;
+    } else if (Object.hasOwn(VALUE_OPTIONS, name)) {
+      if (value === null) {
+        index += 1;
+        if (index >= argv.length) throw usageError(`${name} needs a value`);
+        value = argv[index];
+      }
+      if (value === "") throw usageError(`${name} needs a value that is not empty`);
+      args[VALUE_OPTIONS[name]] = value;
+    } else {
+      throw usageError(`unknown option ${name}`);
+    }
+  }
+  if (args.help) return args;
+
+  if (args.shard !== null) args.shard = parseInteger("--shard", args.shard, 1);
+  if (args.of !== null) args.of = parseInteger("--of", args.of, 1);
+  if (args.seed !== null) args.seed = parseInteger("--seed", args.seed, 0, 4294967295);
+  if (args.maxSuccess !== null) args.maxSuccess = parseInteger("--max-success", args.maxSuccess, 1);
+
+  const modes = [args.shard !== null, args.all, args.modules !== null, args.checkPlan].filter(Boolean).length;
+  if (modes !== 1) {
+    throw usageError("give exactly one of --shard N --of M, --all, --modules LIST or --check-plan");
+  }
+  if (args.shard !== null && args.of === null) throw usageError("--shard needs --of");
+  if (args.of !== null && args.shard === null && !args.checkPlan) throw usageError("--of needs --shard");
+  if (args.shard !== null && args.shard > args.of) throw usageError(`--shard ${args.shard} is more than --of ${args.of}`);
+  if (args.modules !== null) {
+    args.modules = args.modules.split(",").map((item) => item.trim()).filter(Boolean);
+    if (args.modules.length === 0) throw usageError("--modules needs at least one name");
+  }
+  return args;
+}
+
+// ---------------------------------------------------------------------------
+// Static parse of the .ak files
+// ---------------------------------------------------------------------------
+
+function isWordStart(character) {
+  return (character >= "a" && character <= "z") || (character >= "A" && character <= "Z") || character === "_";
+}
+
+function isDigit(character) {
+  return character >= "0" && character <= "9";
+}
+
+function lineAt(source, position) {
+  let line = 1;
+  for (let index = 0; index < position; index += 1) if (source[index] === "\n") line += 1;
+  return line;
+}
+
+// Splits Aiken source into words, numbers, strings and single characters.
+// It drops white space and comments (`//`, `///` and `////`). A string is
+// `"..."` or `@"..."`; it can span lines and `\` escapes the next character.
+// Source: crates/aiken-lang/src/parser/lexer.rs.
+function tokenize(source, label) {
+  const tokens = [];
+  let index = 0;
+  while (index < source.length) {
+    const character = source[index];
+    if (character === " " || character === "\t" || character === "\n" || character === "\r") {
+      index += 1;
+    } else if (character === "/" && source[index + 1] === "/") {
+      while (index < source.length && source[index] !== "\n") index += 1;
+    } else if (character === '"' || (character === "@" && source[index + 1] === '"')) {
+      const start = index;
+      index += character === '"' ? 1 : 2;
+      while (index < source.length && source[index] !== '"') index += source[index] === "\\" ? 2 : 1;
+      if (index >= source.length) {
+        throw new CheckError(`${label}: the string at line ${lineAt(source, start)} has no end`);
+      }
+      index += 1;
+      tokens.push({ type: "string", value: "", at: start });
+    } else if (isWordStart(character) || isDigit(character)) {
+      const start = index;
+      index += 1;
+      while (index < source.length && (isWordStart(source[index]) || isDigit(source[index]))) index += 1;
+      tokens.push({ type: isDigit(character) ? "number" : "word", value: source.slice(start, index), at: start });
+    } else {
+      tokens.push({ type: "punct", value: character, at: index });
+      index += 1;
+    }
+  }
+  return tokens;
+}
+
+// Finds the `test` definitions at the top level of a module. A definition is
+// `test NAME ( PARAMETERS ) [fail [once]] { BODY }`. A test with parameters is
+// a property test. A `bench` definition is not a test: `aiken check` does not
+// run it, and the scan skips it.
+function scanTests(source, label) {
+  const tokens = tokenize(source, label);
+  const tests = [];
+  let depth = 0;
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token.type === "punct") {
+      if (token.value === "{") depth += 1;
+      if (token.value === "}") depth -= 1;
+      if (depth < 0) throw new CheckError(`${label}: the braces are not balanced at line ${lineAt(source, token.at)}`);
+      continue;
+    }
+    if (depth !== 0 || token.type !== "word" || token.value !== "test") continue;
+
+    const name = tokens[index + 1];
+    const open = tokens[index + 2];
+    if (name?.type !== "word" || open?.value !== "(") {
+      throw new CheckError(`${label}: cannot read the test definition at line ${lineAt(source, token.at)}`);
+    }
+    let nesting = 0;
+    let parameterTokens = 0;
+    let end = index + 2;
+    for (; end < tokens.length; end += 1) {
+      const inner = tokens[end];
+      if (inner.type === "punct" && inner.value === "(") nesting += 1;
+      if (inner.type === "punct" && inner.value === ")") nesting -= 1;
+      if (nesting === 0) break;
+      if (end > index + 2) parameterTokens += 1;
+    }
+    if (end >= tokens.length) {
+      throw new CheckError(`${label}: the parameters of "${name.value}" at line ${lineAt(source, token.at)} have no end`);
+    }
+    tests.push({ name: name.value, kind: parameterTokens > 0 ? "property" : "unit" });
+    index = end;
+  }
+  if (depth !== 0) throw new CheckError(`${label}: the braces are not balanced at the end of the file`);
+  return tests;
+}
+
+function byName(left, right) {
+  return left.name < right.name ? -1 : left.name > right.name ? 1 : 0;
+}
+
+// Lists the .ak files below a folder. Aiken follows links, so does this.
+function listAikenFiles(base, seen = new Set()) {
+  const stat = fs.statSync(base, { throwIfNoEntry: false });
+  if (!stat?.isDirectory()) return [];
+  const real = fs.realpathSync(base);
+  if (seen.has(real)) return [];
+  seen.add(real);
+
+  const files = [];
+  for (const entry of fs.readdirSync(base, { withFileTypes: true }).sort(byName)) {
+    const full = path.join(base, entry.name);
+    const target = entry.isSymbolicLink() ? fs.statSync(full, { throwIfNoEntry: false }) : entry;
+    if (!target) continue;
+    if (target.isDirectory()) files.push(...listAikenFiles(full, seen));
+    else if (target.isFile() && entry.name.endsWith(".ak")) files.push(full);
+  }
+  return files;
+}
+
+// The module name is the path below lib/ or validators/ without ".ak".
+// Source: module_name in crates/aiken-project/src/lib.rs.
+function readProject(dir) {
+  const modules = new Map();
+  const modulesWithoutTests = new Set();
+  const ignored = [];
+
+  for (const sub of SOURCE_DIRS) {
+    const base = path.join(dir, sub);
+    for (const file of listAikenFiles(base)) {
+      const relative = toPosix(path.relative(base, file));
+      if (!VALID_MODULE_PATH.test(relative)) {
+        ignored.push(`${sub}/${relative}`);
+        continue;
+      }
+      const name = relative.replace(/\.ak$/, "").replaceAll("-", "_");
+      if (modules.has(name) || modulesWithoutTests.has(name)) {
+        throw new CheckError(`two files define the module "${name}" (one is ${sub}/${relative})`);
+      }
+      const tests = scanTests(fs.readFileSync(file, "utf8"), `${sub}/${relative}`);
+      if (tests.length > 0) modules.set(name, { name, file: `${sub}/${relative}`, tests });
+      else modulesWithoutTests.add(name);
+    }
+  }
+
+  const all = [...modules.values()].flatMap((module) => module.tests);
+  return {
+    dir,
+    modules,
+    modulesWithoutTests,
+    ignored,
+    testCount: all.length,
+    unitCount: all.filter((test) => test.kind === "unit").length,
+    propertyCount: all.filter((test) => test.kind === "property").length,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Selections: a Map of module name -> test names
+// ---------------------------------------------------------------------------
+
+const idOf = (module, test) => `${module}::${test}`;
+
+function allTests(project) {
+  return new Map([...project.modules].map(([name, module]) => [name, module.tests.map((test) => test.name)]));
+}
+
+function idsOf(selection) {
+  const ids = new Set();
+  for (const [module, names] of selection) for (const name of names) ids.add(idOf(module, name));
+  return ids;
+}
+
+function countOf(selection) {
+  let count = 0;
+  for (const names of selection.values()) count += names.length;
+  return count;
+}
+
+function kindCounts(project, selection) {
+  const counts = { unit: 0, property: 0 };
+  for (const [module, names] of selection) {
+    const wanted = new Set(names);
+    for (const test of project.modules.get(module).tests) if (wanted.has(test.name)) counts[test.kind] += 1;
+  }
+  return counts;
+}
+
+// ---------------------------------------------------------------------------
+// Filters
+// ---------------------------------------------------------------------------
+
+// Reads one `-m` value like aiken does (collect_test_items in
+// crates/aiken-project/src/lib.rs; v1.1.21 and v1.1.24 are equal):
+//   - A value with no "." and no "/" is a test name. It has no module.
+//   - Else the text before the first "." is a module text. A module matches
+//     when its name CONTAINS that text.
+//   - The text between the first and the second "." is a list of test names.
+//     Aiken removes "{" and "}", splits at "," and trims. An empty list means
+//     all tests of the module.
+function parseMatch(value) {
+  const parts = value.split(".");
+  let module = "";
+  let next = 0;
+  if (value.includes(".") || value.includes("/")) {
+    module = parts[0];
+    next = 1;
+  }
+  let names = null;
+  if (parts[next] !== undefined) {
+    const list = parts[next]
+      .replace(/[{}]/g, "")
+      .split(",")
+      .map((name) => name.trim())
+      .filter((name) => name !== "");
+    if (list.length > 0) names = list;
+  }
+  return { module, names };
+}
+
+// The set of tests that `aiken check -e -m VALUE...` selects.
+function simulate(values, project) {
+  const matches = values.map(parseMatch);
+  const picked = new Set();
+  for (const module of project.modules.values()) {
+    for (const test of module.tests) {
+      const hit = matches.some(
+        (match) =>
+          (match.module === "" || module.name.includes(match.module)) &&
+          (match.names === null || match.names.includes(test.name)),
+      );
+      if (hit) picked.add(idOf(module.name, test.name));
+    }
+  }
+  return picked;
+}
+
+// Builds the `-m` values that select exactly the tests of the selection.
+//   - A whole module uses a module value, when no other module is caught.
+//     A module name with no "/" (like "advert") needs the form "advert.{}".
+//   - Else the value lists exact test names: "module.{name,name}".
+// The last step checks the result against the static parse.
+function buildFilters(project, selection) {
+  const expected = idsOf(selection);
+  if (expected.size === 0) throw new CheckError("the selection has no tests");
+
+  const candidates = [];
+  for (const [module, names] of [...selection].sort(([left], [right]) => (left < right ? -1 : 1))) {
+    let value = null;
+    if (names.length === project.modules.get(module).tests.length) {
+      const whole = module.includes("/") ? module : `${module}.{}`;
+      if ([...simulate([whole], project)].every((id) => expected.has(id))) value = whole;
+    }
+    candidates.push(value ?? `${module}.{${names.join(",")}}`);
+  }
+
+  // Drop a value when other values select the same tests.
+  const picks = candidates.map((value) => simulate([value], project));
+  const order = candidates.map((_, index) => index).sort((a, b) => picks[b].size - picks[a].size || a - b);
+  const covered = new Set();
+  const kept = new Set();
+  for (const index of order) {
+    if ([...picks[index]].some((id) => !covered.has(id))) {
+      kept.add(index);
+      for (const id of picks[index]) covered.add(id);
+    }
+  }
+  const values = candidates.filter((_, index) => kept.has(index));
+
+  const picked = simulate(values, project);
+  const extra = [...picked].filter((id) => !expected.has(id));
+  const missing = [...expected].filter((id) => !picked.has(id));
+  if (extra.length > 0 || missing.length > 0) {
+    const lines = ["the filters cannot select exactly the expected tests:"];
+    for (const id of extra.slice(0, 10)) lines.push(`  the filters also select ${id}`);
+    for (const id of missing.slice(0, 10)) lines.push(`  the filters do not select ${id}`);
+    throw new CheckError(lines.join("\n"));
+  }
+  return values;
+}
+
+// ---------------------------------------------------------------------------
+// Plan
+// ---------------------------------------------------------------------------
+
+function readPlanFile(file, label) {
+  let text;
+  try {
+    text = fs.readFileSync(file, "utf8");
+  } catch (error) {
+    const hint = error.code === "ENOENT" ? ". A project with no plan can use --all or --modules." : `: ${error.message}`;
+    throw new CheckError(`cannot read the plan ${label}${hint}`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    throw new CheckError(`the plan ${label} is not valid JSON: ${error.message}`);
+  }
+}
+
+// A module entry of a shard is a module name (all tests of the module) or
+// {"module": NAME, "tests": [TEST, ...]} (only these tests of the module).
+function readEntry(entry) {
+  if (typeof entry === "string") return { module: entry, names: null };
+  const valid =
+    isObject(entry) &&
+    typeof entry.module === "string" &&
+    Object.keys(entry).every((key) => key === "module" || key === "tests") &&
+    Array.isArray(entry.tests) &&
+    entry.tests.length > 0 &&
+    entry.tests.every((name) => typeof name === "string");
+  return valid ? { module: entry.module, names: entry.tests } : null;
+}
+
+// Checks the plan against the static parse. Returns the problems and, for
+// each shard, its selection. A valid plan covers each test exactly once.
+function resolvePlan(plan, project, shardCount) {
+  const problems = [];
+  const shards = [];
+
+  if (!isObject(plan) || !Array.isArray(plan.shards) || plan.shards.length === 0) {
+    return { problems: ['the plan needs a "shards" list with at least one shard'], shards };
+  }
+  if (shardCount !== null && plan.shards.length !== shardCount) {
+    problems.push(`the plan has ${plural(plan.shards.length, "shard")}, but --of is ${shardCount}`);
+  }
+
+  const covered = new Map(); // test id -> list of shard numbers
+
+  plan.shards.forEach((shard, index) => {
+    const number = index + 1;
+    const selection = new Map();
+    shards.push({ number, selection, estimates: isObject(shard) ? shard.estimated_seconds : undefined });
+
+    if (!isObject(shard) || !Array.isArray(shard.modules)) {
+      problems.push(`shard ${number}: it needs a "modules" list`);
+      return;
+    }
+    if (shard.shard !== undefined && shard.shard !== number) {
+      problems.push(`shard ${number}: the field "shard" is ${JSON.stringify(shard.shard)}; it must be ${number}`);
+    }
+    if (shard.estimated_seconds !== undefined) {
+      const values = isObject(shard.estimated_seconds) ? Object.values(shard.estimated_seconds) : [];
+      if (values.length === 0 || !values.every((value) => Number.isFinite(value) && value >= 0)) {
+        problems.push(`shard ${number}: "estimated_seconds" must be an object of numbers, one for each aiken version`);
+      }
+    }
+
+    for (const entry of shard.modules) {
+      const parsed = readEntry(entry);
+      if (!parsed) {
+        problems.push(`shard ${number}: a module entry is a string or {"module": "...", "tests": ["..."]}: ${JSON.stringify(entry)}`);
+        continue;
+      }
+      const { module, names } = parsed;
+      const known = project.modules.get(module);
+      if (!known) {
+        const reason = project.modulesWithoutTests.has(module) ? "has no tests" : "is not a module of the project";
+        problems.push(`shard ${number}: the module ${module} ${reason}`);
+        continue;
+      }
+      const existing = new Set(known.tests.map((test) => test.name));
+      for (const name of names ?? existing) {
+        if (!existing.has(name)) {
+          problems.push(`shard ${number}: the module ${module} has no test ${name}`);
+          continue;
+        }
+        const id = idOf(module, name);
+        covered.set(id, [...(covered.get(id) ?? []), number]);
+        if (!selection.has(module)) selection.set(module, []);
+        if (!selection.get(module).includes(name)) selection.get(module).push(name);
+      }
+    }
+  });
+
+  for (const module of project.modules.values()) {
+    const missing = [];
+    const repeated = [];
+    for (const test of module.tests) {
+      const where = covered.get(idOf(module.name, test.name)) ?? [];
+      if (where.length === 0) missing.push(test.name);
+      if (where.length > 1) repeated.push({ name: test.name, where });
+    }
+    if (missing.length === module.tests.length) {
+      problems.push(`the module ${module.name} (${plural(missing.length, "test")}) is in no shard`);
+    } else {
+      for (const name of missing) problems.push(`the test ${name} of the module ${module.name} is in no shard`);
+    }
+    const wholeModule =
+      repeated.length === module.tests.length && repeated.every((item) => item.where.join() === repeated[0].where.join());
+    if (wholeModule) {
+      problems.push(`the module ${module.name} is in more than one place: shards ${repeated[0].where.join(", ")}`);
+    } else {
+      for (const item of repeated) {
+        problems.push(`the test ${item.name} of the module ${module.name} is in more than one place: shards ${item.where.join(", ")}`);
+      }
+    }
+  }
+
+  for (const shard of shards) {
+    if (countOf(shard.selection) === 0 && !problems.some((text) => text.startsWith(`shard ${shard.number}:`))) {
+      problems.push(`shard ${shard.number} has no tests`);
+    }
+  }
+  return { problems, shards };
+}
+
+// Loads and checks the plan, and builds the filters of each shard.
+// Throws when the plan is not valid.
+function loadPlan(planFile, planLabel, project, shardCount) {
+  const { problems, shards } = resolvePlan(readPlanFile(planFile, planLabel), project, shardCount);
+  if (problems.length === 0) {
+    for (const shard of shards) {
+      try {
+        shard.filters = buildFilters(project, shard.selection);
+      } catch (error) {
+        problems.push(`shard ${shard.number}: ${error.message}`);
+      }
+    }
+  }
+  if (problems.length > 0) {
+    const shown = problems.slice(0, MAX_PROBLEMS_SHOWN).map((text) => `  ${text}`);
+    if (problems.length > shown.length) shown.push(`  ... and ${problems.length - shown.length} more`);
+    throw new CheckError(
+      `the plan ${planLabel} is not valid (${plural(problems.length, "problem")}):\n${shown.join("\n")}\n` +
+        "Change the plan so that each test is in exactly one shard.",
+      EXIT.fail,
+      `the plan is not valid (${plural(problems.length, "problem")})`,
+    );
+  }
+  return shards;
+}
+
+// ---------------------------------------------------------------------------
+// aiken
+// ---------------------------------------------------------------------------
+
+function readAikenVersion(aiken) {
+  const run = spawnSync(aiken, ["--version"], { encoding: "utf8" });
+  if (run.error) {
+    const hint = run.error.code === "ENOENT" ? " Install aiken or give its path with --aiken." : "";
+    throw toolError(`cannot run "${aiken}": ${run.error.message}.${hint}`);
+  }
+  const match = /^aiken\s+(v?(\d+\.\d+\.\d+[^\s+]*)(?:\+\S+)?)/m.exec(run.stdout ?? "");
+  if (run.status !== 0 || !match) {
+    throw toolError(`"${aiken} --version" gave no version (status ${run.status}): ${(run.stdout ?? "").trim()}`);
+  }
+  return { text: match[1], number: match[2] };
+}
+
+// Aiken warns when the "compiler" line of aiken.toml differs from the version
+// of the binary. `-D` turns the warning into an error. Aiken v1.1.21 prints no
+// message when stdout is not a terminal, so the run fails with no reason. So
+// the copy gets the version of the binary. The project keeps its pin.
+function pinCompiler(toml, number) {
+  const lines = toml.split("\n");
+  for (let index = 0; index < lines.length; index += 1) {
+    if (/^\s*\[/.test(lines[index])) break; // the pin is a key above the first table
+    const match = /^(\s*compiler\s*=\s*)(["'])v?([^"']*)\2/.exec(lines[index]);
+    if (!match) continue;
+    if (match[3] === number) return { toml, from: null };
+    lines[index] = lines[index].replace(match[0], `${match[1]}"v${number}"`);
+    return { toml: lines.join("\n"), from: match[3] };
+  }
+  return { toml, from: null };
+}
+
+function copyInputs(projectDir, destination) {
+  for (const file of COPIED_FILES) {
+    const source = path.join(projectDir, file);
+    if (fs.existsSync(source)) fs.copyFileSync(source, path.join(destination, file));
+  }
+  for (const sub of COPIED_DIRS) {
+    const base = path.join(projectDir, sub);
+    for (const file of listAikenFiles(base)) {
+      const target = path.join(destination, sub, path.relative(base, file));
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.copyFileSync(file, target);
+    }
+  }
+}
+
+function runAiken(aiken, args, cwd, env, register) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (result) => {
+      if (!settled) {
+        settled = true;
+        resolve(result);
+      }
+    };
+    const child = spawn(aiken, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+    register(child);
+    const stdout = [];
+    let stderr = "";
+    child.stdout.on("data", (chunk) => stdout.push(chunk));
+    child.stderr.on("data", (chunk) => {
+      stderr = (stderr + chunk.toString("utf8")).slice(-MAX_STDERR_BYTES);
+    });
+    child.on("error", (error) => finish({ error }));
+    child.on("close", (status, signal) => {
+      finish({ status, signal, stdout: Buffer.concat(stdout).toString("utf8"), stderr });
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// The report of aiken
+// ---------------------------------------------------------------------------
+
+function parseReport(text) {
+  let report;
+  try {
+    report = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  const valid =
+    isObject(report) &&
+    isObject(report.summary) &&
+    Number.isInteger(report.summary.total) &&
+    Number.isInteger(report.summary.failed) &&
+    Array.isArray(report.modules) &&
+    report.modules.every(
+      (module) =>
+        isObject(module) &&
+        typeof module.name === "string" &&
+        Array.isArray(module.tests) &&
+        module.tests.every((test) => isObject(test) && typeof test.title === "string" && typeof test.status === "string"),
+    );
+  return valid ? report : null;
+}
+
+function describeFailure(module, test) {
+  const kind = "iterations" in test ? "property test" : "unit test";
+  const lines = [`FAIL ${module} :: ${test.title} (status ${test.status}, ${kind})`];
+  const detail = [];
+  if (typeof test.assertion === "string") detail.push(...test.assertion.split("\n"));
+  if (test.counterexample !== undefined && test.counterexample !== null) {
+    const text = typeof test.counterexample === "string" ? test.counterexample : JSON.stringify(test.counterexample);
+    detail.push("counterexample:", ...text.split("\n"));
+  }
+  if (Array.isArray(test.traces) && test.traces.length > 0) {
+    detail.push("traces:", ...test.traces.flatMap((trace) => String(trace).split("\n")));
+  }
+  const room = MAX_LINES_PER_FAILURE - lines.length;
+  if (detail.length > room) {
+    lines.push(...detail.slice(0, room - 1).map((line) => `    ${line}`), `    ... (${detail.length - room + 1} more lines)`);
+  } else {
+    lines.push(...detail.map((line) => `    ${line}`));
+  }
+  return lines;
+}
+
+// Compares the report with the expected selection.
+function compareReport(report, selection, kinds) {
+  const expected = idsOf(selection);
+  const reported = new Map();
+  const repeated = [];
+  for (const module of report.modules) {
+    for (const test of module.tests) {
+      const id = idOf(module.name, test.title);
+      if (reported.has(id)) repeated.push(id);
+      reported.set(id, { module: module.name, test });
+    }
+  }
+  const results = [...reported.values()];
+  const failures = results.filter((item) => item.test.status !== "pass");
+  const passed = results.length - failures.length;
+  const missing = [...expected].filter((id) => !reported.has(id));
+  const extra = [...reported.keys()].filter((id) => !expected.has(id));
+
+  // The run passes only when none of these checks finds a problem.
+  const problems = [];
+  if (failures.length > 0) problems.push(`${plural(failures.length, "test")} did not pass`);
+  if (report.summary.total !== expected.size) {
+    problems.push(`aiken ran ${report.summary.total} tests, but the static parse expects ${expected.size}`);
+  }
+  if (report.summary.failed !== failures.length) {
+    problems.push(`summary.failed is ${report.summary.failed}, but ${failures.length} tests have another status than pass`);
+  }
+  for (const id of repeated.slice(0, 10)) problems.push(`aiken reports the test ${id} twice`);
+  for (const id of missing.slice(0, 10)) problems.push(`aiken did not run the expected test ${id}`);
+  for (const id of extra.slice(0, 10)) problems.push(`aiken ran the test ${id} that is not expected`);
+  if (missing.length > 10) problems.push(`... and ${missing.length - 10} more expected tests that aiken did not run`);
+  if (extra.length > 10) problems.push(`... and ${extra.length - 10} more tests that are not expected`);
+  // A kind that differs while all tests match means the static parse reads a test wrongly.
+  const reportKinds = report.summary.kind;
+  if (problems.length === 0 && isObject(reportKinds) && (reportKinds.unit !== kinds.unit || reportKinds.property !== kinds.property)) {
+    problems.push(
+      `aiken ran ${reportKinds.unit} unit and ${reportKinds.property} property tests, ` +
+        `but the static parse expects ${kinds.unit} unit and ${kinds.property} property tests`,
+    );
+  }
+  if (problems.length === 0 && passed !== expected.size) {
+    problems.push(`${passed} tests passed, but the static parse expects ${expected.size}`);
+  }
+
+  const rows = new Map();
+  const row = (name) => {
+    if (!rows.has(name)) rows.set(name, { expected: 0, passed: 0, failed: 0 });
+    return rows.get(name);
+  };
+  for (const [module, names] of selection) row(module).expected = names.length;
+  for (const item of results) row(item.module)[item.test.status === "pass" ? "passed" : "failed"] += 1;
+
+  return { problems, failures, passed, rows };
+}
+
+function printTable(rows) {
+  const names = [...rows.keys()].sort();
+  const width = Math.max(6, ...names.map((name) => name.length));
+  const line = (name, expected, passed, failed) =>
+    `${name.padEnd(width)}  ${String(expected).padStart(8)}  ${String(passed).padStart(6)}  ${String(failed).padStart(6)}`;
+  out(line("module", "expected", "passed", "failed"));
+  let totals = [0, 0, 0];
+  for (const name of names) {
+    const { expected, passed, failed } = rows.get(name);
+    out(line(name, expected, passed, failed));
+    totals = [totals[0] + expected, totals[1] + passed, totals[2] + failed];
+  }
+  out(line("total", ...totals));
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+function appendStepSummary(text) {
+  const file = process.env.GITHUB_STEP_SUMMARY;
+  if (!file) return;
+  try {
+    fs.appendFileSync(file, `${text}\n`);
+  } catch (error) {
+    note(`cannot write ${file}: ${error.message}`);
+  }
+}
+
+// The last line of stdout. `context.suffix` holds the seed and the version
+// of aiken, when the run knows them.
+function finalLine(context, ok, text) {
+  out(`aiken-check: ${ok ? "PASS" : "FAIL"} ${text}`);
+  appendStepSummary(
+    `- aiken-check \`${context.projectLabel}\` \`${context.modeLabel}\`: **${ok ? "PASS" : "FAIL"}** ${text}${context.suffix}`,
+  );
+}
+
+function resolveContext(args) {
+  const repoRoot = path.resolve(path.dirname(fs.realpathSync(fileURLToPath(import.meta.url))), "..");
+  const label = (file) => {
+    const relative = path.relative(repoRoot, file);
+    return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative) ? toPosix(relative) : file;
+  };
+  const projectDir = path.resolve(repoRoot, args.project ?? DEFAULT_PROJECT);
+  if (!fs.existsSync(path.join(projectDir, "aiken.toml"))) {
+    throw usageError(`${label(projectDir)} is not an aiken project: it has no aiken.toml`);
+  }
+  const planFile = args.plan ? path.resolve(repoRoot, args.plan) : path.join(projectDir, PLAN_NAME);
+
+  let modeLabel;
+  if (args.shard !== null) modeLabel = `shard:${args.shard}/${args.of}`;
+  else if (args.all) modeLabel = "all";
+  else if (args.modules !== null) modeLabel = `modules:${args.modules.join(",")}`;
+  else modeLabel = "check-plan";
+
+  return {
+    projectDir,
+    projectLabel: label(projectDir),
+    planFile,
+    planLabel: label(planFile),
+    modeLabel,
+    suffix: "",
+  };
+}
+
+function printPlanSummary(project, shards) {
+  for (const shard of shards) {
+    const split = [...shard.selection].filter(([module, names]) => names.length !== project.modules.get(module).tests.length).length;
+    const estimates = isObject(shard.estimates)
+      ? `; estimated ${Object.entries(shard.estimates).map(([version, value]) => `${value} s with aiken ${version}`).join(", ")}`
+      : "";
+    out(
+      `shard ${shard.number} of ${shards.length}: ${plural(countOf(shard.selection), "test")} in ${plural(shard.selection.size, "module")}` +
+        `${split > 0 ? ` (${split} split by test name)` : ""}; ${plural(shard.filters.length, "filter")}${estimates}`,
+    );
+  }
+}
+
+// Returns the exit status.
+function checkPlanMode(args, context, project) {
+  out(`aiken-check: mode=check-plan project=${context.projectLabel} plan=${context.planLabel} expected=${project.testCount}`);
+  const shards = loadPlan(context.planFile, context.planLabel, project, args.of);
+  printPlanSummary(project, shards);
+  finalLine(
+    context,
+    true,
+    `plan: ${plural(shards.length, "shard")}, ${plural(project.modules.size, "module")} with tests, ${project.testCount} tests ` +
+      `(${project.unitCount} unit, ${project.propertyCount} property)`,
+  );
+  return EXIT.pass;
+}
+
+function selectModules(args, project) {
+  const selection = new Map();
+  for (const [name, module] of project.modules) {
+    if (args.modules.some((text) => name.includes(text))) selection.set(name, module.tests.map((test) => test.name));
+  }
+  if (selection.size === 0) {
+    const names = [...project.modules.keys()];
+    const shown = names.slice(0, 40).map((name) => `  ${name}`);
+    if (names.length > shown.length) shown.push(`  ... and ${names.length - shown.length} more`);
+    throw usageError(`no module with tests has a name that contains ${args.modules.map((text) => `"${text}"`).join(" or ")}. Modules with tests:\n${shown.join("\n")}`);
+  }
+  return selection;
+}
+
+// The tests to run and the `-m` values that select them.
+function chooseTests(args, context, project) {
+  if (args.shard !== null) {
+    const shard = loadPlan(context.planFile, context.planLabel, project, args.of)[args.shard - 1];
+    return { selection: shard.selection, filters: shard.filters };
+  }
+  if (args.modules !== null) {
+    const selection = selectModules(args, project);
+    return { selection, filters: buildFilters(project, selection) };
+  }
+  return { selection: allTests(project), filters: null };
+}
+
+// Copies the inputs of aiken to a new temp dir.
+function makeCopy(context, version, state) {
+  const copy = fs.mkdtempSync(path.join(os.tmpdir(), "aiken-check-"));
+  state.copy = copy;
+  copyInputs(context.projectDir, copy);
+  const file = path.join(copy, "aiken.toml");
+  const pinned = pinCompiler(fs.readFileSync(file, "utf8"), version.number);
+  if (pinned.from !== null) {
+    fs.writeFileSync(file, pinned.toml);
+    note(`aiken.toml pins compiler v${pinned.from}; the copy uses v${version.number}, the version of the binary`);
+  }
+  return copy;
+}
+
+function printFailures(verdict) {
+  for (const failure of verdict.failures.slice(0, MAX_FAILURES_SHOWN)) {
+    out();
+    for (const line of describeFailure(failure.module, failure.test)) out(line);
+  }
+  if (verdict.failures.length > MAX_FAILURES_SHOWN) {
+    out();
+    out(`... and ${verdict.failures.length - MAX_FAILURES_SHOWN} more failed tests:`);
+    for (const failure of verdict.failures.slice(MAX_FAILURES_SHOWN, MAX_FAILURES_SHOWN + 100)) {
+      out(`  ${failure.module} :: ${failure.test.title}`);
+    }
+  }
+}
+
+// Returns the exit status.
+async function runMode(args, context, project, startedAt, state) {
+  const { selection, filters } = chooseTests(args, context, project);
+  const expectedCount = countOf(selection);
+
+  // A path with a "/" is relative to the current dir, not to the temp copy.
+  const aiken = args.aiken.includes("/") ? path.resolve(args.aiken) : args.aiken;
+  const version = readAikenVersion(aiken);
+  const seed = args.seed ?? randomInt(0, 2 ** 32);
+  context.suffix = ` (seed ${seed}, aiken ${version.text})`;
+
+  out(
+    `aiken-check: seed=${seed} aiken=${version.text} project=${context.projectLabel} ` +
+      `mode=${context.modeLabel} expected=${expectedCount}`,
+  );
+  if (args.modules !== null) {
+    for (const [module, names] of selection) out(`selected: ${module} (${plural(names.length, "test")})`);
+  }
+  for (const file of project.ignored) {
+    note(`warning: aiken ignores ${file} because its path is not a valid module path`);
+  }
+
+  const copy = makeCopy(context, version, state);
+  if (args.keep) out(`aiken-check: the temp copy stays at ${copy}`);
+
+  // Aiken starts one rayon thread for each CPU. Its test phase gets slower
+  // with each added thread, because the threads wait for one lock. One thread
+  // is faster and uses about a tenth of the CPU time (build-0, 1,271 tests:
+  // 517 s with one thread, 806 to 893 s with 16 threads).
+  const aikenArgs = ["check", "-D", "--seed", String(seed)];
+  if (args.maxSuccess !== null) aikenArgs.push("--max-success", String(args.maxSuccess));
+  if (filters !== null) {
+    aikenArgs.push("-e");
+    for (const value of filters) aikenArgs.push("-m", value);
+  }
+  note(`run: RAYON_NUM_THREADS=1 ${[aiken, ...aikenArgs].map(shellQuote).join(" ")}`);
+  const run = await runAiken(aiken, aikenArgs, copy, { ...process.env, RAYON_NUM_THREADS: "1" }, (child) => {
+    state.child = child;
+  });
+  state.child = null;
+
+  if (run.error) throw toolError(`cannot run "${aiken}": ${run.error.message}`);
+  if (run.signal) {
+    throw toolError(
+      `aiken stopped with the signal ${run.signal}. The system kills a process that uses too much memory.\n` +
+        tailLines(run.stderr, MAX_STDERR_LINES).join("\n"),
+    );
+  }
+  if (args.jsonOut && run.stdout !== "") {
+    const file = path.resolve(args.jsonOut);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, run.stdout);
+  }
+
+  const report = parseReport(run.stdout);
+  if (!report) {
+    const lines = [`aiken exited with status ${run.status} and printed no JSON report on stdout.`];
+    if (run.stderr.trim() !== "") {
+      lines.push("stderr of aiken:", ...tailLines(run.stderr, MAX_STDERR_LINES).map((line) => `  ${line}`));
+    }
+    lines.push(
+      "Aiken prints the JSON report after it type-checks the project and runs the tests.",
+      "Possible causes: a compile error, a package that aiken cannot download (see ~/.cache/aiken/packages), or a crash.",
+      "Aiken v1.1.24 prints each error and warning on stderr.",
+      "Aiken v1.1.21 prints no error and no warning when stdout is not a terminal.",
+      `To see them, run this in a terminal: cd ${context.projectDir} && aiken check -D --skip-tests`,
+    );
+    throw toolError(lines.join("\n"));
+  }
+
+  const verdict = compareReport(report, selection, kindCounts(project, selection));
+  printTable(verdict.rows);
+  const problems = [...verdict.problems];
+  const onlyExitStatus = run.status !== 0 && problems.length === 0;
+  if (onlyExitStatus) problems.push(`aiken exited with status ${run.status}, but all expected tests passed`);
+
+  const elapsed = seconds(Date.now() - startedAt);
+  if (problems.length === 0) {
+    finalLine(context, true, `${verdict.passed}/${expectedCount} in ${elapsed} s`);
+    return EXIT.pass;
+  }
+
+  printFailures(verdict);
+  out();
+  for (const text of problems) out(`aiken-check: ${text}`);
+  if (onlyExitStatus) {
+    out(
+      "aiken-check: Aiken -D turns each warning into an error. Aiken v1.1.24 prints each warning on stderr.\n" +
+        "aiken-check: Aiken v1.1.21 prints no warning when stdout is not a terminal.\n" +
+        `aiken-check: To see the warnings, run this in a terminal: cd ${context.projectDir} && aiken check -D --skip-tests`,
+    );
+  }
+  if (run.stderr.trim() !== "") {
+    out("stderr of aiken:");
+    for (const line of tailLines(run.stderr, MAX_STDERR_LINES)) out(`  ${line}`);
+  }
+  out(`aiken-check: to run this again, use --seed ${seed}`);
+  finalLine(context, false, `${verdict.passed}/${expectedCount} in ${elapsed} s: ${problems[0]}`);
+  return EXIT.fail;
+}
+
+async function main(argv) {
+  const startedAt = Date.now();
+  const state = { copy: null, child: null, keep: false };
+
+  // A stop signal must not leave the temp copy or aiken behind. Aiken can
+  // still write files for a short time after the signal, so the removal
+  // retries.
+  const cleanup = () => {
+    state.child?.kill("SIGTERM");
+    if (!state.copy || state.keep) return;
+    try {
+      fs.rmSync(state.copy, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    } catch (error) {
+      note(`cannot remove the temp copy ${state.copy}: ${error.message}`);
+    }
+  };
+  for (const name of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+    process.on(name, () => {
+      cleanup();
+      process.exit(128 + os.constants.signals[name]);
+    });
+  }
+
+  let context = null;
+  try {
+    const args = parseArgs(argv);
+    if (args.help) {
+      process.stdout.write(HELP);
+      return EXIT.pass;
+    }
+    state.keep = args.keep;
+    context = resolveContext(args);
+    const project = readProject(context.projectDir);
+    if (project.testCount === 0) throw new CheckError(`${context.projectLabel} has no tests`);
+    return args.checkPlan ? checkPlanMode(args, context, project) : await runMode(args, context, project, startedAt, state);
+  } catch (error) {
+    if (!(error instanceof CheckError)) {
+      process.stderr.write(`aiken-check: unexpected error: ${error.stack ?? error}\n`);
+      return EXIT.tool;
+    }
+    if (error.exitCode === EXIT.usage) {
+      process.stderr.write(`aiken-check: error: ${error.message}\nRun scripts/aiken-check --help for the options.\n`);
+      return EXIT.usage;
+    }
+    out(error.message);
+    if (context) finalLine(context, false, `${error.exitCode === EXIT.tool ? "tool error: " : ""}${error.summary}`);
+    return error.exitCode;
+  } finally {
+    cleanup();
+  }
+}
+
+process.exitCode = await main(process.argv.slice(2));
