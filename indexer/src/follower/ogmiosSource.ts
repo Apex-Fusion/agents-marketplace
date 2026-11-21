@@ -31,7 +31,7 @@ import type { ChainPoint, ChainSyncSource, ChainTip, RollbackPoint } from "./typ
 import { fromOgmiosBlock } from "./ogmiosBlock.js";
 import { parseOgmiosMessage } from "./ogmiosJson.js";
 
-const INITIAL_BACKOFF = 1_000;
+const DEFAULT_RECONNECT_BACKOFF_MS = 1_000;
 const MAX_BACKOFF = 30_000;
 const DEFAULT_RESPONSE_TIMEOUT_MS = 90_000;
 const DEFAULT_TIP_POLL_MS = 30_000;
@@ -100,12 +100,19 @@ export interface OgmiosSourceOpts {
   tipPollMs?: number;
   /** Wait (ms) before findIntersection is sent again after IntersectionNotFound. Defaults to 30_000. */
   intersectionRetryMs?: number;
+  /**
+   * Wait (ms) before the source connects again after it lost the connection.
+   * The wait doubles after each further attempt, up to 30_000, and returns to
+   * this value when a connection opens. Defaults to 1_000.
+   */
+  reconnectBackoffMs?: number;
 }
 
 export class OgmiosSource extends EventEmitter implements ChainSyncSource {
   private url: string;
   private ws: MinimalWebSocket | null = null;
-  private backoff: number = INITIAL_BACKOFF;
+  private reconnectBackoffMs: number;
+  private backoff: number;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private closed: boolean = false;
   private points: () => ChainPoint[] = () => [];
@@ -122,6 +129,8 @@ export class OgmiosSource extends EventEmitter implements ChainSyncSource {
     this.responseTimeoutMs = opts.responseTimeoutMs ?? DEFAULT_RESPONSE_TIMEOUT_MS;
     this.tipPollMs = opts.tipPollMs ?? DEFAULT_TIP_POLL_MS;
     this.intersectionRetryMs = opts.intersectionRetryMs ?? DEFAULT_INTERSECTION_RETRY_MS;
+    this.reconnectBackoffMs = opts.reconnectBackoffMs ?? DEFAULT_RECONNECT_BACKOFF_MS;
+    this.backoff = this.reconnectBackoffMs;
   }
 
   async start(points: () => ChainPoint[]): Promise<void> {
@@ -168,7 +177,7 @@ export class OgmiosSource extends EventEmitter implements ChainSyncSource {
       this.ws = socket;
       let settled = false;
       socket.onopen = () => {
-        this.backoff = INITIAL_BACKOFF;
+        this.backoff = this.reconnectBackoffMs;
         settled = true;
         this.emit("connected");
         resolve();

@@ -130,6 +130,8 @@ export interface SdkRegistryDeps {
   fetchFn?: typeof globalThis.fetch;
   /** Escrow switch slot (Part 2 §9.6): from it on, the SDK posts only new escrows. */
   switchSlot?: number | null;
+  /** Wait (ms) between two checks for a submitted wallet transaction. Defaults to 1_000. */
+  confirmPollIntervalMs?: number;
 }
 
 interface StableWalletState {
@@ -198,6 +200,7 @@ export class SdkRegistry {
       keyId,
       chain: this.deps.chain,
       store: this.deps.store,
+      confirmPollIntervalMs: this.deps.confirmPollIntervalMs,
     });
     const state: StableWalletState = {
       keyId,

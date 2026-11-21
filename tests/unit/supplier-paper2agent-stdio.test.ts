@@ -17,6 +17,10 @@ function configFor(source: string): Paper2AgentConfig {
     packagePath: join(cwd, "package.bin"), manifestPath: join(cwd, "manifest.json"), journalDir: join(cwd, "journal") };
 }
 
+// The peer below ignores SIGTERM, so only the SIGKILL after the grace ends it.
+// The two cases that start it shorten the grace (production: 1000 ms).
+const SHORT_GRACE = { sigtermGraceMs: 50 };
+
 // A protocol peer fixture, not a production fallback. The production side uses
 // the official MCP Client to initialize, discover and call this local process.
 // These process integration cases use the platform clock deliberately: fake
@@ -53,7 +57,7 @@ afterEach(async () => {
 describe("bounded supplier MCP process transport", () => {
   it("uses real initialize/list/call, omits provider and wallet secrets, and reaps an uncooperative child", async () => {
     const config = configFor(peerSource("echo"));
-    const session = new LocalToolSession(config);
+    const session = new LocalToolSession(config, SHORT_GRACE);
     cleanups.push(() => session.close());
     const old = process.env.SUPPLIER_PRIV_KEY_HEX;
     process.env.SUPPLIER_PRIV_KEY_HEX = "test-secret-never-forward";
@@ -72,7 +76,7 @@ describe("bounded supplier MCP process transport", () => {
 
   it("bounds a hung tool call and stops the process after timeout", async () => {
     const config = configFor(peerSource("hang"));
-    const session = new LocalToolSession(config);
+    const session = new LocalToolSession(config, SHORT_GRACE);
     cleanups.push(() => session.close());
     await session.discover();
     const pid = Number(readFileSync(join(config.cwd, "pid"), "utf8"));

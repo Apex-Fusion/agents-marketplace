@@ -21,6 +21,7 @@
  *   SIGNUP_RATE_MAX / SIGNUP_RATE_WINDOW_MS  — per-IP signup limiter.
  *   KEY_RATE_MAX / KEY_RATE_WINDOW_MS        — per-key request limiter.
  *   SWEEPER_INTERVAL_MS / WALLET_HEALTH_INTERVAL_MS — background tick cadences.
+ *   WALLET_CONFIRM_POLL_INTERVAL_MS — wait between two checks for a submitted wallet transaction (default 1000).
  *   SDK_REGISTRY_MAX    — max cached per-key Marketplace instances (LRU).
  *   ONE_SHOT_CONCURRENCY — active paid LLM jobs per key (default 4).
  *   ONE_SHOT_MAX_OUTSTANDING — active + queued + recovering jobs per key (default 64).
@@ -89,6 +90,8 @@ export interface GatewayConfig {
    * Must agree with the suppliers' CHAT_SETTLE_MODE. */
   chatSettleMode: "full" | "ticket";
   walletHealthIntervalMs: number;
+  /** Wait (ms) between two checks for a submitted wallet transaction. */
+  walletConfirmPollIntervalMs: number;
   sdkRegistryMax: number;
   oneShotConcurrency: number;
   oneShotMaxOutstanding: number;
@@ -259,6 +262,7 @@ export function loadConfig(env: Record<string, string | undefined>): GatewayConf
     demoSessionIdleMs: posInt(env, "DEMO_SESSION_IDLE_MS", 3 * 60 * 1000),
     chatSettleMode: chatSettleMode(env),
     walletHealthIntervalMs: posInt(env, "WALLET_HEALTH_INTERVAL_MS", 10 * 60 * 1000),
+    walletConfirmPollIntervalMs: posInt(env, "WALLET_CONFIRM_POLL_INTERVAL_MS", 1_000),
     sdkRegistryMax: posInt(env, "SDK_REGISTRY_MAX", 500),
     oneShotConcurrency: posInt(env, "ONE_SHOT_CONCURRENCY", 4),
     oneShotMaxOutstanding: posInt(env, "ONE_SHOT_MAX_OUTSTANDING", 64),

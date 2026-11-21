@@ -55,8 +55,8 @@ const newestFirst = (chain: FakeBlock[]) => [...chain].reverse();
 
 /**
  * Wait for a state of the follower. The follower runs over a real local
- * WebSocket and reconnects after its real 1 s backoff, so the test waits for
- * the condition rather than driving fake timers.
+ * WebSocket and reconnects after a short backoff (`follower()` sets it), so
+ * the test waits for the condition rather than driving fake timers.
  */
 async function until(condition: () => boolean, what: string): Promise<void> {
   await vi.waitFor(() => {
@@ -83,7 +83,7 @@ interface Follower {
 
 /** A follower of `server`. The worker is stopped after the test; the cache is closed when `own`. */
 function follower(server: FakeOgmiosServer, cache: SqliteCache, opts: OgmiosSourceOpts = {}, own = true): Follower {
-  const source = new OgmiosSource(server.url, { responseTimeoutMs: 0, tipPollMs: 0, intersectionRetryMs: 20, ...opts });
+  const source = new OgmiosSource(server.url, { responseTimeoutMs: 0, tipPollMs: 0, intersectionRetryMs: 20, reconnectBackoffMs: 20, ...opts });
   const worker = new ChainSyncWorker({ source, cache, networkId: 0, addresses: ADDRESSES });
   const errors: string[] = [];
   worker.on("error", (err: { message: string }) => errors.push(err.message));

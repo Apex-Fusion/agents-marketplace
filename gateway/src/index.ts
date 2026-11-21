@@ -33,6 +33,7 @@ export function buildDeps(env: Record<string, string | undefined>): GatewayDeps 
     masterKeyHex: config.masterKeyHex,
     max: config.sdkRegistryMax,
     switchSlot: config.switchSlot,
+    confirmPollIntervalMs: config.walletConfirmPollIntervalMs,
   });
   return { config, store, chain, registry, fetchFn: globalThis.fetch };
 }

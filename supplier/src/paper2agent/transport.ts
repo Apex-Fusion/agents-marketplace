@@ -12,6 +12,12 @@ export const MCP_STDERR_BYTES = 65536;
  */
 export const MCP_JSON_DEPTH = MAX_TOOL_JSON_DEPTH + 4;
 const MCP_TOTAL_BYTES = 4 * MCP_FRAME_BYTES;
+const DEFAULT_SIGTERM_GRACE_MS = 1000;
+
+export interface BoundedStdioTransportOptions {
+  /** Wait (ms) for the child to exit after SIGTERM, before SIGKILL. Defaults to 1000. */
+  sigtermGraceMs?: number;
+}
 
 /** Reject deeply nested wire JSON before the SDK's recursive message parsing. */
 function boundedJsonDepth(text: string): void {
@@ -43,8 +49,14 @@ export class BoundedStdioTransport implements Transport {
   private stopped = false;
   private closing?: Promise<void>;
   private exited?: Promise<void>;
+  private readonly sigtermGraceMs: number;
 
-  constructor(private readonly config: Pick<Paper2AgentConfig, "executable" | "argv" | "cwd">) {}
+  constructor(
+    private readonly config: Pick<Paper2AgentConfig, "executable" | "argv" | "cwd">,
+    options: BoundedStdioTransportOptions = {},
+  ) {
+    this.sigtermGraceMs = options.sigtermGraceMs ?? DEFAULT_SIGTERM_GRACE_MS;
+  }
 
   async start(): Promise<void> {
     if (this.child || this.stopped) throw new Error("MCP transport already started or closed");
@@ -137,7 +149,7 @@ export class BoundedStdioTransport implements Transport {
     signalGroup("SIGTERM");
     let timer: NodeJS.Timeout | undefined;
     try {
-      await Promise.race([this.exited, new Promise<void>((resolve) => { timer = setTimeout(resolve, 1000); })]);
+      await Promise.race([this.exited, new Promise<void>((resolve) => { timer = setTimeout(resolve, this.sigtermGraceMs); })]);
     } finally { clearTimeout(timer); }
     // Also stop descendants if the direct child already exited.
     signalGroup("SIGKILL");

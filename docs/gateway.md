@@ -488,6 +488,7 @@ A caller timeout does not release a transaction that is still running.
 | `ONE_SHOT_MAX_OUTSTANDING` | `64` | Maximum queued, active, and recovering jobs per key |
 | `ONE_SHOT_QUEUE_TIMEOUT_MS` | `60000` | Maximum wait for admission before funding |
 | `ONE_SHOT_POLL_INTERVAL_MS` | `2000` | Wait between two checks of a running supplier job |
+| `WALLET_CONFIRM_POLL_INTERVAL_MS` | `1000` | Wait between two checks for a submitted wallet transaction |
 
 Queued jobs hold no supplier and spend no funds.
 A full queue returns HTTP 429 with `concurrency_queue_full`.

@@ -5,7 +5,7 @@ import { inspectSignedTransaction, type SignedTransactionInfo } from "@marketpla
 import type { GatewayStore, PendingWalletTransaction } from "../db/store.js";
 
 const RECONCILIATION_CONFIRM_TIMEOUT_MS = 120_000;
-const CONFIRM_POLL_INTERVAL_MS = 1_000;
+const DEFAULT_CONFIRM_POLL_INTERVAL_MS = 1_000;
 
 export class WalletTransactionGuardError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -30,6 +30,8 @@ export interface WalletTransactionGuardOptions {
   keyId: string;
   chain: LiveOgmiosProvider;
   store: PendingTransactionStore;
+  /** Wait (ms) between two checks for a submitted transaction. Defaults to 1_000. */
+  confirmPollIntervalMs?: number;
 }
 
 /**
@@ -42,6 +44,7 @@ export class WalletTransactionGuard {
   private readonly keyId: string;
   private readonly baseChain: LiveOgmiosProvider;
   private readonly store: PendingTransactionStore;
+  private readonly confirmPollIntervalMs: number;
   private readonly scope = new AsyncLocalStorage<GuardScope>();
   private activeToken: symbol | null = null;
 
@@ -49,6 +52,7 @@ export class WalletTransactionGuard {
     this.keyId = options.keyId;
     this.baseChain = options.chain;
     this.store = options.store;
+    this.confirmPollIntervalMs = options.confirmPollIntervalMs ?? DEFAULT_CONFIRM_POLL_INTERVAL_MS;
 
     this.chain = new Proxy(options.chain, {
       get: (target, property) => {
@@ -276,7 +280,7 @@ export class WalletTransactionGuard {
           `awaitTx_timeout: tx ${inspected.txHash} not observed within ${timeoutMs}ms`,
         );
       }
-      await delay(Math.min(CONFIRM_POLL_INTERVAL_MS, remaining));
+      await delay(Math.min(this.confirmPollIntervalMs, remaining));
     }
   }
 }

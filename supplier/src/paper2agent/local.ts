@@ -8,7 +8,7 @@ import {
   type Paper2AgentManifest, type JsonObject,
 } from "@marketplace/shared/paper2agent";
 import type { Paper2AgentConfig } from "../config.js";
-import { BoundedStdioTransport } from "./transport.js";
+import { BoundedStdioTransport, type BoundedStdioTransportOptions } from "./transport.js";
 
 export const MCP_DISCOVERY_MS = 15000;
 
@@ -83,8 +83,8 @@ export class LocalToolSession implements ToolSession {
   private connected = false;
   private used = false;
 
-  constructor(config: Paper2AgentConfig) {
-    this.transport = new BoundedStdioTransport(config);
+  constructor(config: Paper2AgentConfig, options: BoundedStdioTransportOptions = {}) {
+    this.transport = new BoundedStdioTransport(config, options);
   }
 
   async discover(): Promise<Tool[]> {
