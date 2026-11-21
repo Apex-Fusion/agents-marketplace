@@ -15,7 +15,7 @@ export default defineConfig({
   root,
   cacheDir: ".vitest-cache",
   resolve: {
-    // Same lucid-evolution entry points as the root vitest.config.ts (@marketplace/shared/tx/server loads lucid).
+    // Same lucid-evolution entry points as the root vitest.config.ts. The deploy tool imports @lucid-evolution/uplc (scripts.ts).
     alias: {
       "@lucid-evolution/lucid": resolve(root, "packages/shared/node_modules/@lucid-evolution/lucid/dist/index.js"),
       "@lucid-evolution/plutus": resolve(root, "packages/shared/node_modules/@lucid-evolution/plutus/dist/index.js"),

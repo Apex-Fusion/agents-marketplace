@@ -20,7 +20,7 @@ import {
   buildConfigSeal, paymentCredential, validityWindow, type ExUnits, type ProtocolParameters,
   type SlotConfig, type TxContext, type UnsignedTx, type Utxo, type ValidityWindow,
 } from "@marketplace/shared";
-import { buildPublishReferenceScripts } from "@marketplace/shared/tx/server";
+import { buildPublishReferenceScripts } from "@marketplace/shared/tx/lucid-free";
 import { completeTx } from "../../../packages/shared/src/identity/tx/complete.js";
 import type { Chain } from "./chain.js";
 import { ap3x } from "./context.js";

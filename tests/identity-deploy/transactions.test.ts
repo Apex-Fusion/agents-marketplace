@@ -7,7 +7,7 @@
 import { describe, expect, test } from "vitest";
 import { CONFIG_TOKEN_NAME, minUtxo, signTransaction, type Utxo } from "@marketplace/shared";
 import { encodePlutusDataHex } from "@marketplace/shared/cbor";
-import { referenceScriptAddress } from "@marketplace/shared/tx/server";
+import { referenceScriptAddress } from "@marketplace/shared/tx/lucid-free";
 import { describeSimulation } from "../legacy-registry/harness/index.js";
 import { evaluateBuiltTx } from "../legacy-registry/harness/identity.js";
 import { completeTx } from "../../packages/shared/src/identity/tx/complete.js";

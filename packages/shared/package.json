@@ -16,6 +16,7 @@
     "./paper2agent/workflow": "./src/paper2agent/workflow.ts",
     "./responses": "./src/responses.ts",
     "./tx": "./src/tx/index.ts",
+    "./tx/lucid-free": "./src/tx/lucidFree.ts",
     "./tx/server": "./src/tx/server.ts"
   },
   "scripts": {

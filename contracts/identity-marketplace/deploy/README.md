@@ -90,7 +90,7 @@ cli.ts plan --network mainnet --skey <operator.skey> [--seed <txid#ix>] [--seed-
 cli.ts publish-refs --network mainnet --skey <operator.skey> [--scripts identity,attestation,delegation,vault,escrow,advert] [--to <address>]
 ```
 
-- One transaction per script, with one reference output of the ledger minimum (`buildPublishReferenceScripts` of `@marketplace/shared/tx/server`, the only publisher; `supplier/src/cli/publish-reference-scripts.ts` uses it too).
+- One transaction per script, with one reference output of the ledger minimum (`buildPublishReferenceScripts` of `@marketplace/shared/tx/lucid-free`, the only publisher; `supplier/src/cli/publish-reference-scripts.ts` uses it too).
 - The default address is the enterprise address of the zero key hash: `addr1vyqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqkdl5mw`. Nobody can spend it.
 - Each transaction spends the change of the one before, so the list is valid before the first one is on chain.
 - `config_seal` and `config_holder` get no reference output.

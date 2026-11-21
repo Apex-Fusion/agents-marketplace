@@ -21,7 +21,7 @@ import { join } from "node:path";
 import {
   CONFIG_TOKEN_NAME, minUtxo, paymentCredential, readConfigRecord, signTransaction, type Utxo,
 } from "@marketplace/shared";
-import { referenceScriptAddress } from "@marketplace/shared/tx/server";
+import { referenceScriptAddress } from "@marketplace/shared/tx/lucid-free";
 import { ALLOWLIST_FILE, ALLOWLIST_IDS_FILE, allowlistFromMints, legacyMints, readAllowlistFile, writeAllowlistFiles } from "./allowlist.js";
 import type { Chain } from "./chain.js";
 import {

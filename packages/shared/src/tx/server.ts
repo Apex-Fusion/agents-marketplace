@@ -7,23 +7,18 @@
  * to reach the live-CBOR builders for the same reason.
  *
  * Consumers: supplier CLIs and Node-only tx tooling.
+ *
+ * The names that need no lucid are defined in "./lucidFree.js" (package subpath
+ * "@marketplace/shared/tx/lucid-free"). This module re-exports all of them, so this path keeps
+ * every name. A file that needs only those names imports "./lucidFree.js": its process then
+ * does not load lucid.
  */
+
+export * from "./lucidFree.js";
 
 export { loadEscrowScript, loadAdvertScript } from "./internal/liveCbor.js";
 export type { RefUtxoEnvKey } from "./internal/liveCbor.js";
 export { loadIdentityEscrowScript, loadIdentityAdvertScript } from "./internal/liveIdentityCbor.js";
-export { pkhToEnterpriseAddress } from "./internal/pkhAddress.js";
-export type {
-  PublishedReference,
-  PublishReferenceScriptsArgs,
-  PublishReferenceScriptsTx,
-  ReferenceScript,
-} from "./internal/publishReferenceScripts.js";
-export {
-  buildPublishReferenceScripts,
-  REFERENCE_SCRIPT_KEY_HASH,
-  referenceScriptAddress,
-} from "./internal/publishReferenceScripts.js";
 export type { SignedTransactionInfo, SignedTransactionFinancials } from "./internal/signedTransaction.js";
 export { inspectSignedTransaction, inspectSignedTransactionFinancials } from "./internal/signedTransaction.js";
 
@@ -39,17 +34,6 @@ export type {
 } from "./wallet/consolidateWallet.js";
 export { buildConsolidateWalletTx } from "./wallet/consolidateWallet.js";
 export type {
-  ConsolidateLimits,
-  ConsolidateReason,
-  PlannedConsolidate,
-  UtxoLike,
-} from "./wallet/planConsolidate.js";
-export {
-  DEFAULT_COLLATERAL_LOVELACE,
-  DEFAULT_FEE_RESERVE,
-  planConsolidate,
-} from "./wallet/planConsolidate.js";
-export type {
   ConsolidateWalletFlowParams,
   ConsolidateWalletFlowResult,
 } from "./wallet/runConsolidateWallet.js";
@@ -61,9 +45,6 @@ export type {
   WithdrawWalletBuildResult,
 } from "./wallet/withdrawWallet.js";
 export { buildWithdrawTx } from "./wallet/withdrawWallet.js";
-
-// ── Address text checks (before Lucid reads an address text) ────────────
-export { MAX_ADDRESS_TEXT_LENGTH, checkedAddressText, checkedShelleyAddress, isAddressRefusal } from "./internal/addressText.js";
 
 // ── Surplus Merkle-batch anchor (live-only) ────────────────────────────
 export type {
