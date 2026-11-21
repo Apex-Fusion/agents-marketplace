@@ -346,7 +346,7 @@ async function runOneShot(
   // No wallet lock while the supplier generates and the SDK verifies output.
   const result: SubmitPromptResult = await ctx.sdk.executePrompt(posted, async (jobId) => {
     updateOneShotJob(deps, responseId, { supplier_job_id: jobId });
-  });
+  }, { pollIntervalMs: deps.config.oneShotPollIntervalMs });
   const originalRef = `${result.escrowRef.txHash}#${result.escrowRef.index}`;
   const receiptHash = receiptResultHash({ receipt: result.receipt, signature: result.receiptSignature });
   updateOneShotJob(deps, responseId, {

@@ -1262,7 +1262,7 @@ export class Marketplace extends EventEmitterBase {
         recordFailure("malformed_response");
         throw sErr;
       }
-      const POLL_INTERVAL_MS = 2_000;
+      const pollIntervalMs = opts.pollIntervalMs ?? 2_000;
       // A cold upstream cache puts fresh conversions near the advert's SLA
       // (230–250 s against a 300 s advert); the budget must cover the SLA.
       const pollBudgetMs = supplierBudgetMs(deliverByMs);
@@ -1271,7 +1271,7 @@ export class Marketplace extends EventEmitterBase {
       let firstIter = true;
       while (Date.now() < pollDeadline) {
         if (!firstIter) {
-          await new Promise<void>((r) => setTimeout(r, POLL_INTERVAL_MS));
+          await new Promise<void>((r) => setTimeout(r, pollIntervalMs));
         }
         firstIter = false;
         try {

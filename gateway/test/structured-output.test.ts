@@ -190,6 +190,8 @@ describe.sequential("structured output through gateway, SDK, supplier, and Chat 
     const config = loadConfig({
       GATEWAY_MASTER_KEY: randomBytes(32).toString("hex"), INDEXER_URL: indexerUrl,
       LIVE_CHAIN: "1", OGMIOS_URL: "http://unused.test", NETWORK_ID: "0", GATEWAY_DB_DIR: directory,
+      // The supplier job is still running at the first poll. The SDK waits this long before the second.
+      ONE_SHOT_POLL_INTERVAL_MS: "20",
     });
     store = new GatewayStore(directory);
     // The simulated ledger implements the chain operations exercised here.

@@ -310,6 +310,7 @@ async function runOcrOneShot(
           mime: parsed.mime,
           output_format: parsed.output_format,
           payment_lovelace: cand.priceLovelace,
+          pollIntervalMs: config.oneShotPollIntervalMs,
         });
         used = cand;
         break;

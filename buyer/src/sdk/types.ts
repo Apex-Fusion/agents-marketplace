@@ -256,6 +256,8 @@ export interface SubmitOcrOptions {
   mime: string;        // image/png | image/jpeg | image/webp
   output_format: string; // markdown | html | json
   payment_lovelace: bigint;
+  /** Wait (ms) between two polls of a running supplier job. Defaults to 2_000. */
+  pollIntervalMs?: number;
 }
 
 /**

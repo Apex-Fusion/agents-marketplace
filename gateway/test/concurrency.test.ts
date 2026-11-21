@@ -273,6 +273,7 @@ describe.sequential("paid one-shot concurrency", () => {
       ONE_SHOT_CONCURRENCY: "4",
       ONE_SHOT_MAX_OUTSTANDING: "5",
       ONE_SHOT_QUEUE_TIMEOUT_MS: "60000",
+      ONE_SHOT_POLL_INTERVAL_MS: "20",
     });
     store = new GatewayStore(directory);
     const gatewayChain = chain as unknown as GatewayDeps["chain"];

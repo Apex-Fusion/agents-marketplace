@@ -25,6 +25,7 @@
  *   ONE_SHOT_CONCURRENCY — active paid LLM jobs per key (default 4).
  *   ONE_SHOT_MAX_OUTSTANDING — active + queued + recovering jobs per key (default 64).
  *   ONE_SHOT_QUEUE_TIMEOUT_MS — wait for admission before spending (default 60000).
+ *   ONE_SHOT_POLL_INTERVAL_MS — wait between two polls of a running supplier job (default 2000).
  *   MCP_IP_RATE_MAX / MCP_IP_RATE_WINDOW_MS — public /mcp requests per IP (default 120/min).
  *   MCP_CALL_IP_RATE_MAX / MCP_CALL_IP_RATE_WINDOW_MS — tools/call per IP (default 20/min).
  *   MCP_CALL_IP_CONCURRENCY — tools/call in flight per IP (default 1).
@@ -92,6 +93,8 @@ export interface GatewayConfig {
   oneShotConcurrency: number;
   oneShotMaxOutstanding: number;
   oneShotQueueTimeoutMs: number;
+  /** Wait (ms) between two polls of a running supplier job. The buyer SDK has the same default. */
+  oneShotPollIntervalMs: number;
   mcpIpRate: { max: number; windowMs: number };
   mcpCallIpRate: { max: number; windowMs: number };
   mcpCallIpConcurrency: number;
@@ -260,6 +263,7 @@ export function loadConfig(env: Record<string, string | undefined>): GatewayConf
     oneShotConcurrency: posInt(env, "ONE_SHOT_CONCURRENCY", 4),
     oneShotMaxOutstanding: posInt(env, "ONE_SHOT_MAX_OUTSTANDING", 64),
     oneShotQueueTimeoutMs: posInt(env, "ONE_SHOT_QUEUE_TIMEOUT_MS", 60_000),
+    oneShotPollIntervalMs: posInt(env, "ONE_SHOT_POLL_INTERVAL_MS", 2_000),
     mcpIpRate: {
       max: posInt(env, "MCP_IP_RATE_MAX", 120),
       windowMs: posInt(env, "MCP_IP_RATE_WINDOW_MS", 60 * 1000),
