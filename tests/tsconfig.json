@@ -1,0 +1,18 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "incremental": false,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "types": ["node"],
+    "paths": {
+      "@lucid-evolution/lucid": ["../packages/shared/node_modules/@lucid-evolution/lucid"],
+      "@lucid-evolution/plutus": ["../packages/shared/node_modules/@lucid-evolution/plutus"]
+    }
+  },
+  "include": ["unit/**/*.ts", "unit/**/*.tsx", "fixtures/**/*.ts", "setup.ts"]
+}
