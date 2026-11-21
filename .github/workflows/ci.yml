@@ -1,5 +1,15 @@
 name: CI
 
+# One workflow, one required check: the job `gate`.
+#
+# The job `changes` reads the changed files (scripts/ci/changes.mjs) and switches the other jobs on and off. A job that a change
+# does not need is skipped. The job `gate` (if: always) is the only required check of the branch rule: GitHub counts a skipped
+# required job as passed, so each check has to go through `gate`, which reads every result in scripts/ci/gate.mjs.
+# A new job is not required by anything until it is in `needs` of `gate` and in JOBS of scripts/ci/gate.mjs.
+#
+# deploy-mainnet.yml starts after this workflow on main (workflow_run, name "CI"): keep the name.
+# The design and the rules are in docs/TEST-REVISION.md and docs/TESTING.md.
+
 on:
   # Push runs only for main: deploy-mainnet.yml starts after CI on main.
   # A branch with a pull request runs through the pull_request trigger.
@@ -12,19 +22,59 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+permissions:
+  contents: read
+
 jobs:
-  build-and-test:
-    name: typecheck + vitest (Node 20)
+  changes:
+    name: changes
+    runs-on: self-hosted
+    timeout-minutes: 10
+    outputs:
+      docs_only: ${{ steps.select.outputs.docs_only }}
+      run_typecheck: ${{ steps.select.outputs.run_typecheck }}
+      vitest_mode: ${{ steps.select.outputs.vitest_mode }}
+      vitest_count: ${{ steps.select.outputs.vitest_count }}
+      vitest_files: ${{ steps.select.outputs.vitest_files }}
+      vitest_exclude: ${{ steps.select.outputs.vitest_exclude }}
+      aiken_eval: ${{ steps.select.outputs.aiken_eval }}
+      contracts_identity: ${{ steps.select.outputs.contracts_identity }}
+      contracts_legacy: ${{ steps.select.outputs.contracts_legacy }}
+      test_lines: ${{ steps.select.outputs.test_lines }}
+      source_lines: ${{ steps.select.outputs.source_lines }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # The scripts of the CI have their own tests (the table test of the gate, the selection on a small tree).
+      - name: Test the CI scripts
+        run: node --test scripts/ci/*.test.mjs
+
+      - name: Choose the jobs
+        id: select
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
+        run: node scripts/ci/changes.mjs
+
+  typecheck:
+    name: typecheck (Node 20)
+    needs: changes
+    if: needs.changes.outputs.run_typecheck == 'true'
     runs-on: self-hosted
     timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      # pnpm test evaluates builder transactions with `aiken tx simulate`
-      # (tests/unit/identity-tx-*.test.ts, tests/unit/paper2agent-identity-e2e.test.ts).
-      - name: Setup aiken
-        uses: ./.github/actions/setup-aiken
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -43,13 +93,64 @@ jobs:
       - name: Typecheck (all workspaces)
         run: pnpm -r typecheck
 
-      - name: Vitest
-        run: pnpm test
+      # Report only until phase 4 of docs/TEST-REVISION.md fixed the type errors of the test files. Then remove continue-on-error.
+      # tests/identity-deploy/tsconfig.json is blocking already (job aiken-eval).
+      # The tsc matcher of setup-node would turn each error line into an annotation: remove it. The job summary has the counts.
+      - name: Typecheck of the test files (report only)
+        continue-on-error: true
+        run: |
+          echo "::remove-matcher owner=tsc::"
+          node scripts/ci/tsc-report.mjs \
+            tests/tsconfig.json \
+            gateway/tsconfig.test.json \
+            paper2agent/tsconfig.test.json \
+            tests/legacy-registry/tsconfig.json \
+            tests/identity-builders/tsconfig.json \
+            tests/identity-vectors/tsconfig.json
 
-  contracts:
-    name: aiken contracts + script evaluation (Node 20)
+  vitest:
+    name: vitest (Node 20)
+    needs: changes
+    if: needs.changes.outputs.vitest_mode != 'none'
     runs-on: self-hosted
-    timeout-minutes: 65
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The tests evaluate builder transactions with `aiken tx simulate`
+      # (tests/unit/identity-tx-*.test.ts, tests/unit/paper2agent-identity-e2e.test.ts). They need aiken v1.1.21.
+      - name: Setup aiken
+        uses: ./.github/actions/setup-aiken
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.2
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # mode all: `pnpm test`. mode selected: the files of the job `changes`. The run fails when it ran no file.
+      - name: Vitest
+        env:
+          VITEST_MODE: ${{ needs.changes.outputs.vitest_mode }}
+          VITEST_FILES: ${{ needs.changes.outputs.vitest_files }}
+          VITEST_EXCLUDE: ${{ needs.changes.outputs.vitest_exclude }}
+        run: node scripts/ci/vitest-run.mjs
+
+  aiken-eval:
+    name: aiken blueprint + script evaluation (Node 20)
+    needs: changes
+    if: needs.changes.outputs.aiken_eval == 'true'
+    runs-on: self-hosted
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -61,11 +162,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/aiken/packages
-          key: aiken-packages-${{ hashFiles('contracts/identity-marketplace/aiken.lock') }}
-
-      - name: Aiken check (contracts/identity-marketplace)
-        working-directory: contracts/identity-marketplace
-        run: aiken check -D
+          key: aiken-packages-${{ hashFiles('contracts/*/aiken.lock') }}
 
       - name: Aiken build (contracts/identity-marketplace)
         working-directory: contracts/identity-marketplace
@@ -103,3 +200,119 @@ jobs:
 
       - name: Vitest deployment tool (plan, seal and publish transactions, allowlist, resume)
         run: pnpm exec vitest run --config tests/identity-deploy/vitest.config.ts
+
+      - name: CBOR fixtures equal the Aiken tests
+        run: node contracts/identity-marketplace/fixtures/generate.mjs --check
+
+  # `aiken check` of the identity contracts in 4 jobs. One thread each, aiken v1.1.24 on a temporary copy with its own compiler
+  # line (the committed aiken.toml keeps v1.1.21). The shard plan is contracts/identity-marketplace/aiken-shards.json.
+  aiken-check:
+    name: aiken check (shard ${{ matrix.shard }} of 4)
+    needs: changes
+    if: needs.changes.outputs.contracts_identity == 'true'
+    runs-on: self-hosted
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup aiken v1.1.24
+        uses: ./.github/actions/setup-aiken
+        with:
+          version: v1.1.24
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Cache aiken packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/aiken/packages
+          key: aiken-packages-${{ hashFiles('contracts/*/aiken.lock') }}
+
+      - name: Aiken check, shard ${{ matrix.shard }} of 4
+        run: scripts/aiken-check --shard ${{ matrix.shard }} --of 4 --seed 358316146
+
+  legacy-contract:
+    name: legacy contract (aiken check and blueprint)
+    needs: changes
+    if: needs.changes.outputs.contracts_legacy == 'true'
+    runs-on: self-hosted
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup aiken v1.1.24
+        uses: ./.github/actions/setup-aiken
+        with:
+          version: v1.1.24
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Cache aiken packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/aiken/packages
+          key: aiken-packages-${{ hashFiles('contracts/*/aiken.lock') }}
+
+      - name: Aiken check (contracts/marketplace)
+        run: scripts/aiken-check --project contracts/marketplace --all --seed 358316146
+
+      # The blueprint of the legacy contract is built with v1.1.21, the compiler of the deployed code (checked: a v1.1.21 build equals
+      # the committed file byte for byte). This step goes after the check above: the second setup puts v1.1.21 first on PATH.
+      - name: Setup aiken v1.1.21
+        uses: ./.github/actions/setup-aiken
+
+      - name: Aiken build (contracts/marketplace)
+        working-directory: contracts/marketplace
+        run: aiken build
+
+      - name: Committed legacy blueprint equals the build
+        working-directory: contracts/marketplace
+        run: git diff --exit-code plutus.json
+
+  # The only required check. It runs after all other jobs, also when one failed or was cancelled.
+  gate:
+    name: gate
+    if: ${{ always() }}
+    needs: [changes, typecheck, vitest, aiken-eval, aiken-check, legacy-contract]
+    runs-on: self-hosted
+    timeout-minutes: 5
+    steps:
+      - name: Checkout the CI scripts
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts/ci
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Decide
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RESULT_CHANGES: ${{ needs.changes.result }}
+          RESULT_TYPECHECK: ${{ needs.typecheck.result }}
+          RESULT_VITEST: ${{ needs.vitest.result }}
+          RESULT_AIKEN_EVAL: ${{ needs.aiken-eval.result }}
+          RESULT_AIKEN_CHECK: ${{ needs.aiken-check.result }}
+          RESULT_LEGACY_CONTRACT: ${{ needs.legacy-contract.result }}
+          FLAG_TYPECHECK: ${{ needs.changes.outputs.run_typecheck }}
+          FLAG_VITEST: ${{ needs.changes.outputs.vitest_mode }}
+          FLAG_AIKEN_EVAL: ${{ needs.changes.outputs.aiken_eval }}
+          FLAG_AIKEN_CHECK: ${{ needs.changes.outputs.contracts_identity }}
+          FLAG_LEGACY_CONTRACT: ${{ needs.changes.outputs.contracts_legacy }}
+          TEST_LINES: ${{ needs.changes.outputs.test_lines }}
+          SOURCE_LINES: ${{ needs.changes.outputs.source_lines }}
+        run: node scripts/ci/gate.mjs
