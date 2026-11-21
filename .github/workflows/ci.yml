@@ -15,7 +15,7 @@ concurrency:
 jobs:
   build-and-test:
     name: typecheck + vitest (Node 20)
-    runs-on: nixos
+    runs-on: self-hosted
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -48,7 +48,7 @@ jobs:
 
   contracts:
     name: aiken contracts + script evaluation (Node 20)
-    runs-on: nixos
+    runs-on: self-hosted
     timeout-minutes: 65
     steps:
       - name: Checkout

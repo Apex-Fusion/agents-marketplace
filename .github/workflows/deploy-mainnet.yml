@@ -39,7 +39,7 @@ env:
 jobs:
   deploy:
     name: deploy to vector-marketplace
-    runs-on: nixos
+    runs-on: self-hosted
     # workflow_run fires on failure too — only deploy green main.
     if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     timeout-minutes: 50
