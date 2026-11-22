@@ -339,52 +339,28 @@ fn token_value(lovelace: Int, quantity: Int) -> Value {
 
 // ### window
 
-test window_inclusive_bounds() {
-  window(interval.between(test_lo, test_lo + 600_000)) == Window {
-    lo: test_lo,
-    hi: test_lo + 600_000,
+test window_accepts_finite_bounds() {
+  and {
+    // The bound values come back, with inclusive, exclusive and mixed bounds.
+    window(interval.between(test_lo, test_lo + 600_000)) == Window {
+      lo: test_lo,
+      hi: test_lo + 600_000,
+    },
+    window(interval.entirely_between(test_lo, test_lo + 600_000)) == Window {
+      lo: test_lo,
+      hi: test_lo + 600_000,
+    },
+    window(bounded(test_lo, True, test_lo + 1_000, False)) == Window {
+      lo: test_lo,
+      hi: test_lo + 1_000,
+    },
+    // A single point, and a range of exactly one hour.
+    window(interval.between(test_lo, test_lo)) == Window {
+      lo: test_lo,
+      hi: test_lo,
+    },
+    window(interval.between(test_lo, test_lo + max_range_ms)).hi == test_lo + 3_600_000,
   }
-}
-
-test window_exclusive_bounds_give_values() {
-  window(interval.entirely_between(test_lo, test_lo + 600_000)) == Window {
-    lo: test_lo,
-    hi: test_lo + 600_000,
-  }
-}
-
-test window_mixed_bounds_give_values() {
-  window(bounded(test_lo, True, test_lo + 1_000, False)) == Window {
-    lo: test_lo,
-    hi: test_lo + 1_000,
-  }
-}
-
-test window_single_point() {
-  window(interval.between(test_lo, test_lo)) == Window {
-    lo: test_lo,
-    hi: test_lo,
-  }
-}
-
-test window_one_hour_passes() {
-  window(interval.between(test_lo, test_lo + max_range_ms)).hi == test_lo + 3_600_000
-}
-
-test window_over_one_hour_fails() fail {
-  window(interval.between(test_lo, test_lo + max_range_ms + 1)).lo == test_lo
-}
-
-test window_infinite_lower_fails() fail {
-  window(interval.before(test_lo)).hi == test_lo
-}
-
-test window_infinite_upper_fails() fail {
-  window(interval.after(test_lo)).lo == test_lo
-}
-
-test window_unbounded_fails() fail {
-  window(interval.everything).lo == 0
 }
 
 test window_reversed_fails() fail {

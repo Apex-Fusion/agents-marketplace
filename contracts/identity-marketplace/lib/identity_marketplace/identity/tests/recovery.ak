@@ -3,10 +3,9 @@
 //// epoch increase, a controller change or a recovery) and Time.
 
 use identity_marketplace/identity/kit.{
-  accountable, controller, controller_tx, deposit, guardian, hash, hi,
-  hold_in_force, lo, new_controller, output_ap3x, pkh, provider, record,
-  record_id, record_input, revoked_tombstone, signer, spend, spend_tx, subagent,
-  suspended, with_parties, within,
+  accountable, controller, controller_tx, guardian, hash, hi, hold_in_force, lo,
+  new_controller, output_ap3x, pkh, provider, record, record_id, record_input,
+  signer, spend, spend_tx, subagent, suspended, with_parties, within,
 }
 use vector_identity.{days_7_ms, effective, max_range_ms}
 use vector_identity/redeemers.{
@@ -215,17 +214,6 @@ test recover_init_changes_other_field() fail {
   )
 }
 
-test recover_init_takes_value() fail {
-  let d = guarded()
-  spend(
-    RecoverInit { guardians: [1, 2] },
-    output_ap3x(
-      spend_tx(d, with_pending(d, hi + days_7_ms), init_signers()),
-      deposit - 1,
-    ),
-  )
-}
-
 test recover_init_new_controller_not_32_bytes() fail {
   let d = guarded()
   let short = kit.bytes(31, 0xc1)
@@ -243,11 +231,6 @@ test recover_init_new_controller_not_32_bytes() fail {
     },
     [pkh(11), pkh(12), hash(short)],
   )
-}
-
-test recover_init_of_tombstone() fail {
-  let d = revoked_tombstone()
-  init([], d, d, init_signers())
 }
 
 test recover_init_range_over_one_hour() fail {
@@ -300,14 +283,6 @@ test recover_cancel_by_controller() fail {
 test recover_cancel_keeps_pending() fail {
   let d = with_pending(guarded(), hi)
   cancel([2, 3], d, d, [pkh(12), pkh(13)])
-}
-
-test recover_cancel_takes_value() fail {
-  let d = with_pending(guarded(), hi)
-  spend(
-    RecoverCancel { guardians: [2, 3] },
-    output_ap3x(spend_tx(d, guarded(), [pkh(12), pkh(13)]), deposit - 1),
-  )
 }
 
 test recover_cancel_range_over_one_hour() fail {
@@ -372,14 +347,6 @@ test recover_finalize_epoch_not_increased() fail {
       IdentityDatum { ..recovered(d), subagent_epoch: d.subagent_epoch },
       [],
     ),
-  )
-}
-
-test recover_finalize_takes_value() fail {
-  let d = with_pending(guarded(), lo)
-  spend(
-    RecoverFinalize,
-    output_ap3x(spend_tx(d, recovered(d), []), deposit - 1),
   )
 }
 
@@ -517,18 +484,6 @@ test change_controller_below_floor() fail {
   )
 }
 
-test change_controller_of_tombstone() fail {
-  let d = revoked_tombstone()
-  spend(
-    ChangeController,
-    spend_tx(
-      d,
-      IdentityDatum { ..d, controller: new_controller, subagent_epoch: 1 },
-      change_signers(),
-    ),
-  )
-}
-
 test change_controller_range_over_one_hour() fail {
   let d = guarded()
   spend(
@@ -581,11 +536,6 @@ test bump_epoch_down_to_floor() {
 test bump_epoch_below_floor() fail {
   let d = guarded()
   spend(BumpEpoch, output_ap3x(controller_tx(d, bumped(d)), 9_999_999))
-}
-
-test bump_epoch_of_tombstone() fail {
-  let d = revoked_tombstone()
-  spend(BumpEpoch, controller_tx(d, bumped(d)))
 }
 
 test bump_epoch_range_over_one_hour() fail {

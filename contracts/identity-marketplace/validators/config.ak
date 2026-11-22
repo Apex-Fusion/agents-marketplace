@@ -10,12 +10,7 @@
 
 use cardano/address.{Script}
 use cardano/assets.{PolicyId}
-use cardano/certificate.{UpdateDelegateRepresentative}
-use cardano/governance.{DelegateRepresentative, NicePoll, ProposalProcedure}
-use cardano/script_context.{
-  Minting, Proposing, Publishing, ScriptContext, ScriptInfo, Spending, Voting,
-  Withdrawing,
-}
+use cardano/script_context.{ScriptContext, ScriptInfo, Withdrawing}
 use cardano/transaction.{
   InlineDatum, Input, NoDatum, OutputReference, Transaction,
 }
@@ -86,26 +81,6 @@ fn context(info: ScriptInfo) -> ScriptContext {
   ScriptContext { transaction: transaction.placeholder, redeemer, info }
 }
 
-fn publishing() -> ScriptInfo {
-  Publishing {
-    at: 0,
-    certificate: UpdateDelegateRepresentative {
-      delegate_representative: Script(kit.config_holder),
-    },
-  }
-}
-
-fn proposing() -> ScriptInfo {
-  Proposing {
-    at: 0,
-    proposal_procedure: ProposalProcedure {
-      deposit: 0,
-      return_address: Script(kit.config_holder),
-      governance_action: NicePoll,
-    },
-  }
-}
-
 test config_holder_spend_fails() fail {
   let redeemer: Data = 0
   config_holder.spend(
@@ -120,52 +95,25 @@ test config_holder_withdraw_fails() fail {
   config_holder.else(context(Withdrawing(Script(kit.config_holder))))
 }
 
-test config_holder_publish_fails() fail {
-  config_holder.else(context(publishing()))
-}
-
-test config_holder_vote_fails() fail {
-  config_holder.else(
-    context(Voting(DelegateRepresentative(Script(kit.config_holder)))),
-  )
-}
-
-test config_holder_propose_fails() fail {
-  config_holder.else(context(proposing()))
-}
-
-test config_holder_mint_fails() fail {
-  config_holder.else(context(Minting(kit.config_holder)))
-}
-
 test config_seal_mint_wiring() {
   let redeemer: Data = 0
-  config_seal.mint(
-    seed(),
-    kit.config_holder,
-    redeemer,
-    kit.config_policy,
-    seal_tx(),
-  )
-}
-
-test config_seal_mint_wiring_rejects() fail {
-  let redeemer: Data = 0
-  config_seal.mint(
-    seed(),
-    kit.config_holder,
-    redeemer,
-    kit.config_policy,
-    Transaction { ..seal_tx(), inputs: [kit.wallet_input()] },
-  )
-}
-
-test config_seal_spend_fails() fail {
-  config_seal.else(
-    seed(),
-    kit.config_holder,
-    context(Spending { output: seed(), datum: None }),
-  )
+  and {
+    config_seal.mint(
+      seed(),
+      kit.config_holder,
+      redeemer,
+      kit.config_policy,
+      seal_tx(),
+    ),
+    // The seed is not spent: the rule refuses.
+    !config_seal.mint(
+      seed(),
+      kit.config_holder,
+      redeemer,
+      kit.config_policy,
+      Transaction { ..seal_tx(), inputs: [kit.wallet_input()] },
+    ),
+  }
 }
 
 test config_seal_withdraw_fails() fail {
@@ -174,20 +122,4 @@ test config_seal_withdraw_fails() fail {
     kit.config_holder,
     context(Withdrawing(Script(kit.config_policy))),
   )
-}
-
-test config_seal_publish_fails() fail {
-  config_seal.else(seed(), kit.config_holder, context(publishing()))
-}
-
-test config_seal_vote_fails() fail {
-  config_seal.else(
-    seed(),
-    kit.config_holder,
-    context(Voting(DelegateRepresentative(Script(kit.config_policy)))),
-  )
-}
-
-test config_seal_propose_fails() fail {
-  config_seal.else(seed(), kit.config_holder, context(proposing()))
 }

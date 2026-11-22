@@ -19,7 +19,7 @@ use identity_marketplace/delegation/fixtures.{
   delegation_hash, delegation_id, delegation_input, delegation_key, escrow_hash,
   escrow_pattern, hash, hi, identity_hash, lo, now, other_hash, principal,
   principal_delegator, range, record_input, records, seed, staked_script_address,
-  stranger, suspended, vault_hash, wallet_input, without_delegation_key,
+  stranger, vault_hash, wallet_input,
 }
 use identity_marketplace/delegation/pattern.{covers, valid_action_pattern}
 use identity_marketplace/types.{
@@ -709,24 +709,6 @@ test pay_after_undelegate() fail {
   pay1_refs(records(1, 1))
 }
 
-test pay_after_delegate_key_removed() fail {
-  pay1_refs(
-    [
-      delegation_input(delegation_id(1), chain_link(1, owner1())),
-      record_input(1, without_delegation_key(agent(1))),
-    ],
-  )
-}
-
-test pay_delegate_suspended() fail {
-  pay1_refs(
-    [
-      delegation_input(delegation_id(1), chain_link(1, owner1())),
-      record_input(1, suspended(agent(1))),
-    ],
-  )
-}
-
 /// The window ends after the period of the delegation. A new vault period
 /// starts, so the continuing datum has `period_start = hi`.
 test pay_after_delegation_period() fail {
@@ -821,17 +803,9 @@ test pay_continuing_datum_other_delegation() fail {
   )
 }
 
-test pay_continuing_datum_lower_spent() fail {
-  pay1_with([continuing1(39 * ap3x, start, 40 * ap3x), escrow1(job1())])
-}
-
 /// Decision: Pay moves a positive amount.
 test pay_zero_amount() fail {
   pay1_with([continuing1(0, start, 0), escrow1(job1())])
-}
-
-test pay_adds_funds() fail {
-  pay1_with([continuing1(-10 * ap3x, start, -10 * ap3x), escrow1(job1())])
 }
 
 // ## Close

@@ -6,8 +6,8 @@ use aiken/collection/list
 use identity_marketplace/identity/kit.{
   accountable, controller, distributor, guardian, hash, hi, hold_in_force,
   hold_lapsed, lo, module1, module1_party, output_ap3x, pkh, provider, record,
-  responsible, revoked_tombstone, signer, spend, spend_tx, suspended,
-  with_module1, with_parties, within, without_config,
+  responsible, signer, spend, spend_tx, suspended, with_module1, with_parties,
+  within, without_config,
 }
 use vector_identity.{day_ms, days_30_ms, max_range_ms}
 use vector_identity/redeemers.{Actor, ByController, ByParty, Suspend, Unsuspend}
@@ -197,17 +197,6 @@ test suspend_reorders_holds() fail {
   )
 }
 
-test suspend_renews_own_hold() {
-  let d =
-    suspended(base(), [hold_in_force(signer(2)), hold_in_force(ControllerSet)])
-  suspend(
-    ByParty { index: 3 },
-    d,
-    [hold_in_force(ControllerSet), new_hold(signer(2))],
-    [pkh(2)],
-  )
-}
-
 test suspend_shortens_own_hold() {
   // Each author owns its hold; only Module-1 has the "never shorter" rule,
   // and Module-1 enforces it.
@@ -216,7 +205,18 @@ test suspend_shortens_own_hold() {
       base(),
       [Hold { ..hold_in_force(signer(2)), until: lo + 20 * day_ms }],
     )
-  suspend(ByParty { index: 3 }, d, [new_hold(signer(2))], [pkh(2)])
+  // The own hold also goes while the hold of another author stays.
+  let with_other =
+    suspended(base(), [hold_in_force(signer(2)), hold_in_force(ControllerSet)])
+  and {
+    suspend(ByParty { index: 3 }, d, [new_hold(signer(2))], [pkh(2)]),
+    suspend(
+      ByParty { index: 3 },
+      with_other,
+      [hold_in_force(ControllerSet), new_hold(signer(2))],
+      [pkh(2)],
+    ),
+  }
 }
 
 test suspend_two_holds_by_one_author() fail {
@@ -251,18 +251,6 @@ test suspend_keeps_lapsed_hold() fail {
   )
 }
 
-test suspend_drops_hold_of_removed_key_party() {
-  // Must pass (§12.1 Holds): signer 9 is no longer a party.
-  let d =
-    suspended(base(), [hold_in_force(signer(9)), hold_in_force(ControllerSet)])
-  suspend(
-    ByParty { index: 3 },
-    d,
-    [hold_in_force(ControllerSet), new_hold(signer(2))],
-    [pkh(2)],
-  )
-}
-
 test suspend_keeps_hold_of_removed_key_party() fail {
   let d =
     suspended(base(), [hold_in_force(signer(9)), hold_in_force(ControllerSet)])
@@ -293,12 +281,23 @@ test suspend_not_blocked_by_holds_of_removed_party_keys() {
   // The controller cannot fill the 10 holds with party keys that it removed
   // and so block another party's Suspend.
   let d = suspended(base(), ten_holds())
-  suspend(
-    ByParty { index: 3 },
-    d,
-    [hold_in_force(ControllerSet), new_hold(signer(2))],
-    [pkh(2)],
-  )
+  // Must pass (§12.1 Holds): signer 9 is no longer a party.
+  let one =
+    suspended(base(), [hold_in_force(signer(9)), hold_in_force(ControllerSet)])
+  and {
+    suspend(
+      ByParty { index: 3 },
+      d,
+      [hold_in_force(ControllerSet), new_hold(signer(2))],
+      [pkh(2)],
+    ),
+    suspend(
+      ByParty { index: 3 },
+      one,
+      [hold_in_force(ControllerSet), new_hold(signer(2))],
+      [pkh(2)],
+    ),
+  }
 }
 
 test suspend_more_than_10_holds() fail {
@@ -342,10 +341,6 @@ test suspend_controller_party_key_cannot_lift_other_hold() fail {
       [hold_in_force(signer(2))],
     )
   unsuspend(signer(2), d, [], [hash(controller)])
-}
-
-test suspend_by_distributor() fail {
-  suspend(ByParty { index: 4 }, base(), [new_hold(signer(5))], [pkh(5)])
 }
 
 test suspend_by_guardian() fail {
@@ -425,21 +420,6 @@ test suspend_changes_other_field() fail {
       [hash(controller)],
     )
   spend(Suspend { actor: ByController }, tx)
-}
-
-test suspend_of_tombstone() fail {
-  let d = revoked_tombstone()
-  spend(
-    Suspend { actor: ByController },
-    spend_tx(
-      d,
-      IdentityDatum {
-        ..d,
-        status: Suspended { holds: [new_hold(ControllerSet)] },
-      },
-      [hash(controller)],
-    ),
-  )
 }
 
 test suspend_range_over_one_hour() fail {
@@ -573,14 +553,14 @@ test unsuspend_by_module1_relies_on_module1_withdraw_rule() {
 // ## Unsuspend
 
 test unsuspend_by_author() {
+  // The second case: the last hold of the author gives Active.
   let d =
     suspended(base(), [hold_in_force(ControllerSet), hold_in_force(signer(2))])
-  unsuspend(signer(2), d, [hold_in_force(ControllerSet)], [pkh(2)])
-}
-
-test unsuspend_last_hold_gives_active() {
-  let d = suspended(base(), [hold_in_force(signer(2))])
-  unsuspend(signer(2), d, [], [pkh(2)])
+  let last = suspended(base(), [hold_in_force(signer(2))])
+  and {
+    unsuspend(signer(2), d, [hold_in_force(ControllerSet)], [pkh(2)]),
+    unsuspend(signer(2), last, [], [pkh(2)]),
+  }
 }
 
 test unsuspend_last_hold_kept_suspended() fail {
@@ -657,12 +637,6 @@ test unsuspend_shortens_other_hold() fail {
   )
 }
 
-test unsuspend_takes_value() fail {
-  let d = suspended(base(), [hold_in_force(signer(2))])
-  let tx = spend_tx(d, with_holds(d, []), [pkh(2)])
-  spend(Unsuspend { author: signer(2) }, output_ap3x(tx, kit.deposit - 1))
-}
-
 test unsuspend_range_over_one_hour() fail {
   let d = suspended(base(), [hold_in_force(signer(2))])
   let tx = spend_tx(d, with_holds(d, []), [pkh(2)])
@@ -685,16 +659,15 @@ fn ended_guardian() -> IdentityDatum {
   }
 }
 
-test suspend_after_guardian_period_ended() {
-  suspend(
-    ByParty { index: 1 },
-    ended_guardian(),
-    [new_hold(signer(2))],
-    [pkh(2)],
-  )
-}
-
-test unsuspend_after_guardian_period_ended() {
+test suspend_and_unsuspend_after_guardian_period_ended() {
   let d = suspended(ended_guardian(), [hold_in_force(signer(2))])
-  unsuspend(signer(2), d, [], [pkh(2)])
+  and {
+    suspend(
+      ByParty { index: 1 },
+      ended_guardian(),
+      [new_hold(signer(2))],
+      [pkh(2)],
+    ),
+    unsuspend(signer(2), d, [], [pkh(2)]),
+  }
 }

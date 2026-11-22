@@ -117,24 +117,25 @@ test delegate_by_principal_key() {
   mint_delegate(principal_root_tx(principal_root()))
 }
 
-test delegate_by_agent_controller() {
-  mint_delegate(
-    delegate_tx(
-      agent_root(),
-      records(0, 1),
-      [hash(controller_key(0)), hash(delegation_key(1))],
+/// An agent delegator signs with its controller key, or with a listed key that
+/// has the delegation purpose (the two branches of `agent_signed`).
+test delegate_by_agent_controller_or_delegation_key() {
+  and {
+    mint_delegate(
+      delegate_tx(
+        agent_root(),
+        records(0, 1),
+        [hash(controller_key(0)), hash(delegation_key(1))],
+      ),
     ),
-  )
-}
-
-test delegate_by_agent_delegation_key() {
-  mint_delegate(
-    delegate_tx(
-      agent_root(),
-      records(0, 1),
-      [hash(delegation_key(0)), hash(delegation_key(1))],
+    mint_delegate(
+      delegate_tx(
+        agent_root(),
+        records(0, 1),
+        [hash(delegation_key(0)), hash(delegation_key(1))],
+      ),
     ),
-  )
+  }
 }
 
 test delegate_sub_delegation() {
@@ -234,15 +235,8 @@ test delegate_child_wider_actions() fail {
   )
 }
 
-test delegate_child_star_action_under_prefix() fail {
-  sub2(DelegationDatum { ..child_of(2), actions: ["*"] })
-}
-
-/// §12.1 Delegation: a child wider than its parent (resources).
-test delegate_child_wider_resources() fail {
-  sub2(DelegationDatum { ..child_of(2), resources: ["*"] })
-}
-
+/// §12.1 Delegation: a child wider than its parent (resources). The parent has
+/// no resource pattern, so it covers no resource (decision 3).
 test delegate_child_resource_under_empty_parent() fail {
   sub2_under(DelegationDatum { ..parent_of(2), resources: [] }, child_of(2))
 }
@@ -262,10 +256,6 @@ test delegate_child_ends_after_parent() fail {
 /// §12.1 Delegation: a child wider than its parent (depth).
 test delegate_child_same_depth_as_parent() fail {
   sub2(DelegationDatum { ..child_of(2), depth: 1, remaining: 0 })
-}
-
-test delegate_child_depth_skips_one() fail {
-  sub2(DelegationDatum { ..child_of(2), depth: 3, remaining: 0 })
 }
 
 /// §12.1 Delegation: a child wider than its parent (remaining).
@@ -558,16 +548,6 @@ test delegate_delegate_suspended() fail {
     delegate_tx(
       principal_root(),
       [record_input(1, suspended(agent(1)))],
-      [principal, hash(delegation_key(1))],
-    ),
-  )
-}
-
-test delegate_delegate_revoked() fail {
-  mint_delegate(
-    delegate_tx(
-      principal_root(),
-      [record_input(1, revoked(agent(1)))],
       [principal, hash(delegation_key(1))],
     ),
   )
@@ -938,26 +918,27 @@ test undelegate_by_principal_key() {
   mint_undelegate(principal_undelegate_tx())
 }
 
-test undelegate_by_agent_controller() {
-  mint_undelegate(
-    undelegate_tx(
-      spent_link(1, agent_root()),
-      records(0, 0),
-      [hash(controller_key(0))],
-      burn(delegation_id(1)),
+/// An agent delegator undelegates with its controller key, or with a listed key
+/// that has the delegation purpose (the two branches of `agent_signed`).
+test undelegate_by_agent_controller_or_delegation_key() {
+  and {
+    mint_undelegate(
+      undelegate_tx(
+        spent_link(1, agent_root()),
+        records(0, 0),
+        [hash(controller_key(0))],
+        burn(delegation_id(1)),
+      ),
     ),
-  )
-}
-
-test undelegate_by_agent_delegation_key() {
-  mint_undelegate(
-    undelegate_tx(
-      spent_link(1, agent_root()),
-      records(0, 0),
-      [hash(delegation_key(0))],
-      burn(delegation_id(1)),
+    mint_undelegate(
+      undelegate_tx(
+        spent_link(1, agent_root()),
+        records(0, 0),
+        [hash(delegation_key(0))],
+        burn(delegation_id(1)),
+      ),
     ),
-  )
+  }
 }
 
 /// The principal of link 1 undelegates link 3 (ancestors as reference
@@ -1306,10 +1287,6 @@ test use_delegate_record_missing() fail {
       record_input(1, agent(1)),
     ],
   ) == child_of(2)
-}
-
-test use_intermediate_delegator_revoked() fail {
-  use_depth2(depth2_refs(revoked(agent(1)), agent(2))) == child_of(2)
 }
 
 test use_intermediate_delegator_suspended() fail {

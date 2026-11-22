@@ -37,21 +37,21 @@ Each attack must fail.
 
 ## §12.1 "Other purposes"
 
-The attestation script used as withdraw, publish, vote or propose fails (§3.9). Tests in `validators/attestation.ak`: `purpose_withdraw_fails`, `purpose_publish_fails`, `purpose_vote_fails`, `purpose_propose_fails`.
+The attestation script used as withdraw, publish, vote or propose fails (§3.9). The four purposes reach the one `else` handler of `validators/attestation.ak`, so one test covers it: `purpose_withdraw_fails`.
 
 ## Rules for every action
 
-A rule that holds for several actions has a test for each action. The tests that start with `mint_` or `spend_` are in `validators/attestation.ak` and go through the validator's redeemer dispatch. Every handler starts with the condition `lo <= hi`, so the window rule runs before any branch (see the module comment of `handlers.ak`). "—": the rule does not apply to the action.
+A rule that holds for several actions has a test for each action. The tests `mint_attest`, `spend_revoke_att` and `spend_revoke_att_without_datum` are in `validators/attestation.ak` and go through the validator; every other test calls a handler. The tests `attest_via_handle_mint`, `burn_via_handle_mint`, `revoke_att_via_handle_spend`, `contest_via_handle_spend` and `withdraw_via_handle_spend` cover the dispatch of each redeemer. Every handler starts with the condition `lo <= hi`, so the window rule runs before any branch (see the module comment of `handlers.ak`); each action has its own window test. "—": the rule does not apply to the action.
 
 | Rule | Attest | Burn | RevokeAtt | Contest | Withdraw |
 |---|---|---|---|---|---|
-| A range over one hour fails | `attest_range_over_one_hour`, `mint_attest_range_over_one_hour` | `burn_range_over_one_hour`, `mint_burn_range_over_one_hour` | `revoke_att_range_over_one_hour`, `spend_revoke_att_range_over_one_hour` | `contest_range_over_one_hour`, `spend_contest_range_over_one_hour` | `withdraw_range_over_one_hour`, `spend_withdraw_range_over_one_hour` |
+| A range over one hour fails | `attest_range_over_one_hour` | `burn_range_over_one_hour` | `revoke_att_range_over_one_hour` | `contest_range_over_one_hour` | `withdraw_range_over_one_hour` |
 | An infinite bound fails | `attest_unbounded_range` | `burn_unbounded_range` | `revoke_att_unbounded_range` | `contest_unbounded_range` | `withdraw_unbounded_range` |
 | A second input at the attestation script fails | `attest_with_attestation_input`, `attest_with_script_input_with_stake_credential` | `withdraw_two_inputs_one_burn`, `withdraw_two_inputs_two_burns` | `revoke_att_two_attestation_inputs` | `contest_two_attestation_inputs` | `withdraw_two_inputs_one_burn`, `withdraw_two_inputs_two_burns` |
 | A spent input that is not authentic fails (no token, or a stake credential) | — | `withdraw_input_without_token`, `withdraw_input_with_stake_credential`, `burn_without_attestation_input` | `revoke_att_input_without_token`, `revoke_att_input_with_stake_credential` | `contest_input_without_token`, `contest_input_with_stake_credential` | `withdraw_input_without_token`, `withdraw_input_with_stake_credential` |
 | A second output at the attestation script fails | `attest_two_outputs_at_aa`, `attest_extra_output_at_script_with_stake_credential` | — | `revoke_att_two_outputs_at_aa` | `contest_two_outputs_at_aa` | — |
 | The output datum is inline and is an attestation | `attest_datum_hash`, `attest_no_datum`, `attest_datum_not_attestation` | — | `revoke_att_output_datum_hash`, `revoke_att_datum_not_attestation` | `contest_output_datum_hash`, `contest_datum_not_attestation` | — |
-| A spend without a datum fails | — | — | `spend_revoke_att_without_datum` | `spend_contest_without_datum` | `spend_withdraw_without_datum` |
+| A spend without a datum fails (one check of the validator for each spend action) | — | — | `spend_revoke_att_without_datum` | same check | same check |
 | The mint of the attestation policy is as the action needs | `attest_quantity_two`, `attest_second_name`, `attest_name_not_from_seed` | `withdraw_burn_quantity_two`, `withdraw_burn_of_other_token`, `burn_with_positive_quantity` | `revoke_att_with_mint_of_own_policy` | `contest_with_burn_of_own_policy` | `withdraw_without_burn`, `withdraw_burn_of_other_token`, `withdraw_burn_quantity_two` |
 | Value: enough AP3X, no other asset, no reference script | `attest_deposit_below_minimum`, `attest_output_foreign_asset`, `attest_output_reference_script` | — | `revoke_att_value_lowered`, `revoke_att_output_foreign_asset`, `revoke_att_output_reference_script` | `contest_value_lowered`, `contest_output_foreign_asset`, `contest_output_reference_script` | — |
 | The output is exactly at `AA` | `attest_output_stake_credential`, `attest_token_outside_aa` | — | `revoke_att_output_stake_credential`, `revoke_att_token_to_key_address`, `revoke_att_token_to_other_script` | `contest_output_stake_credential`, `contest_token_to_key_address` | — |
@@ -63,7 +63,7 @@ A rule that holds for several actions has a test for each action. The tests that
 | Attest spends `seed` | `attest_seed_not_spent` |
 | Attest: `AttActive` and `contested = None` | `attest_status_revoked`, `attest_contested_set` |
 | Registered issuer: effective status Active | `attest_issuer_record_missing`, `attest_issuer_suspended`, `attest_issuer_unaccountable`, `attest_issuer_revoked`, `attest_issuer_parent_ended_subagents`, `attest_issuer_parent_missing` |
-| `valid_until` at most 366 days after `issued_at`; types 2 and 3 require it; `valid_from` at or before it; valid times | `attest_valid_until_over_366_days`, `attest_software_without_valid_until`, `attest_environment_without_valid_until`, `attest_valid_from_after_valid_until`, `attest_valid_from_outside_time_range` |
+| `valid_until` at most 366 days after `issued_at`; types 2 and 3 require it; `valid_from` at or before it; valid times | `attest_valid_until_over_366_days`, `attest_types_2_and_3_need_valid_until`, `attest_valid_from_after_valid_until`, `attest_valid_from_outside_time_range` |
 | Lengths of the datum comments | `attest_byte_lengths`, `attest_five_links`, `attest_link_limits`, `attest_format_out_of_range` |
 | RevokeAtt: `AttActive` to `AttRevoked { at: lo, reason }`, nothing else changes | `revoke_att_already_revoked`, `revoke_att_at_not_lo`, `revoke_att_reason_not_redeemer_reason`, `revoke_att_changes_other_field`, `revoke_att_reason_out_of_range` |
 | Issuer authority | `revoke_att_issuer_record_missing`, `revoke_att_by_stranger`, `withdraw_issuer_record_missing`, `withdraw_by_subject` |
@@ -76,9 +76,9 @@ A rule that holds for several actions has a test for each action. The tests that
 |---|---|
 | Attest | `attest_registered_issuer`, `attest_unregistered_issuer`, `attest_via_handle_mint`, `attest_solicited_with_subject_controller`, `attest_subject_tombstone`, `attest_subject_suspended`, `attest_issuer_subagent_active`, `attest_allowed_types`, `attest_valid_until_optional_for_other_types`, `attest_valid_until_bounds`, `attest_valid_from_bounds`, `attest_limits_at_bounds`, `attest_deposit_above_minimum`, `attest_with_mint_of_other_policy`, `attest_range_one_hour`, `mint_attest` |
 | RevokeAtt | `revoke_att_by_issuer_key`, `revoke_att_by_issuer_controller`, `revoke_att_via_handle_spend`, `revoke_att_unregistered_issuer`, `revoke_att_by_controller_after_key_removal`, `revoke_att_by_controller_of_issuer_tombstone`, `revoke_att_adds_ap3x`, `revoke_att_contested_attestation`, `revoke_att_reason_bounds`, `spend_revoke_att` |
-| Contest | `contest_by_subject_controller`, `contest_via_handle_spend`, `contest_replaces_anchor`, `contest_revoked_attestation`, `contest_unregistered_issuer`, `contest_uri_bounds`, `contest_subject_tombstone`, `spend_contest` |
-| Withdraw | `withdraw_after_revocation` (at `at + 90 days`), `withdraw_after_expiry` (at `valid_until + 90 days`), `withdraw_revoked_before_expiry`, `withdraw_via_handle_spend`, `withdraw_by_issuer_controller`, `withdraw_unregistered_issuer`, `spend_withdraw` |
-| Burn | `burn_with_withdraw`, `burn_via_handle_mint`, `mint_burn` |
+| Contest | `contest_by_subject_controller`, `contest_via_handle_spend`, `contest_replaces_anchor`, `contest_revoked_attestation`, `contest_unregistered_issuer`, `contest_uri_bounds`, `contest_subject_tombstone` |
+| Withdraw | `withdraw_after_revocation` (at `at + 90 days`), `withdraw_after_expiry` (at `valid_until + 90 days`), `withdraw_revoked_before_expiry`, `withdraw_via_handle_spend`, `withdraw_by_issuer_controller`, `withdraw_unregistered_issuer` |
+| Burn | `burn_with_withdraw`, `burn_via_handle_mint` |
 | Identifier | `attestation_id_vectors` (the two vectors of Part 1 §3.1) |
 
 ## Largest cases

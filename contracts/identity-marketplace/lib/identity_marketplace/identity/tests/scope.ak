@@ -348,6 +348,8 @@ test scope_output_with_other_token_name() fail {
 }
 
 test scope_output_field_outside_limit() fail {
+  // Wiring proof: a spend runs `valid_datum` on the record output. The rules
+  // of the valid datum have their own tests in `tests/datum`.
   let d = base()
   spend(
     Update,

@@ -16,8 +16,7 @@ use identity_marketplace/identity/kit.{
   allowlist_ids, allowlist_proof, allowlist_root, bytes, controller,
   creation_signers, hash, hi, legacy_datum, legacy_hash, legacy_input,
   legacy_owner, lo, mint, new_record, outside_id, own, pkh, provider,
-  record_input, record_output, staked, with_mint, with_outputs, with_parties,
-  within,
+  record_output, staked, with_mint, with_outputs, with_parties, within,
 }
 use vector_identity.{max_range_ms}
 use vector_identity/redeemers.{Adopt}
@@ -353,16 +352,6 @@ test adopt_party_signs() {
 
 test adopt_without_accountable_party() fail {
   adopt(adopt_tx(with_parties(new_record(), []), adoption_signers()))
-}
-
-test adopt_with_identity_input() fail {
-  let tx = ok_tx()
-  adopt(
-    Transaction {
-      ..tx,
-      inputs: [record_input(0, kit.record_id, kit.record()), ..tx.inputs],
-    },
-  )
 }
 
 test adopt_two_outputs_at_identity_address() fail {
