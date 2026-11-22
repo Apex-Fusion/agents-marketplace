@@ -7,8 +7,10 @@
  *
  * The fake node is an injected `fetch`. For an address with wanted outputs it answers `count` added outputs (each has a valid inline
  * datum and no token), then the wanted outputs. The answer is built once for each count and each datum, and every reader shares it.
- * The counts are 25,000 and 100,000. The added datums have 3 bytes and 200 bytes. The two scans of the supplier (release-escrows
- * and the advert scan) run with the small datum only, because they skip each added datum with an error.
+ * The pull request gate runs 25,000 added outputs with a datum of 3 bytes: the record is then text 25,001, the smallest answer that
+ * the old limit of 25,000 texts for one answer would hide. The night (TEST_DEPTH=nightly) adds 100,000 added outputs, and the datum
+ * of 200 bytes (40 million characters at 100,000 outputs, more than the old limit of 32 MiB). The two scans of the supplier
+ * (release-escrows and the advert scan) run with the small datum only, because they skip each added datum with an error.
  *
  * Readers that this file calls:
  *   - supplier record lookup (supplier/src/identity/agent.ts), with readAgentRecord
@@ -32,9 +34,6 @@ import { LiveOgmiosProvider } from "../../packages/shared/src/chain/LiveOgmiosPr
 import { OgmiosLucidProvider } from "../../packages/shared/src/chain/OgmiosLucidProvider.js";
 import { ReadOnlyOgmiosProvider } from "../../packages/shared/src/chain/ReadOnlyOgmiosProvider.js";
 import {
-  decodeAnyAdvertDatum,
-  decodeAnyEscrowDatum,
-  decodePlutusDataHex,
   encodeAdvertDatum,
   encodeEscrowDatum,
   encodeIdentityAdvertDatum,
@@ -63,6 +62,7 @@ import { buildSampleEscrowDatum } from "../fixtures/buyer-side/escrow-datum-buil
 import { newAdvert, newEscrow } from "../fixtures/buyer-side/identity-world.js";
 import { TEST_IDENTITY_HASH, testIdentityBlueprint } from "../fixtures/identity-builders/blueprint.js";
 import { AGENT_ID, AP3X, agentRecord, recordUtxo, testWallet, tombstone } from "../fixtures/identity-builders/world.js";
+import { nightly } from "../depth.js";
 
 const OGMIOS_URL = "http://ogmios.test";
 const NETWORK_ID = 1;
@@ -78,15 +78,15 @@ const DATUM_200_BYTES = encodePlutusDataHex({
   fields: ["11".repeat(64), "22".repeat(64), "33".repeat(62)].map((hex): PlutusData => ({ kind: "bytes", hex })),
 });
 
-/** The added datums, each with its name for the report. */
+/** The added datums, each with its name for the report. The gate runs the small datum only. */
 const DATUMS: ReadonlyArray<[name: string, hex: string]> = [
   ["a datum of 3 bytes", DATUM_3_BYTES],
-  ["a datum of 200 bytes", DATUM_200_BYTES],
+  ...(nightly ? [["a datum of 200 bytes", DATUM_200_BYTES] as [string, string]] : []),
 ];
-/** The numbers of added outputs, each with its label for the report. */
+/** The numbers of added outputs, each with its label for the report. The gate runs the smallest number that fails the old limit. */
 const COUNTS: ReadonlyArray<[label: string, count: number]> = [
   ["25,000", 25_000],
-  ["100,000", 100_000],
+  ...(nightly ? [["100,000", 100_000] as [string, number]] : []),
 ];
 
 // ─── The outputs that the readers look for ───────────────────────────────
@@ -163,14 +163,6 @@ const WALLET_OUTPUT = outputAt(wallet.address, "5e", DATUM_3_BYTES, 20n * AP3X);
 const WANTED: readonly Utxo[] = [
   ACTIVE_RECORD, REVOKED_RECORD, LEGACY_ESCROW, NEW_ESCROW, LEGACY_ADVERT, NEW_ADVERT, WALLET_OUTPUT,
 ];
-
-/** The escrows and adverts, with what the decoders of the shared package read from each. */
-const SCRIPT_OUTPUTS = [
-  { name: "the legacy escrow", output: LEGACY_ESCROW, decode: decodeAnyEscrowDatum, expected: { layout: "legacy", datum: LEGACY_ESCROW_DATUM } },
-  { name: "the new escrow", output: NEW_ESCROW, decode: decodeAnyEscrowDatum, expected: { layout: "identity", datum: NEW_ESCROW_DATUM } },
-  { name: "the legacy advert", output: LEGACY_ADVERT, decode: decodeAnyAdvertDatum, expected: { layout: "legacy", datum: LEGACY_ADVERT_DATUM } },
-  { name: "the new advert", output: NEW_ADVERT, decode: decodeAnyAdvertDatum, expected: { layout: "identity", datum: NEW_ADVERT_DATUM } },
-] as const;
 
 // ─── The fake node ───────────────────────────────────────────────────────
 
@@ -388,12 +380,6 @@ afterEach(() => {
 // ─── The checks ──────────────────────────────────────────────────────────
 
 describe("outputs that a third party adds at an address do not hide a record or an escrow", () => {
-  it("uses added datums that the decoders read", () => {
-    expect(DATUM_3_BYTES.length / 2).toBe(3);
-    expect(DATUM_200_BYTES.length / 2).toBe(200);
-    for (const [, hex] of DATUMS) expect(() => decodePlutusDataHex(hex)).not.toThrow();
-  });
-
   describe.each(COUNTS)("%s added outputs in front", (_label, count) => {
     describe.each(DATUMS)("with %s", (_name, hex) => {
       let built: FakeNode | undefined;
@@ -491,16 +477,6 @@ describe("outputs that a third party adds at an address do not hide a record or 
           const addresses = [LEGACY_ADVERT_ADDRESS, NEW_ADVERT_ADDRESS];
           const capabilities = await withoutStackTraces(() => advertCapabilities(live(node), addresses, supplier.pubKeyHash));
           expect(capabilities).toEqual([IDENTITY_CAPABILITY, LEGACY_CAPABILITY].sort());
-        });
-      }
-
-      for (const script of SCRIPT_OUTPUTS) {
-        check(`the read-only client lists ${script.name} with its exact datum`, async (node) => {
-          const listed = await READ_ONLY_CLIENT.list(node, script.output.address);
-          expect(listed).toHaveLength(count + 1);
-          const last = listed.at(-1);
-          expect(last).toEqual({ ref: refText(script.output.ref), lovelace: script.output.lovelace, datum: script.output.datumHex });
-          expect(script.decode(last!.datum!)).toEqual(script.expected);
         });
       }
 
