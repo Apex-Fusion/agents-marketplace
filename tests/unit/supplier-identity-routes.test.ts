@@ -6,138 +6,44 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import request from "supertest";
-import { createHash } from "node:crypto";
 import { MockChainProvider } from "../../packages/shared/src/chain/MockChainProvider.js";
-import { encodeAdvertDatum } from "../../packages/shared/src/cbor/AdvertDatum.js";
 import { encodeEscrowDatum } from "../../packages/shared/src/cbor/EscrowDatum.js";
-import { canonicalize } from "../../packages/shared/src/cbor/canonical.js";
-import type { PlutusAddress } from "../../packages/shared/src/cbor/address.js";
 import { decodeIdentityEscrowDatum, type IdentityEscrowDatum } from "../../packages/shared/src/cbor/IdentityEscrowDatum.js";
 import type { IdentityAdvertDatum } from "../../packages/shared/src/cbor/IdentityAdvertDatum.js";
-import type { AdvertDatum } from "../../packages/shared/src/cbor/types.js";
 import { verifyEscrowReceipt } from "../../packages/shared/src/receipt/verify.js";
-import { chatSessionPromptHash } from "../../packages/shared/src/tx/escrow/postChatEscrow.js";
-import { ocrPromptHash } from "../../packages/shared/src/tx/escrow/postOcrEscrow.js";
-import { SupplierState } from "../../supplier/src/state.js";
-import { JobStore } from "../../supplier/src/jobs.js";
-import { ChatSessionStore } from "../../supplier/src/chatSession.js";
-import { createApp } from "../../supplier/src/server.js";
-import type { SupplierConfig } from "../../supplier/src/config.js";
-import {
-  buildSampleConfig, buildSampleOcrConfig, buildSampleTtsConfig, SAMPLE_ADVERT_INDEX, SAMPLE_ADVERT_TX_HASH,
-} from "../fixtures/supplier-side/sample-config.js";
-import {
-  BUYER_PKH, POSTED_AT, PROMPT_HASH, REQUEST_SPEC_HASH, TEST_MAX_OUTPUT_TOKENS, TEST_MODEL, TEST_RESPONSE_INPUT,
-} from "../fixtures/supplier-side/sample-escrow-state.js";
 import {
   AGENT_ID, IDENTITY, OTHER_AGENT_ID, identityAdvertUtxo, identityEscrowUtxo, identitySupplierKey, recordSubmissions,
-  recordUtxo, supplierAgentRecord, testIdentity,
+  recordUtxo, supplierAgentRecord, testIdentity, withAgent,
 } from "../fixtures/supplier-side/identity.js";
+import { ESCROW_SCRIPT_ADDRESS } from "../fixtures/supplier-side/sample-escrow-state.js";
+import {
+  ADVERT_REF, advertOf, advertUtxoOf, escrowOf, routeOf, serve, stubUpstreams, type RouteKind,
+} from "../fixtures/supplier-side/route-kinds.js";
 
 const supplier = identitySupplierKey();
-const ADVERT_REF = { txHash: SAMPLE_ADVERT_TX_HASH, index: SAMPLE_ADVERT_INDEX };
 const ESCROW_REF = { txHash: "e5".repeat(32), index: 0 };
 const ESCROW_HEADER = `${ESCROW_REF.txHash}#0`;
 const RECORD_REF = { txHash: "7e".repeat(32), index: 0 };
-const REFUND_ADDRESS: PlutusAddress = { paymentCredential: { type: "VerificationKey", hash: BUYER_PKH }, stakeCredential: null };
 
-const sha256 = (text: string): string => createHash("sha256").update(text, "utf8").digest("hex");
-
-type Kind = "chat" | "tts" | "ocr" | "chat-session";
-
-interface Capability {
-  config: SupplierConfig;
-  capability: string;
-  model: string;
-  maxOutputTokens: number;
-  path: string;
-  body: Record<string, unknown>;
-  promptHash: string;
-}
-
-const TTS_BODY = { text: "Hello world.", voice: "nova", format: "mp3", speed: 1 };
-const OCR_BODY = { image_b64: "aGVsbG8=", mime: "image/png", output_format: "markdown" };
-
-function capability(kind: Kind): Capability {
-  switch (kind) {
-    case "chat":
-      return { config: buildSampleConfig(), capability: "llm.text.generate.v1", model: TEST_MODEL,
-        maxOutputTokens: TEST_MAX_OUTPUT_TOKENS, path: "/v1/responses",
-        body: { model: TEST_MODEL, input: TEST_RESPONSE_INPUT, max_output_tokens: TEST_MAX_OUTPUT_TOKENS }, promptHash: PROMPT_HASH };
-    case "tts":
-      return { config: buildSampleTtsConfig(), capability: "audio.synthesize.piper.v1", model: "en_US-lessac-medium",
-        maxOutputTokens: 0, path: "/v1/audio/synthesize", body: TTS_BODY, promptHash: sha256(canonicalize(TTS_BODY)) };
-    case "ocr":
-      return { config: buildSampleOcrConfig(), capability: "ocr.page.extract.chandra-ocr-2.v1", model: "datalab-to/chandra-ocr-2",
-        maxOutputTokens: 4096, path: "/v1/ocr/extract", body: OCR_BODY, promptHash: ocrPromptHash(OCR_BODY) };
-    case "chat-session":
-      return { config: { ...buildSampleConfig(), capabilityKind: "chat-session", llmBackend: "openai", ollamaUrl: "",
-        openaiBaseUrl: "http://openai.fake" }, capability: "llm.chat.v1", model: "gpt-test", maxOutputTokens: 1024,
-        path: "/v1/chat/start", body: { session_nonce: "nonce-1" }, promptHash: chatSessionPromptHash({ session_nonce: "nonce-1" }) };
-  }
-}
-
-function legacyAdvert(cap: Capability): AdvertDatum {
-  return {
-    supplier_pkh: supplier.pubKeyHash, capability_id: cap.capability, model: cap.model, max_output_tokens: cap.maxOutputTokens,
-    max_processing_ms: 60_000, price_lovelace: 2_000_000n, supplier_bond_lovelace: 1_000_000n, buyer_bond_lovelace: 1_000_000n,
-    endpoint_url: "https://supplier.example", detail_uri: "", detail_hash: "a".repeat(64), advertised_at: POSTED_AT, status: "Active",
-  };
-}
-
-function newEscrow(cap: Capability, changes: Partial<IdentityEscrowDatum> = {}): IdentityEscrowDatum {
-  return {
-    buyer_pkh: BUYER_PKH, supplier_pkh: supplier.pubKeyHash, advert_ref: ADVERT_REF, capability_id: cap.capability,
-    request_spec_hash: sha256(canonicalize({ capability_id: cap.capability, max_output_tokens: cap.maxOutputTokens, model: cap.model })),
-    prompt_hash: cap.promptHash, payment_lovelace: 2_000_000n, buyer_bond_lovelace: 1_000_000n, supplier_bond_lovelace: 1_000_000n,
-    deliver_by: POSTED_AT + 90_000, posted_at: POSTED_AT, submitted_at: null, result_receipt_hash: null, state: "Open",
-    agent_id: AGENT_ID, refund: { address: REFUND_ADDRESS, datum: null }, ...changes,
-  };
-}
-
-function setup(kind: Kind, options: { agentId?: string; advert?: "legacy" | "identity"; record?: boolean;
+function setup(kind: RouteKind, options: { agentId?: string; advert?: "legacy" | "identity"; record?: boolean;
   recordCapabilities?: string[]; escrow?: Partial<IdentityEscrowDatum> } = {}) {
-  const cap = capability(kind);
+  const cap = routeOf(kind);
   const chain = new MockChainProvider();
   chain.advanceSlot(1_000);
-  const advert = legacyAdvert(cap);
   if (options.advert === "identity") {
-    chain.seed(identityAdvertUtxo({ ...advert, agent_id: AGENT_ID } satisfies IdentityAdvertDatum, ADVERT_REF));
+    chain.seed(identityAdvertUtxo({ ...advertOf(cap), agent_id: AGENT_ID } satisfies IdentityAdvertDatum, ADVERT_REF));
   } else {
-    chain.seed({ ref: ADVERT_REF, address: "addr_test1wfakeadvertaddress", lovelace: 2_000_000n, assets: {},
-      datumHex: encodeAdvertDatum(advert), scriptRef: null });
+    chain.seed(advertUtxoOf(cap));
   }
   if (options.record !== false) {
     chain.seed(recordUtxo(supplierAgentRecord(supplier, options.recordCapabilities ?? [cap.capability])));
   }
-  const escrow = newEscrow(cap, options.escrow);
+  const escrow = withAgent(escrowOf(cap), options.escrow);
   chain.seed(identityEscrowUtxo(escrow, ESCROW_REF));
   const bodies = recordSubmissions(chain);
-  const jobs = new JobStore();
-  const state = new SupplierState();
-  const chatSessions = new ChatSessionStore();
-  const config: SupplierConfig = { ...cap.config, advertRef: ADVERT_REF,
-    agentId: "agentId" in options ? options.agentId : AGENT_ID };
-  const app = createApp({ chain, state, config, supplierKey: supplier, jobs, chatSessions, identity: testIdentity(chain) });
+  const agentId = "agentId" in options ? options.agentId : AGENT_ID;
+  const { app, state, jobs, chatSessions } = serve(cap, chain, { agentId, identity: testIdentity(chain) });
   return { cap, chain, app, jobs, state, bodies, escrow, chatSessions };
-}
-
-function stubUpstreams(): void {
-  vi.stubGlobal("fetch", vi.fn(async (url: string | URL) => {
-    const target = String(url);
-    if (target.includes("/api/chat")) {
-      return new Response(JSON.stringify({ message: { role: "assistant", content: "I am a test supplier." }, done: true,
-        done_reason: "stop", prompt_eval_count: 12, eval_count: 7, total_duration: 1_000_000 }), { status: 200 });
-    }
-    if (target.includes("/v1/audio/speech")) {
-      return new Response(new Uint8Array(256).fill(7), { status: 200, headers: { "content-type": "audio/mpeg" } });
-    }
-    if (target.includes("/chat/completions")) {
-      return new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: "# page" } }],
-        usage: { prompt_tokens: 3, completion_tokens: 4 } }), { status: 200, headers: { "content-type": "application/json" } });
-    }
-    throw new Error(`unexpected upstream ${target}`);
-  }));
 }
 
 beforeEach(() => stubUpstreams());
@@ -235,11 +141,8 @@ describe("refusals before Claim", () => {
 
   it("keeps the legacy escrow path: no agent, an 8-field receipt", async () => {
     const { cap, app, chain, jobs, bodies } = setup("chat", { agentId: undefined });
-    const legacy = { ...newEscrow(cap) } as Partial<IdentityEscrowDatum>;
-    delete legacy.agent_id;
-    delete legacy.refund;
-    chain.seed({ ref: ESCROW_REF, address: "addr_test1wrqq9qqjzf3uh4w9hm0kqzrpvt60r4ryjp5rjf5epd3nptq7yscm6",
-      lovelace: 4_000_000n, assets: {}, datumHex: encodeEscrowDatum(legacy as IdentityEscrowDatum), scriptRef: null });
+    chain.seed({ ref: ESCROW_REF, address: ESCROW_SCRIPT_ADDRESS, lovelace: 4_000_000n, assets: {},
+      datumHex: encodeEscrowDatum(escrowOf(cap)), scriptRef: null });
     const response = await request(app).post(cap.path).set("X-Escrow-Ref", ESCROW_HEADER).send(cap.body);
     expect(response.status).toBe(202);
     await vi.waitFor(() => expect(jobs.get(response.body.job_id)?.status).toBe("done"));

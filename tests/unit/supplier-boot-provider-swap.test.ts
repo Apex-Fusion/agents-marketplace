@@ -1,30 +1,21 @@
 /**
- * supplier-boot-provider-swap.test.ts — RED phase tests for LIVE_CHAIN env
- * driven provider selection in supplier boot.
+ * supplier-boot-provider-swap.test.ts — tests for the LIVE_CHAIN env driven
+ * provider selection in supplier boot.
  *
  * Tests the `buildChainProvider(config, fetch?)` function exported from
  * `supplier/src/chain.ts`, which is extracted from `supplier/src/index.ts`
  * so it can be tested in isolation without booting the Express server.
  *
- * Contract:
- *   - LIVE_CHAIN = "1"          → returns LiveOgmiosProvider instance
- *   - LIVE_CHAIN = "0"          → returns ReadOnlyOgmiosProvider instance
- *   - LIVE_CHAIN = ""           → returns ReadOnlyOgmiosProvider instance
- *   - LIVE_CHAIN = undefined    → returns ReadOnlyOgmiosProvider instance
- *   - LIVE_CHAIN = "true"       → returns ReadOnlyOgmiosProvider (only "1" opts in)
- *   - LIVE_CHAIN = "yes"        → returns ReadOnlyOgmiosProvider (only "1" opts in)
- *   - LIVE_CHAIN = "TRUE"       → returns ReadOnlyOgmiosProvider (only "1" opts in)
- *   - liveChain: true  in config → returns LiveOgmiosProvider
- *   - liveChain: false in config → returns ReadOnlyOgmiosProvider
+ * Contract (M1-F-2, SPEC FIX 2026-04-27): only the literal LIVE_CHAIN="1"
+ * opts in. Each test goes from the env through loadConfig to the provider.
+ *   - LIVE_CHAIN = "1"                         → LiveOgmiosProvider
+ *   - omitted, "true", "yes", "TRUE", "0", ""  → ReadOnlyOgmiosProvider
  *
- * Also covers:
- *   - loadConfig LIVE_CHAIN parsing: true/false/default (liveChain field)
- *   - buildChainProvider logs which provider was selected
- *
- * SPEC FIX 2026-04-27: M1-F-2 supplier boot provider swap RED tests
+ * The parsing of LIVE_CHAIN into config.liveChain is tested in
+ * supplier-config.test.ts.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect } from "vitest";
 import { buildChainProvider } from "../../supplier/src/chain.js";
 import { loadConfig } from "../../supplier/src/config.js";
 import { LiveOgmiosProvider } from "../../packages/shared/src/chain/LiveOgmiosProvider.js";
@@ -42,12 +33,6 @@ describe("buildChainProvider() — LIVE_CHAIN=1 → LiveOgmiosProvider", () => {
 });
 
 describe("buildChainProvider() — default → ReadOnlyOgmiosProvider", () => {
-  it("returns ReadOnlyOgmiosProvider when liveChain is false", () => {
-    const config = loadConfig({ ...buildSampleEnv(), LIVE_CHAIN: "0" });
-    const provider = buildChainProvider(config);
-    expect(provider).toBeInstanceOf(ReadOnlyOgmiosProvider);
-  });
-
   it("returns ReadOnlyOgmiosProvider when LIVE_CHAIN is omitted from config", () => {
     // loadConfig defaults liveChain to false when env var is absent
     const config = loadConfig({ ...buildSampleEnv() });
@@ -62,72 +47,12 @@ describe("buildChainProvider() — default → ReadOnlyOgmiosProvider", () => {
     expect(provider).toBeInstanceOf(ReadOnlyOgmiosProvider);
   });
 
-  it("returns ReadOnlyOgmiosProvider when liveChain is false (LIVE_CHAIN='yes' is rejected)", () => {
-    const config = loadConfig({ ...buildSampleEnv(), LIVE_CHAIN: "yes" });
-    const provider = buildChainProvider(config);
-    expect(provider).toBeInstanceOf(ReadOnlyOgmiosProvider);
-  });
-
-  it("returns ReadOnlyOgmiosProvider when liveChain is false (LIVE_CHAIN='TRUE' is rejected)", () => {
-    const config = loadConfig({ ...buildSampleEnv(), LIVE_CHAIN: "TRUE" });
-    const provider = buildChainProvider(config);
-    expect(provider).toBeInstanceOf(ReadOnlyOgmiosProvider);
-  });
-});
-
-describe("buildChainProvider() — logs provider selection", () => {
-  beforeEach(() => {
-    vi.spyOn(console, "log").mockImplementation(() => { /* silence */ });
-  });
-
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
-  it("logs 'LiveOgmiosProvider' when liveChain is true", () => {
-    const config = loadConfig({ ...buildSampleEnv(), LIVE_CHAIN: "1" });
-    buildChainProvider(config);
-    const loggedLines = (console.log as ReturnType<typeof vi.spyOn>).mock.calls.map(c => c.join(" "));
-    expect(loggedLines.some(line => line.includes("LiveOgmiosProvider"))).toBe(true);
-  });
-
-  it("logs 'ReadOnlyOgmiosProvider' when liveChain is false", () => {
-    const config = loadConfig({ ...buildSampleEnv() });
-    buildChainProvider(config);
-    const loggedLines = (console.log as ReturnType<typeof vi.spyOn>).mock.calls.map(c => c.join(" "));
-    expect(loggedLines.some(line => line.includes("ReadOnlyOgmiosProvider"))).toBe(true);
-  });
-});
-
-// ─── loadConfig — LIVE_CHAIN parsing ─────────────────────────────────────────
-// SPEC FIX 2026-04-27: M1-F-2 LIVE_CHAIN env support — these assertions verify
-// that SupplierConfig.liveChain is parsed correctly from the LIVE_CHAIN env var.
-
-describe("loadConfig() — LIVE_CHAIN parsing (M1-F-2)", () => {
-  it("LIVE_CHAIN='1' → liveChain: true", () => {
-    const cfg = loadConfig({ ...buildSampleEnv(), LIVE_CHAIN: "1" });
-    expect(cfg.liveChain).toBe(true);
-  });
-
-  it("LIVE_CHAIN='0' → liveChain: false", () => {
-    const cfg = loadConfig({ ...buildSampleEnv(), LIVE_CHAIN: "0" });
-    expect(cfg.liveChain).toBe(false);
-  });
-
-  it("LIVE_CHAIN omitted → liveChain: false (default off)", () => {
-    const env = { ...buildSampleEnv() };
-    delete (env as Record<string, string | undefined>).LIVE_CHAIN;
-    const cfg = loadConfig(env);
-    expect(cfg.liveChain).toBe(false);
-  });
-
-  it("LIVE_CHAIN='' → liveChain: false", () => {
-    const cfg = loadConfig({ ...buildSampleEnv(), LIVE_CHAIN: "" });
-    expect(cfg.liveChain).toBe(false);
-  });
-
-  it("LIVE_CHAIN='true' → liveChain: false (only literal '1' opts in)", () => {
-    const cfg = loadConfig({ ...buildSampleEnv(), LIVE_CHAIN: "true" });
-    expect(cfg.liveChain).toBe(false);
-  });
+  it.each(["0", "yes", "TRUE", ""])(
+    "LIVE_CHAIN=%j → liveChain false and ReadOnlyOgmiosProvider (only '1' opts in)",
+    (literal) => {
+      const config = loadConfig({ ...buildSampleEnv(), LIVE_CHAIN: literal });
+      expect(config.liveChain).toBe(false);
+      expect(buildChainProvider(config)).toBeInstanceOf(ReadOnlyOgmiosProvider);
+    },
+  );
 });

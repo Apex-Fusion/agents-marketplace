@@ -1,10 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import request from "supertest";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
-import { createHash } from "node:crypto";
-import type { Tool } from "@modelcontextprotocol/client";
 import { MockChainProvider } from "@marketplace/shared/chain";
 import { encodeAdvertDatum, encodeEscrowDatum, type AdvertDatum, type EscrowDatum } from "@marketplace/shared/cbor";
 import { loadBlueprint, NETWORK_BUFFER_MS } from "@marketplace/shared/tx";
@@ -15,37 +12,22 @@ import { parsePaper2AgentManifest, paper2AgentManifestHash, paper2AgentModel,
 import { SupplierState } from "../../supplier/src/state.js";
 import { JobStore } from "../../supplier/src/jobs.js";
 import { createApp } from "../../supplier/src/server.js";
-import { deriveSupplierKey, checkSupplierKey } from "../../supplier/src/paper2agent/identity.js";
+import { checkSupplierKey } from "../../supplier/src/paper2agent/identity.js";
 import { Paper2AgentRuntime } from "../../supplier/src/paper2agent/runtime.js";
 import { ToolJournal } from "../../supplier/src/paper2agent/journal.js";
-import { loadConfig, type Paper2AgentConfig } from "../../supplier/src/config.js";
-import type { ToolSession } from "../../supplier/src/paper2agent/local.js";
+import { loadConfig } from "../../supplier/src/config.js";
 import { parseCliArgs } from "../../supplier/src/cli/post-advert.js";
 import { registerPaper2Agent } from "../../supplier/src/cli/register-paper2agent.js";
-import { buildSampleConfig, buildSampleEnv } from "../fixtures/supplier-side/sample-config.js";
+import { NO_DRAIN_MARKER, buildSampleConfig, buildSampleEnv } from "../fixtures/supplier-side/sample-config.js";
+import { POLL, advertRef, body, escrowRef, escrowText, input, makeToolKit, manifest, manifestHash, schema,
+  supplierKey } from "../fixtures/supplier-side/paper2agent-fixture.js";
 
 const directories: string[] = [];
 const runtimes: Paper2AgentRuntime[] = [];
-const schema = { type: "object" as const, properties: { value: { type: "string" } }, required: ["value"], additionalProperties: false };
-const preparedBytes = "reviewed local package";
-const supplierKey = deriveSupplierKey("11".repeat(32), 0);
-const advertRef = { txHash: "bb".repeat(32), index: 0 };
-const escrowRef = { txHash: "cc".repeat(32), index: 0 };
-const escrowText = `${escrowRef.txHash}#0`;
-const manifest = parsePaper2AgentManifest({ schema_version: 1, name: "echo_record", description: "Test-only tool",
-  package_sha256: createHash("sha256").update(preparedBytes).digest("hex"), input_schema: schema, output_schema: schema,
-  limits: { max_input_bytes: 4096, max_output_bytes: 4096, max_runtime_ms: 1000 } });
-const manifestHash = paper2AgentManifestHash(manifest);
-const input = { value: "hello" };
-const body = { manifest_hash: manifestHash, input };
 
 function fixture() {
-  const directory = mkdtempSync(join(tmpdir(), "supplier-p2a-"));
+  const { directory, config, session, factory } = makeToolKit("supplier-p2a-");
   directories.push(directory);
-  const config: Paper2AgentConfig = { executable: process.execPath, argv: [], cwd: directory,
-    packagePath: join(directory, "package.bin"), manifestPath: join(directory, "manifest.json"), journalDir: join(directory, "journal") };
-  writeFileSync(config.packagePath, preparedBytes);
-  writeFileSync(config.manifestPath, JSON.stringify(manifest));
   const chain = new MockChainProvider();
   const state = new SupplierState();
   const advert: AdvertDatum = { supplier_pkh: supplierKey.pubKeyHash, capability_id: PAPER2AGENT_CAPABILITY_ID,
@@ -65,10 +47,8 @@ function fixture() {
   const seedEscrow = () => chain.seed({ ref: escrowRef, address: loadBlueprint().escrowScriptAddress(0), lovelace: 4000000n,
     assets: {}, datumHex: encodeEscrowDatum(escrow), scriptRef: null });
   seedEscrow();
-  const tools: Tool[] = [{ name: manifest.name, inputSchema: schema, outputSchema: schema }];
-  const session = { discover: vi.fn(async () => tools), execute: vi.fn(async () => input), close: vi.fn(async () => undefined) } satisfies ToolSession;
-  const factory = vi.fn(() => session);
-  const deps = { chain, state, supplierKey, networkId: 0 as const, advertRef, config, sessionFactory: factory };
+  const deps = { chain, state, supplierKey, networkId: 0 as const, advertRef, config, sessionFactory: factory,
+    drainMarkerPath: NO_DRAIN_MARKER };
   const create = async () => {
     const runtime = await Paper2AgentRuntime.create(deps);
     runtimes.push(runtime);
@@ -143,7 +123,7 @@ describe("supplier Paper2Agent admission and identity", () => {
     f.chain.advanceSlot((PAPER2AGENT_DELIVERY_OVERHEAD_MS - PAPER2AGENT_SUPPLIER_OVERHEAD_MS) / 1000);
     const runtime = await f.create();
     const job = await runtime.admit(escrowText, body);
-    await vi.waitFor(() => expect(job.status).toBe("done"));
+    await vi.waitFor(() => expect(job.status).toBe("done"), POLL);
   });
 
   it("checks the real package hash at boot and again before Claim", async () => {
@@ -185,7 +165,7 @@ describe("supplier Paper2Agent execution and financial evidence", () => {
       return submit(cbor);
     });
     const job = await runtime.admit(escrowText, body);
-    await vi.waitFor(() => expect(job.status).toBe("done"));
+    await vi.waitFor(() => expect(job.status).toBe("done"), POLL);
     expect(f.session.execute).toHaveBeenCalledWith(manifest.name, input, manifest.limits.max_runtime_ms);
     verifyPaper2AgentReceipt({ manifest, input, result: job.result!, receipt: job.receipt!, signature: job.receipt_signature!,
       publicKeyHex: job.pub_key_hex!, supplierPkh: supplierKey.pubKeyHash, escrowRef: escrowText });
@@ -238,7 +218,7 @@ describe("supplier Paper2Agent execution and financial evidence", () => {
       return submit(cbor);
     });
     const job = await runtime.admit(escrowText, body);
-    await vi.waitFor(() => expect(job.status).toBe("failed"));
+    await vi.waitFor(() => expect(job.status).toBe("failed"), POLL);
     expect(job.reason).toBe("submit_financial_status_unknown");
     const restored = new ToolJournal(f.config.journalDir).get(job.job_id)!;
     expect(restored.result).toEqual(input);
@@ -262,13 +242,13 @@ describe("supplier Paper2Agent execution and financial evidence", () => {
     f.session.execute.mockRejectedValue(new Error("tool failed"));
     const submit = vi.spyOn(f.chain, "submitTx");
     const job = await runtime.admit(escrowText, body);
-    await vi.waitFor(() => expect(f.session.close).toHaveBeenCalled());
+    await vi.waitFor(() => expect(f.session.close).toHaveBeenCalled(), POLL);
     expect(job.status).toBe("failed");
     expect(f.state.snapshot().status).toBe("working");
     expect(submit).toHaveBeenCalledTimes(1);
     finishCleanup();
     f.session.close.mockResolvedValue(undefined);
-    await vi.waitFor(() => expect(f.state.snapshot().status).toBe("free"));
+    await vi.waitFor(() => expect(f.state.snapshot().status).toBe("free"), POLL);
   });
 
   it("rejects schema-invalid output before signing or Submit", async () => {
@@ -277,7 +257,7 @@ describe("supplier Paper2Agent execution and financial evidence", () => {
     const runtime = await f.create();
     const submit = vi.spyOn(f.chain, "submitTx");
     const job = await runtime.admit(escrowText, body);
-    await vi.waitFor(() => expect(job.status).toBe("failed"));
+    await vi.waitFor(() => expect(job.status).toBe("failed"), POLL);
     expect(submit).toHaveBeenCalledTimes(1);
     expect(job.receipt_signature).toBeUndefined();
   });
@@ -292,7 +272,7 @@ describe("supplier Paper2Agent execution and financial evidence", () => {
     const runtime = await f.create();
     const submit = vi.spyOn(f.chain, "submitTx");
     const job = await runtime.admit(escrowText, body);
-    await vi.waitFor(() => expect(job.status).toBe("failed"));
+    await vi.waitFor(() => expect(job.status).toBe("failed"), POLL);
     expect(job.receipt_signature).toBeUndefined();
     // Only the Claim: the buyer can Reclaim after deliver_by.
     expect(submit).toHaveBeenCalledTimes(1);
@@ -308,7 +288,7 @@ describe("supplier Paper2Agent execution and financial evidence", () => {
     f.session.execute.mockResolvedValue(original);
     const runtime = await f.create();
     const job = await runtime.admit(escrowText, { ...body, input: original });
-    await vi.waitFor(() => expect(job.status).toBe("done"));
+    await vi.waitFor(() => expect(job.status).toBe("done"), POLL);
     expect(f.session.execute).toHaveBeenCalledWith(manifest.name, normalized, manifest.limits.max_runtime_ms);
     expect(job.result).toEqual(normalized);
     verifyPaper2AgentReceipt({ manifest, input: normalized, result: job.result!, receipt: job.receipt!,
@@ -322,7 +302,7 @@ describe("supplier Paper2Agent execution and financial evidence", () => {
     f.session.close.mockRejectedValue(new Error("process termination unknown"));
     const runtime = await f.create();
     await runtime.admit(escrowText, body);
-    await vi.waitFor(() => expect(f.state.snapshot().status).toBe("offline"));
+    await vi.waitFor(() => expect(f.state.snapshot().status).toBe("offline"), POLL);
   });
 
   it("isolates tool polling from legacy job stores and exposes the bound manifest and key", async () => {
@@ -346,7 +326,7 @@ describe("supplier Paper2Agent read-only recovery and durable records", () => {
     const f = fixture();
     const runtime = await f.create();
     const job = await runtime.admit(escrowText, body);
-    await vi.waitFor(() => expect(job.status).toBe("done"));
+    await vi.waitFor(() => expect(job.status).toBe("done"), POLL);
     const acquire = vi.spyOn(f.state, "tryAcquire");
     const submit = vi.spyOn(f.chain, "submitTx");
     const app = f.serve(runtime);
@@ -393,7 +373,7 @@ describe("supplier Paper2Agent read-only recovery and durable records", () => {
     const f = fixture();
     const runtime = await f.create();
     const job = await runtime.admit(escrowText, body);
-    await vi.waitFor(() => expect(job.status).toBe("done"));
+    await vi.waitFor(() => expect(job.status).toBe("done"), POLL);
     const app = f.serve(runtime);
     expect((await request(app).get(`/v1/paper2agent/run/${job.job_id}`)).body.result).toEqual(input);
     const path = join(f.config.journalDir, `${job.job_id}.json`);
@@ -475,7 +455,7 @@ describe("supplier Paper2Agent unpaid calls", () => {
     // A free call holds the slot.
     const finishFree = heldExecution(f.session.execute);
     const inFlight = runtime.call(body);
-    await vi.waitFor(() => expect(f.session.execute).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(f.session.execute).toHaveBeenCalledTimes(1), POLL);
     expect(f.state.snapshot().status).toBe("working");
     await expect(runtime.call(body)).rejects.toMatchObject({ status: 409, reason: "supplier_busy" });
     const submit = vi.spyOn(f.chain, "submitTx");
@@ -490,13 +470,13 @@ describe("supplier Paper2Agent unpaid calls", () => {
     // A paid job holds the slot. The escrow refused above is still admissible.
     const finishPaid = heldExecution(f.session.execute);
     const job = await runtime.admit(escrowText, body);
-    await vi.waitFor(() => expect(f.session.execute).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(f.session.execute).toHaveBeenCalledTimes(2), POLL);
     const busy = await request(app).post("/v1/paper2agent/call").send(body);
     expect([busy.status, busy.body]).toEqual([409, { reason: "supplier_busy", message: "supplier_busy" }]);
     expect(f.factory).toHaveBeenCalledTimes(2);
     finishPaid();
-    await vi.waitFor(() => expect(job.status).toBe("done"));
-    await vi.waitFor(() => expect(f.state.snapshot().status).toBe("free"));
+    await vi.waitFor(() => expect(job.status).toBe("done"), POLL);
+    await vi.waitFor(() => expect(f.state.snapshot().status).toBe("free"), POLL);
   });
 
   it("returns 502 for a failed, schema-invalid, or late tool call without a transaction", async () => {
@@ -532,7 +512,7 @@ describe("supplier Paper2Agent unpaid calls", () => {
     f.session.close.mockImplementationOnce(() => new Promise<void>((resolve) => { finishCleanup = resolve; }));
     f.session.execute.mockRejectedValueOnce(new Error("tool failed"));
     const pending = runtime.call(body);
-    await vi.waitFor(() => expect(f.session.close).toHaveBeenCalled());
+    await vi.waitFor(() => expect(f.session.close).toHaveBeenCalled(), POLL);
     expect(f.state.snapshot().status).toBe("working");
     finishCleanup();
     await expect(pending).rejects.toMatchObject({ status: 502, reason: "tool_execution_failed" });
@@ -550,12 +530,12 @@ describe("supplier Paper2Agent unpaid calls", () => {
     const runtime = await f.create();
     const finish = heldExecution(f.session.execute);
     const inFlight = runtime.call(body);
-    await vi.waitFor(() => expect(f.session.execute).toHaveBeenCalled());
+    await vi.waitFor(() => expect(f.session.execute).toHaveBeenCalled(), POLL);
     let stopped = false;
     const stopping = runtime.close().then(() => { stopped = true; });
     const refused = await request(f.serve(runtime)).post("/v1/paper2agent/call").send(body);
     expect([refused.status, refused.body]).toEqual([503, { reason: "supplier_draining", message: "supplier_draining" }]);
-    await vi.waitFor(() => expect(f.session.close).toHaveBeenCalled());
+    await vi.waitFor(() => expect(f.session.close).toHaveBeenCalled(), POLL);
     expect(stopped).toBe(false);
     finish();
     await stopping;

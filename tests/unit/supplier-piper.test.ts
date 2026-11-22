@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { callPiper, PiperError } from "../../supplier/src/piper.js";
+import { callPiper } from "../../supplier/src/piper.js";
 
 const PIPER_URL = "http://piper.fake";
 const TEXT = "Hello from the marketplace.";
@@ -130,11 +130,5 @@ describe("callPiper() — error reasons", () => {
     await expect(
       callPiper({ piperUrl: PIPER_URL, text: TEXT, voice: VOICE, format: FORMAT, speed: SPEED, timeoutMs: TIMEOUT_MS }),
     ).rejects.toMatchObject({ name: "PiperError", reason: "piper_malformed" });
-  });
-
-  it("PiperError exports `reason` for switch dispatch", () => {
-    const err = new PiperError("piper_timeout", "x");
-    expect(err.reason).toBe("piper_timeout");
-    expect(err.name).toBe("PiperError");
   });
 });

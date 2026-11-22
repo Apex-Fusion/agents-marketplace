@@ -13,7 +13,6 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   callDatalabOcr,
   probeDatalabHealth,
-  DatalabError,
 } from "../../supplier/src/datalabOcr.js";
 import { loadConfig } from "../../supplier/src/config.js";
 import { buildSampleEnv } from "../fixtures/supplier-side/sample-config.js";
@@ -149,16 +148,6 @@ describe("callDatalabOcr — error taxonomy", () => {
     });
     await expect(callDatalabOcr(validParams({ timeoutMs: 60, pollIntervalMs: 10 })))
       .rejects.toMatchObject({ reason: "datalab_timeout" });
-  });
-
-  it("exports the error class for instanceof checks", async () => {
-    vi.stubGlobal("fetch", async () => new Response("x", { status: 502 }));
-    try {
-      await callDatalabOcr(validParams());
-      expect.unreachable("should have thrown");
-    } catch (err) {
-      expect(err).toBeInstanceOf(DatalabError);
-    }
   });
 });
 

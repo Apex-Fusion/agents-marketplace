@@ -6,53 +6,32 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import request from "supertest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
-import { createHash } from "node:crypto";
-import type { Tool } from "@modelcontextprotocol/client";
+import { rmSync } from "node:fs";
 import { MockChainProvider } from "@marketplace/shared/chain";
 import { encodeEscrowDatum, type IdentityAdvertDatum, type IdentityEscrowDatum } from "@marketplace/shared/cbor";
 import { loadBlueprint, NETWORK_BUFFER_MS } from "@marketplace/shared/tx";
-import { parsePaper2AgentManifest, paper2AgentManifestHash, paper2AgentModel, paper2AgentRequestHash,
+import { paper2AgentModel, paper2AgentRequestHash,
   paper2AgentRequestSpecHash, verifyPaper2AgentReceipt, PAPER2AGENT_CAPABILITY_ID,
   PAPER2AGENT_SUPPLIER_OVERHEAD_MS } from "@marketplace/shared/paper2agent";
 import { SupplierState } from "../../supplier/src/state.js";
 import { createApp } from "../../supplier/src/server.js";
-import { deriveSupplierKey } from "../../supplier/src/paper2agent/identity.js";
 import { Paper2AgentRuntime } from "../../supplier/src/paper2agent/runtime.js";
-import type { Paper2AgentConfig } from "../../supplier/src/config.js";
-import type { ToolSession } from "../../supplier/src/paper2agent/local.js";
 import { supplierIdentity } from "../../supplier/src/identity/agent.js";
-import { buildSampleConfig } from "../fixtures/supplier-side/sample-config.js";
+import { NO_DRAIN_MARKER, buildSampleConfig } from "../fixtures/supplier-side/sample-config.js";
 import {
   AGENT_ID, IDENTITY, OTHER_AGENT_ID, identityAdvertUtxo, identityEscrowUtxo, recordSubmissions, recordUtxo,
   supplierAgentRecord, testIdentity,
 } from "../fixtures/supplier-side/identity.js";
+import { POLL, advertRef, body, escrowRef, escrowText, input, makeToolKit, manifest, manifestHash,
+  supplierKey } from "../fixtures/supplier-side/paper2agent-fixture.js";
 
 const directories: string[] = [];
 const runtimes: Paper2AgentRuntime[] = [];
-const schema = { type: "object" as const, properties: { value: { type: "string" } }, required: ["value"], additionalProperties: false };
-const preparedBytes = "reviewed local package";
-const supplierKey = deriveSupplierKey("11".repeat(32), 0);
-const advertRef = { txHash: "bb".repeat(32), index: 0 };
-const escrowRef = { txHash: "cc".repeat(32), index: 0 };
-const escrowText = `${escrowRef.txHash}#0`;
 const recordRef = { txHash: "7e".repeat(32), index: 0 };
-const manifest = parsePaper2AgentManifest({ schema_version: 1, name: "echo_record", description: "Test-only tool",
-  package_sha256: createHash("sha256").update(preparedBytes).digest("hex"), input_schema: schema, output_schema: schema,
-  limits: { max_input_bytes: 4096, max_output_bytes: 4096, max_runtime_ms: 1000 } });
-const manifestHash = paper2AgentManifestHash(manifest);
-const input = { value: "hello" };
-const body = { manifest_hash: manifestHash, input };
 
 function fixture(options: { agentId?: string; capabilities?: string[] } = {}) {
-  const directory = mkdtempSync(join(tmpdir(), "supplier-p2a-identity-"));
+  const { directory, config, session, factory } = makeToolKit("supplier-p2a-identity-");
   directories.push(directory);
-  const config: Paper2AgentConfig = { executable: process.execPath, argv: [], cwd: directory,
-    packagePath: join(directory, "package.bin"), manifestPath: join(directory, "manifest.json"), journalDir: join(directory, "journal") };
-  writeFileSync(config.packagePath, preparedBytes);
-  writeFileSync(config.manifestPath, JSON.stringify(manifest));
   const chain = new MockChainProvider();
   // Mock time is slot × 1000 ms: the record window starts 60 s before the tip.
   chain.advanceSlot(1_000);
@@ -77,11 +56,8 @@ function fixture(options: { agentId?: string; capabilities?: string[] } = {}) {
   seedEscrow();
   chain.seed(recordUtxo(supplierAgentRecord(supplierKey, options.capabilities ?? [PAPER2AGENT_CAPABILITY_ID])));
   const bodies = recordSubmissions(chain);
-  const tools: Tool[] = [{ name: manifest.name, inputSchema: schema, outputSchema: schema }];
-  const session = { discover: vi.fn(async () => tools), execute: vi.fn(async () => input), close: vi.fn(async () => undefined) } satisfies ToolSession;
-  const factory = vi.fn(() => session);
   const deps = { chain, state, supplierKey, networkId: 0 as const, advertRef, config, sessionFactory: factory,
-    identity: testIdentity(chain), agentId: options.agentId };
+    identity: testIdentity(chain), agentId: options.agentId, drainMarkerPath: NO_DRAIN_MARKER };
   const create = async () => {
     const runtime = await Paper2AgentRuntime.create(deps);
     runtimes.push(runtime);
@@ -104,7 +80,7 @@ describe("Paper2Agent runtime with a new advert", () => {
     const f = fixture();
     const runtime = await f.create();
     const job = await runtime.admit(escrowText, body);
-    await vi.waitFor(() => expect(job.status).toBe("done"));
+    await vi.waitFor(() => expect(job.status).toBe("done"), POLL);
     expect(f.bodies[0]).toMatchObject({ type: "claim", referenceInputs: [recordRef], meta: { script_hash: IDENTITY.escrowScriptHash } });
     expect(f.bodies[1]).toMatchObject({ type: "submit", referenceInputs: [recordRef] });
     expect(job.receipt?.agent_did).toBe(`did:vector:${AGENT_ID}`);
@@ -158,7 +134,7 @@ describe("Paper2Agent runtime with a new advert", () => {
     // The controller updates the record: the new datum lists the capability.
     f.chain.seed(recordUtxo(supplierAgentRecord(supplierKey, [PAPER2AGENT_CAPABILITY_ID]), { ref: recordRef }));
     const job = await runtime.admit(escrowText, body);
-    await vi.waitFor(() => expect(job.status).toBe("done"));
+    await vi.waitFor(() => expect(job.status).toBe("done"), POLL);
   });
 
   it("refuses a new advert of another agent than AGENT_ID, and a new advert without the identity hash", async () => {

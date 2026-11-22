@@ -1,170 +1,69 @@
 /**
- * supplier-config.test.ts — RED phase tests for supplier/src/config.ts
+ * supplier-config.test.ts — tests for supplier/src/config.ts
  *
  * Tests loadConfig(env) and parseAdvertRef(ref):
- *   - Happy paths: all required vars present
- *   - Defaults: PORT and OLLAMA_TIMEOUT_MS
- *   - Errors: missing required vars, malformed values
+ *   - NETWORK_ID selects the chain
+ *   - Errors: a missing required var and a malformed value throw an error
+ *     that names the setting
+ *   - Strict opt-ins: only the literal "1" sets LIVE_CHAIN and
+ *     OPENAI_SESSION_PASSTHROUGH
+ *   - Rules across settings: upstream protocol, chat-session slots and
+ *     settle mode, reseller mode
+ *   - parseAdvertRef: the "<txHash>#<index>" format
+ *
+ * The tests do not repeat default values or read back a value that they put in.
  */
 
 import { describe, it, expect } from "vitest";
 import { loadConfig, parseAdvertRef } from "../../supplier/src/config.js";
 import { buildSampleEnv } from "../fixtures/supplier-side/sample-config.js";
-import { SAMPLE_ADVERT_TX_HASH, SAMPLE_ADVERT_INDEX } from "../fixtures/supplier-side/sample-config.js";
-import { SUPPLIER_PRIVATE_KEY_HEX } from "../fixtures/supplier-side/wallet-keys.js";
 
-// ─── loadConfig — happy paths ────────────────────────────────────────────────
+// ─── loadConfig — NETWORK_ID ─────────────────────────────────────────────────
 
-describe("loadConfig() — happy path", () => {
-  it("returns a valid SupplierConfig for a complete env map", () => {
-    const cfg = loadConfig(buildSampleEnv());
-    expect(cfg.supplierPrivKeyHex).toBe(SUPPLIER_PRIVATE_KEY_HEX);
-    expect(cfg.ogmiosUrl).toBe("ws://localhost:1337");
-    expect(cfg.ollamaUrl).toBe("http://localhost:11434");
-    expect(cfg.advertRef.txHash).toBe(SAMPLE_ADVERT_TX_HASH);
-    expect(cfg.advertRef.index).toBe(SAMPLE_ADVERT_INDEX);
-    expect(cfg.networkId).toBe(0);
-    expect(cfg.port).toBe(8080);
-    expect(cfg.ollamaTimeoutMs).toBe(120_000);
-  });
-
-  it("parses NETWORK_ID 1 as mainnet", () => {
-    const cfg = loadConfig({ ...buildSampleEnv(), NETWORK_ID: "1" });
-    expect(cfg.networkId).toBe(1);
-  });
-
-  it("defaults PORT to 8080 when omitted", () => {
-    const env = { ...buildSampleEnv() };
-    delete env.PORT;
-    const cfg = loadConfig(env);
-    expect(cfg.port).toBe(8080);
-  });
-
-  it("defaults OLLAMA_TIMEOUT_MS to 120_000 when omitted", () => {
-    const env = { ...buildSampleEnv() };
-    delete env.OLLAMA_TIMEOUT_MS;
-    const cfg = loadConfig(env);
-    expect(cfg.ollamaTimeoutMs).toBe(120_000);
-  });
-
-  it("accepts custom PORT", () => {
-    const cfg = loadConfig({ ...buildSampleEnv(), PORT: "9000" });
-    expect(cfg.port).toBe(9000);
-  });
-
-  it("accepts custom OLLAMA_TIMEOUT_MS", () => {
-    const cfg = loadConfig({ ...buildSampleEnv(), OLLAMA_TIMEOUT_MS: "30000" });
-    expect(cfg.ollamaTimeoutMs).toBe(30_000);
+describe("loadConfig() — NETWORK_ID", () => {
+  it.each([
+    ["0", 0, "testnet"],
+    ["1", 1, "mainnet"],
+  ])("NETWORK_ID %s → networkId %i (%s)", (value, networkId) => {
+    const cfg = loadConfig({ ...buildSampleEnv(), NETWORK_ID: value });
+    expect(cfg.networkId).toBe(networkId);
   });
 });
 
 // ─── loadConfig — missing required vars ─────────────────────────────────────
 
 describe("loadConfig() — missing required vars", () => {
-  it("throws when SUPPLIER_PRIV_KEY_HEX is missing", () => {
-    const env = { ...buildSampleEnv() };
-    delete env.SUPPLIER_PRIV_KEY_HEX;
-    expect(() => loadConfig(env)).toThrow();
-  });
-
-  it("throws when OGMIOS_URL is missing", () => {
-    const env = { ...buildSampleEnv() };
-    delete env.OGMIOS_URL;
-    expect(() => loadConfig(env)).toThrow();
-  });
-
-  it("throws when OLLAMA_URL is missing", () => {
-    const env = { ...buildSampleEnv() };
-    delete env.OLLAMA_URL;
-    expect(() => loadConfig(env)).toThrow();
-  });
-
-  it("throws when ADVERT_REF is missing", () => {
-    const env = { ...buildSampleEnv() };
-    delete env.ADVERT_REF;
-    expect(() => loadConfig(env)).toThrow();
-  });
-
-  it("throws when NETWORK_ID is missing", () => {
-    const env = { ...buildSampleEnv() };
-    delete env.NETWORK_ID;
-    expect(() => loadConfig(env)).toThrow();
+  it.each([
+    "SUPPLIER_PRIV_KEY_HEX",
+    "OGMIOS_URL",
+    "OLLAMA_URL",
+    "ADVERT_REF",
+    "NETWORK_ID",
+  ])("throws an error that names %s when it is missing", (name) => {
+    const env: Record<string, string | undefined> = { ...buildSampleEnv() };
+    delete env[name];
+    expect(() => loadConfig(env)).toThrow(new RegExp(name));
   });
 });
 
 // ─── loadConfig — malformed values ──────────────────────────────────────────
 
 describe("loadConfig() — malformed values", () => {
-  it("throws when SUPPLIER_PRIV_KEY_HEX is not 64-char hex", () => {
-    expect(() =>
-      loadConfig({ ...buildSampleEnv(), SUPPLIER_PRIV_KEY_HEX: "short" })
-    ).toThrow();
-  });
-
-  it("throws when SUPPLIER_PRIV_KEY_HEX is 63 chars (odd length)", () => {
-    expect(() =>
-      loadConfig({ ...buildSampleEnv(), SUPPLIER_PRIV_KEY_HEX: "a".repeat(63) })
-    ).toThrow();
-  });
-
-  it("throws when SUPPLIER_PRIV_KEY_HEX is 64 chars but contains non-hex", () => {
-    expect(() =>
-      loadConfig({ ...buildSampleEnv(), SUPPLIER_PRIV_KEY_HEX: "z".repeat(64) })
-    ).toThrow();
-  });
-
-  it("throws when NETWORK_ID is not '0' or '1'", () => {
-    expect(() =>
-      loadConfig({ ...buildSampleEnv(), NETWORK_ID: "2" })
-    ).toThrow();
-  });
-
-  it("throws when ADVERT_REF is malformed (no # separator)", () => {
-    expect(() =>
-      loadConfig({ ...buildSampleEnv(), ADVERT_REF: "nohashsep" })
-    ).toThrow();
-  });
-
-  it("throws when ADVERT_REF txHash is not 64 hex chars", () => {
-    expect(() =>
-      loadConfig({ ...buildSampleEnv(), ADVERT_REF: "abc#0" })
-    ).toThrow();
-  });
-
-  it("throws when ADVERT_REF index is not a non-negative integer", () => {
-    expect(() =>
-      loadConfig({ ...buildSampleEnv(), ADVERT_REF: `${"a".repeat(64)}#-1` })
-    ).toThrow();
-  });
-
-  it("throws when PORT is not a positive integer string", () => {
-    expect(() =>
-      loadConfig({ ...buildSampleEnv(), PORT: "not-a-port" })
-    ).toThrow();
-  });
-
-  it("throws when OLLAMA_TIMEOUT_MS is not a positive integer string", () => {
-    expect(() =>
-      loadConfig({ ...buildSampleEnv(), OLLAMA_TIMEOUT_MS: "0" })
-    ).toThrow();
+  // Each row breaks one setting of a valid env. The error must name that setting.
+  it.each([
+    ["SUPPLIER_PRIV_KEY_HEX is 63 chars (odd length)", "SUPPLIER_PRIV_KEY_HEX", "a".repeat(63)],
+    ["SUPPLIER_PRIV_KEY_HEX is 64 chars but contains non-hex", "SUPPLIER_PRIV_KEY_HEX", "z".repeat(64)],
+    ["NETWORK_ID is not '0' or '1'", "NETWORK_ID", "2"],
+    ["PORT is not a positive integer string", "PORT", "not-a-port"],
+    ["OLLAMA_TIMEOUT_MS is not a positive integer string", "OLLAMA_TIMEOUT_MS", "0"],
+  ])("throws when %s", (_row, name, value) => {
+    expect(() => loadConfig({ ...buildSampleEnv(), [name]: value })).toThrow(new RegExp(name));
   });
 
   it("binds only an IP literal from SUPPLIER_BIND_HOST, so a proxied child stays on loopback", () => {
     expect(loadConfig({ ...buildSampleEnv(), SUPPLIER_BIND_HOST: "127.0.0.1" }).bindHost).toBe("127.0.0.1");
     expect(loadConfig(buildSampleEnv()).bindHost).toBeUndefined();
     expect(() => loadConfig({ ...buildSampleEnv(), SUPPLIER_BIND_HOST: "localhost" })).toThrow(/SUPPLIER_BIND_HOST/);
-  });
-
-  it("error message mentions the missing/malformed field name", () => {
-    const env = { ...buildSampleEnv() };
-    delete env.SUPPLIER_PRIV_KEY_HEX;
-    let errorMsg = "";
-    try {
-      loadConfig(env);
-    } catch (e) {
-      errorMsg = (e as Error).message;
-    }
-    expect(errorMsg.toLowerCase()).toMatch(/supplier_priv_key_hex/i);
   });
 });
 
@@ -196,12 +95,6 @@ describe("loadConfig() — upstream Responses protocol", () => {
     LLM_BACKEND: "openai",
     OPENAI_BASE_URL: "https://router.huggingface.co",
     ...over,
-  });
-
-  it("defaults to native Responses with the derived endpoint", () => {
-    const cfg = loadConfig(openAiEnv());
-    expect(cfg.openaiUpstreamApi).toBe("responses");
-    expect(cfg.openaiResponsesUrl).toBe("");
   });
 
   it("accepts an explicit full Responses endpoint", () => {
@@ -242,12 +135,6 @@ describe("loadConfig() — upstream Responses protocol", () => {
     expect(loadConfig(openAiEnv({ OPENAI_CONTEXT_TOKENS: "262144" })).openaiContextTokens).toBe(262144);
     expect(() => loadConfig(openAiEnv({ OPENAI_CONTEXT_TOKENS: "0" }))).toThrow(/OPENAI_CONTEXT_TOKENS/);
     expect(() => loadConfig(openAiEnv({ OPENAI_CONTEXT_TOKENS: "262k" }))).toThrow(/OPENAI_CONTEXT_TOKENS/);
-  });
-
-  it("selects Chat Completions only when configured explicitly", () => {
-    expect(loadConfig(openAiEnv({
-      OPENAI_UPSTREAM_API: "chat-completions",
-    })).openaiUpstreamApi).toBe("chat-completions");
   });
 
   it("rejects unknown protocol values", () => {
@@ -313,12 +200,6 @@ describe("loadConfig() — MAX_CHAT_SESSIONS / CHAT_SETTLE_MODE", () => {
     OPENAI_BASE_URL: "http://up",
   });
 
-  it("defaults to 1 slot and full settle mode", () => {
-    const cfg = loadConfig(buildSampleEnv());
-    expect(cfg.maxChatSessions).toBe(1);
-    expect(cfg.chatSettleMode).toBe("full");
-  });
-
   it("parses MAX_CHAT_SESSIONS and CHAT_SETTLE_MODE for chat-session kind", () => {
     const cfg = loadConfig({ ...chatSessionEnv(), MAX_CHAT_SESSIONS: "8", CHAT_SETTLE_MODE: "ticket" });
     expect(cfg.maxChatSessions).toBe(8);
@@ -326,16 +207,16 @@ describe("loadConfig() — MAX_CHAT_SESSIONS / CHAT_SETTLE_MODE", () => {
   });
 
   it("rejects MAX_CHAT_SESSIONS > 1 for non-chat-session kinds", () => {
-    expect(() => loadConfig({ ...buildSampleEnv(), MAX_CHAT_SESSIONS: "4" })).toThrow();
+    expect(() => loadConfig({ ...buildSampleEnv(), MAX_CHAT_SESSIONS: "4" })).toThrow(/MAX_CHAT_SESSIONS/);
   });
 
   it("rejects CHAT_SETTLE_MODE=ticket for non-chat-session kinds", () => {
-    expect(() => loadConfig({ ...buildSampleEnv(), CHAT_SETTLE_MODE: "ticket" })).toThrow();
+    expect(() => loadConfig({ ...buildSampleEnv(), CHAT_SETTLE_MODE: "ticket" })).toThrow(/CHAT_SETTLE_MODE/);
   });
 
   it("rejects invalid values", () => {
-    expect(() => loadConfig({ ...chatSessionEnv(), MAX_CHAT_SESSIONS: "0" })).toThrow();
-    expect(() => loadConfig({ ...chatSessionEnv(), CHAT_SETTLE_MODE: "nope" })).toThrow();
+    expect(() => loadConfig({ ...chatSessionEnv(), MAX_CHAT_SESSIONS: "0" })).toThrow(/MAX_CHAT_SESSIONS/);
+    expect(() => loadConfig({ ...chatSessionEnv(), CHAT_SETTLE_MODE: "nope" })).toThrow(/CHAT_SETTLE_MODE/);
   });
 });
 
@@ -367,12 +248,6 @@ describe("loadConfig() — OPENAI_SESSION_PASSTHROUGH", () => {
     expect(() => loadConfig({ ...buildSampleEnv(), OPENAI_SESSION_PASSTHROUGH: "1" })).toThrow(
       /chat-session/,
     );
-  });
-
-  it("parses OPENAI_MODEL_OVERRIDE (default empty = advert model verbatim)", () => {
-    expect(loadConfig(chatSessionEnv()).openaiModelOverride).toBe("");
-    const cfg = loadConfig({ ...chatSessionEnv(), OPENAI_MODEL_OVERRIDE: "openclaw" });
-    expect(cfg.openaiModelOverride).toBe("openclaw");
   });
 });
 
