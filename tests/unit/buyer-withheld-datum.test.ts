@@ -225,7 +225,7 @@ describe("Marketplace when the chain client withheld the datum of the escrow", (
       chain, indexerUrl: INDEXER, walletKey: buyer, networkParams: { networkId: 0 }, identityBlueprint, historyStore: history, _fetch: fetchImpl,
     });
     const events: ProgressEvent[] = [];
-    marketplace.on("progress", (event: ProgressEvent) => { events.push(event); });
+    marketplace.on("progress", (event) => { events.push(event as ProgressEvent); });
     return { marketplace, history, events, submit: vi.spyOn(chain, "submitTx") };
   }
 

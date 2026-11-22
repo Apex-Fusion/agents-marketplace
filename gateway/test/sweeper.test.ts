@@ -42,12 +42,12 @@ import { seal } from "../src/crypto/seal.js";
 import { hashApiKey } from "../src/middleware/apiKeyAuth.js";
 import { runSweepOnce } from "../src/sweeper.js";
 import { transcripts } from "../src/openai/transcripts.js";
-import type { GatewayConfig } from "../src/config.js";
 import type { GatewayDeps } from "../src/deps.js";
 import type { EscrowRow } from "../src/onchain/settle.js";
 import { keepReceipt } from "../src/onchain/receipts.js";
 import { TEST_IDENTITY_HASH, testIdentityBlueprint } from "../../tests/fixtures/identity-builders/blueprint.js";
 import { agentRecord, recordUtxo, testWallet, tombstone } from "../../tests/fixtures/identity-builders/world.js";
+import { buildSampleGatewayConfig } from "../../tests/fixtures/gateway-side/sample-config.js";
 
 const MASTER = "ab".repeat(32);
 
@@ -61,34 +61,7 @@ function makeSweepDeps(opts: {
 }) {
   const dbDir = join(tmpdir(), `gw-sweep-${randomUUID()}`);
   const store = new GatewayStore(dbDir);
-  const config: GatewayConfig = {
-    masterKeyHex: MASTER,
-    indexerUrl: "http://ix",
-    ogmiosUrl: "http://og",
-    networkId: 0,
-    liveChain: true,
-    port: 0,
-    dbDir,
-    signupRate: { max: 1000, windowMs: 60_000 },
-    keyRate: { max: 1000, windowMs: 60_000 },
-    demoIpRate: { max: 1000, windowMs: 60_000 },
-    sweeperIntervalMs: 60_000,
-    demoSessionIdleMs: 180_000,
-    chatSettleMode: opts.chatSettleMode,
-    walletHealthIntervalMs: 600_000,
-    sdkRegistryMax: 100,
-    oneShotConcurrency: 4, oneShotMaxOutstanding: 64, oneShotQueueTimeoutMs: 60_000,
-    mcpIpRate: { max: 1000, windowMs: 60_000 },
-    mcpCallIpRate: { max: 1000, windowMs: 60_000 },
-    mcpCallIpConcurrency: 1,
-    mcpCallConcurrency: 2,
-    mcpCallQueueTimeoutMs: 60_000,
-    mcpCatalogTtlMs: 30_000,
-    ocrCapabilityId: "ocr.page.extract.chandra-ocr-2.v1",
-    corsOrigins: [],
-    identityPolicyId: null,
-    switchSlot: null,
-  };
+  const config = buildSampleGatewayConfig({ masterKeyHex: MASTER, dbDir, chatSettleMode: opts.chatSettleMode });
   const chain = opts.chain ?? ({ queryUtxo: async () => null } as unknown as GatewayDeps["chain"]);
   const registry = new SdkRegistry({
     chain,

@@ -52,6 +52,7 @@ function view(utxoByte: string, overrides: Partial<SupplierView>): SupplierView 
     current_escrow_ref: null,
     last_seen_iso: null,
     created_slot: 1,
+    agent_id: null,
     ...overrides,
   };
 }

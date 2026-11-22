@@ -15,7 +15,7 @@ import express from "express";
 import request from "supertest";
 
 import { VECTOR_TESTNET, slotToPosixMs } from "@marketplace/shared";
-import { loadConfig } from "../../indexer/src/config.js";
+import { loadConfig, type JuryDeployment } from "../../indexer/src/config.js";
 import type { JuryOutputRow, UtxoRow } from "../../indexer/src/db/cache.js";
 import { SqliteCache } from "../../indexer/src/db/cache.js";
 import { vectorTxUri } from "../../indexer/src/documents/document.js";
@@ -316,7 +316,7 @@ describe("result rule (§8)", () => {
 });
 
 describe("jury view — cases, ballots, jurors, canonical case", () => {
-  const DEPLOYMENTS = [
+  const DEPLOYMENTS: JuryDeployment[] = [
     { label: "jury-1", address: JURY_ADDRESS, scriptHash: JURY_SCRIPT_HASH, params: JURY_PARAMS, casesFrom: 0, casesUntil: null },
     { label: "jury-2", address: "", scriptHash: OTHER_JURY_SCRIPT_HASH, params: JURY_PARAMS, casesFrom: 0, casesUntil: null },
   ];

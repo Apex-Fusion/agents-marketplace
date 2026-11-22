@@ -23,7 +23,7 @@ export const SAMPLE_ADVERT_INDEX = 0;
 /** A deterministic valid 64-char hex tx hash for use in escrow refs. */
 export const SAMPLE_ESCROW_TX_HASH = "f".repeat(64);
 
-/** Full supplier config used in route handler tests. */
+/** Full supplier config used in route handler tests. It sets every field of SupplierConfig, so a new field breaks this one file and not each test. */
 export function buildSampleConfig(): SupplierConfig {
   return {
     supplierPrivKeyHex: SUPPLIER_PRIVATE_KEY_HEX,
@@ -52,9 +52,20 @@ export function buildSampleConfig(): SupplierConfig {
     piperUrl: "",
     piperTimeoutMs: 120_000,
     capabilityKind: "chat",
+    chatIdleTimeoutMs: 300_000,
     maxChatSessions: 1,
     chatSettleMode: "full",
+    ocrUpstream: "openai-vision",
+    datalabApiKey: "",
+    datalabBaseUrl: "https://www.datalab.to",
+    datalabMode: "accurate",
+    datalabTimeoutMs: 120_000,
+    ocrPromptOverride: "",
+    hfModelRevision: "",
+    revisionProbeUrl: "",
+    revisionProbeMode: "off",
     liveChain: false,
+    walletHealthIntervalMs: 0, // 0 turns the periodic wallet check off
     drainMarkerPath: NO_DRAIN_MARKER,
     reseller: null,
   };
@@ -81,15 +92,6 @@ export function buildSampleOcrConfig(): SupplierConfig {
     openaiMaxTokens: 0,
     openaiReasoningDisabled: false,
     capabilityKind: "ocr",
-    ocrUpstream: "openai-vision",
-    datalabApiKey: "",
-    datalabBaseUrl: "https://www.datalab.to",
-    datalabMode: "accurate",
-    datalabTimeoutMs: 120_000,
-    ocrPromptOverride: "",
-    hfModelRevision: "",
-    revisionProbeUrl: "",
-    revisionProbeMode: "off",
   };
 }
 

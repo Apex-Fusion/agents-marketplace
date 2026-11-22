@@ -65,6 +65,12 @@ function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
 
+/** The `error.code` of the JSON body of a refused request. */
+async function errorCode(response: Response): Promise<string> {
+  const body = (await response.json()) as { error: { code: string } };
+  return body.error.code;
+}
+
 /** Free MCP must never open a key wallet. */
 const noWallets = {
   getContext(): never {
@@ -108,7 +114,7 @@ async function fixture(options: { manifest?: Paper2AgentManifest; env?: Record<s
     call: (body) => json({ manifest_hash: body.manifest_hash, result: RESULT, wallclock_ms: 7 }),
   };
   const posts: Array<{ url: string; init: RequestInit }> = [];
-  const fetchFn = vi.fn(async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+  const fetchFn = vi.fn(async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const target = String(url);
     if (init?.method === "POST") {
       if (!target.endsWith("/v1/paper2agent/call")) throw new Error(`unexpected POST ${target}`);
@@ -186,7 +192,7 @@ describe("Paper2Agent public MCP HTTP", () => {
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
     });
     expect(response.status).toBe(403);
-    expect((await response.json()).error.code).toBe("mcp_origin_denied");
+    expect(await errorCode(response)).toBe("mcp_origin_denied");
     expect(f.fetchFn).not.toHaveBeenCalled();
   });
 
@@ -201,7 +207,7 @@ describe("Paper2Agent public MCP HTTP", () => {
     const limited = await post("198.51.100.7");
     expect(limited.status).toBe(429);
     expect(limited.headers.get("retry-after")).toBeTruthy();
-    expect((await limited.json()).error.code).toBe("rate_limit_exceeded");
+    expect(await errorCode(limited)).toBe("rate_limit_exceeded");
     expect((await post("198.51.100.8")).status).not.toBe(429);
   });
 
@@ -545,7 +551,7 @@ describe("legacy paid Paper2Agent records", () => {
     first["db"].close();
 
     const restarted = new GatewayStore(dbDir);
-    cleanups.push(async () => restarted["db"].close());
+    cleanups.push(async () => { restarted["db"].close(); });
     const chain = new MockChainProvider();
     const submit = vi.spyOn(chain, "submitTx");
     await recoverOneShotJobs({

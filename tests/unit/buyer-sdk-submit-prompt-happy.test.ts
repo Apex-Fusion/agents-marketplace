@@ -141,7 +141,7 @@ describe("Marketplace.submitPrompt Responses lifecycle", () => {
       networkParams: { networkId: 0 },
       _fetch: fetchImpl as typeof fetch,
     });
-    marketplace.on("progress", (event: ProgressEvent) => events.push(event.type));
+    marketplace.on("progress", (event) => events.push((event as ProgressEvent).type));
 
     const result = await marketplace.submitPrompt({
       advertRef: ADVERT_REF,
@@ -159,7 +159,7 @@ describe("Marketplace.submitPrompt Responses lifecycle", () => {
   });
 
   it("leaves max_output_tokens absent when the buyer omits it", async () => {
-    let postedRequest: Record<string, unknown> | undefined;
+    let postedRequest: ResponseRequest | undefined;
     const fetchImpl = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
       if (String(url).endsWith("/capability")) return json(capability());
       const request = JSON.parse(String(init?.body)) as ResponseRequest & { model: string };

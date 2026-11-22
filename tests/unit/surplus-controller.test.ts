@@ -7,43 +7,18 @@ import {
 import {
   SurplusHttpError,
   type SurplusDiscoveredModel,
+  type SurplusEarnings,
   type SurplusOffer,
   type SurplusOfferPatch,
   type SurplusOfferWrite,
+  type SurplusOrderBookOffer,
 } from "../../supplier/src/surplus/client.js";
 import type { OpenRouterKeyAllowance } from "../../supplier/src/surplus/openRouterKey.js";
 import type {
   SurplusControllerState,
   SurplusStateStore,
 } from "../../supplier/src/surplus/state.js";
-
-const SELLER_WALLET = "0x1111111111111111111111111111111111111111";
-
-function config(): SurplusManagerConfig {
-  return {
-    live: true,
-    apiBaseUrl: "https://api.surplusintelligence.ai",
-    sellerApiKey: "si_seller_test",
-    providerApiKey: "sk-or-v1-test",
-    providerBaseUrl: "https://openrouter.ai/api/v1",
-    capacityBaseUrl: "https://openrouter.ai/api",
-    perOfferCapUsd: "0.05",
-    aggregateCapUsd: "0.05",
-    sellerWallet: SELLER_WALLET,
-    payoutAddress: SELLER_WALLET,
-    maxCandidateOrderBooks: 10,
-    reserveUsd: "1.00",
-    maxProviderLimitUsd: "20.00",
-    recoveryBps: 490,
-    undercutBps: 10,
-    pollIntervalMs: 300_000,
-    requestTimeoutMs: 120_000,
-    stopAfterTrades: 1,
-    settledStatuses: ["confirmed"],
-    statePath: "/tmp/surplus-test-state.json",
-    port: 8080,
-  };
-}
+import { SAMPLE_SELLER_WALLET as SELLER_WALLET, buildSampleSurplusConfig } from "../fixtures/supplier-side/sample-surplus-config.js";
 
 class MemoryStateStore implements SurplusStateStore {
   state: SurplusControllerState = { version: 1, phase: "selecting" };
@@ -104,7 +79,7 @@ class FakeSurplusClient implements SurplusControllerClient {
 
   async getOrderBook(model: string) {
     this.externalCalls += 1;
-    const offers = [{
+    const offers: SurplusOrderBookOffer[] = [{
       id: "external",
       seller: "0x2222222222222222222222222222222222222222",
       sellerBaseUrl: "https://openrouter.ai/api/v1",
@@ -187,7 +162,7 @@ class FakeSurplusClient implements SurplusControllerClient {
     if (this.offer) this.offer.status = "active";
   }
 
-  async getEarnings() {
+  async getEarnings(): Promise<SurplusEarnings> {
     this.externalCalls += 1;
     return {
       totalEarnedMicroUsd: this.settled ? 100 : 0,
@@ -206,6 +181,7 @@ class FakeSurplusClient implements SurplusControllerClient {
         offerId: "managed-offer",
         settlementStatus: "confirmed",
         createdAt: "2026-08-27T10:00:01.000Z",
+        createdAtMs: Date.parse("2026-08-27T10:00:01.000Z"),
         sellerCostMicroUsd: 100,
         inputTokens: 1,
         outputTokens: 1,
@@ -231,7 +207,7 @@ function controller(
   allowance: { readAllowance(): Promise<OpenRouterKeyAllowance> } = {
     readAllowance: async () => ALLOWANCE,
   },
-  managerConfig: SurplusManagerConfig = config(),
+  managerConfig: SurplusManagerConfig = buildSampleSurplusConfig(),
 ): SurplusSellerController {
   let mutation = 0;
   return new SurplusSellerController({
@@ -317,7 +293,7 @@ describe("SurplusSellerController", () => {
           remainingUsdNanos: remaining,
         }),
       },
-      { ...config(), stopAfterTrades: 0 },
+      buildSampleSurplusConfig({ stopAfterTrades: 0 }),
     );
     await activeController.runOnce();
     client.trades24h = 1;

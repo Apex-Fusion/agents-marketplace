@@ -5,7 +5,7 @@ import { randomBytes, randomUUID } from "crypto";
 import request from "supertest";
 import Database from "better-sqlite3";
 import { rmSync } from "fs";
-import { createResponse, responseEvents, type ResponseObject } from "@marketplace/shared/responses";
+import { createResponse, responseEvents, type ResponseItem, type ResponseObject } from "@marketplace/shared/responses";
 import { createApp } from "../src/server.js";
 import { GatewayStore } from "../src/db/store.js";
 import { SdkRegistry } from "../src/sdk/registry.js";
@@ -16,8 +16,8 @@ import { completeStoredResponse, insertPendingResponse } from "../src/openai/res
 import { sweepIdleDemoSessions } from "../src/openai/demoChat.js";
 import { streamSupplierTurn } from "../src/openai/sessions.js";
 import { transcripts, dropSessionState } from "../src/openai/transcripts.js";
-import type { GatewayConfig } from "../src/config.js";
 import type { GatewayDeps } from "../src/deps.js";
+import { buildSampleGatewayConfig } from "../../tests/fixtures/gateway-side/sample-config.js";
 
 vi.mock("../src/onchain/settle.js", async (importOriginal) => {
   const actual = await importOriginal();
@@ -53,16 +53,9 @@ function makeDeps(
 ): GatewayDeps {
   const dbDir = join(tmpdir(), `gw-test-${randomUUID()}`);
   const store = new GatewayStore(dbDir);
-  const config: GatewayConfig = {
-    masterKeyHex: MASTER, indexerUrl: "http://ix", ogmiosUrl: "http://og", networkId: 0,
-    liveChain: true, port: 0, dbDir, signupRate: { max: 1000, windowMs: 60_000 },
-    keyRate: { max: 1000, windowMs: 60_000 }, demoIpRate: { max: demoIpMax, windowMs: 60_000 },
-    sweeperIntervalMs: 60_000, demoSessionIdleMs: 180_000, chatSettleMode,
-    walletHealthIntervalMs: 600_000, sdkRegistryMax: 100,
-    oneShotConcurrency: 4, oneShotMaxOutstanding: 64, oneShotQueueTimeoutMs: 60_000,
-    ocrCapabilityId: "ocr.page.extract.chandra-ocr-2.v1", corsOrigins: [],
-    identityPolicyId: null, switchSlot: null,
-  };
+  const config = buildSampleGatewayConfig({
+    masterKeyHex: MASTER, dbDir, demoIpRate: { max: demoIpMax, windowMs: 60_000 }, chatSettleMode,
+  });
   const chain = chainOverride ??
     ({ queryUtxosByAddress: async () => [] } as unknown as GatewayDeps["chain"]);
   const registry = new SdkRegistry({
@@ -281,8 +274,8 @@ describe("gateway HTTP", () => {
     const keyA = signupA.body.api_key as string;
     const keyB = signupB.body.api_key as string;
     const owner = deps.store.getKeyByHash(hashApiKey(keyA))!;
-    const input = [{ type: "message", role: "user", content: [{ type: "input_text", text: "secret" }] }] as const;
-    const output = [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "answer" }] }] as const;
+    const input: ResponseItem[] = [{ type: "message", role: "user", content: [{ type: "input_text", text: "secret" }] }];
+    const output: ResponseItem[] = [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "answer" }] }];
     for (const [id, parent] of [["resp_parent", undefined], ["resp_child", "resp_parent"]] as const) {
       insertPendingResponse(deps, { id, keyId: owner.id, model: "qwen", previousResponseId: parent, request: { input: [...input] } });
       completeStoredResponse(deps, {

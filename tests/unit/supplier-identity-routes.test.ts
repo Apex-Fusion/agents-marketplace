@@ -10,6 +10,7 @@ import { MockChainProvider } from "../../packages/shared/src/chain/MockChainProv
 import { encodeEscrowDatum } from "../../packages/shared/src/cbor/EscrowDatum.js";
 import { decodeIdentityEscrowDatum, type IdentityEscrowDatum } from "../../packages/shared/src/cbor/IdentityEscrowDatum.js";
 import type { IdentityAdvertDatum } from "../../packages/shared/src/cbor/IdentityAdvertDatum.js";
+import type { Receipt, SignedReceipt } from "../../packages/shared/src/receipt/index.js";
 import { verifyEscrowReceipt } from "../../packages/shared/src/receipt/verify.js";
 import {
   AGENT_ID, IDENTITY, OTHER_AGENT_ID, identityAdvertUtxo, identityEscrowUtxo, identitySupplierKey, recordSubmissions,
@@ -66,10 +67,10 @@ describe("new escrow of the supplier's own agent", () => {
     expect(decodeIdentityEscrowDatum(claim!.outputs[0]!.datumHex!)).toMatchObject({ state: "Claimed", agent_id: AGENT_ID });
     expect(submit).toMatchObject({ type: "submit", referenceInputs: [RECORD_REF] });
 
-    const payload = jobs.get(jobId)!.responsePayload as unknown as { receipt: Record<string, unknown>; receipt_signature: string };
+    const payload = jobs.get(jobId)!.responsePayload as unknown as { receipt: Receipt; receipt_signature: string };
     expect(payload.receipt.agent_did).toBe(`did:vector:${AGENT_ID}`);
     expect(Object.keys(payload.receipt)).toHaveLength(9);
-    const signed = { receipt: payload.receipt, signature: payload.receipt_signature } as Parameters<typeof verifyEscrowReceipt>[0];
+    const signed: SignedReceipt = { receipt: payload.receipt, signature: payload.receipt_signature };
     expect(verifyEscrowReceipt(signed, supplier.pubKeyHex,
       { escrow_ref: ESCROW_HEADER, supplier_pkh: supplier.pubKeyHash, agent_id: AGENT_ID })).toBe(true);
     expect(decodeIdentityEscrowDatum(submit!.outputs[0]!.datumHex!)).toMatchObject({ state: "Submitted", agent_id: AGENT_ID });

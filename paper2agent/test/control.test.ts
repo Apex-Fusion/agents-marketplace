@@ -782,8 +782,8 @@ describe("Paper2Agent control service", () => {
     const job = await approvedJob(harness, builder, 0);
     const sha256 = job.artifact?.sha256;
     const live = { artifact_sha256: sha256, confirm: true, max_debit_lovelace: "5000000" };
-    const prepare = (body: unknown) => request(app).post(`/jobs/${job.id}/prepare-publication`).set("authorization", AUTH).send(body);
-    const publish = (body: unknown) => request(app).post(`/jobs/${job.id}/publish`).set("authorization", AUTH).send(body);
+    const prepare = (body: object) => request(app).post(`/jobs/${job.id}/prepare-publication`).set("authorization", AUTH).send(body);
+    const publish = (body: object) => request(app).post(`/jobs/${job.id}/publish`).set("authorization", AUTH).send(body);
 
     expect((await request(app).get("/targets").set("authorization", AUTH).expect(200)).body.targets).toEqual([TARGET]);
     await publish(live).expect(409);

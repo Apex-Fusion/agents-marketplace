@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import express, { type Express } from "express";
-import { createServer, type Server } from "node:http";
+import { createServer, type RequestListener, type Server } from "node:http";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -79,7 +79,7 @@ describe.sequential("structured output through gateway, SDK, supplier, and Chat 
   let supplierPkh: string;
   let cachedStatus = "free";
 
-  async function listen(serverApp: Express): Promise<string> {
+  async function listen(serverApp: RequestListener): Promise<string> {
     const server = createServer(serverApp);
     servers.push(server);
     await new Promise<void>((resolve, reject) => {

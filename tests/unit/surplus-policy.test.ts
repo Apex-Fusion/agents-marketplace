@@ -137,6 +137,9 @@ describe("Surplus multi-model selection", () => {
       healthy: true,
       trusted: true,
       trades24h: 0,
+      rank: 1,
+      capRemainingMicroUsd: null,
+      volume24hMicroUsd: 0,
     };
     const seller = "0x1111111111111111111111111111111111111111";
     const offers = [

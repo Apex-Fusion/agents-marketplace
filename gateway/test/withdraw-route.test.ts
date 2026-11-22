@@ -42,10 +42,10 @@ import { SdkRegistry } from "../src/sdk/registry.js";
 import { seal } from "../src/crypto/seal.js";
 import { hashApiKey } from "../src/middleware/apiKeyAuth.js";
 import { deriveWalletKey, genPrivKeyHex } from "../src/wallet.js";
-import type { GatewayConfig } from "../src/config.js";
 import type { GatewayDeps } from "../src/deps.js";
 import { nightly } from "../../tests/depth.js";
 import { AP3X, FakeOgmios, outputOf, testWallet } from "../../tests/fixtures/identity-builders/world.js";
+import { buildSampleGatewayConfig } from "../../tests/fixtures/gateway-side/sample-config.js";
 
 // The real builder runs in every test. The spy only records what the route gives it.
 vi.mock("@marketplace/shared/tx/server", async (importOriginal) => {
@@ -122,17 +122,9 @@ function makeWorld(networkId: 0 | 1 = NETWORK_ID): World {
   const chain = new LiveOgmiosProvider({ ogmiosUrl: "http://ogmios.invalid", fetch: ogmios });
   const dbDir = join(tmpdir(), `gw-withdraw-${randomUUID()}`);
   const store = new GatewayStore(dbDir);
-  const config: GatewayConfig = {
-    masterKeyHex: MASTER, indexerUrl: "http://indexer.invalid", ogmiosUrl: "http://ogmios.invalid", networkId,
-    liveChain: true, port: 0, dbDir, signupRate: { max: 1000, windowMs: 60_000 },
-    keyRate: { max: 1000, windowMs: 60_000 }, demoIpRate: { max: 1000, windowMs: 60_000 },
-    sweeperIntervalMs: 60_000, demoSessionIdleMs: 180_000, chatSettleMode: "full",
-    walletHealthIntervalMs: 600_000, sdkRegistryMax: 100,
-    oneShotConcurrency: 4, oneShotMaxOutstanding: 64, oneShotQueueTimeoutMs: 60_000,
-    mcpIpRate: { max: 1000, windowMs: 60_000 }, mcpCallIpRate: { max: 1000, windowMs: 60_000 },
-    mcpCallIpConcurrency: 1, mcpCallConcurrency: 2, mcpCallQueueTimeoutMs: 60_000, mcpCatalogTtlMs: 30_000,
-    ocrCapabilityId: "ocr.page.extract.chandra-ocr-2.v1", corsOrigins: [], identityPolicyId: null, switchSlot: null,
-  };
+  const config = buildSampleGatewayConfig({
+    masterKeyHex: MASTER, indexerUrl: "http://indexer.invalid", ogmiosUrl: "http://ogmios.invalid", networkId, dbDir,
+  });
   const registry = new SdkRegistry({
     chain, store, indexerUrl: config.indexerUrl, networkId: config.networkId, masterKeyHex: config.masterKeyHex, max: config.sdkRegistryMax,
   });
