@@ -6,6 +6,7 @@ import { bech32 } from "bech32";
 import {
   Paper2AgentClient, type Paper2AgentResult,
 } from "../../buyer/src/sdk/paper2agent.js";
+import { supplierBudgetMs } from "../../buyer/src/sdk/budget.js";
 import {
   PAPER2AGENT_CAPABILITY_ID, MAX_TOOL_MANIFEST_BYTES, MAX_TOOL_OUTPUT_BYTES,
   paper2AgentManifestHash, paper2AgentModel, paper2AgentRequestHash, paper2AgentResultHash,
@@ -339,7 +340,10 @@ describe("Paper2Agent Node buyer", () => {
       if (!Array.isArray(body.rows)) throw new Error("missing fixture rows");
       return ++queries === 1 ? json({ ...body, rows: body.rows.slice(0, 1) }) : json(body);
     };
-    const result = await f.client.execute(posted);
+    vi.useFakeTimers();
+    const execution = f.client.execute(posted);
+    await vi.advanceTimersByTimeAsync(1_001); // the one pause between the two reads (POLL_MS = 1_000)
+    const result = await execution;
     expect(result.result).toEqual({ value: "hello" });
     expect(queries).toBe(2);
     expect(f.fetchFn.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
@@ -359,7 +363,7 @@ describe("Paper2Agent Node buyer", () => {
     vi.useFakeTimers();
     f.hooks.result = (body) => json({ status: "running", escrow_ref: body.escrow_ref }, 202);
     const rejection = expect(f.client.execute(posted)).rejects.toThrow(/deadline/);
-    await vi.advanceTimersByTimeAsync(480_001);
+    await vi.advanceTimersByTimeAsync(supplierBudgetMs(posted.deliverBy) + 1);
     await rejection;
     expect(f.fetchFn.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
   });
