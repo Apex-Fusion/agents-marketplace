@@ -29,7 +29,7 @@ import {
 } from "../../../packages/shared/src/identity/tx/index.js";
 import type { Key, Party } from "../../../packages/shared/src/cbor/IdentityDatum.js";
 import { allowlistRoot } from "../../../packages/shared/src/identity/allowlist.js";
-import { blueprintScript } from "./blueprint.js";
+import { appliedScript } from "./blueprint.js";
 import * as cbor from "./cbor.js";
 import { encodeData, type Data } from "./data.js";
 import {
@@ -393,28 +393,28 @@ export function testContext(wallet: TestWallet, utxos: Utxo[], extra: Partial<Tx
 let world: IdentityWorld | undefined;
 
 /**
- * The test deployment. It applies the parameters with `aiken blueprint apply`,
- * builds the configuration seal with `buildConfigSeal` and requires that
+ * The test deployment. It applies the parameters in process (`appliedScript`; its bytes equal those of `aiken blueprint apply`,
+ * tests/identity-deploy/plan.test.ts), builds the configuration seal with `buildConfigSeal` and requires that
  * `aiken tx simulate` accepts it.
  */
 export function identityWorld(): IdentityWorld {
   if (world !== undefined) return world;
   const path = IDENTITY_BLUEPRINT_PATH;
   const deployer = testWallet("identity world deployer");
-  const holder = blueprintScript(path, "config.config_holder.spend");
+  const holder = appliedScript(path, "config.config_holder.spend");
   const holderHash = scriptHash(holder);
   const seedUtxo = walletFunds("identity world: config seal seed", deployer, 50n * AP3X);
-  const seal = blueprintScript(path, "config.config_seal.mint", [outRefData({ txId: fromHex(seedUtxo.ref.txHash), index: seedUtxo.ref.index }), holderHash]);
+  const seal = appliedScript(path, "config.config_seal.mint", [outRefData({ txId: fromHex(seedUtxo.ref.txHash), index: seedUtxo.ref.index }), holderHash]);
   const sealHash = scriptHash(seal);
   const legacyRoot = allowlistRoot(TEST_ALLOWLIST);
-  const identity = blueprintScript(path, "identity.identity.mint", [LEGACY_HASH, fromHex(legacyRoot), sealHash, holderHash]);
+  const identity = appliedScript(path, "identity.identity.mint", [LEGACY_HASH, fromHex(legacyRoot), sealHash, holderHash]);
   const identityHash = scriptHash(identity);
-  const attestation = blueprintScript(path, "attestation.attestation.mint", [identityHash]);
-  const delegation = blueprintScript(path, "delegation.delegation.mint", [identityHash]);
-  const escrow = blueprintScript(path, "escrow.escrow.spend", [identityHash]);
+  const attestation = appliedScript(path, "attestation.attestation.mint", [identityHash]);
+  const delegation = appliedScript(path, "delegation.delegation.mint", [identityHash]);
+  const escrow = appliedScript(path, "escrow.escrow.spend", [identityHash]);
   const delegationHash = scriptHash(delegation);
   const escrowHash = scriptHash(escrow);
-  const vault = blueprintScript(path, "vault.vault.spend", [identityHash, delegationHash, escrowHash]);
+  const vault = appliedScript(path, "vault.vault.spend", [identityHash, delegationHash, escrowHash]);
 
   const refs = {
     identity: referenceScriptUtxo("identity world: identity reference script", identity),

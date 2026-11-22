@@ -6,18 +6,27 @@
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, describe, expect, test } from "vitest";
+import { afterAll, describe, expect, test, vi } from "vitest";
 import { enterpriseAddress } from "@marketplace/shared";
 import { loadIdentityBlueprint } from "@marketplace/shared/tx";
-import { blake2b256, blueprintScript, fromHex, LEGACY_HASH, outRefData, scriptHash, toHex, utf8 } from "../legacy-registry/harness/index.js";
+import { appliedScript, blake2b256, blueprintScript, fromHex, LEGACY_HASH, outRefData, scriptHash, toHex, utf8, type PlutusV3Script } from "../legacy-registry/harness/index.js";
 import { IDENTITY_BLUEPRINT_PATH } from "../legacy-registry/harness/identity.js";
 import { allowlistFromMints, writeAllowlistFiles } from "../../contracts/identity-marketplace/deploy/allowlist.js";
 import { main } from "../../contracts/identity-marketplace/deploy/cli.js";
 import { generatePaymentKey, keyAddress } from "../../contracts/identity-marketplace/deploy/keys.js";
 import { MAINNET_LEGACY_POLICY } from "../../contracts/identity-marketplace/deploy/network.js";
+import type * as ScriptsModule from "../../contracts/identity-marketplace/deploy/scripts.js";
 import { deriveScripts, readBlueprint, SCRIPT_TITLES } from "../../contracts/identity-marketplace/deploy/scripts.js";
-import { SCRIPT_NAMES, StateFile } from "../../contracts/identity-marketplace/deploy/state.js";
+import { SCRIPT_NAMES, StateFile, type ScriptName } from "../../contracts/identity-marketplace/deploy/state.js";
 import { FakeLedger, testIo } from "./ledger.js";
+
+// The commands derive the 8 applied scripts again for each step. The mock remembers the results (memo-scripts.ts). The mock factory
+// is hoisted above the imports, so it loads the helper with a dynamic import.
+vi.mock("../../contracts/identity-marketplace/deploy/scripts.js", async (importOriginal) => {
+  const original = await importOriginal<typeof ScriptsModule>();
+  const { memoizedDeriveScripts } = await import("./memo-scripts.js");
+  return { ...original, deriveScripts: memoizedDeriveScripts(original.deriveScripts) };
+});
 
 const SEED = { txHash: "5e".repeat(32), index: 3 };
 const ALLOWLIST = allowlistFromMints(MAINNET_LEGACY_POLICY, 100, Array.from({ length: 13 }, (_, i) => ({
@@ -34,23 +43,30 @@ afterAll(() => {
 describe("parameters", () => {
   const scripts = deriveScripts(readBlueprint(), { legacyHash: MAINNET_LEGACY_POLICY, legacyRoot: ALLOWLIST.root, configSeed: SEED, networkId: 1 });
 
-  test("uplc gives the bytes and hashes of aiken blueprint apply for every script, in the contract order", () => {
+  /** The 8 scripts of the identity side with the parameters of this plan, applied by `apply` in the contract order. */
+  function appliedWith(apply: typeof blueprintScript): Record<ScriptName, PlutusV3Script> {
     const path = IDENTITY_BLUEPRINT_PATH;
-    const holder = blueprintScript(path, SCRIPT_TITLES.config_holder);
-    const seal = blueprintScript(path, SCRIPT_TITLES.config_seal, [outRefData({ txId: fromHex(SEED.txHash), index: SEED.index }), scriptHash(holder)]);
-    const identity = blueprintScript(path, SCRIPT_TITLES.identity, [LEGACY_HASH, fromHex(ALLOWLIST.root), scriptHash(seal), scriptHash(holder)]);
-    const attestation = blueprintScript(path, SCRIPT_TITLES.attestation, [scriptHash(identity)]);
-    const delegation = blueprintScript(path, SCRIPT_TITLES.delegation, [scriptHash(identity)]);
-    const escrow = blueprintScript(path, SCRIPT_TITLES.escrow, [scriptHash(identity)]);
-    const vault = blueprintScript(path, SCRIPT_TITLES.vault, [scriptHash(identity), scriptHash(delegation), scriptHash(escrow)]);
-    const advert = blueprintScript(path, SCRIPT_TITLES.advert);
-    const aiken = { config_holder: holder, config_seal: seal, identity, attestation, delegation, escrow, vault, advert };
+    const holder = apply(path, SCRIPT_TITLES.config_holder);
+    const seal = apply(path, SCRIPT_TITLES.config_seal, [outRefData({ txId: fromHex(SEED.txHash), index: SEED.index }), scriptHash(holder)]);
+    const identity = apply(path, SCRIPT_TITLES.identity, [LEGACY_HASH, fromHex(ALLOWLIST.root), scriptHash(seal), scriptHash(holder)]);
+    const attestation = apply(path, SCRIPT_TITLES.attestation, [scriptHash(identity)]);
+    const delegation = apply(path, SCRIPT_TITLES.delegation, [scriptHash(identity)]);
+    const escrow = apply(path, SCRIPT_TITLES.escrow, [scriptHash(identity)]);
+    const vault = apply(path, SCRIPT_TITLES.vault, [scriptHash(identity), scriptHash(delegation), scriptHash(escrow)]);
+    const advert = apply(path, SCRIPT_TITLES.advert);
+    return { config_holder: holder, config_seal: seal, identity, attestation, delegation, escrow, vault, advert };
+  }
+
+  test("uplc gives the bytes and hashes of aiken blueprint apply for every script, in the contract order (deployment tool and test harness)", () => {
+    const aiken = appliedWith(blueprintScript);
+    const harness = appliedWith(appliedScript);
     for (const name of SCRIPT_NAMES) {
       const hash = toHex(scriptHash(aiken[name]));
       expect(scripts[name].compiled_code, name).toBe(toHex(aiken[name].compiledCode));
       expect(scripts[name].hash, name).toBe(hash);
       expect(scripts[name].address, name).toBe(enterpriseAddress({ type: "Script", hash }, 1));
       expect(scripts[name].size, name).toBe(aiken[name].compiledCode.length);
+      expect(toHex(harness[name].compiledCode), name).toBe(toHex(aiken[name].compiledCode));
     }
   });
 
