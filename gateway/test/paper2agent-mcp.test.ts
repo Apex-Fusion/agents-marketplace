@@ -283,20 +283,26 @@ describe("Paper2Agent public MCP HTTP", () => {
     expect(f.posts).toEqual([]);
   });
 
-  it.each([
+  // One fixture for all rows of a table: each row sets the answer of the supplier and uses the same MCP client.
+  const SUPPLIER_RESULTS: Array<[string, unknown, string]> = [
     ["output outside the schema", { manifest_hash: HASH, result: { count: -1 }, wallclock_ms: 1 }, "paper2agent_invalid_output"],
     ["a different manifest", { manifest_hash: "f".repeat(64), result: RESULT, wallclock_ms: 1 }, "paper2agent_supplier_error"],
     ["no wallclock", { manifest_hash: HASH, result: RESULT }, "paper2agent_supplier_error"],
-  ])("rejects a supplier result with %s", async (_label, body, code) => {
-    const f = await fixture();
-    f.hooks.call = () => json(body);
-    const response = await (await f.connect()).request({ method: "tools/call", params: { name: TOOL, arguments: INPUT } }) as CallToolResult;
-    expect(response.isError).toBe(true);
-    expect(response.structuredContent).toBeUndefined();
-    expect(vector(response).code).toBe(code);
+  ];
+
+  it("rejects a supplier result with output outside the schema, a different manifest or no wallclock", async () => {
+    const f = await fixture({ env: { MCP_CALL_IP_RATE_MAX: "100" } });
+    const client = await f.connect();
+    for (const [label, body, code] of SUPPLIER_RESULTS) {
+      f.hooks.call = () => json(body);
+      const response = await client.request({ method: "tools/call", params: { name: TOOL, arguments: INPUT } }) as CallToolResult;
+      expect(response.isError, label).toBe(true);
+      expect(response.structuredContent, label).toBeUndefined();
+      expect(vector(response).code, label).toBe(code);
+    }
   });
 
-  it.each([
+  const HTTP_ERRORS: Array<[number, string, string]> = [
     [400, "invalid_tool_request", "paper2agent_invalid_input"],
     [401, "unauthorized", "paper2agent_calls_unavailable"],
     [404, "not_found", "paper2agent_tool_unavailable"],
@@ -305,13 +311,20 @@ describe("Paper2Agent public MCP HTTP", () => {
     [502, "tool_execution_failed", "paper2agent_tool_failed"],
     [503, "supplier_draining", "paper2agent_tool_unavailable"],
     [503, "supplier_unavailable", "paper2agent_tool_unavailable"],
-  ])("maps HTTP %i %s to %s", async (status, reason, code) => {
-    const f = await fixture();
-    f.hooks.call = () => json({ reason, message: reason }, status);
-    const response = await (await f.connect()).callTool({ name: TOOL, arguments: INPUT });
-    expect(response.isError).toBe(true);
-    expect(vector(response)).toEqual({ code });
-    expect(f.posts).toHaveLength(1);
+  ];
+
+  it("maps the HTTP status and reason of the supplier to one tool error, with one call each", async () => {
+    const f = await fixture({ env: { MCP_CALL_IP_RATE_MAX: "100" } });
+    const client = await f.connect();
+    for (const [status, reason, code] of HTTP_ERRORS) {
+      const label = `HTTP ${status} ${reason}`;
+      const postsBefore = f.posts.length;
+      f.hooks.call = () => json({ reason, message: reason }, status);
+      const response = await client.callTool({ name: TOOL, arguments: INPUT });
+      expect(response.isError, label).toBe(true);
+      expect(vector(response), label).toEqual({ code });
+      expect(f.posts, label).toHaveLength(postsBefore + 1);
+    }
   });
 
   it("maps an unreachable supplier and an HTML proxy error without a retry", async () => {
