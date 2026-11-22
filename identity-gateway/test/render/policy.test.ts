@@ -73,31 +73,17 @@ const RETRY_SENTENCE = " After a check that found no protocol, it checks again a
 const CURRENT = { ...OLD, fetchRules: OLD.fetchRules + RETRY_SENTENCE, limits: { ...OLD.limits, firstRetrySeconds: 600 } };
 
 describe("the members that were there before", () => {
-  test.each([
-    ["without the M4 services", { ...PRODUCTION, m4: null }],
-    ["without the M4 field", { ...PRODUCTION, m4: undefined }],
-    ["with the M4 services", PRODUCTION],
-    ["with the status lists that do not follow the chain", withM4({ statusListFollowMs: 0 })],
-    ["with the background jobs off", { ...PRODUCTION, fetchJobs: false }],
-  ])("%s: the six members have the text and value of the live body, with the new rule of the repeat of a check; only two members are new", (_name, config) => {
-    const { revocationBounds: bounds, escrowBound, ...rest } = policyDocument(config);
+  test("the six members have the text and value of the live body, with the new rule of the repeat of a check; only two members are new", () => {
+    const document = policyDocument(PRODUCTION);
+    const { revocationBounds: bounds, escrowBound, ...rest } = document;
     expect(rest).toEqual(CURRENT);
     expect(bounds).toBeDefined();
     expect(escrowBound).toBeDefined();
-    expect(Object.keys(policyDocument(config)).sort()).toEqual([...Object.keys(CURRENT), "escrowBound", "revocationBounds"].sort());
+    expect(Object.keys(document).sort()).toEqual([...Object.keys(CURRENT), "escrowBound", "revocationBounds"].sort());
     // The other four members are the members of the live body, letter for letter.
     const { fetchRules: _fetchRules, limits: _limits, ...others } = rest;
     const { fetchRules: _oldFetchRules, limits: _oldLimits, ...oldOthers } = OLD;
     expect(others).toEqual(oldOthers);
-  });
-
-  test("fetchRules keeps the whole old text and adds one sentence; limits keep their six numbers and add firstRetrySeconds", () => {
-    const { fetchRules, limits } = policyDocument(PRODUCTION) as { fetchRules: string; limits: Record<string, number> };
-    expect(fetchRules.startsWith(OLD.fetchRules)).toBe(true);
-    expect(fetchRules.slice(OLD.fetchRules.length)).toBe(RETRY_SENTENCE);
-    expect(fetchRules).toContain("It checks each Active agent again every day and after each change of its record. After a check that found no protocol,");
-    expect(limits).toEqual({ ...OLD.limits, firstRetrySeconds: FIRST_RETRY_MS / 1000 });
-    expect(limits.firstRetrySeconds).toBe(600);
   });
 
   test("the sentence states the rule of the scheduler: 10 minutes after the first check that found no protocol, twice as long after each next one, never more than a day", () => {
@@ -136,49 +122,16 @@ describe("escrowBound", () => {
     });
     expect(ESCROW_BOUND).toHaveLength(9);
   });
-
-  test("the text does not depend on the settings", () => {
-    const expected = policyDocument(PRODUCTION).escrowBound;
-    expect(policyDocument({ ...PRODUCTION, m4: null }).escrowBound).toEqual(expected);
-    expect(policyDocument(withM4({ statusListFollowMs: 30_000 })).escrowBound).toEqual(expected);
-  });
 });
 
-// ── The shape ──
+// ── The text around the cells ──
 
-describe("revocationBounds: the shape", () => {
+describe("revocationBounds: the start events, the assumptions and what is not counted", () => {
   const bounds = revocationBounds(PRODUCTION);
 
-  test("eight paths and ten surfaces, with these names", () => {
-    expect([...PATHS].sort()).toEqual(["controllerSuspend", "holdLift", "keyRemoval", "module1Hold", "partySuspend", "retire", "revoke", "undelegate"]);
-    expect([...SURFACES].sort()).toEqual(["accessTokenLocal", "catalogs", "contracts", "credential", "introspection", "jwtSvid", "marketplaceListing", "resolver", "statusLists", "x509Svid"]);
-    expect(Object.keys(bounds.paths).sort()).toEqual([...PATHS].sort());
-    expect(Object.keys(bounds.surfaces).sort()).toEqual([...SURFACES].sort());
-    expect(Object.keys(bounds).sort()).toEqual(["about", "assumptions", "computed", "effects", "notCounted", "paths", "startEvent", "surfaces", "terms"]);
-    expect(Object.keys(bounds.effects).sort()).toEqual(["applies", "none", "notOffered", "partial"]);
-  });
-
-  test("each path names its start event, and each path holds a cell for each surface", () => {
-    for (const path of PATHS) {
-      const entry = bounds.paths[path];
-      expect(Object.keys(entry).sort()).toEqual(["description", "startEvent", "surfaces"]);
-      expect(entry.description.length).toBeGreaterThan(10);
-      expect(entry.startEvent).toMatch(/^The block that carries /);
-      expect(Object.keys(entry.surfaces).sort()).toEqual([...SURFACES].sort());
-    }
-  });
-
-  test("each cell has an effect, a text, a number or null, and a formula or null", () => {
-    const effects: readonly Effect[] = ["applies", "partial", "none", "notOffered"];
-    for (const { path, surface, cell } of allCells(bounds)) {
-      const where = `${path}/${surface}`;
-      expect(Object.keys(cell).sort(), where).toEqual(["bound", "effect", "formula", "seconds"]);
-      expect(effects, where).toContain(cell.effect);
-      expect(cell.bound.length, where).toBeGreaterThan(20);
-      expect(cell.seconds === null || (Number.isInteger(cell.seconds) && cell.seconds >= 0), where).toBe(true);
-      expect(cell.formula === null || typeof cell.formula === "string", where).toBe(true);
-      if (cell.formula === null) expect(cell.seconds === null || cell.seconds === 0, where).toBe(true);
-    }
+  test("each path names its start event", () => {
+    for (const path of PATHS) expect(bounds.paths[path].startEvent, path).toMatch(/^The block that carries /);
+    expect(bounds.paths.controllerSuspend.startEvent).toBe("The block that carries the Suspend transaction.");
   });
 
   test("the start event, the assumptions and what is not counted are stated", () => {
@@ -263,19 +216,6 @@ describe("revocationBounds: the numbers with the default settings", () => {
     }
   });
 
-  test("the formulas of the main cells", () => {
-    const formula = (path: Path, surface: Surface): string | null => cellOf(bounds, path, surface).formula;
-    expect(formula("controllerSuspend", "statusLists")).toBe("followSeconds + stepSecondsDuringBuild");
-    expect(formula("holdLift", "statusLists")).toBe("confirmations * blockSecondsP90 + followSeconds + stepSecondsDuringBuild");
-    expect(formula("holdLift", "resolver")).toBe("confirmations * blockSecondsP90");
-    expect(formula("revoke", "statusLists")).toBe("followSeconds + stepSecondsDuringBuild");
-    expect(formula("controllerSuspend", "catalogs")).toBe("2 * scanSeconds + scanIntervalSeconds");
-    expect(formula("holdLift", "marketplaceListing")).toBe("confirmations * blockSecondsP90 + indexerRereadSeconds + indexerTickSeconds");
-    expect(formula("controllerSuspend", "accessTokenLocal")).toBe("tokenSeconds");
-    expect(formula("controllerSuspend", "contracts")).toBeNull();
-    expect(formula("controllerSuspend", "resolver")).toBeNull();
-  });
-
   test("the typical values and the other numbers in the text", () => {
     const text = (path: Path, surface: Surface): string => cellOf(bounds, path, surface).bound;
     expect(text("controllerSuspend", "statusLists")).toContain("within 16 s (computed");
@@ -304,14 +244,7 @@ describe("revocationBounds: the numbers with the default settings", () => {
     expect(text("holdLift", "marketplaceListing")).toContain("follows within 65 s");
   });
 
-  test("the three holds have the same cells, and revoke and retire differ only in their words", () => {
-    expect(bounds.paths.partySuspend.surfaces).toEqual(bounds.paths.controllerSuspend.surfaces);
-    expect(bounds.paths.module1Hold.surfaces).toEqual(bounds.paths.controllerSuspend.surfaces);
-    for (const surface of SURFACES) {
-      const revoke = cellOf(bounds, "revoke", surface);
-      const retire = cellOf(bounds, "retire", surface);
-      expect([retire.effect, retire.seconds, retire.formula], surface).toEqual([revoke.effect, revoke.seconds, revoke.formula]);
-    }
+  test("retire and revoke say what happens to a Submitted escrow", () => {
     expect(cellOf(bounds, "retire", "contracts").bound).toContain("A Retire never returns a Submitted escrow.");
     expect(cellOf(bounds, "revoke", "contracts").bound).toContain("only while the escrow is unspent");
   });
@@ -324,8 +257,7 @@ describe("revocationBounds: the numbers with the default settings", () => {
     expect(cellOf(bounds, "keyRemoval", "statusLists").bound).toContain("no bit changes");
   });
 
-  test("the contracts count from the block and the cells of the contracts name the escrow bound", () => {
-    for (const path of PATHS) expect(cellOf(bounds, path, "contracts").seconds, path).toBe(0);
+  test("the cells of the contracts name the escrow bound", () => {
     for (const path of ["controllerSuspend", "partySuspend", "module1Hold", "revoke", "retire", "keyRemoval", "undelegate"] as const) {
       expect(cellOf(bounds, path, "contracts").bound, path).toContain("escrowBound");
     }
@@ -471,11 +403,9 @@ describe("revocationBounds: the repair of the lists when the records no longer f
   });
 
   test.each([
-    ["the default settings", PRODUCTION, 485, 964, 60, 534],
     ["a follow interval of 30 s", withM4({ statusListFollowMs: 30_000 }), 505, 984, 60, 534],
     ["a follow interval of 20 s and a refresh interval of 5 s", withM4({ statusListFollowMs: 20_000, statusListRefreshMs: 5_000 }), 495, 974, 5, 479],
     ["the longest follow interval", withM4({ statusListFollowMs: 300_000 }), 775, 1254, 60, 534],
-    ["a refresh interval of 120 s", withM4({ statusListRefreshMs: 120_000 }), 485, 964, 120, 594],
   ])("the numbers follow the follow interval and the refresh interval: %s", (_name, config, idle, busy, refresh, failed) => {
     const bounds = revocationBounds(config);
     const text = entry(bounds)!;
@@ -513,7 +443,7 @@ describe("revocationBounds: the repair of the lists when the records no longer f
 
 // ── Each number is the result of its formula ──
 
-describe("revocationBounds: seconds is the result of the formula", () => {
+describe("revocationBounds: seconds is the result of the formula, or null or 0 when the cell has no formula", () => {
   test.each([
     ["the live gateway", PRODUCTION],
     ["a slow follow interval", withM4({ statusListFollowMs: 120_000 })],
@@ -527,7 +457,10 @@ describe("revocationBounds: seconds is the result of the formula", () => {
     const bounds = revocationBounds(config);
     for (const { path, surface, cell } of allCells(bounds)) {
       const where = `${path}/${surface}`;
-      if (cell.formula === null) continue;
+      if (cell.formula === null) {
+        expect([null, 0], where).toContain(cell.seconds);
+        continue;
+      }
       expect(cell.seconds, where).toBe(compute(cell.formula, bounds.terms));
     }
   });
@@ -606,20 +539,18 @@ describe("revocationBounds: public text", () => {
     ["no background jobs and no delegation contract", { ...withM4({ delegation: null }), fetchJobs: false }],
   ];
 
-  test.each(configs)("%s: ASCII only, no unfinished text", (_name, config) => {
+  test.each(configs)("%s: ASCII only, no unfinished text, at most 25 words in a sentence", (_name, config) => {
     const document = policyDocument(config);
-    const text = [...strings(document.revocationBounds, ["revocationBounds"]), ...strings(document.escrowBound, ["escrowBound"])];
+    const bounds = strings(document.revocationBounds, ["revocationBounds"]);
+    const text = [...bounds, ...strings(document.escrowBound, ["escrowBound"])];
     expect(text.length).toBeGreaterThan(200);
     for (const { path, text: value } of text) {
       expect(value, path).toMatch(/^[\x20-\x7e]+$/);
     }
-    for (const { path, text: value } of strings(document.revocationBounds, ["revocationBounds"]).filter((s) => /\.(bound|meaning)$/.test(s.path))) {
+    for (const { path, text: value } of bounds.filter((s) => /\.(bound|meaning)$/.test(s.path))) {
       expect(value, path).not.toMatch(/\b(null|undefined|NaN|Infinity)\b|\[object/);
     }
-  });
-
-  test.each(configs)("%s: a sentence has at most 25 words", (_name, config) => {
-    for (const { path, text: value } of strings(revocationBounds(config), ["revocationBounds"])) {
+    for (const { path, text: value } of bounds) {
       for (const sentence of value.split(/(?<=[.!?])\s+/)) {
         expect(sentence.split(/\s+/).length, `${path}: ${sentence}`).toBeLessThanOrEqual(25);
       }

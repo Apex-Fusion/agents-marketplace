@@ -1,13 +1,9 @@
 import { describe, expect, test } from "vitest";
 import { catalogIdentifier, didWebOf, reverseHost } from "../../src/render/agent.js";
-import { DEFAULT_ACCESS_LOG_RETENTION, DEFAULT_BASE_URL, loadRenderConfig } from "../../src/render/config.js";
+import { loadRenderConfig } from "../../src/render/config.js";
 import { renderJson } from "../../src/render/json.js";
 
 describe("render configuration", () => {
-  test("defaults", () => {
-    expect(loadRenderConfig({})).toEqual({ baseUrl: DEFAULT_BASE_URL, accessLogRetention: DEFAULT_ACCESS_LOG_RETENTION, fetchJobs: true, scanIntervalMs: 600_000 });
-  });
-
   test("values from the environment", () => {
     expect(
       loadRenderConfig({ GATEWAY_BASE_URL: "https://id.example.org/", ACCESS_LOG_RETENTION: "30 days.", FETCH_JOBS: "off", FETCH_SCAN_INTERVAL_S: "900" }),

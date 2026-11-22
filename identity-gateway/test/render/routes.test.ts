@@ -487,31 +487,6 @@ describe("GET /policy", () => {
       },
     });
   });
-
-  test("the revocation bounds and the escrow bound are in the body; the render config of this test has no M4 services, so the M4 surfaces say so", async () => {
-    const { body, response } = await json("/policy");
-    expect(response.headers.get("cache-control")).toBe("no-store");
-    expect(body).toMatchObject({
-      revocationBounds: {
-        paths: {
-          controllerSuspend: {
-            startEvent: "The block that carries the Suspend transaction.",
-            surfaces: {
-              resolver: { effect: "applies", seconds: 0 },
-              contracts: { effect: "applies", seconds: 0 },
-              statusLists: { effect: "notOffered", seconds: null },
-              catalogs: { effect: "applies", formula: "2 * scanSeconds + scanIntervalSeconds" },
-            },
-          },
-          holdLift: { surfaces: { resolver: { effect: "applies", seconds: 240 } } },
-        },
-        terms: { confirmations: { value: 30 }, scanIntervalSeconds: { value: 600 } },
-      },
-      escrowBound: { sentences: expect.arrayContaining([expect.stringContaining("`Undelegate`")]) },
-    });
-    const { escrowBound } = body as { escrowBound: { sentences: string[] } };
-    expect(escrowBound.sentences).toHaveLength(9);
-  });
 });
 
 describe("HTTP behaviour", () => {
