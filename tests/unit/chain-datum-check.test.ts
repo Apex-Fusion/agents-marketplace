@@ -8,6 +8,9 @@
  *
  * Covered: OgmiosLucidProvider (getUtxos, getUtxosByOutRef), ReadOnlyOgmiosProvider (queryUtxo, queryUtxosByAddress) and
  * LiveOgmiosProvider, which reads through the read-only one.
+ *
+ * Sizes: the pull request gate runs the smallest answer that a limit of 25,000 texts would hide (25,000 outputs and the record).
+ * The night (TEST_DEPTH=nightly) adds 100,000 outputs and the time limit for texts of one million characters.
  */
 
 import { randomBytes } from "node:crypto";
@@ -31,6 +34,7 @@ import { buildSampleEscrowDatum } from "../fixtures/buyer-side/escrow-datum-buil
 import { buildSampleAdvertDatum } from "../fixtures/buyer-side/advert-datum-builders.js";
 import { activeRecord, buyer, newAdvert, newEscrow } from "../fixtures/buyer-side/identity-world.js";
 import { testWallet } from "../fixtures/identity-builders/world.js";
+import { nightly } from "../depth.js";
 
 const URL = "http://ogmios.test";
 const ADDRESS = "addr1vyqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqkdl5mw";
@@ -40,8 +44,6 @@ let TX = "ab".repeat(32);
 const rep = (piece: string, times: number): string => piece.repeat(times);
 /** `levels` arrays inside each other; the leaf is the integer 0. */
 const arrays = (levels: number): string => `${rep("81", levels)}00`;
-/** `levels` maps inside each other. */
-const maps = (levels: number): string => `${rep("a100", levels)}00`;
 /** A native script that nests `scripts` "all" scripts (2 levels of CBOR for each) around a signature script. */
 const nativeScript = (scripts: number): string => `${rep("820181", scripts)}8200581c${rep("11", 28)}`;
 
@@ -130,39 +132,20 @@ describe("the check of an inline datum at the Ogmios clients", () => {
     }
   });
 
+  // The check turns each refusal of the parser into one verdict (datumGuard.ts, `passes`), so one datum of each kind shows it at the
+  // three clients. The kinds of refusal are tested one by one in packages/shared/src/cbor-depth.test.ts.
   it.each([
     ["arrays inside each other", arrays(5000)],
-    ["maps inside each other", maps(2500)],
-    ["indefinite-length arrays inside each other", `${rep("9f", 70)}00${rep("ff", 70)}`],
-    ["tags inside each other", `${rep("d87a", 70)}00`],
-  ])("withholds a datum that nests too deep: %s", async (_name, datum) => {
-    const answers = await datumsOf([output(0, { datum })]);
-    expect(answers).toEqual({ lucid: [null], readOnly: [null], live: [null] });
-  });
-
-  it.each([
     ["text that is not hex", "zz"],
-    ["hex of an odd length", "d8798"],
-    ["CBOR that ends inside an item", "d879"],
-    ["an array that has no break code", "9f01"],
-    ["a break code with no array", "ff"],
-    ["a reserved header", "de"],
-    ["a float, which Plutus data does not hold", "fb3ff0000000000000"],
-    ["whitespace", "  "],
-  ])("withholds a datum that is not CBOR that the decoders read: %s", async (_name, datum) => {
+    ["whitespace, which is not the empty text", "  "],
+  ])("withholds a datum that nests too deep or is not CBOR that the decoders read: %s", async (_name, datum) => {
     const answers = await datumsOf([output(0, { datum })]);
     expect(answers).toEqual({ lucid: [null], readOnly: [null], live: [null] });
   });
 
-  it.each([
-    ["a byte string with a declared length far past the input", "5a80000000"],
-    ["a byte string with the largest declared length", "5bffffffffffffffff"],
-    ["an array with the largest declared count", "9bffffffffffffffff"],
-    ["a map with a declared count past the input", "bb0000000100000000"],
-    ["an array with a declared count past the input", "9a000f424000"],
-  ])("withholds a datum with a length or a count past the end, and allocates nothing for it: %s", async (_name, datum) => {
+  it("withholds a datum with a length far past the end of the input, and allocates nothing for it", async () => {
     const before = process.memoryUsage().arrayBuffers;
-    const answers = await datumsOf([output(0, { datum })]);
+    const answers = await datumsOf([output(0, { datum: "5a80000000" })]);
     expect(answers).toEqual({ lucid: [null], readOnly: [null], live: [null] });
     expect(process.memoryUsage().arrayBuffers - before).toBeLessThan(8 * 1024 * 1024);
   });
@@ -393,16 +376,18 @@ describe("the log lines of the check: one line for each output reference", () =>
     });
   });
 
-  it("writes 21 lines for 100,000 bad outputs, keeps all of them, and remembers 20 references", async () => {
-    // The bad datums are short (65 levels), so that the scan of 100,000 of them is quick. The log does not depend on the length.
-    const flood = Array.from({ length: 100_000 }, () => output(next++, { datum: arrays(MAX_CBOR_DEPTH + 1) }));
+  it("writes 21 lines for a flood of bad outputs, keeps all of them, and remembers 20 references", async () => {
+    // The bad datums are short (65 levels). The log does not depend on their length, nor on the number of bad outputs above 21.
+    // The night runs the flood of 100,000 outputs.
+    const count = nightly ? 100_000 : 100;
+    const flood = Array.from({ length: count }, () => output(next++, { datum: arrays(MAX_CBOR_DEPTH + 1) }));
     const utxos = await lucid(flood).getUtxos(ADDRESS);
-    expect(utxos).toHaveLength(100_000);
+    expect(utxos).toHaveLength(count);
     expect(utxos.every((utxo) => utxo.datum === null)).toBe(true);
     expect(linesOf()).toHaveLength(21);
-    expect(linesOf()[20]).toContain("99980 more outputs");
+    expect(linesOf()[20]).toContain(`${count - 20} more outputs`);
 
-    // The memory holds 20 references of the answer, not 100,000: they are not said again at another address, the 21st is.
+    // The memory holds 20 references of the answer, not all of them: they are not said again at another address, the 21st is.
     warn.mockClear();
     const elsewhere = (outputs: OgmiosOutput[]): OgmiosOutput[] => outputs.map((o) => ({ ...o, address: "addr1elsewhere" }));
     await lucid(elsewhere(flood.slice(0, 20))).getUtxos("addr1elsewhere");
@@ -427,7 +412,9 @@ describe("a datum is withheld for one reason only: the datum itself fails the ch
   ];
 
   describe.each(CLIENTS)("%s", (_name, datumsOf) => {
-    it.each([25_000, 25_001, 100_000])("keeps the datum of each of %i valid outputs, and the datum of the record after them", async (count) => {
+    // 25,000 valid outputs and then the record: the record is text 25,001, the smallest answer that a limit of 25,000 texts for one
+    // answer (the old limit) would hide. The night adds 100,000.
+    it.each(nightly ? [25_000, 100_000] : [25_000])("keeps the datum of each of %i valid outputs, and the datum of the record after them", async (count) => {
       const answer = Array.from({ length: count }, (_unused, i) => output(i, { datum: small }));
       answer.push(output(count, { datum: record }));
       const datums = await datumsOf(answer);
@@ -436,13 +423,15 @@ describe("a datum is withheld for one reason only: the datum itself fails the ch
       expect(datums[count]).toBe(record);
     }, 60_000);
 
-    it("keeps the datum of each of 2,100 outputs with a datum of 16,000 bytes (67 MB of text), and the record after them", async () => {
+    // The old limit was 32 MiB (33,554,432 characters) of datum text for one answer. 1,100 datums of 16,000 bytes (32,010 characters
+    // each) are 35 million characters, and the record is after them.
+    it("keeps the datum of each of 1,100 outputs with a datum of 16,000 bytes (35 million characters), and the record after them", async () => {
       const big = byteString(16_000);
-      const answer = Array.from({ length: 2100 }, (_unused, i) => output(i, { datum: big }));
-      answer.push(output(2100, { datum: record }));
+      const answer = Array.from({ length: 1100 }, (_unused, i) => output(i, { datum: big }));
+      answer.push(output(1100, { datum: record }));
       const datums = await datumsOf(answer);
-      expect(datums.slice(0, 2100).every((datum) => datum === big)).toBe(true);
-      expect(datums[2100]).toBe(record);
+      expect(datums.slice(0, 1100).every((datum) => datum === big)).toBe(true);
+      expect(datums[1100]).toBe(record);
     }, 60_000);
 
     it("keeps one valid datum of 4 MiB", async () => {
@@ -450,16 +439,17 @@ describe("a datum is withheld for one reason only: the datum itself fails the ch
       expect(await datumsOf([output(0, { datum: huge })])).toEqual([huge]);
     }, 60_000);
 
-    it("withholds the one bad datum among 60,000 valid ones, and no other", async () => {
-      const answer = Array.from({ length: 60_001 }, (_unused, i) => output(i, { datum: i === 30_000 ? arrays(MAX_CBOR_DEPTH + 1) : small }));
+    it("withholds the one bad datum among 25,002 outputs, and no other", async () => {
+      // The old limit of 25,000 texts for one answer would have withheld each datum after the 25,000th.
+      const answer = Array.from({ length: 25_002 }, (_unused, i) => output(i, { datum: i === 12_500 ? arrays(MAX_CBOR_DEPTH + 1) : small }));
       const datums = await datumsOf(answer);
       expect(datums.filter((datum) => datum === null)).toHaveLength(1);
-      expect(datums[30_000]).toBeNull();
+      expect(datums[12_500]).toBeNull();
       expect(linesOf()).toHaveLength(1);
     }, 60_000);
 
     it("takes nothing from an earlier answer: the verdict for a datum depends on the datum alone", async () => {
-      await datumsOf(Array.from({ length: 30_000 }, (_unused, i) => output(i, { datum: small })));
+      await datumsOf(Array.from({ length: 25_001 }, (_unused, i) => output(i, { datum: small })));
       expect(await datumsOf([output(0, { datum: small })])).toEqual([small]);
     }, 60_000);
   });
@@ -566,7 +556,9 @@ describe("the check of a reference script", () => {
   });
 
   describe("at the read-only client and the live client", () => {
-    const scripts: Array<[string, string]> = [["65 levels", deep], ["3,001 levels", veryDeep], ["not CBOR", "zz"], ["a declared length past the end", "5a80000000"]];
+    // The read-only client maps no native script, so it ignores what the script holds. One script that fails the depth check and one
+    // that is no CBOR show that no client check reaches it.
+    const scripts: Array<[string, string]> = [["65 levels", deep], ["not CBOR", "zz"]];
 
     it.each(scripts)("returns an escrow output with a native script of %s: queryUtxo gives it, and the lists keep it", async (_name, cbor) => {
       const datum = encodeEscrowDatum(buildSampleEscrowDatum());
@@ -607,27 +599,34 @@ describe("the bounds of the fields of an output", () => {
     ["policy id", 56, (n) => output(0, { value: { ...lovelace, [word(n)]: { "": 1 } } })],
     ["asset name", 64, (n) => output(0, { value: { ...lovelace, [word(56)]: { [word(n)]: 1 } } })],
   ];
-  const CLIENTS: Array<[string, (answer: OgmiosOutput[]) => Promise<unknown[]>]> = [
-    ["the Lucid client", (answer) => lucid(answer).getUtxos(ADDRESS)],
-    ["the read-only client", (answer) => readOnly(answer).queryUtxosByAddress(ADDRESS)],
-    ["the live client", (answer) => live(answer).queryUtxosByAddress(ADDRESS)],
+  const lucidCall = (answer: OgmiosOutput[]): Promise<unknown[]> => lucid(answer).getUtxos(ADDRESS);
+  const readOnlyCall = (answer: OgmiosOutput[]): Promise<unknown[]> => readOnly(answer).queryUtxosByAddress(ADDRESS);
+  const liveCall = (answer: OgmiosOutput[]): Promise<unknown[]> => live(answer).queryUtxosByAddress(ADDRESS);
+  // Each field has its own branch in assertOutputFields, and each client calls it (the live client through the read-only client):
+  // one check for each field through the Lucid client, and one for the address through each other client.
+  const address = CASES.find(([field]) => field === "address")!;
+  const CHECKS = [
+    ...CASES.map(([field, max, make]) => ({ client: "the Lucid client", field, max, make, call: lucidCall })),
+    { client: "the read-only client", field: address[0], max: address[1], make: address[2], call: readOnlyCall },
+    { client: "the live client", field: address[0], max: address[1], make: address[2], call: liveCall },
   ];
 
-  describe.each(CASES)("the %s (at most %i characters)", (field, max, make) => {
-    it.each(CLIENTS)("%s: passes the longest value, and refuses one more character", async (_name, call) => {
-      expect(await call([make(max)])).toHaveLength(1);
-      const error = await call([make(max + 1)]).catch((e: unknown) => e);
-      expect(error).toBeInstanceOf(OutputFieldError);
-      expect((error as Error).message).toBe(`Ogmios sent an output whose ${field} is ${max + 1} characters long; the longest ${field} is ${max} characters`);
-    });
+  it.each(CHECKS)("$client: the $field passes at its longest value, and is refused one character longer", async ({ field, max, make, call }) => {
+    expect(await call([make(max)])).toHaveLength(1);
+    const error = await call([make(max + 1)]).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(OutputFieldError);
+    expect((error as Error).message).toBe(`Ogmios sent an output whose ${field} is ${max + 1} characters long; the longest ${field} is ${max} characters`);
+  });
 
-    it("refuses a text of one million characters at once, and the message holds no part of it", async () => {
+  // The check reads the length of a text and never the text, so the call ends at once. Only the night checks the time.
+  it("refuses a text of one million characters in each field, and the message holds no part of it", async () => {
+    for (const [field, , make] of CASES) {
       const started = performance.now();
       const error = await readOnly([make(1_000_000)]).queryUtxosByAddress(ADDRESS).catch((e: unknown) => e);
-      expect(performance.now() - started).toBeLessThan(500);
-      expect(error).toBeInstanceOf(OutputFieldError);
-      expect((error as Error).message.length).toBeLessThan(120);
-    });
+      if (nightly) expect(performance.now() - started, field).toBeLessThan(500);
+      expect(error, field).toBeInstanceOf(OutputFieldError);
+      expect((error as Error).message.length, field).toBeLessThan(120);
+    }
   });
 
   it("fails the whole call when one output among 100 has a field that is too long, and keeps the order of the others when none has", async () => {
