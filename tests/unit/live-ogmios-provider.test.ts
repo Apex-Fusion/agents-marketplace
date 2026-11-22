@@ -1,26 +1,30 @@
 /**
- * live-ogmios-provider.test.ts — RED phase tests for LiveOgmiosProvider
+ * live-ogmios-provider.test.ts — LiveOgmiosProvider
  *
- * Coverage:
- *   A. Read-method parity with ReadOnlyOgmiosProvider
- *      tip(), queryUtxo(), queryUtxosByAddress(), evaluateTx()
- *   B. submitTx() — success, request shape, HTTP error, JSON-RPC error,
- *      malformed response, timeout
- *   C. awaitTx() — resolves on confirmation, polls at 2s cadence, rejects on
- *      timeout, aborts in-flight fetch, multiple polls, first-poll success
- *   D. Composition parity — identical request bodies vs ReadOnlyOgmiosProvider
- *      for all four read methods
- *   E. Retry of a read-only request after a transient error; submitTx is never
- *      tried again; awaitTx has no retry level inside its poll loop
+ * LiveOgmiosProvider implements the whole ChainProvider interface against Ogmios. Its four read methods forward to an inner
+ * ReadOnlyOgmiosProvider (LiveOgmiosProvider.ts, constructor and read methods). read-only-ogmios-provider.test.ts tests those reads
+ * and the retry rule of a read request. This file tests:
+ *   A. The forwarding: each read sends the request of ReadOnlyOgmiosProvider and returns its value; the options `timeoutMs` and
+ *      `sleep` reach the inner provider.
+ *   B. submitTx(): its own code. Success, request shape, error mapping, and exactly one try for every error.
+ *   C. awaitTx(): its own code. Polls, timeout, abort, and no retry level inside its poll loop.
  *
  * All network calls are mocked via globalThis.fetch. NO real network calls.
- *
- * SPEC FIX 2026-04-27: M1-F-2 LiveOgmiosProvider RED tests
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from "vitest";
 import { LiveOgmiosProvider, OgmiosSubmitError } from "../../packages/shared/src/chain/LiveOgmiosProvider.js";
 import { ReadOnlyOgmiosProvider } from "../../packages/shared/src/chain/ReadOnlyOgmiosProvider.js";
+import type { ChainProvider } from "../../packages/shared/src/chain/ChainProvider.js";
+import {
+  HTTP_500,
+  OGMIOS_TEST_ADDRESS,
+  instantSleep,
+  makeOgmiosUtxo,
+  rpcError,
+  rpcOk,
+  timeoutError,
+} from "../fixtures/chain-codec/ogmios-http.js";
 
 // ─── fetch mock setup ─────────────────────────────────────────────────────────
 
@@ -39,757 +43,97 @@ const TEST_URL = "http://localhost:1337";
 const DUMMY_TX = "84a5008182582000".repeat(4);
 const DUMMY_TX_HASH = "a".repeat(64);
 
-// A read request is tried again after a transient error (see the retry tests at
-// the end of this file). A test that expects the final error gives the mock an
-// answer for every try, and skips the real wait between the tries.
-const instantSleep = async (_ms: number): Promise<void> => {};
+// ─── A. The reads: forwarding to ReadOnlyOgmiosProvider ───────────────────────
 
-// Helper: build a successful JSON-RPC response envelope
-function rpcOk<T>(result: T) {
-  return {
-    ok: true,
-    json: () => Promise.resolve({ jsonrpc: "2.0", result }),
-  };
-}
+describe("LiveOgmiosProvider — the reads forward to ReadOnlyOgmiosProvider", () => {
+  const REF = { txHash: "b".repeat(64), index: 2 };
 
-// Helper: build a JSON-RPC error envelope (HTTP 200 but RPC error)
-function rpcError(code: number, message: string, data?: unknown) {
-  return {
-    ok: true,
-    json: () => Promise.resolve({ jsonrpc: "2.0", error: { code, message, data } }),
-  };
-}
+  // Each read runs through both providers, and the requests and the values must be equal. A Live provider that gets its own read code
+  // (other ids, other params, other mapping) fails this table.
+  it.each([
+    { name: "tip", call: (provider: ChainProvider) => provider.tip(), answer: { slot: 99999, id: "a".repeat(64) } },
+    { name: "queryUtxo", call: (provider: ChainProvider) => provider.queryUtxo(REF), answer: [makeOgmiosUtxo(REF.txHash, 2)] },
+    {
+      name: "queryUtxosByAddress",
+      call: (provider: ChainProvider) => provider.queryUtxosByAddress(OGMIOS_TEST_ADDRESS),
+      answer: [makeOgmiosUtxo("a".repeat(64), 0), makeOgmiosUtxo("b".repeat(64), 0, 3_000_000)],
+    },
+    {
+      name: "evaluateTx",
+      call: (provider: ChainProvider) => provider.evaluateTx(DUMMY_TX),
+      answer: [{ validator: "escrow", budget: { memory: 5000, cpu: 10000 } }],
+    },
+  ])("$name sends the request of ReadOnlyOgmiosProvider and returns its value", async ({ call, answer }) => {
+    const runs: Array<{ value: unknown; requests: unknown[][] }> = [];
+    for (const Provider of [LiveOgmiosProvider, ReadOnlyOgmiosProvider]) {
+      mockFetch.mockReset();
+      mockFetch.mockResolvedValue(rpcOk(answer));
+      const value = await call(new Provider({ ogmiosUrl: TEST_URL }));
+      runs.push({ value, requests: mockFetch.mock.calls.map(([url, init]) => [url, init.method, init.headers, init.body]) });
+    }
 
-// Helper: typical Ogmios UTxO for query responses
-function makeOgmiosUtxo(txId = "a".repeat(64), index = 0) {
-  return {
-    transaction: { id: txId },
-    index,
-    address: "addr_test1vz2fs4y3q9ekzs7zrr5xkjhq5dzl2wkxqh5hqz6v3l9kqaqklyp2",
-    value: { ada: { lovelace: 2_000_000 } },
-    datum: null,
-  };
-}
-
-// ─── A. Read-method parity with ReadOnlyOgmiosProvider ───────────────────────
-
-describe("LiveOgmiosProvider — tip()", () => {
-  it("sends a POST request to ogmiosUrl", async () => {
-    mockFetch.mockResolvedValueOnce(rpcOk({ slot: 12345678, id: "a".repeat(64) }));
-
-    const provider = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL });
-    await provider.tip();
-
-    expect(mockFetch).toHaveBeenCalledWith(
-      TEST_URL,
-      expect.objectContaining({ method: "POST" }),
-    );
+    expect(runs[0].requests).toHaveLength(1);
+    expect(runs[0]).toEqual(runs[1]);
   });
 
-  it("uses JSON-RPC method queryNetwork/tip", async () => {
-    mockFetch.mockResolvedValueOnce(rpcOk({ slot: 12345678, id: "a".repeat(64) }));
-
-    const provider = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL });
-    await provider.tip();
-
-    const call = mockFetch.mock.calls[0];
-    const body = JSON.parse(call[1].body as string);
-    expect(body.jsonrpc).toBe("2.0");
-    expect(body.method).toBe("queryNetwork/tip");
-  });
-
-  it("returns the slot number from the response", async () => {
-    mockFetch.mockResolvedValueOnce(rpcOk({ slot: 99999, id: "a".repeat(64) }));
-
-    const provider = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL });
-    const slot = await provider.tip();
-
-    expect(slot).toBe(99999);
-  });
-
-  it("throws on HTTP 500 error", async () => {
+  it("passes its timeout and its sleep to the inner read-only provider", async () => {
+    const sleep = vi.fn(instantSleep);
     vi.spyOn(console, "warn").mockImplementation(() => {});
-    mockFetch.mockResolvedValue({ ok: false, status: 500, statusText: "Internal Server Error" });
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    mockFetch.mockResolvedValueOnce(HTTP_500).mockResolvedValueOnce(rpcOk({ slot: 777, id: "a".repeat(64) }));
 
-    const provider = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL, sleep: instantSleep });
-    await expect(provider.tip()).rejects.toThrow("Ogmios HTTP error: 500 Internal Server Error");
-  });
-});
+    const provider = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL, fetch: mockFetch, sleep, timeoutMs: 1234 });
+    await expect(provider.tip()).resolves.toBe(777);
 
-describe("LiveOgmiosProvider — queryUtxo()", () => {
-  const TEST_REF = { txHash: "b".repeat(64), index: 0 };
-
-  it("uses JSON-RPC method queryLedgerState/utxo", async () => {
-    mockFetch.mockResolvedValueOnce(rpcOk([]));
-
-    const provider = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL });
-    await provider.queryUtxo(TEST_REF);
-
-    const body = JSON.parse(mockFetch.mock.calls[0][1].body as string);
-    expect(body.method).toBe("queryLedgerState/utxo");
-  });
-
-  it("includes outputReferences with txHash and index", async () => {
-    mockFetch.mockResolvedValueOnce(rpcOk([]));
-
-    const provider = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL });
-    await provider.queryUtxo(TEST_REF);
-
-    const body = JSON.parse(mockFetch.mock.calls[0][1].body as string);
-    expect(JSON.stringify(body.params)).toContain(TEST_REF.txHash);
-    expect(JSON.stringify(body.params)).toContain(String(TEST_REF.index));
-  });
-
-  it("returns null when result is empty", async () => {
-    mockFetch.mockResolvedValueOnce(rpcOk([]));
-
-    const provider = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL });
-    const result = await provider.queryUtxo(TEST_REF);
-    expect(result).toBeNull();
-  });
-
-  it("returns parsed Utxo when result has one entry", async () => {
-    mockFetch.mockResolvedValueOnce(rpcOk([makeOgmiosUtxo(TEST_REF.txHash, 0)]));
-
-    const provider = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL });
-    const result = await provider.queryUtxo(TEST_REF);
-    expect(result).not.toBeNull();
-    expect(result!.ref.txHash).toBe(TEST_REF.txHash);
-  });
-});
-
-describe("LiveOgmiosProvider — queryUtxosByAddress()", () => {
-  const TEST_ADDR = "addr_test1vz2fs4y3q9ekzs7zrr5xkjhq5dzl2wkxqh5hqz6v3l9kqaqklyp2";
-
-  it("uses JSON-RPC method queryLedgerState/utxo with addresses param", async () => {
-    mockFetch.mockResolvedValueOnce(rpcOk([]));
-
-    const provider = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL });
-    await provider.queryUtxosByAddress(TEST_ADDR);
-
-    const body = JSON.parse(mockFetch.mock.calls[0][1].body as string);
-    expect(body.method).toBe("queryLedgerState/utxo");
-    expect(JSON.stringify(body.params)).toContain(TEST_ADDR);
-  });
-
-  it("returns empty array when result is empty", async () => {
-    mockFetch.mockResolvedValueOnce(rpcOk([]));
-
-    const provider = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL });
-    const result = await provider.queryUtxosByAddress(TEST_ADDR);
-    expect(result).toEqual([]);
-  });
-
-  it("returns all UTxOs when result has multiple entries", async () => {
-    mockFetch.mockResolvedValueOnce(rpcOk([
-      makeOgmiosUtxo("a".repeat(64), 0),
-      makeOgmiosUtxo("b".repeat(64), 0),
-    ]));
-
-    const provider = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL });
-    const result = await provider.queryUtxosByAddress(TEST_ADDR);
-    expect(result).toHaveLength(2);
-  });
-});
-
-describe("LiveOgmiosProvider — evaluateTx()", () => {
-  it("sends JSON-RPC method evaluateTransaction", async () => {
-    mockFetch.mockResolvedValueOnce(rpcOk([{ validator: "escrow", budget: { memory: 5000, cpu: 10000 } }]));
-
-    const provider = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL });
-    await provider.evaluateTx(DUMMY_TX);
-
-    const body = JSON.parse(mockFetch.mock.calls[0][1].body as string);
-    expect(body.method).toBe("evaluateTransaction");
-  });
-
-  it("passes txCborHex in params.transaction.cbor", async () => {
-    mockFetch.mockResolvedValueOnce(rpcOk({ memory: 1000, steps: 2000 }));
-
-    const provider = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL });
-    await provider.evaluateTx(DUMMY_TX);
-
-    const body = JSON.parse(mockFetch.mock.calls[0][1].body as string);
-    expect(JSON.stringify(body.params)).toContain(DUMMY_TX);
-  });
-
-  it("returns {ok: true} on success with budget aggregated", async () => {
-    mockFetch.mockResolvedValueOnce(rpcOk([{ validator: "escrow", budget: { memory: 5000, cpu: 10000 } }]));
-
-    const provider = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL });
-    const result = await provider.evaluateTx(DUMMY_TX);
-    expect(result.ok).toBe(true);
-  });
-
-  it("returns {ok: false} on JSON-RPC error (script failure)", async () => {
-    mockFetch.mockResolvedValueOnce(rpcError(3010, "Script execution failure"));
-
-    const provider = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL });
-    const result = await provider.evaluateTx(DUMMY_TX);
-    expect(result.ok).toBe(false);
-    expect(typeof result.error).toBe("string");
+    expect(sleep.mock.calls).toEqual([[300]]);
+    expect(timeout.mock.calls).toEqual([[1234], [1234]]);
   });
 });
 
 // ─── B. submitTx() ───────────────────────────────────────────────────────────
 
-describe("LiveOgmiosProvider — submitTx() — success path", () => {
-  it("returns the txHash from result.transaction.id", async () => {
+describe("LiveOgmiosProvider — submitTx()", () => {
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  it("posts submitTransaction with the cbor and a UUID id, and returns result.transaction.id", async () => {
     mockFetch.mockResolvedValueOnce(rpcOk({ transaction: { id: DUMMY_TX_HASH } }));
 
-    const provider = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL });
-    const result = await provider.submitTx(DUMMY_TX);
-    expect(result).toBe(DUMMY_TX_HASH);
-  });
-
-  it("sends a POST to ogmiosUrl", async () => {
-    mockFetch.mockResolvedValueOnce(rpcOk({ transaction: { id: DUMMY_TX_HASH } }));
-
-    const provider = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL });
-    await provider.submitTx(DUMMY_TX);
-
-    expect(mockFetch).toHaveBeenCalledWith(
-      TEST_URL,
-      expect.objectContaining({ method: "POST" }),
-    );
-  });
-
-  it("request body has jsonrpc '2.0', method 'submitTransaction', params.transaction.cbor and a string id", async () => {
-    mockFetch.mockResolvedValueOnce(rpcOk({ transaction: { id: DUMMY_TX_HASH } }));
-
-    const provider = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL });
-    await provider.submitTx(DUMMY_TX);
-
-    const body = JSON.parse(mockFetch.mock.calls[0][1].body as string);
-    expect(body.jsonrpc).toBe("2.0");
-    expect(body.method).toBe("submitTransaction");
-    expect(body.params.transaction.cbor).toBe(DUMMY_TX);
-    // id must be a non-empty string (UUID)
-    expect(typeof body.id).toBe("string");
-    expect(body.id.length).toBeGreaterThan(0);
-  });
-
-  it("request body id is a valid UUID v4 format", async () => {
-    mockFetch.mockResolvedValueOnce(rpcOk({ transaction: { id: DUMMY_TX_HASH } }));
-
-    const provider = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL });
-    await provider.submitTx(DUMMY_TX);
-
-    const body = JSON.parse(mockFetch.mock.calls[0][1].body as string);
-    const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    expect(body.id).toMatch(uuidRe);
-  });
-});
-
-describe("LiveOgmiosProvider — submitTx() — error paths", () => {
-  it("throws on HTTP 5xx error", async () => {
-    mockFetch.mockResolvedValueOnce({ ok: false, status: 503, statusText: "Service Unavailable" });
-
-    const provider = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL });
-    await expect(provider.submitTx(DUMMY_TX)).rejects.toThrow();
-  });
-
-  it("throws OgmiosSubmitError when Ogmios returns a JSON-RPC error", async () => {
-    mockFetch.mockResolvedValueOnce(rpcError(3005, "Invalid transaction", { reason: "bad cbor" }));
-
-    const provider = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL });
-    await expect(provider.submitTx(DUMMY_TX)).rejects.toThrow(OgmiosSubmitError);
-  });
-
-  it("OgmiosSubmitError preserves the JSON-RPC error code", async () => {
-    mockFetch.mockResolvedValueOnce(rpcError(3005, "Invalid transaction", { reason: "bad cbor" }));
-
-    const provider = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL });
-    let caught: unknown;
-    try {
-      await provider.submitTx(DUMMY_TX);
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toBeInstanceOf(OgmiosSubmitError);
-    expect((caught as OgmiosSubmitError).code).toBe(3005);
-  });
-
-  it("OgmiosSubmitError preserves the JSON-RPC error data field", async () => {
-    const errorData = { reason: "bad cbor", detail: "unexpected byte at offset 4" };
-    mockFetch.mockResolvedValueOnce(rpcError(3005, "Invalid transaction", errorData));
-
-    const provider = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL });
-    let caught: unknown;
-    try {
-      await provider.submitTx(DUMMY_TX);
-    } catch (e) {
-      caught = e;
-    }
-    expect((caught as OgmiosSubmitError).data).toMatchObject(errorData);
-  });
-
-  it("OgmiosSubmitError has name 'OgmiosSubmitError'", async () => {
-    mockFetch.mockResolvedValueOnce(rpcError(3005, "err"));
-
-    const provider = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL });
-    let caught: unknown;
-    try {
-      await provider.submitTx(DUMMY_TX);
-    } catch (e) {
-      caught = e;
-    }
-    expect((caught as Error).name).toBe("OgmiosSubmitError");
-  });
-
-  it("throws with reason 'submit_malformed_response' when result.transaction.id is missing", async () => {
-    // Ogmios returns 200 + result but no transaction.id
-    mockFetch.mockResolvedValueOnce(rpcOk({ transaction: {} }));
-
-    const provider = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL });
-    let caught: unknown;
-    try {
-      await provider.submitTx(DUMMY_TX);
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toBeInstanceOf(Error);
-    expect((caught as Error).message).toMatch(/submit_malformed_response/);
-  });
-
-  it("throws with reason 'submit_malformed_response' when result itself is missing", async () => {
-    // Ogmios returns 200 but no result and no error
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: () => Promise.resolve({ jsonrpc: "2.0" }),
-    });
-
-    const provider = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL });
-    await expect(provider.submitTx(DUMMY_TX)).rejects.toThrow(/submit_malformed_response/);
-  });
-});
-
-// ─── C. awaitTx() ────────────────────────────────────────────────────────────
-// Note: awaitTx tests use fake timers to control polling cadence and timeouts.
-// The runAwaitTx helper attaches a catch handler immediately after calling
-// awaitTx to silence Node's unhandledRejection for the RED-phase stub,
-// then re-throws via the returned promise.
-
-async function runAwaitTx(
-  provider: LiveOgmiosProvider,
-  txHash: string,
-  timeoutMs: number,
-): Promise<void> {
-  // Start the call, then advance timers, then await the settled promise.
-  // This prevents unhandled rejections when the stub throws synchronously.
-  const p = provider.awaitTx(txHash, timeoutMs);
-  // Attach a no-op rejection handler immediately to silence Node's
-  // unhandledRejection for the RED-phase stub.
-  p.catch(() => { /* intentional — will re-throw below */ });
-  await vi.runAllTimersAsync();
-  return p;
-}
-
-describe("LiveOgmiosProvider — awaitTx() — resolves on confirmation", () => {
-  beforeEach(() => { vi.useFakeTimers(); });
-  afterEach(() => { vi.useRealTimers(); });
-
-  it("resolves when polling finds a UTxO with matching transactionId", async () => {
-    mockFetch.mockResolvedValueOnce(rpcOk([makeOgmiosUtxo(DUMMY_TX_HASH, 0)]));
-
-    const provider = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL });
-    await expect(runAwaitTx(provider, DUMMY_TX_HASH, 10_000)).resolves.toBeUndefined();
-  });
-
-  it("resolves on first poll without issuing further polls", async () => {
-    mockFetch.mockResolvedValue(rpcOk([makeOgmiosUtxo(DUMMY_TX_HASH, 0)]));
-
-    const provider = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL });
-    await runAwaitTx(provider, DUMMY_TX_HASH, 10_000).catch(() => { /* RED */ });
-
-    // In GREEN, fetch should have been called exactly once
-    // In RED, fetch is never called (stub throws), so we assert the spec
-    // is encoded: if the provider were implemented, only 1 fetch would occur
-    // on a first-poll hit.
-    expect(mockFetch).toHaveBeenCalledTimes(
-      // RED: 0 calls (stub throws before fetching)
-      // GREEN: 1 call (first poll returns result)
-      mockFetch.mock.calls.length,
-    );
-    // The real assertion: after implementation, exactly 1 fetch for first-poll success
-    if (mockFetch.mock.calls.length > 0) {
-      expect(mockFetch).toHaveBeenCalledTimes(1);
-    }
-  });
-
-  it("issues multiple polls before resolving (GREEN: asserts fetchCallCount === 3)", async () => {
-    mockFetch
-      .mockResolvedValueOnce(rpcOk([]))
-      .mockResolvedValueOnce(rpcOk([]))
-      .mockResolvedValueOnce(rpcOk([makeOgmiosUtxo(DUMMY_TX_HASH, 0)]));
-
-    const provider = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL, pollIntervalMs: 2000 });
-    await expect(runAwaitTx(provider, DUMMY_TX_HASH, 10_000)).resolves.toBeUndefined();
-
-    expect(mockFetch).toHaveBeenCalledTimes(3);
-  });
-
-  it("polls using queryLedgerState/utxo with synthetic outputReference for the txHash", async () => {
-    mockFetch.mockResolvedValueOnce(rpcOk([makeOgmiosUtxo(DUMMY_TX_HASH, 0)]));
-
-    const provider = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL });
-    await runAwaitTx(provider, DUMMY_TX_HASH, 10_000).catch(() => { /* RED */ });
-
-    // In GREEN, the fetch body must use queryLedgerState/utxo with the txHash
-    if (mockFetch.mock.calls.length > 0) {
-      const body = JSON.parse(mockFetch.mock.calls[0][1].body as string);
-      expect(body.method).toBe("queryLedgerState/utxo");
-      expect(JSON.stringify(body.params)).toContain(DUMMY_TX_HASH);
-    } else {
-      // RED: stub didn't reach fetch — fail with a clear message
-      expect(mockFetch).toHaveBeenCalled(); // will fail: 0 calls
-    }
-  });
-
-  it("resolves even when Ogmios returns UTxO at index > 0 for the same txHash", async () => {
-    mockFetch.mockResolvedValueOnce(rpcOk([makeOgmiosUtxo(DUMMY_TX_HASH, 1)]));
-
-    const provider = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL });
-    await expect(runAwaitTx(provider, DUMMY_TX_HASH, 10_000)).resolves.toBeUndefined();
-  });
-});
-
-describe("LiveOgmiosProvider — awaitTx() — timeout", () => {
-  beforeEach(() => { vi.useFakeTimers(); });
-  afterEach(() => { vi.useRealTimers(); });
-
-  it("rejects after timeoutMs when tx never appears", async () => {
-    mockFetch.mockResolvedValue(rpcOk([]));
-
-    const provider = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL, pollIntervalMs: 100 });
-    await expect(runAwaitTx(provider, DUMMY_TX_HASH, 500)).rejects.toThrow();
-  });
-
-  it("timeout error message references the txHash", async () => {
-    mockFetch.mockResolvedValue(rpcOk([]));
-
-    const provider = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL, pollIntervalMs: 100 });
-    let caught: unknown;
-    try {
-      await runAwaitTx(provider, DUMMY_TX_HASH, 500);
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toBeInstanceOf(Error);
-    expect((caught as Error).message).toContain(DUMMY_TX_HASH);
-  });
-
-  it("aborts in-flight fetch after timeout", async () => {
-    let capturedSignal: AbortSignal | undefined;
-    mockFetch.mockImplementation((_url: string, init?: RequestInit) => {
-      capturedSignal = init?.signal as AbortSignal | undefined;
-      return new Promise(() => { /* never resolves */ });
-    });
-
-    const provider = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL, pollIntervalMs: 100 });
-    await expect(runAwaitTx(provider, DUMMY_TX_HASH, 200)).rejects.toThrow();
-
-    // In GREEN: the AbortController signal passed to fetch must be aborted
-    if (capturedSignal !== undefined) {
-      expect(capturedSignal.aborted).toBe(true);
-    } else {
-      // RED: stub didn't reach fetch — signal never captured; fail clearly
-      expect(capturedSignal).toBeDefined(); // will fail
-    }
-  });
-});
-
-// ─── D. Read-method composition parity ───────────────────────────────────────
-// Live provider and ReadOnly provider should send identical request bodies
-// for the same inputs on all four read methods.
-//
-// Helper: call the provider and capture the fetch body. If fetch was never
-// called (e.g. stub threw before reaching fetch), re-throw so the test
-// correctly fails with "not implemented — M1-F-2-green" rather than
-// a confusing "cannot read property" frame.
-
-describe("LiveOgmiosProvider — composition parity with ReadOnlyOgmiosProvider", () => {
-  async function captureBodyOrThrow(call: () => Promise<unknown>): Promise<Record<string, unknown>> {
-    try {
-      await call();
-    } catch {
-      // rethrow only if fetch was never reached (stub threw before the HTTP call)
-      if (mockFetch.mock.calls.length === 0) throw new Error("LiveOgmiosProvider did not reach fetch — not implemented");
-      // otherwise ignore the error (we only care about the request body)
-    }
-    const lastCall = mockFetch.mock.calls[mockFetch.mock.calls.length - 1];
-    return JSON.parse(lastCall[1].body as string) as Record<string, unknown>;
-  }
-
-  it("tip() — identical jsonrpc, method fields", async () => {
-    mockFetch.mockResolvedValue(rpcOk({ slot: 1, id: "a".repeat(64) }));
-
-    const live = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL });
-    const liveBody = await captureBodyOrThrow(() => live.tip());
-
-    mockFetch.mockReset();
-    mockFetch.mockResolvedValue(rpcOk({ slot: 1, id: "a".repeat(64) }));
-    const readOnly = new ReadOnlyOgmiosProvider({ ogmiosUrl: TEST_URL });
-    const roBody = await captureBodyOrThrow(() => readOnly.tip());
-
-    expect(liveBody.jsonrpc).toBe(roBody.jsonrpc);
-    expect(liveBody.method).toBe(roBody.method);
-  });
-
-  it("queryUtxo() — identical method and params shape", async () => {
-    const ref = { txHash: "c".repeat(64), index: 2 };
-    mockFetch.mockResolvedValue(rpcOk([]));
-
-    const live = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL });
-    const liveBody = await captureBodyOrThrow(() => live.queryUtxo(ref));
-
-    mockFetch.mockReset();
-    mockFetch.mockResolvedValue(rpcOk([]));
-    const readOnly = new ReadOnlyOgmiosProvider({ ogmiosUrl: TEST_URL });
-    const roBody = await captureBodyOrThrow(() => readOnly.queryUtxo(ref));
-
-    expect(liveBody.method).toBe(roBody.method);
-    // Both must include the txHash in params
-    expect(JSON.stringify(liveBody.params)).toContain(ref.txHash);
-    expect(JSON.stringify(roBody.params)).toContain(ref.txHash);
-  });
-
-  it("queryUtxosByAddress() — identical method and address in params", async () => {
-    const addr = "addr_test1vz2fs4y3q9ekzs7zrr5xkjhq5dzl2wkxqh5hqz6v3l9kqaqklyp2";
-    mockFetch.mockResolvedValue(rpcOk([]));
-
-    const live = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL });
-    const liveBody = await captureBodyOrThrow(() => live.queryUtxosByAddress(addr));
-
-    mockFetch.mockReset();
-    mockFetch.mockResolvedValue(rpcOk([]));
-    const readOnly = new ReadOnlyOgmiosProvider({ ogmiosUrl: TEST_URL });
-    const roBody = await captureBodyOrThrow(() => readOnly.queryUtxosByAddress(addr));
-
-    expect(liveBody.method).toBe(roBody.method);
-    expect(JSON.stringify(liveBody.params)).toContain(addr);
-    expect(JSON.stringify(roBody.params)).toContain(addr);
-  });
-
-  it("evaluateTx() — identical method and txCborHex in params", async () => {
-    mockFetch.mockResolvedValue(rpcOk({ memory: 1000, steps: 2000 }));
-
-    const live = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL });
-    const liveBody = await captureBodyOrThrow(() => live.evaluateTx(DUMMY_TX));
-
-    mockFetch.mockReset();
-    mockFetch.mockResolvedValue(rpcOk({ memory: 1000, steps: 2000 }));
-    const readOnly = new ReadOnlyOgmiosProvider({ ogmiosUrl: TEST_URL });
-    const roBody = await captureBodyOrThrow(() => readOnly.evaluateTx(DUMMY_TX));
-
-    expect(liveBody.method).toBe(roBody.method);
-    expect(JSON.stringify(liveBody.params)).toContain(DUMMY_TX);
-    expect(JSON.stringify(roBody.params)).toContain(DUMMY_TX);
-  });
-});
-
-// ─── E. Retry of a read-only request after a transient error ──────────────────
-//
-// The read calls go through the inner ReadOnlyOgmiosProvider, so the rule of
-// packages/shared/src/chain/ogmiosRetry.ts applies to them: at most 3 tries, a
-// wait of 300 ms and then 1,000 ms, only for an HTTP status of 500 or higher or
-// a network error, never after a timeout or an abort. The `sleep` option of the
-// Live provider must reach that inner provider.
-// submitTx is NEVER tried again. awaitTx has no second retry level: its poll
-// loop is the retry.
-
-const HTTP_500 = { ok: false, status: 500, statusText: "Internal Server Error" };
-const HTTP_502 = { ok: false, status: 502, statusText: "Bad Gateway" };
-
-function tipAnswer(slot: number) {
-  return rpcOk({ slot, id: "a".repeat(64) });
-}
-
-function timeoutError(): DOMException {
-  return new DOMException("The operation was aborted due to timeout", "TimeoutError");
-}
-
-function abortError(): DOMException {
-  return new DOMException("This operation was aborted", "AbortError");
-}
-
-describe("LiveOgmiosProvider — a read-only request is tried again after a transient error", () => {
-  // The URL holds a credential in the path: no warn line may show it.
-  const CREDENTIAL_URL = "https://ogmios.example/secret-key-123";
-  const sleep = vi.fn(async (_ms: number): Promise<void> => {});
-  let warn: MockInstance<typeof console.warn>;
-
-  function makeProvider(extra: { timeoutMs?: number } = {}) {
-    return new LiveOgmiosProvider({ ogmiosUrl: CREDENTIAL_URL, fetch: mockFetch, sleep, ...extra });
-  }
-
-  beforeEach(() => {
-    sleep.mockClear();
-    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-  });
-
-  it("tip() returns the answer of try 2 after one HTTP 500: 2 calls, 1 warn line", async () => {
-    mockFetch.mockResolvedValueOnce(HTTP_500).mockResolvedValueOnce(tipAnswer(777));
-
-    await expect(makeProvider().tip()).resolves.toBe(777);
-
-    expect(mockFetch).toHaveBeenCalledTimes(2);
-    expect(warn.mock.calls).toEqual([["[ogmios] retry 1/2 method=queryNetwork/tip cause=500"]]);
-    expect(sleep.mock.calls).toEqual([[300]]);
-  });
-
-  it("tip() returns the answer of try 3 after HTTP 500 and HTTP 502: 3 calls, 2 warn lines, waits 300 ms and 1,000 ms", async () => {
-    mockFetch
-      .mockResolvedValueOnce(HTTP_500)
-      .mockResolvedValueOnce(HTTP_502)
-      .mockResolvedValueOnce(tipAnswer(778));
-
-    await expect(makeProvider().tip()).resolves.toBe(778);
-
-    expect(mockFetch).toHaveBeenCalledTimes(3);
-    expect(warn.mock.calls).toEqual([
-      ["[ogmios] retry 1/2 method=queryNetwork/tip cause=500"],
-      ["[ogmios] retry 2/2 method=queryNetwork/tip cause=502"],
-    ]);
-    expect(sleep.mock.calls).toEqual([[300], [1000]]);
-  });
-
-  it("tip() throws the same error as before after three HTTP 500: 3 calls", async () => {
-    mockFetch.mockResolvedValue(HTTP_500);
-
-    const error = await makeProvider().tip().catch((e: unknown) => e);
-
-    expect(error).toBeInstanceOf(Error);
-    expect((error as Error).constructor).toBe(Error);
-    expect((error as Error).message).toBe("Ogmios HTTP error: 500 Internal Server Error");
-    expect(mockFetch).toHaveBeenCalledTimes(3);
-  });
-
-  it("tip() returns the answer of try 2 after one network error", async () => {
-    mockFetch.mockRejectedValueOnce(new TypeError("fetch failed")).mockResolvedValueOnce(tipAnswer(5));
-
-    await expect(makeProvider().tip()).resolves.toBe(5);
-
-    expect(mockFetch).toHaveBeenCalledTimes(2);
-    expect(warn.mock.calls).toEqual([["[ogmios] retry 1/2 method=queryNetwork/tip cause=TypeError"]]);
-  });
-
-  it("tip() does not try an HTTP 400 with a JSON-RPC error body again, and keeps the thrown text", async () => {
-    mockFetch.mockResolvedValue({
-      ok: false,
-      status: 400,
-      statusText: "Bad Request",
-      json: () => Promise.resolve({ jsonrpc: "2.0", error: { code: -32600, message: "Invalid Request" } }),
-    });
-
-    await expect(makeProvider().tip()).rejects.toThrow(new Error("Ogmios HTTP error: 400 Bad Request"));
+    await expect(new LiveOgmiosProvider({ ogmiosUrl: TEST_URL }).submitTx(DUMMY_TX)).resolves.toBe(DUMMY_TX_HASH);
 
     expect(mockFetch).toHaveBeenCalledTimes(1);
-    expect(sleep).not.toHaveBeenCalled();
-    expect(warn).not.toHaveBeenCalled();
-  });
-
-  it("tip() does not try again after HTTP 200 with a JSON-RPC error", async () => {
-    mockFetch.mockResolvedValue(rpcError(-32600, "Invalid Request"));
-
-    await expect(makeProvider().tip()).rejects.toThrow(new Error("Ogmios RPC error: Invalid Request"));
-
-    expect(mockFetch).toHaveBeenCalledTimes(1);
-    expect(warn).not.toHaveBeenCalled();
+    const [url, init] = mockFetch.mock.calls[0];
+    expect(url).toBe(TEST_URL);
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body)).toEqual({
+      jsonrpc: "2.0",
+      method: "submitTransaction",
+      params: { transaction: { cbor: DUMMY_TX } },
+      id: expect.stringMatching(UUID),
+    });
   });
 
   it.each([
-    ["a TimeoutError", timeoutError],
-    ["an AbortError", abortError],
-  ])("tip() does not try again after %s on try 1", async (_label, make) => {
-    const error = make();
-    mockFetch.mockRejectedValue(error);
+    [
+      "no transaction.id",
+      rpcOk({ transaction: {} }),
+      'submit_malformed_response: Ogmios did not return result.transaction.id (got {"transaction":{}})',
+    ],
+    [
+      "no result",
+      { ok: true, json: () => Promise.resolve({ jsonrpc: "2.0" }) },
+      "submit_malformed_response: Ogmios did not return result.transaction.id (got undefined)",
+    ],
+  ])("throws submit_malformed_response for an answer with %s", async (_label, answer, message) => {
+    mockFetch.mockResolvedValueOnce(answer);
 
-    await expect(makeProvider().tip()).rejects.toBe(error);
-
-    expect(mockFetch).toHaveBeenCalledTimes(1);
-    expect(sleep).not.toHaveBeenCalled();
-    expect(warn).not.toHaveBeenCalled();
-  });
-
-  it("gives each try a timeout signal with the timeout of the provider", async () => {
-    const timeout = vi.spyOn(AbortSignal, "timeout");
-    mockFetch.mockResolvedValueOnce(HTTP_500).mockResolvedValueOnce(tipAnswer(5));
-
-    await expect(makeProvider({ timeoutMs: 1234 }).tip()).resolves.toBe(5);
-
-    expect(timeout.mock.calls).toEqual([[1234], [1234]]);
-    const [first, second] = mockFetch.mock.calls.map((call) => call[1].signal as AbortSignal);
-    expect(first).not.toBe(second);
-  });
-
-  it("queryUtxo() returns the answer of try 2 after one HTTP 500", async () => {
-    const ref = { txHash: "c".repeat(64), index: 1 };
-    mockFetch.mockResolvedValueOnce(HTTP_500).mockResolvedValueOnce(rpcOk([makeOgmiosUtxo(ref.txHash, 1)]));
-
-    const result = await makeProvider().queryUtxo(ref);
-
-    expect(result?.ref).toEqual(ref);
-    expect(mockFetch).toHaveBeenCalledTimes(2);
-    expect(warn.mock.calls).toEqual([["[ogmios] retry 1/2 method=queryLedgerState/utxo cause=500"]]);
-  });
-
-  it("queryUtxosByAddress() returns the answer of try 3 after HTTP 500 and a network error, with warn lines that hold no URL, body or params", async () => {
-    const address = "addr_test1vz2fs4y3q9ekzs7zrr5xkjhq5dzl2wkxqh5hqz6v3l9kqaqklyp2";
-    mockFetch
-      .mockResolvedValueOnce(HTTP_500)
-      .mockRejectedValueOnce(new TypeError("fetch failed"))
-      .mockResolvedValueOnce(rpcOk([makeOgmiosUtxo()]));
-
-    const result = await makeProvider().queryUtxosByAddress(address);
-
-    expect(result).toHaveLength(1);
-    expect(mockFetch).toHaveBeenCalledTimes(3);
-    expect(warn.mock.calls).toEqual([
-      ["[ogmios] retry 1/2 method=queryLedgerState/utxo cause=500"],
-      ["[ogmios] retry 2/2 method=queryLedgerState/utxo cause=TypeError"],
-    ]);
-    const written = JSON.stringify(warn.mock.calls);
-    expect(written).not.toContain("secret-key-123");
-    expect(written).not.toContain("ogmios.example");
-    expect(written).not.toContain(address);
-  });
-
-  it("evaluateTx() returns the answer of try 2 after one HTTP 500: 2 calls", async () => {
-    mockFetch
-      .mockResolvedValueOnce(HTTP_500)
-      .mockResolvedValueOnce(rpcOk([{ validator: "escrow", budget: { memory: 5000, cpu: 10000 } }]));
-
-    const result = await makeProvider().evaluateTx(DUMMY_TX);
-
-    expect(result).toEqual({ ok: true, cost: { memory: 5000, steps: 10000 } });
-    expect(mockFetch).toHaveBeenCalledTimes(2);
-    expect(warn.mock.calls).toEqual([["[ogmios] retry 1/2 method=evaluateTransaction cause=500"]]);
-    expect(sleep.mock.calls).toEqual([[300]]);
-  });
-
-  it("evaluateTx() throws the same error as before after three HTTP 500: 3 calls", async () => {
-    mockFetch.mockResolvedValue(HTTP_500);
-
-    await expect(makeProvider().evaluateTx(DUMMY_TX)).rejects.toThrow(
-      new Error("Ogmios HTTP error: 500 Internal Server Error"),
-    );
-
-    expect(mockFetch).toHaveBeenCalledTimes(3);
-  });
-
-  it("evaluateTx() does not try again after HTTP 200 with a JSON-RPC error", async () => {
-    mockFetch.mockResolvedValue(rpcError(3010, "Script execution failure"));
-
-    await expect(makeProvider().evaluateTx(DUMMY_TX)).resolves.toMatchObject({ ok: false });
-
-    expect(mockFetch).toHaveBeenCalledTimes(1);
+    await expect(new LiveOgmiosProvider({ ogmiosUrl: TEST_URL }).submitTx(DUMMY_TX)).rejects.toThrow(new Error(message));
   });
 });
 
-describe("LiveOgmiosProvider — submitTx() is never tried again", () => {
-  // A submit that got no clear answer may be on chain: one try, whatever the error.
-  const sleep = vi.fn(async (_ms: number): Promise<void> => {});
+describe("LiveOgmiosProvider — submitTx() makes one call, whatever the error", () => {
+  // A submit that got no clear answer may be on chain. A second submit of the same transaction fails with a misleading error, and the
+  // caller would treat a transaction that is on chain as failed. So submitTx never tries again (commit 3259ca9).
+  const sleep = vi.fn(instantSleep);
   let warn: MockInstance<typeof console.warn>;
 
   function makeProvider() {
@@ -808,55 +152,127 @@ describe("LiveOgmiosProvider — submitTx() is never tried again", () => {
     expect(warn).not.toHaveBeenCalled();
   }
 
-  it("makes one call after HTTP 500, and throws the same error as before", async () => {
-    mockFetch.mockResolvedValue({
-      ok: false,
-      status: 500,
-      statusText: "Internal Server Error",
-      text: () => Promise.resolve("upstream down"),
-    });
+  it.each([
+    [
+      "HTTP 500: the text of the error holds the body",
+      { ok: false, status: 500, statusText: "Internal Server Error", text: () => Promise.resolve("upstream down") },
+      "Ogmios HTTP error: 500 Internal Server Error :: upstream down",
+    ],
+    [
+      "HTTP 503 with a body that cannot be read",
+      { ok: false, status: 503, statusText: "Service Unavailable", text: () => Promise.reject(new Error("socket closed")) },
+      "Ogmios HTTP error: 503 Service Unavailable :: ",
+    ],
+  ])("after %s", async (_label, answer, message) => {
+    mockFetch.mockResolvedValue(answer);
 
-    await expect(makeProvider().submitTx(DUMMY_TX)).rejects.toThrow(
-      new Error("Ogmios HTTP error: 500 Internal Server Error :: upstream down"),
-    );
-
-    expectOneTryOnly();
-  });
-
-  it.each([502, 503, 504, 522, 524])("makes one call after HTTP %i", async (status) => {
-    mockFetch.mockResolvedValue({ ok: false, status, statusText: "x", text: () => Promise.resolve("") });
-
-    await expect(makeProvider().submitTx(DUMMY_TX)).rejects.toThrow(`Ogmios HTTP error: ${status} x`);
-
-    expectOneTryOnly();
-  });
-
-  it("makes one call after a network error, and throws that error", async () => {
-    const error = new TypeError("fetch failed");
-    mockFetch.mockRejectedValue(error);
-
-    await expect(makeProvider().submitTx(DUMMY_TX)).rejects.toBe(error);
+    await expect(makeProvider().submitTx(DUMMY_TX)).rejects.toThrow(new Error(message));
 
     expectOneTryOnly();
   });
 
   it.each([
-    ["a TimeoutError", timeoutError],
-    ["an AbortError", abortError],
-  ])("makes one call after %s, and throws that error", async (_label, make) => {
-    const error = make();
+    ["a network error", new TypeError("fetch failed")],
+    ["a TimeoutError", timeoutError()],
+  ])("after %s, throws that error", async (_label, error) => {
     mockFetch.mockRejectedValue(error);
 
     await expect(makeProvider().submitTx(DUMMY_TX)).rejects.toBe(error);
 
     expectOneTryOnly();
   });
+
+  it("after a JSON-RPC error, throws OgmiosSubmitError with its name, message, code and data", async () => {
+    const data = { reason: "bad cbor", detail: "unexpected byte at offset 4" };
+    mockFetch.mockResolvedValue(rpcError(3005, "Invalid transaction", data));
+
+    const error = await makeProvider().submitTx(DUMMY_TX).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(OgmiosSubmitError);
+    expect(error).toMatchObject({ name: "OgmiosSubmitError", message: "Invalid transaction", code: 3005, data });
+    expectOneTryOnly();
+  });
+});
+
+// ─── C. awaitTx() ────────────────────────────────────────────────────────────
+// awaitTx tests use fake timers to control the polling cadence and the timeout.
+
+async function runAwaitTx(provider: LiveOgmiosProvider, txHash: string, timeoutMs: number): Promise<void> {
+  const call = provider.awaitTx(txHash, timeoutMs);
+  // Attach a handler at once: the call can reject while the timers run, before the caller awaits it.
+  call.catch(() => {});
+  await vi.runAllTimersAsync();
+  return call;
+}
+
+describe("LiveOgmiosProvider — awaitTx()", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("resolves on the first poll that lists the transaction, after one request for its output reference", async () => {
+    mockFetch.mockResolvedValue(rpcOk([makeOgmiosUtxo(DUMMY_TX_HASH, 0)]));
+    const provider = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL });
+
+    await expect(runAwaitTx(provider, DUMMY_TX_HASH, 10_000)).resolves.toBeUndefined();
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(mockFetch.mock.calls[0][1].body)).toMatchObject({
+      method: "queryLedgerState/utxo",
+      params: { outputReferences: [{ transaction: { id: DUMMY_TX_HASH }, index: 0 }] },
+    });
+  });
+
+  it("polls again until a poll lists the transaction", async () => {
+    mockFetch
+      .mockResolvedValueOnce(rpcOk([]))
+      .mockResolvedValueOnce(rpcOk([]))
+      .mockResolvedValueOnce(rpcOk([makeOgmiosUtxo(DUMMY_TX_HASH, 0)]));
+    const provider = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL, pollIntervalMs: 2000 });
+
+    await expect(runAwaitTx(provider, DUMMY_TX_HASH, 10_000)).resolves.toBeUndefined();
+
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("resolves when Ogmios lists the output at an index above 0 for the same transaction", async () => {
+    mockFetch.mockResolvedValueOnce(rpcOk([makeOgmiosUtxo(DUMMY_TX_HASH, 1)]));
+    const provider = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL });
+
+    await expect(runAwaitTx(provider, DUMMY_TX_HASH, 10_000)).resolves.toBeUndefined();
+  });
+
+  it("rejects after timeoutMs when the transaction never appears, and the error names the hash", async () => {
+    mockFetch.mockResolvedValue(rpcOk([]));
+    const provider = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL, pollIntervalMs: 100 });
+
+    await expect(runAwaitTx(provider, DUMMY_TX_HASH, 500)).rejects.toThrow(
+      `awaitTx_timeout: tx ${DUMMY_TX_HASH} not observed within 500ms`,
+    );
+  });
+
+  it("aborts the fetch of the poll after the timeout", async () => {
+    let capturedSignal: AbortSignal | undefined;
+    mockFetch.mockImplementation((_url: string, init?: RequestInit) => {
+      capturedSignal = init?.signal as AbortSignal | undefined;
+      return new Promise(() => { /* never resolves */ });
+    });
+    const provider = new LiveOgmiosProvider({ ogmiosUrl: TEST_URL, pollIntervalMs: 100 });
+
+    await expect(runAwaitTx(provider, DUMMY_TX_HASH, 200)).rejects.toThrow(/awaitTx_timeout/);
+
+    expect(capturedSignal?.aborted).toBe(true);
+  });
 });
 
 describe("LiveOgmiosProvider — awaitTx() has no retry level inside its poll loop", () => {
-  // The poll loop is the retry: an HTTP 500 answer ends one poll with `false`,
-  // and the next poll starts after pollIntervalMs. Nothing is tried again inside a poll.
-  const sleep = vi.fn(async (_ms: number): Promise<void> => {});
+  // The poll loop is the retry: an HTTP 500 answer ends one poll with `false`, and the next poll starts after pollIntervalMs.
+  // Nothing is tried again inside a poll (commit 3259ca9).
+  const sleep = vi.fn(instantSleep);
   let warn: MockInstance<typeof console.warn>;
 
   beforeEach(() => {
