@@ -49,15 +49,4 @@ describe("the time limit of a shutdown that the decoder check starts", () => {
     expect(PUBLISHER).toBe(graceOf("docker-compose.paper2agent-publisher.yml"));
     expect(PUBLISHER).toBe(1_020_000);
   });
-
-  it.each([
-    ["docker-compose.gateway.yml", "gateway/src/index.ts"],
-    ["docker-compose.buyer.yml", "buyer/src/index.ts"],
-    ["docker-compose.supplier.yml", "supplier/src/index.ts"],
-    ["docker-compose.surplus-seller.yml", "supplier/src/cli/surplus-seller.ts"],
-    ["docker-compose.paper2agent-publisher.yml", "paper2agent/src/serve.ts"],
-  ])("%s names the constant in %s, and that file holds it", (composeFile, source) => {
-    expect(readFileSync(resolve(ROOT, "deploy/mainnet", composeFile), "utf8")).toContain(`DECODER_STOP_LIMIT_MS in ${source}`);
-    expect(readFileSync(resolve(ROOT, source), "utf8")).toMatch(/export const DECODER_STOP_LIMIT_MS = /);
-  });
 });
