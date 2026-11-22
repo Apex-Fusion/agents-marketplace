@@ -9,19 +9,12 @@ import { extractPdfText } from "../../buyer/src/pdf/extract.js";
 import { PdfExtractionError } from "../../buyer/src/pdf/types.js";
 
 describe("extractPdfText", () => {
-  it("throws a structured PdfExtractionError on a non-PDF buffer", async () => {
-    await expect(extractPdfText(Buffer.from("definitely not a pdf"))).rejects.toBeInstanceOf(
-      PdfExtractionError,
+  it("throws a PdfExtractionError with the reason pdf_parse_failed on a non-PDF buffer", async () => {
+    const error = await extractPdfText(Buffer.from("definitely not a pdf")).then(
+      () => undefined,
+      (e: unknown) => e,
     );
-  });
-
-  it("error carries a machine-readable reason", async () => {
-    try {
-      await extractPdfText(Buffer.from("nope"));
-      throw new Error("expected throw");
-    } catch (e) {
-      expect(e).toBeInstanceOf(PdfExtractionError);
-      expect((e as PdfExtractionError).reason).toBeTruthy();
-    }
+    expect(error).toBeInstanceOf(PdfExtractionError);
+    expect((error as PdfExtractionError).reason).toBe("pdf_parse_failed");
   });
 });

@@ -13,7 +13,7 @@ import { PdfJobDb } from "../../buyer/src/pdf/job-db.js";
 import { loadPdfCaps } from "../../buyer/src/pdf/caps.js";
 import type { Chunk } from "../../buyer/src/pdf/types.js";
 import type { Marketplace } from "../../buyer/src/sdk/Marketplace.js";
-import type { SupplierView } from "../../buyer/src/sdk/types.js";
+import { makeSupplierView } from "../fixtures/buyer-side/supplier-views.js";
 import type { ChainProvider } from "../../packages/shared/src/chain/ChainProvider.js";
 import type { WalletKey } from "../../packages/shared/src/tx/types.js";
 import { canonicalize } from "../../packages/shared/src/cbor/canonical.js";
@@ -24,33 +24,10 @@ import {
 } from "../../packages/shared/src/responses.js";
 import type { ResponseArchive, PersistChatParams } from "../../buyer/src/db/archive.js";
 
-function supplierView(model: string, ref: string, price: string): SupplierView {
-  return {
-    utxo_ref: ref,
-    supplier_pkh: `pkh_${model}`,
-    capability_id: "llm.text.generate.v1",
-    model,
-    max_output_tokens: 512,
-    max_processing_ms: 60000,
-    price_lovelace: price,
-    supplier_bond_lovelace: "1000000",
-    buyer_bond_lovelace: "1000000",
-    endpoint_url: "http://supplier",
-    detail_uri: "",
-    detail_hash: "",
-    advertised_at: 0,
-    status: "active",
-    advert_status: "Active",
-    current_escrow_ref: null,
-    last_seen_iso: null,
-    created_slot: 0,
-  };
-}
-
 const MARKETPLACE = {
   discoverSuppliers: async () => [
-    supplierView("kimi-k2", `${"a".repeat(64)}#0`, "2000000"),
-    supplierView("deepseek", `${"b".repeat(64)}#0`, "3000000"),
+    makeSupplierView({ model: "kimi-k2" }),
+    makeSupplierView({ model: "deepseek", supplier_pkh: "b".repeat(56), utxo_ref: `${"b".repeat(64)}#0`, price_lovelace: "3000000" }),
   ],
 } as unknown as Marketplace;
 

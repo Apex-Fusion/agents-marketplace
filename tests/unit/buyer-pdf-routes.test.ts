@@ -8,41 +8,18 @@ import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { createApp } from "../../buyer/src/server.js";
-import { JobStore, type RunCallFn } from "../../buyer/src/pdf/summarize-job.js";
+import { JobStore, type Job, type RunCallFn } from "../../buyer/src/pdf/summarize-job.js";
 import { PdfJobDb } from "../../buyer/src/pdf/job-db.js";
 import { loadPdfCaps } from "../../buyer/src/pdf/caps.js";
 import type { Chunk } from "../../buyer/src/pdf/types.js";
 import type { Marketplace } from "../../buyer/src/sdk/Marketplace.js";
-import type { SupplierView } from "../../buyer/src/sdk/types.js";
+import { makeSupplierView } from "../fixtures/buyer-side/supplier-views.js";
 import type { ChainProvider } from "../../packages/shared/src/chain/ChainProvider.js";
 import type { WalletKey } from "../../packages/shared/src/tx/types.js";
 import { createResponse } from "../../packages/shared/src/responses.js";
 
-function supplierView(model: string, ref: string, price: string): SupplierView {
-  return {
-    utxo_ref: ref,
-    supplier_pkh: `pkh_${model}`,
-    capability_id: "llm.text.generate.v1",
-    model,
-    max_output_tokens: 512,
-    max_processing_ms: 60000,
-    price_lovelace: price,
-    supplier_bond_lovelace: "1000000",
-    buyer_bond_lovelace: "1000000",
-    endpoint_url: "http://supplier",
-    detail_uri: "",
-    detail_hash: "",
-    advertised_at: 0,
-    status: "active",
-    advert_status: "Active",
-    current_escrow_ref: null,
-    last_seen_iso: null,
-    created_slot: 0,
-  };
-}
-
 const MARKETPLACE = {
-  discoverSuppliers: async () => [supplierView("kimi-k2", `${"a".repeat(64)}#0`, "2000000")],
+  discoverSuppliers: async () => [makeSupplierView({ model: "kimi-k2" })],
 } as unknown as Marketplace;
 const WALLET = { address: "addr_test", pubKeyHash: "pkh", pubKeyHex: "", privateKeyHex: "0".repeat(64) } as WalletKey;
 const CHAIN = {} as ChainProvider;
@@ -82,6 +59,16 @@ function makeStore(opts?: { balance?: bigint; caps?: Record<string, string>; db?
 
 function chunks(n: number): Chunk[] {
   return Array.from({ length: n }, (_, i) => ({ index: i, text: `chunk ${i}`, tokenEstimate: 5 }));
+}
+
+/** Resolves when the job sends its terminal `done` frame. A late subscriber gets the frames that it missed. */
+function jobDone(job: Job): Promise<void> {
+  // Node 20 has no Promise.withResolvers.
+  return new Promise<void>((resolve) => {
+    job.subscribe((frame) => {
+      if (frame.startsWith("event: done")) resolve();
+    });
+  });
 }
 
 describe("/v1/pdf-* routes", () => {
@@ -137,12 +124,11 @@ describe("/v1/pdf-* routes", () => {
       const seeded = store1.createJob("Past.pdf", 2, chunks(2));
       const app1 = createApp({ jobStore: store1, pdfCaps: loadPdfCaps({}) });
       const { default: request } = await import("supertest");
-      await request(app1).post(`/v1/pdf-jobs/${seeded.jobId}/start`).send({ confirm: true });
-      let view = seeded.view();
-      for (let i = 0; i < 100 && view.status === "running"; i++) {
-        await new Promise((r) => setTimeout(r, 10));
-        view = (await request(app1).get(`/v1/pdf-jobs/${seeded.jobId}`)).body;
-      }
+      const done = jobDone(seeded);
+      const start = await request(app1).post(`/v1/pdf-jobs/${seeded.jobId}/start`).send({ confirm: true });
+      expect(start.status).toBe(202);
+      await done;
+      const view = (await request(app1).get(`/v1/pdf-jobs/${seeded.jobId}`)).body;
       expect(view.status).toBe("completed");
       db1.close();
 
@@ -197,16 +183,13 @@ describe("/v1/pdf-* routes", () => {
     expect(noConfirm.body.error).toBe("not_confirmed");
 
     // start with confirm → 202
+    const done = jobDone(seeded);
     const start = await request(app).post(`/v1/pdf-jobs/${seeded.jobId}/start`).send({ confirm: true });
     expect(start.status).toBe(202);
 
-    // poll until finished
-    let view = seeded.view();
-    for (let i = 0; i < 100 && view.status === "running"; i++) {
-      await new Promise((r) => setTimeout(r, 10));
-      const v = await request(app).get(`/v1/pdf-jobs/${seeded.jobId}`);
-      view = v.body;
-    }
+    // wait for the done frame
+    await done;
+    const view = (await request(app).get(`/v1/pdf-jobs/${seeded.jobId}`)).body;
     expect(view.status).toBe("completed");
     expect(view.coverage).toEqual({ done: 4, total: 4 });
     expect(view.escrow_refs.length).toBeGreaterThanOrEqual(4);
