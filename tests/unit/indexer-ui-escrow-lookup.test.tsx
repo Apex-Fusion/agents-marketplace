@@ -1,142 +1,64 @@
 // @vitest-environment happy-dom
 /**
- * tests/unit/indexer-ui-escrow-lookup.test.tsx — GREEN (M1-F-5)
- *
- * Category F: EscrowLookup component (~6 tests)
- *
- * Mock strategy: vi.mock client.js at module level; per-test control via
- * fetchEscrowMock.mockResolvedValue / mockRejectedValue.
+ * tests/unit/indexer-ui-escrow-lookup.test.tsx — EscrowLookup: the ref check before the request, the not-found view (the `.status`
+ * of the error that client.ts throws) and the state pills. client.js is mocked.
  */
 
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, screen, cleanup, waitFor, fireEvent } from "@testing-library/react";
+import { act, render, screen, cleanup, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
-// Module-level mock — hoisted above imports.
+// Module-level mock — hoisted above the imports, so the import below is the mock.
 vi.mock("../../indexer-ui/src/api/client.js", () => ({
   fetchEscrow: vi.fn(),
-  fetchSuppliers: vi.fn(),
-  fetchHealthz: vi.fn(),
-  fetchCapabilities: vi.fn(),
 }));
 
 import EscrowLookup from "../../indexer-ui/src/components/EscrowLookup.js";
+import { fetchEscrow } from "../../indexer-ui/src/api/client.js";
+import { UI_ESCROW_REF as VALID_REF, buildUiEscrowView } from "../fixtures/indexer-ui-side/sample-escrow.js";
 
-const { fetchEscrow: fetchEscrowMock } = await import("../../indexer-ui/src/api/client.js");
+const fetchEscrowMock = vi.mocked(fetchEscrow);
 
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
 });
 
-const VALID_REF = "a".repeat(64) + "#0";
+const SAMPLE_ESCROW = buildUiEscrowView();
 
-const SAMPLE_ESCROW = {
-  utxo_ref: VALID_REF,
-  buyer_pkh: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-  supplier_pkh: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-  advert_ref: "b".repeat(64) + "#0",
-  capability_id: "llm.text.generate.v1",
-  request_spec_hash: "d".repeat(64),
-  prompt_hash: "e".repeat(64),
-  payment_lovelace: "2000000",
-  buyer_bond_lovelace: "1000000",
-  supplier_bond_lovelace: "1000000",
-  deliver_by: 1_745_600_000,
-  posted_at: 1_745_500_000,
-  submitted_at: null,
-  result_receipt_hash: null,
-  state: "Open",
-  created_slot: 3000,
-};
+/** Types `ref` in the input and clicks the lookup button. */
+async function lookUp(ref: string): Promise<void> {
+  const user = userEvent.setup();
+  fireEvent.change(screen.getByTestId("escrow-ref-input"), { target: { value: ref } });
+  await user.click(screen.getByTestId("escrow-lookup-submit"));
+}
 
-// ─── Input ────────────────────────────────────────────────────────────────────
-
-describe("EscrowLookup — input", () => {
-  it("renders escrow-ref-input and escrow-lookup-submit", async () => {
-    (fetchEscrowMock as ReturnType<typeof vi.fn>).mockResolvedValue(SAMPLE_ESCROW);
-    render(<EscrowLookup />);
-    const input = document.querySelector("[data-testid='escrow-ref-input']");
-    const btn = document.querySelector("[data-testid='escrow-lookup-submit']");
-    expect(input).not.toBeNull();
-    expect(btn).not.toBeNull();
-  });
-
-  it("accepts a valid <hex64>#<int> ref value", async () => {
-    (fetchEscrowMock as ReturnType<typeof vi.fn>).mockResolvedValue(SAMPLE_ESCROW);
-    render(<EscrowLookup />);
-    const input = document.querySelector("[data-testid='escrow-ref-input']") as HTMLInputElement;
-    fireEvent.change(input, { target: { value: VALID_REF } });
-    expect(input.value).toBe(VALID_REF);
-  });
-
+describe("EscrowLookup", () => {
   it("does not call fetchEscrow when input format is invalid", async () => {
-    const user = userEvent.setup();
-    (fetchEscrowMock as ReturnType<typeof vi.fn>).mockResolvedValue(SAMPLE_ESCROW);
+    fetchEscrowMock.mockResolvedValue(SAMPLE_ESCROW);
     render(<EscrowLookup />);
-    const input = document.querySelector("[data-testid='escrow-ref-input']") as HTMLInputElement;
-    const btn = document.querySelector("[data-testid='escrow-lookup-submit']") as HTMLButtonElement;
-    fireEvent.change(input, { target: { value: "not-a-valid-ref" } });
-    await user.click(btn);
-    // Should not have been called due to validation
+    await lookUp("not-a-valid-ref");
+    await act(async () => {});
     expect(fetchEscrowMock).not.toHaveBeenCalled();
   });
-});
 
-// ─── 404 path ─────────────────────────────────────────────────────────────────
-
-describe("EscrowLookup — not found", () => {
-  it("renders 'not found' indicator on 404 response", async () => {
-    const user = userEvent.setup();
-    (fetchEscrowMock as ReturnType<typeof vi.fn>).mockRejectedValue(
-      Object.assign(new Error("escrow not found"), { status: 404 }),
-    );
+  it("shows the not-found view when fetchEscrow rejects with status 404", async () => {
+    fetchEscrowMock.mockRejectedValue(Object.assign(new Error("escrow not found"), { status: 404 }));
     render(<EscrowLookup />);
-    const input = document.querySelector("[data-testid='escrow-ref-input']") as HTMLInputElement;
-    const btn = document.querySelector("[data-testid='escrow-lookup-submit']") as HTMLButtonElement;
-    fireEvent.change(input, { target: { value: VALID_REF } });
-    await user.click(btn);
-    await waitFor(() => {
-      const notFound =
-        document.querySelector("[data-testid='escrow-not-found']") ??
-        screen.queryByText(/not found/i);
-      expect(notFound).not.toBeNull();
-    });
-  });
-});
-
-// ─── Success path ─────────────────────────────────────────────────────────────
-
-describe("EscrowLookup — state machine view", () => {
-  it("renders escrow-state-machine on successful fetch", async () => {
-    const user = userEvent.setup();
-    (fetchEscrowMock as ReturnType<typeof vi.fn>).mockResolvedValue(SAMPLE_ESCROW);
-    render(<EscrowLookup />);
-    const input = document.querySelector("[data-testid='escrow-ref-input']") as HTMLInputElement;
-    const btn = document.querySelector("[data-testid='escrow-lookup-submit']") as HTMLButtonElement;
-    fireEvent.change(input, { target: { value: VALID_REF } });
-    await user.click(btn);
-    await waitFor(() => {
-      const sm = document.querySelector("[data-testid='escrow-state-machine']");
-      expect(sm).not.toBeNull();
-    });
+    await lookUp(VALID_REF);
+    expect(await screen.findByTestId("escrow-not-found")).toBeInTheDocument();
   });
 
-  it("highlights current state pill as active, other states as dimmed", async () => {
-    const user = userEvent.setup();
-    (fetchEscrowMock as ReturnType<typeof vi.fn>).mockResolvedValue(SAMPLE_ESCROW);
+  it("asks for the typed ref, and highlights the current state pill and no other", async () => {
+    fetchEscrowMock.mockResolvedValue(SAMPLE_ESCROW);
     render(<EscrowLookup />);
-    const input = document.querySelector("[data-testid='escrow-ref-input']") as HTMLInputElement;
-    const btn = document.querySelector("[data-testid='escrow-lookup-submit']") as HTMLButtonElement;
-    fireEvent.change(input, { target: { value: VALID_REF } });
-    await user.click(btn);
-    await waitFor(() => {
-      const current = document.querySelector("[data-testid='escrow-state-current']");
-      const others = document.querySelectorAll("[data-testid='escrow-state-other']");
-      expect(current).not.toBeNull();
-      expect(others.length).toBeGreaterThan(0);
-      // Current state text should match SAMPLE_ESCROW.state
-      expect(current!.textContent).toMatch(/open/i);
-    });
+    await lookUp(VALID_REF);
+    expect(await screen.findByTestId("escrow-state-machine")).toBeInTheDocument();
+    expect(fetchEscrowMock).toHaveBeenCalledWith(VALID_REF);
+    // The current pill shows the state of the escrow; no other pill does.
+    expect(screen.getByTestId("escrow-state-current")).toHaveTextContent(SAMPLE_ESCROW.state);
+    const others = screen.getAllByTestId("escrow-state-other");
+    expect(others.length).toBeGreaterThan(0);
+    for (const pill of others) expect(pill).not.toHaveTextContent(SAMPLE_ESCROW.state);
   });
 });

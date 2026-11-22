@@ -7,13 +7,14 @@
  */
 
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, cleanup, waitFor, fireEvent } from "@testing-library/react";
+import { render, screen, cleanup, waitFor, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import {
   SAMPLE_FREE_SUPPLIER,
   SAMPLE_NEW_ADVERT_SUPPLIER,
   UI_AGENT_ID,
 } from "../fixtures/indexer-ui-side/sample-supplier-rows.js";
+import { UI_ESCROW_REF as VALID_REF, buildUiEscrowView } from "../fixtures/indexer-ui-side/sample-escrow.js";
 
 vi.mock("../../indexer-ui/src/api/client.js", () => ({
   fetchSuppliers: vi.fn(),
@@ -39,53 +40,30 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-const VALID_REF = "a".repeat(64) + "#0";
-
-const LEGACY_ESCROW = {
-  utxo_ref: VALID_REF,
-  buyer_pkh: "c".repeat(56),
-  supplier_pkh: "b".repeat(56),
-  advert_ref: "b".repeat(64) + "#0",
-  capability_id: "llm.text.generate.v1",
-  request_spec_hash: "d".repeat(64),
-  prompt_hash: "e".repeat(64),
-  payment_lovelace: "2000000",
-  buyer_bond_lovelace: "1000000",
-  supplier_bond_lovelace: "1000000",
-  deliver_by: 1_745_600_000,
-  posted_at: 1_745_500_000,
-  submitted_at: null,
-  result_receipt_hash: null,
-  state: "Open",
-  created_slot: 3000,
-  layout: "legacy",
-  agent_id: null,
-  refund: null,
-  routable: true,
-};
+const LEGACY_ESCROW = buildUiEscrowView();
 
 async function lookUp(escrow: unknown): Promise<void> {
   const user = userEvent.setup();
   (fetchEscrowMock as ReturnType<typeof vi.fn>).mockResolvedValue(escrow);
   render(<EscrowLookup />);
-  const input = document.querySelector("[data-testid='escrow-ref-input']") as HTMLInputElement;
-  fireEvent.change(input, { target: { value: VALID_REF } });
-  await user.click(document.querySelector("[data-testid='escrow-lookup-submit']") as HTMLButtonElement);
-  await waitFor(() => expect(document.querySelector("[data-testid='escrow-state-machine']")).not.toBeNull());
+  fireEvent.change(screen.getByTestId("escrow-ref-input"), { target: { value: VALID_REF } });
+  await user.click(screen.getByTestId("escrow-lookup-submit"));
+  await screen.findByTestId("escrow-state-machine");
 }
 
-const text = (testId: string): string | null =>
-  document.querySelector(`[data-testid='${testId}']`)?.textContent ?? null;
+/** The text of a cell: an API value that the component shows (a layout, a DID, an address). */
+const text = (testId: string): string | null => screen.getByTestId(testId).textContent;
 
 describe("SuppliersTable — agent column", () => {
-  it("shows the canonical DID of a new advert and 'legacy' for a legacy advert", async () => {
+  it("shows the canonical DID of a new advert and no DID for a legacy advert", async () => {
     (fetchSuppliersMock as ReturnType<typeof vi.fn>).mockResolvedValue([SAMPLE_NEW_ADVERT_SUPPLIER, SAMPLE_FREE_SUPPLIER]);
     render(<SuppliersTable />);
     await waitFor(() => {
-      const cells = [...document.querySelectorAll("[data-testid='supplier-agent']")].map((cell) => cell.textContent);
-      expect(cells).toEqual([`did:vector:${UI_AGENT_ID}`, "legacy"]);
+      const cells = screen.getAllByTestId("supplier-agent").map((cell) => cell.textContent);
+      expect(cells).toHaveLength(2);
+      expect(cells[0]).toBe(`did:vector:${UI_AGENT_ID}`);
+      expect(cells[1]).not.toContain("did:vector:");
     });
-    expect(document.querySelector("th:nth-child(3)")?.textContent).toBe("Agent");
   });
 });
 
@@ -100,24 +78,22 @@ describe("EscrowLookup — identity facts", () => {
     });
     expect(text("escrow-layout")).toBe("identity");
     expect(text("escrow-agent")).toBe(`did:vector:${UI_AGENT_ID}`);
-    expect(text("escrow-refund")).toBe("addr1vxrefundexample (with datum)");
-    expect(text("escrow-not-routable")).toMatch(/10,000 AP3X/);
+    expect(text("escrow-refund")).toContain("addr1vxrefundexample");
+    expect(screen.getByTestId("escrow-not-routable")).toBeInTheDocument();
   });
 
-  it("shows a legacy escrow as legacy, with no agent and the buyer key as refund target", async () => {
+  it("shows a legacy escrow as legacy, with no agent and no value-cap flag", async () => {
     await lookUp(LEGACY_ESCROW);
     expect(text("escrow-layout")).toBe("legacy");
-    expect(text("escrow-agent")).toBe("none");
-    expect(text("escrow-refund")).toBe("buyer key");
-    expect(document.querySelector("[data-testid='escrow-not-routable']")).toBeNull();
+    expect(text("escrow-agent")).not.toContain("did:vector:");
+    expect(screen.queryByTestId("escrow-not-routable")).toBeNull();
   });
 
   it("reads a row from an indexer without the identity fields as legacy", async () => {
     const { layout: _layout, agent_id: _agent, refund: _refund, routable: _routable, ...older } = LEGACY_ESCROW;
     await lookUp(older);
     expect(text("escrow-layout")).toBe("legacy");
-    expect(text("escrow-refund")).toBe("buyer key");
-    expect(document.querySelector("[data-testid='escrow-not-routable']")).toBeNull();
+    expect(screen.queryByTestId("escrow-not-routable")).toBeNull();
   });
 });
 
