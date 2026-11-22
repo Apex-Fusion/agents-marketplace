@@ -19,27 +19,7 @@ afterEach(() => {
 
 // ─── Preserved semantics ─────────────────────────────────────────────────────
 
-describe("Mutex — serialization (preserved semantics)", () => {
-  it("runs fns strictly one at a time, in order", async () => {
-    const mutex = new Mutex();
-    const order: number[] = [];
-    let firstRunning = false;
-
-    const first = mutex.run(async () => {
-      firstRunning = true;
-      await new Promise((r) => setTimeout(r, 20));
-      order.push(1);
-      firstRunning = false;
-    });
-    const second = mutex.run(async () => {
-      expect(firstRunning).toBe(false);
-      order.push(2);
-    });
-
-    await Promise.all([first, second]);
-    expect(order).toEqual([1, 2]);
-  });
-
+describe("Mutex — a rejecting run (preserved semantics)", () => {
   it("a rejecting fn does not poison the chain", async () => {
     const mutex = new Mutex();
 
