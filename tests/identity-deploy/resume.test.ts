@@ -7,11 +7,20 @@
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, describe, expect, test } from "vitest";
+import { afterAll, describe, expect, test, vi } from "vitest";
 import { blake2b256, toHex, utf8 } from "../legacy-registry/harness/index.js";
 import { main } from "../../contracts/identity-marketplace/deploy/cli.js";
 import { REFERENCE_NAMES, StateFile, type Deployment } from "../../contracts/identity-marketplace/deploy/state.js";
 import { FakeIndex, FakeLedger, testIo, TIP_SLOT, type TestIo } from "./ledger.js";
+import type * as ScriptsModule from "../../contracts/identity-marketplace/deploy/scripts.js";
+
+// Each command derives the 8 applied scripts again (about 15 times in this file). The mock remembers the results (memo-scripts.ts).
+// The mock factory is hoisted above the imports, so it loads the helper with a dynamic import.
+vi.mock("../../contracts/identity-marketplace/deploy/scripts.js", async (importOriginal) => {
+  const original = await importOriginal<typeof ScriptsModule>();
+  const { memoizedDeriveScripts } = await import("./memo-scripts.js");
+  return { ...original, deriveScripts: memoizedDeriveScripts(original.deriveScripts) };
+});
 
 const AP3X = 1_000_000n;
 const M1 = "b7".repeat(28);

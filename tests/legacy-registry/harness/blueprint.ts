@@ -3,7 +3,8 @@
  *
  * A parameterised validator, such as the identity validator of Part 2 §2,
  * gets its parameters from `aiken blueprint apply`, one parameter at a time
- * and in the order of the blueprint.
+ * and in the order of the blueprint (`blueprintScript`), or from
+ * `apply_params_to_script` in process (`appliedScript`).
  */
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -11,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { encodeData, type Data } from "./data.js";
 import { fromHex, scriptHash, toHex, type PlutusV3Script } from "./ledger.js";
+import { apply_params_to_script } from "@lucid-evolution/uplc";
 import { HarnessError } from "./simulate.js";
 
 export interface BlueprintValidator {
@@ -60,4 +62,23 @@ export function blueprintScript(path: string, title: string, parameters: readonl
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+/**
+ * Like `blueprintScript`, without a process. `apply_params_to_script` of @lucid-evolution/uplc (the `uplc` crate of Aiken, in
+ * WebAssembly) applies all parameters in one call, as the deployment tool does
+ * (contracts/identity-marketplace/deploy/scripts.ts). Its bytes equal those of `aiken blueprint apply`
+ * (tests/identity-deploy/plan.test.ts). The blueprint holds a hash only for a script without parameters: that one is checked.
+ */
+export function appliedScript(path: string, title: string, parameters: readonly Data[] = []): PlutusV3Script {
+  const entry = readBlueprint(path).validators.find((v) => v.title === title);
+  if (entry === undefined) throw new HarnessError(`No validator ${title} in ${path}`);
+  const expected = (entry.parameters ?? []).length;
+  if (expected !== parameters.length) throw new HarnessError(`${title} takes ${expected} parameter(s), not ${parameters.length}`);
+  const blueprintCode = fromHex(entry.compiledCode);
+  if (parameters.length === 0) {
+    if (toHex(scriptHash({ compiledCode: blueprintCode })) !== entry.hash) throw new HarnessError(`${title}: the code does not match the blueprint hash`);
+    return { compiledCode: blueprintCode };
+  }
+  return { compiledCode: apply_params_to_script(encodeData(parameters), blueprintCode) };
 }
