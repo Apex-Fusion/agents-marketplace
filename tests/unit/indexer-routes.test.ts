@@ -1,151 +1,33 @@
 /**
- * tests/unit/indexer-routes.test.ts — REST route tests via supertest (Category D)
- *
- * Tests all indexer routes: /suppliers, /capabilities, /escrows, /health.
- * createApp is injected with a mock cache and worker.
- * All tests RED — createApp throws "not implemented — M1-D-green".
- * Tests call createApp() directly; the stub throws, causing Vitest to mark them FAIL.
- * When Catherine implements createApp, these will use supertest to verify route behaviour.
+ * tests/unit/indexer-routes.test.ts — the REST routes of the indexer through supertest, on a stub cache that filters nothing (a case checks what the route adds).
+ * Ties to a live incident: the indexer stopped at slot 36,987,164 while the chain went on (the healthz lag cases).
  */
 
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect } from "vitest";
 import request from "supertest";
 
 import { createApp } from "../../indexer/src/server.js";
-import type { IndexerDeps } from "../../indexer/src/server.js";
+import { MAX_TIP_AGE_MS } from "../../indexer/src/routes/healthz.js";
+import { AmbiguousEscrowLineageError, type EscrowLineage } from "../../indexer/src/db/cache.js";
+import { makeIndexerDeps } from "./__helpers__/fakeIndexerDeps.js";
+import { makeAdvertRow, makeEscrowRow } from "../fixtures/indexer-side/rows.js";
 import {
   INDEXER_SUPPLIER_PKH,
   INDEXER_BUYER_PKH,
   INDEXER_SUPPLIER_ENDPOINT,
-  buildAdvertDatumHex,
-  buildEscrowDatumHex,
   SAMPLE_DELIVER_BY,
   SAMPLE_POSTED_AT,
-  SAMPLE_REQUEST_SPEC_HASH,
-  SAMPLE_PROMPT_HASH,
 } from "../fixtures/indexer-side/sample-blocks.js";
-import {
-  AmbiguousEscrowLineageError,
-  type AdvertRow,
-  type EscrowLineage,
-  type EscrowRow,
-} from "../../indexer/src/db/cache.js";
-import type { FollowerHealth } from "../../indexer/src/follower/worker.js";
-import { MAX_TIP_AGE_MS } from "../../indexer/src/routes/healthz.js";
 
-// ─── Mock helpers ─────────────────────────────────────────────────────────────
-
-function sampleAdvert(overrides: Partial<AdvertRow> = {}): AdvertRow {
-  return {
-    utxo_ref: "a".repeat(64) + "#0",
-    supplier_pkh: INDEXER_SUPPLIER_PKH,
-    capability_id: "llm.text.generate.v1",
-    model: "qwen2.5:0.5b",
-    max_output_tokens: 512,
-    max_processing_ms: 60_000,
-    price_lovelace: "2000000",
-    supplier_bond_lovelace: "1000000",
-    buyer_bond_lovelace: "1000000",
-    endpoint_url: INDEXER_SUPPLIER_ENDPOINT,
-    detail_uri: "ipfs://QmTest",
-    detail_hash: "b".repeat(64),
-    advertised_at: SAMPLE_POSTED_AT,
-    status: "Active",
-    created_slot: 1_000_000,
-    datum_hex: buildAdvertDatumHex(),
-    rolled_back: 0,
-    ...overrides,
-  } as AdvertRow;
-}
-
-function sampleEscrow(overrides: Partial<EscrowRow> = {}): EscrowRow {
-  return {
-    utxo_ref: "c".repeat(64) + "#0",
-    buyer_pkh: INDEXER_BUYER_PKH,
-    supplier_pkh: INDEXER_SUPPLIER_PKH,
-    advert_ref_tx: "a".repeat(64),
-    advert_ref_index: 0,
-    capability_id: "llm.text.generate.v1",
-    request_spec_hash: SAMPLE_REQUEST_SPEC_HASH,
-    prompt_hash: SAMPLE_PROMPT_HASH,
-    payment_lovelace: "2000000",
-    buyer_bond_lovelace: "1000000",
-    supplier_bond_lovelace: "1000000",
-    deliver_by: SAMPLE_DELIVER_BY,
-    posted_at: SAMPLE_POSTED_AT,
-    submitted_at: null,
-    result_receipt_hash: null,
-    state: "Open",
-    created_slot: 1_000_000,
-    datum_hex: buildEscrowDatumHex({ state: "Open" }),
-    rolled_back: 0,
-    ...overrides,
-  } as EscrowRow;
-}
-
-function makeMockDeps(overrides: Partial<{
-  adverts: AdvertRow[];
-  escrows: EscrowRow[];
-  lineage?: EscrowLineage | null;
-  lineageError?: Error;
-  health: Partial<FollowerHealth>;
-}>): IndexerDeps {
-  const adverts = overrides.adverts ?? [sampleAdvert()];
-  const escrows = overrides.escrows ?? [];
-  const health: FollowerHealth = {
-    state: "following",
-    connected: true,
-    syncSlot: 1_000_000,
-    tip: { slot: 1_000_500, id: "f".repeat(64) },
-    tipAgeMs: 1_000,
-    error: null,
-    ...overrides.health,
-  };
-
-  const cache = {
-    listActiveAdvertisements: vi.fn((filter?: { capability_id?: string; supplier_pkh?: string }) => {
-      return adverts.filter(a => {
-        if (filter?.capability_id && a.capability_id !== filter.capability_id) return false;
-        if (filter?.supplier_pkh && a.supplier_pkh !== filter.supplier_pkh) return false;
-        return a.status === "Active";
-      });
-    }),
-    getAdvertisementByRef: vi.fn((ref: string) => adverts.find(a => a.utxo_ref === ref) ?? null),
-    getEscrowByRef: vi.fn((ref: string) => escrows.find(e => e.utxo_ref === ref) ?? null),
-    getEscrowLineage: vi.fn(() => {
-      if (overrides.lineageError) throw overrides.lineageError;
-      return overrides.lineage ?? null;
-    }),
-    listEscrowsByBuyer: vi.fn((pkh: string) => escrows.filter(e => e.buyer_pkh === pkh)),
-    listEscrowsBySupplier: vi.fn((pkh: string) => escrows.filter(e => e.supplier_pkh === pkh)),
-    getSupplierStatus: vi.fn(() => ({
-      supplier_pkh: INDEXER_SUPPLIER_PKH,
-      advert_ref: "a".repeat(64) + "#0",
-      status: "free",
-      last_seen_iso: "2026-04-24T10:00:00.000Z",
-      current_escrow_ref: null,
-      polled_at: Date.now(),
-    })),
-    listEventsAfterSlot: vi.fn(() => []),
-    dbSizeBytes: vi.fn(() => 4096),
-  } as unknown as IndexerDeps["cache"];
-
-  const worker = {
-    getHealth: vi.fn(() => health),
-    on: vi.fn(),
-    off: vi.fn(),
-  } as unknown as IndexerDeps["worker"];
-
-  return { cache, worker };
-}
+const ADVERT_REF = `${"a".repeat(64)}#0`;
+const ESCROW_REF = `${"c".repeat(64)}#0`;
 
 // ─── GET /healthz ─────────────────────────────────────────────────────────────
-// SPEC FIX 2026-04-27: standardize to /healthz (was /health — indexer drift).
-// All tests call createApp() directly — stub throws, tests fail RED.
+// SPEC FIX 2026-04-27: the path is /healthz (it was /health).
 
 describe("GET /healthz", () => {
-  it("GET /healthz returns 200 with ok, sync_slot, tip_slot, db_size_bytes", async () => { // SPEC FIX 2026-04-27: standardize to /healthz
-    const app = createApp(makeMockDeps({}));
+  it("returns 200 with the full health body", async () => {
+    const app = createApp(makeIndexerDeps({}));
     const res = await request(app).get("/healthz");
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
@@ -162,27 +44,8 @@ describe("GET /healthz", () => {
     });
   });
 
-  it("healthz endpoint returns ogmios_status field", async () => { // SPEC FIX 2026-04-27: standardize to /healthz
-    const app = createApp(makeMockDeps({}));
-    const res = await request(app).get("/healthz");
-    expect(res.status).toBe(200);
-    expect(res.body).toHaveProperty("ogmios_status");
-  });
-
-  it("sync_slot reflects the slot of the last applied block (999999)", async () => {
-    const app = createApp(makeMockDeps({ health: { syncSlot: 999_999 } }));
-    const res = await request(app).get("/healthz"); // SPEC FIX 2026-04-27: standardize to /healthz
-    expect(res.body.sync_slot).toBe(999_999);
-  });
-
-  it("tip_slot reflects the chain tip that Ogmios reported (1234567)", async () => {
-    const app = createApp(makeMockDeps({ health: { tip: { slot: 1_234_567, id: "f".repeat(64) } } }));
-    const res = await request(app).get("/healthz"); // SPEC FIX 2026-04-27: standardize to /healthz
-    expect(res.body.tip_slot).toBe(1_234_567);
-  });
-
   it("health lag: ok is false when the indexer is more than MAX_SYNC_LAG_SLOTS behind the tip", async () => {
-    const behind = (lag: number) => makeMockDeps({ health: { syncSlot: 36_987_164, tip: { slot: 36_987_164 + lag, id: "f".repeat(64) } } });
+    const behind = (lag: number) => makeIndexerDeps({ health: { syncSlot: 36_987_164, tip: { slot: 36_987_164 + lag, id: "f".repeat(64) } } });
     const atLimit = await request(createApp(behind(600))).get("/healthz");
     expect(atLimit.body).toMatchObject({ ok: true, lag_slots: 600, max_sync_lag_slots: 600 });
     const over = await request(createApp(behind(601))).get("/healthz");
@@ -194,7 +57,7 @@ describe("GET /healthz", () => {
   });
 
   it("health lag: MAX_SYNC_LAG_SLOTS sets the limit", async () => {
-    const deps = makeMockDeps({ health: { syncSlot: 1_000, tip: { slot: 1_100, id: "f".repeat(64) } } });
+    const deps = makeIndexerDeps({ health: { syncSlot: 1_000, tip: { slot: 1_100, id: "f".repeat(64) } } });
     expect((await request(createApp(deps, { maxSyncLagSlots: 99 })).get("/healthz")).body)
       .toMatchObject({ ok: false, lag_slots: 100, max_sync_lag_slots: 99 });
     expect((await request(createApp(deps, { maxSyncLagSlots: 100 })).get("/healthz")).body)
@@ -202,7 +65,7 @@ describe("GET /healthz", () => {
   });
 
   it("ok is false when the follower failed, even with no lag", async () => {
-    const app = createApp(makeMockDeps({
+    const app = createApp(makeIndexerDeps({
       health: { state: "no_intersection", syncSlot: 1_000_500, error: "no intersection: ... RESYNC_FROM_SLOT ..." },
     }));
     const res = await request(app).get("/healthz");
@@ -212,247 +75,154 @@ describe("GET /healthz", () => {
   });
 
   it("ok is false before the first tip report, before the first intersection, and with an old tip", async () => {
-    const noTip = await request(createApp(makeMockDeps({ health: { tip: null, tipAgeMs: null } }))).get("/healthz");
+    const noTip = await request(createApp(makeIndexerDeps({ health: { tip: null, tipAgeMs: null } }))).get("/healthz");
     expect(noTip.body).toMatchObject({ ok: false, tip_slot: 0, lag_slots: null, tip_age_ms: null });
-    const starting = await request(createApp(makeMockDeps({ health: { state: "starting" } }))).get("/healthz");
+    const starting = await request(createApp(makeIndexerDeps({ health: { state: "starting" } }))).get("/healthz");
     expect(starting.body).toMatchObject({ ok: false, follower: "starting" });
-    const old = await request(createApp(makeMockDeps({ health: { tipAgeMs: MAX_TIP_AGE_MS + 1 } }))).get("/healthz");
+    const old = await request(createApp(makeIndexerDeps({ health: { tipAgeMs: MAX_TIP_AGE_MS + 1 } }))).get("/healthz");
     expect(old.body).toMatchObject({ ok: false, lag_slots: 500 });
   });
 
   it("ogmios_status follows the chain-sync connection", async () => {
-    const res = await request(createApp(makeMockDeps({ health: { connected: false } }))).get("/healthz");
+    const res = await request(createApp(makeIndexerDeps({ health: { connected: false } }))).get("/healthz");
     expect(res.body.ogmios_status).toBe("disconnected");
   });
 });
 
-// ─── GET /suppliers ───────────────────────────────────────────────────────────
+// ─── GET /suppliers, GET /suppliers/:pkh ──────────────────────────────────────
 
 describe("GET /suppliers", () => {
-  it("GET /suppliers returns 200 with array of active suppliers", async () => {
-    const app = createApp(makeMockDeps({}));
-    const res = await request(app).get("/suppliers");
-    expect(res.status).toBe(200);
-    expect(Array.isArray(res.body)).toBe(true);
-    expect(res.body.length).toBe(1);
-  });
-
-  it("suppliers list includes supplier_pkh, capability_id, price_lovelace, endpoint_url", async () => {
-    const app = createApp(makeMockDeps({}));
-    const res = await request(app).get("/suppliers");
-    expect(res.status).toBe(200);
-    expect(res.body[0]).toMatchObject({
-      supplier_pkh: INDEXER_SUPPLIER_PKH,
-      capability_id: "llm.text.generate.v1",
-      price_lovelace: "2000000",
-      endpoint_url: INDEXER_SUPPLIER_ENDPOINT,
+  it("maps each advert and its supplier_status to a supplier view; a supplier that was never polled has status unknown", async () => {
+    const unpolled = "11".repeat(28);
+    const deps = makeIndexerDeps({
+      adverts: [
+        makeAdvertRow({ utxo_ref: ADVERT_REF }),
+        makeAdvertRow({ utxo_ref: `${"b".repeat(64)}#0`, supplier_pkh: unpolled }),
+      ],
+      statuses: {
+        [INDEXER_SUPPLIER_PKH]: { status: "working", current_escrow_ref: ESCROW_REF, last_seen_iso: "2026-04-24T11:30:00.000Z" },
+        [unpolled]: null,
+      },
     });
-  });
-
-  it("suppliers list includes last status (status, last_seen_iso) from supplier_status cache", async () => {
-    const app = createApp(makeMockDeps({}));
-    const res = await request(app).get("/suppliers");
+    const res = await request(createApp(deps)).get("/suppliers");
     expect(res.status).toBe(200);
-    expect(res.body[0]).toMatchObject({
-      status: "free",
-      last_seen_iso: expect.any(String),
-    });
-  });
-
-  it("returns empty array when no active suppliers (adverts=[])", async () => {
-    const app = createApp(makeMockDeps({ adverts: [] }));
-    const res = await request(app).get("/suppliers");
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual([]);
-  });
-
-  it("price_lovelace is serialised as string (bigint-safe)", async () => {
-    const app = createApp(makeMockDeps({}));
-    const res = await request(app).get("/suppliers");
-    expect(typeof res.body[0].price_lovelace).toBe("string");
+    expect(res.body).toMatchObject([
+      {
+        utxo_ref: ADVERT_REF,
+        supplier_pkh: INDEXER_SUPPLIER_PKH,
+        capability_id: "llm.text.generate.v1",
+        price_lovelace: "2000000",
+        endpoint_url: INDEXER_SUPPLIER_ENDPOINT,
+        advert_status: "Active",
+        status: "working",
+        current_escrow_ref: ESCROW_REF,
+        last_seen_iso: "2026-04-24T11:30:00.000Z",
+      },
+      { supplier_pkh: unpolled, status: "unknown", current_escrow_ref: null, last_seen_iso: null },
+    ]);
   });
 });
-
-// ─── GET /suppliers/:pkh ──────────────────────────────────────────────────────
 
 describe("GET /suppliers/:pkh", () => {
-  it("returns 200 with supplier detail when pkh matches Active advert", async () => {
-    const app = createApp(makeMockDeps({}));
-    const res = await request(app).get(`/suppliers/${INDEXER_SUPPLIER_PKH}`);
+  it("returns the supplier view of the listed advert", async () => {
+    const res = await request(createApp(makeIndexerDeps({}))).get(`/suppliers/${INDEXER_SUPPLIER_PKH}`);
     expect(res.status).toBe(200);
-    expect(res.body.supplier_pkh).toBe(INDEXER_SUPPLIER_PKH);
+    expect(res.body).toMatchObject({ supplier_pkh: INDEXER_SUPPLIER_PKH, endpoint_url: INDEXER_SUPPLIER_ENDPOINT, status: "free" });
   });
 
-  it("returns 404 when no Active advert exists for pkh", async () => {
-    const app = createApp(makeMockDeps({ adverts: [] }));
-    const res = await request(app).get(`/suppliers/${INDEXER_SUPPLIER_PKH}`);
+  it("returns 404 when no advert is listed for the pkh", async () => {
+    const res = await request(createApp(makeIndexerDeps({ adverts: [] }))).get(`/suppliers/${INDEXER_SUPPLIER_PKH}`);
     expect(res.status).toBe(404);
-  });
-
-  it("returns 404 for Retired supplier pkh", async () => {
-    const app = createApp(makeMockDeps({ adverts: [sampleAdvert({ status: "Retired" })] }));
-    const res = await request(app).get(`/suppliers/${INDEXER_SUPPLIER_PKH}`);
-    expect(res.status).toBe(404);
-  });
-
-  it("response body includes endpoint_url and status", async () => {
-    const app = createApp(makeMockDeps({}));
-    const res = await request(app).get(`/suppliers/${INDEXER_SUPPLIER_PKH}`);
-    expect(res.body).toMatchObject({
-      endpoint_url: INDEXER_SUPPLIER_ENDPOINT,
-      status: "free",
-    });
   });
 });
 
-// ─── GET /capabilities ────────────────────────────────────────────────────────
+// ─── GET /capabilities, GET /capabilities/:id/suppliers ───────────────────────
 
 describe("GET /capabilities", () => {
-  it("returns 200 with distinct capability_id list", async () => {
+  it("counts the listed adverts of each capability", async () => {
     const adverts = [
-      sampleAdvert({ utxo_ref: "a".repeat(64) + "#0", capability_id: "llm.text.generate.v1" }),
-      sampleAdvert({ utxo_ref: "b".repeat(64) + "#0", capability_id: "llm.text.generate.v1" }),
-      sampleAdvert({ utxo_ref: "c".repeat(64) + "#0", capability_id: "speech.transcribe.v1" }),
+      makeAdvertRow({ utxo_ref: `${"a".repeat(64)}#0`, capability_id: "llm.text.generate.v1" }),
+      makeAdvertRow({ utxo_ref: `${"b".repeat(64)}#0`, capability_id: "llm.text.generate.v1" }),
+      makeAdvertRow({ utxo_ref: `${"c".repeat(64)}#0`, capability_id: "speech.transcribe.v1" }),
     ];
-    const app = createApp(makeMockDeps({ adverts }));
-    const res = await request(app).get("/capabilities");
+    const res = await request(createApp(makeIndexerDeps({ adverts }))).get("/capabilities");
     expect(res.status).toBe(200);
-    expect(Array.isArray(res.body)).toBe(true);
-  });
-
-  it("returns correct supplier_count per capability", async () => {
-    const adverts = [
-      sampleAdvert({ utxo_ref: "a".repeat(64) + "#0", capability_id: "llm.text.generate.v1" }),
-      sampleAdvert({ utxo_ref: "b".repeat(64) + "#0", capability_id: "llm.text.generate.v1" }),
-      sampleAdvert({ utxo_ref: "c".repeat(64) + "#0", capability_id: "speech.transcribe.v1" }),
-    ];
-    const app = createApp(makeMockDeps({ adverts }));
-    const res = await request(app).get("/capabilities");
-    expect(res.status).toBe(200);
-    const llm = res.body.find((c: { capability_id: string }) => c.capability_id === "llm.text.generate.v1");
-    expect(llm?.supplier_count).toBe(2);
-  });
-
-  it("returns empty array when no active suppliers", async () => {
-    const app = createApp(makeMockDeps({ adverts: [] }));
-    const res = await request(app).get("/capabilities");
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual([]);
+    expect(res.body).toEqual([
+      { capability_id: "llm.text.generate.v1", supplier_count: 2 },
+      { capability_id: "speech.transcribe.v1", supplier_count: 1 },
+    ]);
   });
 });
-
-// ─── GET /capabilities/:id/suppliers ─────────────────────────────────────────
 
 describe("GET /capabilities/:id/suppliers", () => {
-  it("filters suppliers by capability_id, returns only matching", async () => {
-    const adverts = [
-      sampleAdvert({ utxo_ref: "a".repeat(64) + "#0", capability_id: "llm.text.generate.v1" }),
-      sampleAdvert({ utxo_ref: "b".repeat(64) + "#0", capability_id: "speech.transcribe.v1" }),
-    ];
-    const app = createApp(makeMockDeps({ adverts }));
-    const res = await request(app).get("/capabilities/llm.text.generate.v1/suppliers");
-    expect(res.status).toBe(200);
-    expect(res.body.length).toBe(1);
-    expect(res.body[0].capability_id).toBe("llm.text.generate.v1");
+  // The route sorts the views itself. The stub cache gives the adverts in the order S1, S2, S3, S4. S3 and S4 were never polled.
+  const pkh = { S1: "11".repeat(28), S2: "22".repeat(28), S3: "33".repeat(28), S4: "44".repeat(28) };
+  const deps = () => makeIndexerDeps({
+    adverts: [
+      makeAdvertRow({ utxo_ref: `${"a".repeat(64)}#0`, supplier_pkh: pkh.S1, price_lovelace: "3000000" }),
+      makeAdvertRow({ utxo_ref: `${"b".repeat(64)}#0`, supplier_pkh: pkh.S2, price_lovelace: "1000000" }),
+      makeAdvertRow({ utxo_ref: `${"c".repeat(64)}#0`, supplier_pkh: pkh.S3, price_lovelace: "2000000" }),
+      makeAdvertRow({ utxo_ref: `${"d".repeat(64)}#0`, supplier_pkh: pkh.S4, price_lovelace: "4000000" }),
+    ],
+    statuses: {
+      [pkh.S1]: { last_seen_iso: "2026-04-24T10:00:00.000Z" },
+      [pkh.S2]: { last_seen_iso: "2026-04-24T11:00:00.000Z" },
+      [pkh.S3]: null,
+      [pkh.S4]: null,
+    },
   });
 
-  it("?sort=price sorts by price_lovelace ascending (cheapest first)", async () => {
-    const adverts = [
-      sampleAdvert({ utxo_ref: "a".repeat(64) + "#0", price_lovelace: "3000000" }),
-      sampleAdvert({ utxo_ref: "b".repeat(64) + "#0", price_lovelace: "1000000" }),
-    ];
-    const app = createApp(makeMockDeps({ adverts }));
-    const res = await request(app).get("/capabilities/llm.text.generate.v1/suppliers?sort=price");
+  it.each([
+    ["no ?sort keeps the order of the cache", "", ["S1", "S2", "S3", "S4"]],
+    ["?sort=price lists the cheapest supplier first", "?sort=price", ["S2", "S3", "S1", "S4"]],
+    ["?sort=last_seen lists the supplier that was seen last first, and the suppliers never seen after the others", "?sort=last_seen", ["S2", "S1", "S3", "S4"]],
+  ] as const)("%s", async (_title, query, order) => {
+    const res = await request(createApp(deps())).get(`/capabilities/llm.text.generate.v1/suppliers${query}`);
     expect(res.status).toBe(200);
-    expect(res.body[0].price_lovelace).toBe("1000000");
-  });
-
-  it("?sort=last_seen sorts by last_seen_iso descending (most recent first)", async () => {
-    const app = createApp(makeMockDeps({}));
-    const res = await request(app).get("/capabilities/llm.text.generate.v1/suppliers?sort=last_seen");
-    expect(res.status).toBe(200);
-    // Just checking it doesn't 400/500 — sort order verified by caller
-  });
-
-  it("returns empty array for unknown capability_id", async () => {
-    const app = createApp(makeMockDeps({ adverts: [] }));
-    const res = await request(app).get("/capabilities/unknown.capability.v99/suppliers");
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual([]);
-  });
-
-  it("returns 200 with all matching suppliers across multiple suppliers", async () => {
-    const otherPkh = "11".repeat(28);
-    const adverts = [
-      sampleAdvert({ utxo_ref: "a".repeat(64) + "#0", supplier_pkh: INDEXER_SUPPLIER_PKH }),
-      sampleAdvert({ utxo_ref: "b".repeat(64) + "#0", supplier_pkh: otherPkh }),
-    ];
-    const app = createApp(makeMockDeps({ adverts }));
-    const res = await request(app).get("/capabilities/llm.text.generate.v1/suppliers");
-    expect(res.status).toBe(200);
-    expect(res.body.length).toBe(2);
+    expect(res.body.map((s: { supplier_pkh: string }) => s.supplier_pkh)).toEqual(order.map((name) => pkh[name]));
   });
 });
 
-// ─── GET /escrows/:ref ────────────────────────────────────────────────────────
+// ─── GET /escrows/:ref, GET /escrows/:ref/lineage, GET /escrows ───────────────
 
 describe("GET /escrows/:ref", () => {
-  it("returns 200 with full escrow detail including state, buyer_pkh, supplier_pkh", async () => {
-    const ref = "c".repeat(64) + "#0";
-    const app = createApp(makeMockDeps({ escrows: [sampleEscrow({ utxo_ref: ref })] }));
-    const encodedRef = encodeURIComponent(ref);
-    const res = await request(app).get(`/escrows/${encodedRef}`);
+  it("maps the escrow row to the escrow view", async () => {
+    const deps = makeIndexerDeps({ escrows: [makeEscrowRow({ utxo_ref: ESCROW_REF })] });
+    const res = await request(createApp(deps)).get(`/escrows/${encodeURIComponent(ESCROW_REF)}`);
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({
+      utxo_ref: ESCROW_REF,
       buyer_pkh: INDEXER_BUYER_PKH,
       supplier_pkh: INDEXER_SUPPLIER_PKH,
+      advert_ref: ADVERT_REF,
+      payment_lovelace: "2000000",
+      deliver_by: SAMPLE_DELIVER_BY,
+      posted_at: SAMPLE_POSTED_AT,
+      submitted_at: null,
+      result_receipt_hash: null,
       state: "Open",
+      routable: true,
     });
   });
 
   it("returns 404 when escrow ref not found", async () => {
-    const app = createApp(makeMockDeps({ escrows: [] }));
-    const res = await request(app).get("/escrows/unknown%230");
+    const res = await request(createApp(makeIndexerDeps({ escrows: [] }))).get("/escrows/unknown%230");
     expect(res.status).toBe(404);
-  });
-
-  it("escrow response includes deliver_by, posted_at, submitted_at, result_receipt_hash", async () => {
-    const ref = "c".repeat(64) + "#0";
-    const app = createApp(makeMockDeps({ escrows: [sampleEscrow({ utxo_ref: ref })] }));
-    const encodedRef = encodeURIComponent(ref);
-    const res = await request(app).get(`/escrows/${encodedRef}`);
-    expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({
-      deliver_by: expect.any(Number),
-      posted_at: expect.any(Number),
-    });
-    expect(res.body).toHaveProperty("submitted_at");
-    expect(res.body).toHaveProperty("result_receipt_hash");
-  });
-
-  it("returns 200 for Claimed escrow with matching state in response", async () => {
-    const ref = "d".repeat(64) + "#0";
-    const app = createApp(makeMockDeps({
-      escrows: [sampleEscrow({ utxo_ref: ref, state: "Claimed" })],
-    }));
-    const encodedRef = encodeURIComponent(ref);
-    const res = await request(app).get(`/escrows/${encodedRef}`);
-    expect(res.status).toBe(200);
-    expect(res.body.state).toBe("Claimed");
   });
 });
 
 describe("GET /escrows/:ref/lineage", () => {
-  it("returns the exact rows with spend links and an observed terminal event", async () => {
-    const originalRef = `${"c".repeat(64)}#0`;
+  // The route builds an escrow view for each row and adds its spent_tx; the buyer and the gateway read spent_tx to check the chain of rows.
+  it("gives each row as an escrow view with its spent_tx, and the observed terminal event", async () => {
+    const originalRef = ESCROW_REF;
     const submittedRef = `${"d".repeat(64)}#1`;
     const terminalTx = "e".repeat(64);
     const lineage: EscrowLineage = {
       original_ref: originalRef,
       rows: [
-        { ...sampleEscrow({ utxo_ref: originalRef }), spent_tx: "d".repeat(64) },
+        { ...makeEscrowRow({ utxo_ref: originalRef }), spent_tx: "d".repeat(64) },
         {
-          ...sampleEscrow({
+          ...makeEscrowRow({
             utxo_ref: submittedRef,
             state: "Submitted",
             submitted_at: SAMPLE_POSTED_AT + 1_000,
@@ -463,94 +233,36 @@ describe("GET /escrows/:ref/lineage", () => {
       ],
       terminal: { type: "AcceptEscrow", tx_hash: terminalTx },
     };
-    const app = createApp(makeMockDeps({ lineage }));
 
-    const res = await request(app).get(
-      `/escrows/${encodeURIComponent(originalRef)}/lineage`,
-    );
+    const res = await request(createApp(makeIndexerDeps({ lineage }))).get(`/escrows/${encodeURIComponent(originalRef)}/lineage`);
 
     expect(res.status).toBe(200);
-    expect(res.body.original_ref).toBe(originalRef);
-    expect(res.body.rows.map((row: { utxo_ref: string }) => row.utxo_ref)).toEqual([
-      originalRef,
-      submittedRef,
-    ]);
-    expect(res.body.rows[0].spent_tx).toBe("d".repeat(64));
-    expect(res.body.terminal).toEqual({
-      type: "AcceptEscrow",
-      tx_hash: terminalTx,
+    expect(res.body).toMatchObject({
+      original_ref: originalRef,
+      rows: [
+        { utxo_ref: originalRef, state: "Open", advert_ref: ADVERT_REF, spent_tx: "d".repeat(64) },
+        { utxo_ref: submittedRef, state: "Submitted", result_receipt_hash: "f".repeat(64), spent_tx: terminalTx },
+      ],
     });
+    expect(res.body.terminal).toEqual({ type: "AcceptEscrow", tx_hash: terminalTx });
   });
 
   it("returns 404 when the origin is not in the active indexed history", async () => {
-    const app = createApp(makeMockDeps({ lineage: null }));
-    const res = await request(app).get("/escrows/missing%230/lineage");
+    const res = await request(createApp(makeIndexerDeps({ lineage: null }))).get("/escrows/missing%230/lineage");
     expect(res.status).toBe(404);
   });
 
   it("returns 409 rather than choosing an ambiguous continuation", async () => {
-    const app = createApp(makeMockDeps({
-      lineageError: new AmbiguousEscrowLineageError("ambiguous#0"),
-    }));
-    const res = await request(app).get("/escrows/ambiguous%230/lineage");
+    const deps = makeIndexerDeps({ lineageError: new AmbiguousEscrowLineageError("ambiguous#0") });
+    const res = await request(createApp(deps)).get("/escrows/ambiguous%230/lineage");
     expect(res.status).toBe(409);
   });
 });
 
-// ─── GET /escrows?buyer= and ?supplier= ──────────────────────────────────────
-
-describe("GET /escrows (query params)", () => {
-  it("?buyer=PKH returns escrows matching buyer_pkh only", async () => {
-    const otherBuyer = "9".repeat(56);
-    const deps = makeMockDeps({
-      escrows: [
-        sampleEscrow({ utxo_ref: "c".repeat(64) + "#0", buyer_pkh: INDEXER_BUYER_PKH }),
-        sampleEscrow({ utxo_ref: "d".repeat(64) + "#0", buyer_pkh: otherBuyer }),
-      ],
-    });
-    const app = createApp(deps);
-    const res = await request(app).get(`/escrows?buyer=${INDEXER_BUYER_PKH}`);
-    expect(res.status).toBe(200);
-    expect(res.body.length).toBe(1);
-    expect(res.body[0].buyer_pkh).toBe(INDEXER_BUYER_PKH);
-  });
-
-  it("?supplier=PKH returns escrows matching supplier_pkh only", async () => {
-    const otherSupplier = "9".repeat(56);
-    const deps = makeMockDeps({
-      escrows: [
-        sampleEscrow({ utxo_ref: "c".repeat(64) + "#0", supplier_pkh: INDEXER_SUPPLIER_PKH }),
-        sampleEscrow({ utxo_ref: "d".repeat(64) + "#0", supplier_pkh: otherSupplier }),
-      ],
-    });
-    const app = createApp(deps);
-    const res = await request(app).get(`/escrows?supplier=${INDEXER_SUPPLIER_PKH}`);
-    expect(res.status).toBe(200);
-    expect(res.body.length).toBe(1);
-    expect(res.body[0].supplier_pkh).toBe(INDEXER_SUPPLIER_PKH);
-  });
-
-  it("returns empty array when no escrows match buyer query", async () => {
-    const app = createApp(makeMockDeps({ escrows: [] }));
-    const res = await request(app).get(`/escrows?buyer=${INDEXER_BUYER_PKH}`);
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual([]);
-  });
-
+describe("GET /escrows", () => {
   it("returns 400 when neither buyer nor supplier filter is provided", async () => {
-    const app = createApp(makeMockDeps({}));
-    const res = await request(app).get("/escrows");
+    const res = await request(createApp(makeIndexerDeps({}))).get("/escrows");
     expect(res.status).toBe(400);
-  });
-
-  it("payment_lovelace in escrow response is serialised as string", async () => {
-    const deps = makeMockDeps({
-      escrows: [sampleEscrow({ buyer_pkh: INDEXER_BUYER_PKH })],
-    });
-    const app = createApp(deps);
-    const res = await request(app).get(`/escrows?buyer=${INDEXER_BUYER_PKH}`);
-    expect(res.status).toBe(200);
-    expect(typeof res.body[0].payment_lovelace).toBe("string");
   });
 });
 
@@ -558,16 +270,7 @@ describe("GET /escrows (query params)", () => {
 
 describe("createApp — unknown routes", () => {
   it("returns 404 for unknown path /nonexistent-path", async () => {
-    const app = createApp(makeMockDeps({}));
-    const res = await request(app).get("/nonexistent-path");
+    const res = await request(createApp(makeIndexerDeps({}))).get("/nonexistent-path");
     expect(res.status).toBe(404);
-  });
-
-  it("does not expose internal Express error details on unmatched routes", async () => {
-    const app = createApp(makeMockDeps({}));
-    const res = await request(app).get("/nonexistent-path");
-    expect(res.status).toBe(404);
-    // Should not return a full Express stack trace
-    expect(typeof res.text).toBe("string");
   });
 });

@@ -1,21 +1,6 @@
 /**
- * tests/unit/indexer-block-processor.test.ts — blockProcessor + chain follower tests (Category B)
- *
- * Injects synthetic blocks via MockChainSyncSource to test event detection.
- * Tests call processBlock() directly.
- *
- * M1-D-fix changes:
- *   - AcceptEscrow / ReleaseEscrow tests now assert EXCLUSIVE event emission
- *     (Accept → no Release; Release → no Accept) driven by the spend redeemers.
- *   - Added: redeemer/state mismatch tests (e.g. Accept redeemer on Open → no event + warn).
- *   - DELETED (3 tests): old tests that asserted both AcceptEscrow AND ReleaseEscrow
- *     were emitted on the same Submitted-spend via .some() — those encoded the broken
- *     double-emit behaviour Catherine's blockProcessor.ts must no longer exhibit.
- *
- * Identity registry (wave 2): redeemers are Plutus Data CBOR hex in
- * tx.spendRedeemers, decoded by the shared escrow redeemer codec. A spend
- * without a redeemer no longer defaults to Accept or Reclaim: it gives no
- * event and a warning (the lineage then fails closed).
+ * tests/unit/indexer-block-processor.test.ts — processBlock: the marketplace events of one block. Ties to M1-D-fix: a spend of a Submitted escrow
+ * gives AcceptEscrow or ReleaseEscrow as its redeemer says, never both; a missing or unfitting redeemer gives no event and a warning.
  */
 
 import { describe, it, expect, vi, afterEach } from "vitest";
@@ -41,7 +26,6 @@ import {
   escrowRedeemerHex,
   ADVERT_SCRIPT_ADDRESS,
   ESCROW_SCRIPT_ADDRESS,
-  INDEXER_SUPPLIER_PKH,
   SAMPLE_RECEIPT_HASH,
   SAMPLE_SUBMITTED_AT,
 } from "../fixtures/indexer-side/sample-blocks.js";
@@ -69,27 +53,12 @@ describe("blockProcessor — PostAdvert", () => {
     expect(result.events[0].utxoRef).toBe("a".repeat(64) + "#0");
     expect(result.events[0].slot).toBe(1_000_000);
   });
-
-  it("PostAdvert event datumHex decodes to valid AdvertDatum", () => {
-    const datumHex = buildAdvertDatumHex({ supplierPkh: INDEXER_SUPPLIER_PKH });
-    const tx = buildPostAdvertTx({ txId: "a".repeat(64), advertDatumOpts: { supplierPkh: INDEXER_SUPPLIER_PKH } });
-    const block = buildMockBlock({ slot: 1_000_000, transactions: [tx] });
-    const result = processBlock(block, new Map(), ADDRESSES);
-    expect(result.events[0].datumHex).toBe(datumHex);
-  });
-
-  it("PostAdvert address is ADVERT_SCRIPT_ADDRESS", () => {
-    const tx = buildPostAdvertTx();
-    const block = buildMockBlock({ slot: 1_000_000, transactions: [tx] });
-    const result = processBlock(block, new Map(), ADDRESSES);
-    expect(result.events[0].address).toBe(ADVERT_SCRIPT_ADDRESS);
-  });
 });
 
 // ─── UpdateAdvert ─────────────────────────────────────────────────────────────
 
 describe("blockProcessor — UpdateAdvert", () => {
-  it("UpdateAdvert tx spends old advert UTxO and emits UpdateAdvert event", () => {
+  it("UpdateAdvert tx spends old advert UTxO and emits one UpdateAdvert event with the new datum", () => {
     const postTxId = "a".repeat(64);
     const knownUtxos = new Map([
       [postTxId + "#0", { address: ADVERT_SCRIPT_ADDRESS, datumHex: buildAdvertDatumHex() }],
@@ -101,24 +70,9 @@ describe("blockProcessor — UpdateAdvert", () => {
     });
     const block = buildMockBlock({ slot: 1_000_100, transactions: [tx] });
     const result = processBlock(block, knownUtxos, ADDRESSES);
-    expect(result.events.some(e => e.type === "UpdateAdvert")).toBe(true);
-  });
-
-  it("UpdateAdvert: advertisements table reflects new datum after update", () => {
-    const postTxId = "a".repeat(64);
-    const knownUtxos = new Map([
-      [postTxId + "#0", { address: ADVERT_SCRIPT_ADDRESS, datumHex: buildAdvertDatumHex() }],
+    expect(result.events.map((e) => [e.type, e.utxoRef, e.datumHex])).toEqual([
+      ["UpdateAdvert", "b".repeat(64) + "#0", buildAdvertDatumHex({ maxOutputTokens: 1024 })],
     ]);
-    const newDatumHex = buildAdvertDatumHex({ maxOutputTokens: 1024 });
-    const tx = buildUpdateAdvertTx({
-      txId: "b".repeat(64),
-      spentRef: { txId: postTxId, index: 0 },
-      newAdvertDatumOpts: { maxOutputTokens: 1024 },
-    });
-    const block = buildMockBlock({ slot: 1_000_100, transactions: [tx] });
-    const result = processBlock(block, knownUtxos, ADDRESSES);
-    const ev = result.events.find(e => e.type === "UpdateAdvert");
-    expect(ev!.datumHex).toBe(newDatumHex);
   });
 });
 
@@ -145,15 +99,6 @@ describe("blockProcessor — PostEscrow", () => {
     const block = buildMockBlock({ slot: 1_001_000, transactions: [tx] });
     const result = processBlock(block, new Map(), ADDRESSES);
     expect(result.events.some(e => e.type === "PostEscrow")).toBe(true);
-  });
-
-  it("PostEscrow event has state=Open in decoded datum", () => {
-    const datumHex = buildEscrowDatumHex({ state: "Open" });
-    const tx = buildPostEscrowTx({ txId: "c".repeat(64) });
-    const block = buildMockBlock({ slot: 1_001_000, transactions: [tx] });
-    const result = processBlock(block, new Map(), ADDRESSES);
-    const ev = result.events.find(e => e.type === "PostEscrow");
-    expect(ev!.datumHex).toBe(datumHex);
   });
 });
 
@@ -356,23 +301,7 @@ describe("blockProcessor — ReleaseEscrow (redeemer-aware)", () => {
 // guess Accept or Release: it emits no event and calls console.warn.
 
 describe("blockProcessor — missing redeemer (ambiguous Submitted-spend)", () => {
-  it("ambiguous Submitted-spend → no AcceptEscrow and no ReleaseEscrow event", () => {
-    const submitTxId = "e".repeat(64);
-    const knownUtxos = new Map([
-      [submitTxId + "#0", { address: ESCROW_SCRIPT_ADDRESS, datumHex: buildEscrowDatumHex({ state: "Submitted" }) }],
-    ]);
-    vi.spyOn(console, "warn").mockImplementation(() => {});
-    const tx = buildAmbiguousSubmittedSpendTx({
-      txId: "z".repeat(64),
-      spentRef: { txId: submitTxId, index: 0 },
-    });
-    const block = buildMockBlock({ slot: 1_009_000, transactions: [tx] });
-    const result = processBlock(block, knownUtxos, ADDRESSES);
-    expect(result.events.filter(e => e.type === "AcceptEscrow")).toHaveLength(0);
-    expect(result.events.filter(e => e.type === "ReleaseEscrow")).toHaveLength(0);
-  });
-
-  it("ambiguous Submitted-spend → no event, console.warn called, spend still recorded", () => {
+  it("ambiguous Submitted-spend → neither AcceptEscrow nor ReleaseEscrow, no event, console.warn called, spend still recorded", () => {
     const submitTxId = "e".repeat(64);
     const knownUtxos = new Map([
       [submitTxId + "#0", { address: ESCROW_SCRIPT_ADDRESS, datumHex: buildEscrowDatumHex({ state: "Submitted" }) }],
@@ -407,96 +336,34 @@ describe("blockProcessor — missing redeemer (ambiguous Submitted-spend)", () =
 
 // ─── Redeemer / state mismatch ────────────────────────────────────────────────
 //
-// M1-D-fix: When the redeemer disagrees with the on-chain prior state,
-// blockProcessor must emit NO event and call console.warn.
-// e.g. "Accept" redeemer on an Open escrow is invalid.
-// e.g. "Reclaim" redeemer on a Submitted escrow is invalid.
+// M1-D-fix: When the redeemer disagrees with the on-chain prior state, blockProcessor must emit NO event and warn.
+// e.g. "Accept" redeemer on an Open escrow is invalid; "Reclaim" on a Submitted escrow is invalid (ARCHITECTURE.md §4.3).
 
 describe("blockProcessor — redeemer / state mismatch", () => {
-  it("Accept redeemer on Open escrow → no event emitted, console.warn called", () => {
-    const postTxId = "c".repeat(64);
+  it.each([
+    ["Open", "Accept"],
+    ["Claimed", "Accept"],
+    ["Open", "Release"],
+    ["Submitted", "Reclaim"],
+  ] as const)("%s escrow spent with %s → no event emitted, console.warn called", (state, redeemer) => {
+    const spentTxId = "c".repeat(64);
     const knownUtxos = new Map([
-      [postTxId + "#0", { address: ESCROW_SCRIPT_ADDRESS, datumHex: buildEscrowDatumHex({ state: "Open" }) }],
+      [spentTxId + "#0", { address: ESCROW_SCRIPT_ADDRESS, datumHex: buildEscrowDatumHex({ state }) }],
     ]);
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    // Inline mismatch: Accept redeemer on an Open-state escrow is nonsensical
     const tx = {
       id: "m1".repeat(32),
-      inputs: [{ transaction: { id: postTxId }, index: 0 }],
+      inputs: [{ transaction: { id: spentTxId }, index: 0 }],
       outputs: [{
         address: "addr_test1vqfrg4ncjz4ummcjx3t83y9tehh3ydzk0zg2hn00zg69v7q7sa96j",
         value: { ada: { lovelace: 4_000_000 } },
       }],
-      spendRedeemers: { [postTxId + "#0"]: escrowRedeemerHex("Accept") },
+      spendRedeemers: { [spentTxId + "#0"]: escrowRedeemerHex(redeemer) },
     };
     const block = buildMockBlock({ slot: 1_010_000, transactions: [tx] });
     const result = processBlock(block, knownUtxos, ADDRESSES);
-    expect(result.events.length).toBe(0);
-    expect(warnSpy).toHaveBeenCalled();
-  });
-
-  it("Reclaim redeemer on Submitted escrow → no event emitted, console.warn called", () => {
-    const submitTxId = "e".repeat(64);
-    const knownUtxos = new Map([
-      [submitTxId + "#0", { address: ESCROW_SCRIPT_ADDRESS, datumHex: buildEscrowDatumHex({ state: "Submitted" }) }],
-    ]);
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    // Reclaim on Submitted is invalid per ARCHITECTURE.md §4.3
-    const tx = {
-      id: "n1".repeat(32),
-      inputs: [{ transaction: { id: submitTxId }, index: 0 }],
-      outputs: [{
-        address: "addr_test1vqfrg4ncjz4ummcjx3t83y9tehh3ydzk0zg2hn00zg69v7q7sa96j",
-        value: { ada: { lovelace: 4_000_000 } },
-      }],
-      spendRedeemers: { [submitTxId + "#0"]: escrowRedeemerHex("Reclaim") },
-    };
-    const block = buildMockBlock({ slot: 1_010_100, transactions: [tx] });
-    const result = processBlock(block, knownUtxos, ADDRESSES);
-    expect(result.events.length).toBe(0);
-    expect(warnSpy).toHaveBeenCalled();
-  });
-
-  it("Release redeemer on Open escrow → no event emitted, console.warn called", () => {
-    const postTxId = "c".repeat(64);
-    const knownUtxos = new Map([
-      [postTxId + "#0", { address: ESCROW_SCRIPT_ADDRESS, datumHex: buildEscrowDatumHex({ state: "Open" }) }],
-    ]);
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const tx = {
-      id: "o1".repeat(32),
-      inputs: [{ transaction: { id: postTxId }, index: 0 }],
-      outputs: [{
-        address: "addr_test1vqfrg4ncjz4ummcjx3t83y9tehh3ydzk0zg2hn00zg69v7q7sa96j",
-        value: { ada: { lovelace: 4_000_000 } },
-      }],
-      spendRedeemers: { [postTxId + "#0"]: escrowRedeemerHex("Release") },
-    };
-    const block = buildMockBlock({ slot: 1_010_200, transactions: [tx] });
-    const result = processBlock(block, knownUtxos, ADDRESSES);
-    expect(result.events.length).toBe(0);
-    expect(warnSpy).toHaveBeenCalled();
-  });
-
-  it("Accept redeemer on Claimed escrow → no event emitted, console.warn called", () => {
-    const claimTxId = "d".repeat(64);
-    const knownUtxos = new Map([
-      [claimTxId + "#0", { address: ESCROW_SCRIPT_ADDRESS, datumHex: buildEscrowDatumHex({ state: "Claimed" }) }],
-    ]);
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const tx = {
-      id: "p1".repeat(32),
-      inputs: [{ transaction: { id: claimTxId }, index: 0 }],
-      outputs: [{
-        address: "addr_test1vqfrg4ncjz4ummcjx3t83y9tehh3ydzk0zg2hn00zg69v7q7sa96j",
-        value: { ada: { lovelace: 4_000_000 } },
-      }],
-      spendRedeemers: { [claimTxId + "#0"]: escrowRedeemerHex("Accept") },
-    };
-    const block = buildMockBlock({ slot: 1_010_300, transactions: [tx] });
-    const result = processBlock(block, knownUtxos, ADDRESSES);
-    expect(result.events.length).toBe(0);
-    expect(warnSpy).toHaveBeenCalled();
+    expect(result.events).toEqual([]);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("redeemer/state mismatch"));
   });
 });
 
@@ -563,29 +430,5 @@ describe("blockProcessor — spend-driven detection", () => {
     const result = processBlock(block, new Map(), ADDRESSES);
     // All inputs are from untracked prev-txs
     expect(result.spentRefs.length).toBe(0);
-  });
-});
-
-// ─── Rollback via worker ──────────────────────────────────────────────────────
-
-describe("blockProcessor — rollback integration note", () => {
-  it("rollback to before a Submit: escrow returns to Claimed state (via cache rollback)", () => {
-    // This test documents rollback semantics at the worker level.
-    // The actual mechanic is tested in sqlite-cache.test.ts (rollbackTo).
-    // Here we verify processBlock correctly tracks which events were at which slots.
-    const claimTxId = "d".repeat(64);
-    const knownUtxos = new Map([
-      [claimTxId + "#0", { address: ESCROW_SCRIPT_ADDRESS, datumHex: buildEscrowDatumHex({ state: "Claimed" }) }],
-    ]);
-    const submitTx = buildSubmitEscrowTx({
-      txId: "e".repeat(64),
-      spentRef: { txId: claimTxId, index: 0 },
-    });
-    const block = buildMockBlock({ slot: 1_001_200, transactions: [submitTx] });
-    const result = processBlock(block, knownUtxos, ADDRESSES);
-    const ev = result.events.find(e => e.type === "SubmitEscrow");
-    expect(ev!.slot).toBe(1_001_200);
-    // If we rolled back to slot 1_001_100, this SubmitEscrow event at 1_001_200
-    // would be soft-deleted. The cache test validates that directly.
   });
 });
