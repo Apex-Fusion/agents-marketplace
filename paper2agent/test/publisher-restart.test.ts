@@ -2,12 +2,12 @@
  * A supplier child that ends by itself starts again, with the back-off of the publisher. A stop by the publisher starts
  * nothing. The children are local stand-ins, and time moves only when a test moves it.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import request from "supertest";
 import type { Express } from "express";
 import { PaperPublisherStore } from "../src/publisher-store.js";
-import { AUTH, JOB_ID, cleanup, manualTime, preparation, publisher, reviewedPackage, terms, tick, until,
-  type LaunchHook } from "./publisher-fixtures.js";
+import { AUTH, JOB_ID, cleanup, manualTime, publishRelease, tick, until,
+  type LaunchHook, type PublisherOptions, type Release } from "./publisher-fixtures.js";
 
 const unhandled: unknown[] = [];
 const noteRejection = (reason: unknown) => { unhandled.push(reason); };
@@ -20,7 +20,13 @@ beforeEach(() => {
 afterEach(async () => {
   process.off("unhandledRejection", noteRejection);
   await cleanup();
+  vi.useRealTimers();
 });
+
+/** The publication that every case restores: one slot, published once. */
+let release: Release;
+beforeAll(async () => { release = await publishRelease(); });
+afterAll(() => { release?.drop(); });
 
 /** The second child reports another advert, so the publisher stops it after its identity check. */
 const wrongAdvert: LaunchHook = (launch, index) => {
@@ -32,15 +38,12 @@ const exitAtStart: LaunchHook = (launch, index) => {
   if (index === 1) launch.exit(1);
 };
 
-/** A published slot with one ready child. */
-async function publishedSlot(options: Parameters<typeof publisher>[0] = {}) {
-  const fixture = await publisher(options);
-  const pkg = await reviewedPackage();
-  await request(fixture.app).post("/publications").set(AUTH).send(preparation(pkg, terms(pkg.artifact)));
-  const published = await request(fixture.app).post(`/publications/${JOB_ID}/publish`).set(AUTH)
-    .send({ artifact_sha256: pkg.artifact.sha256, confirm: true, max_debit_lovelace: "5000000" });
-  expect(published.body.state).toBe("published");
+/** A published slot with one ready child: the publication is restored, so a case does not publish again. */
+async function publishedSlot(options: PublisherOptions = {}) {
+  const fixture = await release.open(options);
+  await fixture.service.idle();
   expect(fixture.launches).toHaveLength(1);
+  expect((await capability(fixture.app)).status).toBe(200);
   return fixture;
 }
 
@@ -69,13 +72,10 @@ describe("restart of a supplier child that ends by itself", () => {
   });
 
   it("starts a new child when the first child of a restarted publisher exits during its start", async () => {
-    const first = await publishedSlot();
-    await first.service.close();
     const exitAtOpen: LaunchHook = (launch, index) => {
       if (index === 0) launch.exit(1);
     };
-    const { app, service, launches } = await publisher({ dataDir: first.dataDir, chain: first.chain, images: first.images,
-      onLaunch: exitAtOpen });
+    const { app, service, launches } = await release.open({ onLaunch: exitAtOpen });
     await until(() => launches.length === 2);
     await service.idle();
     expect((await capability(app)).status).toBe(200);
@@ -248,23 +248,20 @@ describe("restart of a supplier child that ends by itself", () => {
     expect(launches).toHaveLength(2);
   });
 
-  it("sets an unref'd timer by default and clears it when the publisher closes", async () => {
-    const time = manualTime();
-    const set = vi.spyOn(globalThis, "setTimeout");
-    const clear = vi.spyOn(globalThis, "clearTimeout");
-    const { service, launches } = await publishedSlot({ now: time.now });
+  it("holds a pending attempt in the default timer, and the close of the publisher releases it", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const { service, launches } = await publishedSlot();
     launches[0]!.exit(1);
     await until(() => launches.length === 2);
     await service.idle();
-    time.advance(12_345);
+    vi.advanceTimersByTime(12_345);
     launches[1]!.exit(1);
     await settle();
-
-    const attempts = set.mock.calls.flatMap((call, index) => call[1] === 17_655 ? [set.mock.results[index]!.value as NodeJS.Timeout] : []);
-    expect(attempts).toHaveLength(1);
-    expect(attempts[0]!.hasRef()).toBe(false);
+    expect(launches).toHaveLength(2);
+    // The attempt waits in the default timer. The close of the publisher cancels it, so one timer less is pending.
+    const pending = vi.getTimerCount();
     await service.close();
-    expect(clear).toHaveBeenCalledWith(attempts[0]);
+    expect(vi.getTimerCount()).toBe(pending - 1);
   });
 
   it("logs a child that does not become ready and tries again at the end of the back-off", async () => {

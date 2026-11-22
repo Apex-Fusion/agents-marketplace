@@ -2,14 +2,17 @@
  * Shared fixtures of the publisher tests: a reviewed package, wallet slots, a
  * fake runtime image store, a local stand-in for the supplier child, and the
  * publisher service with its management app. Call cleanup() after each test.
+ * A published release is built once with publishRelease() and restored for each case.
  */
 import { expect, vi, type Mock } from "vitest";
 import { createServer, type Server } from "node:http";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { cpSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import tar from "tar-stream";
+import type { Express } from "express";
+import request from "supertest";
 import { MockChainProvider, type ChainProvider } from "@marketplace/shared/chain";
 import { encodeAdvertDatum, encodeIdentityAdvertDatum } from "@marketplace/shared/cbor";
 import { isIdentityAdvertDatum, loadBlueprint } from "@marketplace/shared/tx";
@@ -32,6 +35,7 @@ export const KEY_A = "11".repeat(32);
 export const KEY_B = "22".repeat(32);
 export const AUTH = { Authorization: `Bearer ${TOKEN}` };
 export const JOB_ID = "0b4b7c2e-3f5d-4a8e-9c1d-2e3f4a5b6c7d";
+export const JOB_B = "7d6c5b4a-3e2f-4a1b-8c9d-0e1f2a3b4c5d";
 const schema = { type: "object", properties: { value: { type: "string" } }, required: ["value"], additionalProperties: false };
 
 const directories: string[] = [];
@@ -61,7 +65,13 @@ export async function until(condition: () => boolean): Promise<void> {
   expect(condition()).toBe(true);
 }
 
-export async function reviewedPackage(): Promise<{ archive: Buffer; artifact: PaperPackageArtifact; manifest: Paper2AgentManifest }> {
+export interface ReviewedPackage {
+  archive: Buffer;
+  artifact: PaperPackageArtifact;
+  manifest: Paper2AgentManifest;
+}
+
+export async function reviewedPackage(): Promise<ReviewedPackage> {
   const files: Record<string, string> = { "server.py": "print('reviewed wrapper')\n", "source/model.py": "SCALE = 2\n" };
   const pack = tar.pack();
   const chunks: Buffer[] = [];
@@ -102,14 +112,17 @@ export function target(id: string, key: string, live = true, extra: Record<strin
     { SUPPLIER_PRIV_KEY_HEX: key, NETWORK_ID: "0", OGMIOS_URL: "http://127.0.0.1:1337", LIVE_CHAIN: live ? "1" : "0", ...extra }, PUBLIC_URL);
 }
 
-export function fakeImages(failedBuilds = 0): RuntimeImages & { build: Mock } {
+/** `runtimeBuilt`: the runtime image exists already, as after a publication that built it. */
+export function fakeImages(failedBuilds = 0, runtimeBuilt = false): RuntimeImages & { build: Mock } {
   const images = new Map([[BASE_IMAGE, { id: BASE_IMAGE, layers: ["sha256:base"] }]]);
+  const runtime = { id: RUNTIME_IMAGE, layers: ["sha256:base", "sha256:bundle"] };
+  if (runtimeBuilt) images.set(RUNTIME_IMAGE, runtime);
   let failures = failedBuilds;
   return {
     inspect: async (reference: string) => images.get(reference) ?? null,
     build: vi.fn(async () => {
       if (failures-- > 0) throw new Error("pip install failed");
-      images.set(RUNTIME_IMAGE, { id: RUNTIME_IMAGE, layers: ["sha256:base", "sha256:bundle"] });
+      images.set(RUNTIME_IMAGE, runtime);
       return RUNTIME_IMAGE;
     }),
   };
@@ -199,11 +212,24 @@ export function supplierLauncher(launches: Launch[], price: string, onLaunch?: L
   };
 }
 
-export async function publisher(options: { dataDir?: string; targets?: PublisherTarget[]; chain?: ChainProvider; images?: RuntimeImages;
+export interface PublisherOptions {
+  dataDir?: string; targets?: PublisherTarget[]; chain?: ChainProvider; images?: RuntimeImages;
   postAdvert?: PaperPublisherDeps["postAdvert"]; retireAdvert?: PaperPublisherDeps["retireAdvert"]; price?: string;
   toolCallToken?: string; identityController?: PaperPublisherConfig["identityController"]; registrar?: PaperPublisherDeps["registrar"];
   identity?: PaperPublisherDeps["identity"]; now?: PaperPublisherDeps["now"]; schedule?: PaperPublisherDeps["schedule"];
-  log?: PaperPublisherDeps["log"]; onLaunch?: LaunchHook } = {}) {
+  log?: PaperPublisherDeps["log"]; onLaunch?: LaunchHook;
+}
+
+export interface PublisherFixture {
+  service: PaperPublisherService;
+  app: Express;
+  chain: ChainProvider;
+  images: RuntimeImages;
+  launches: Launch[];
+  dataDir: string;
+}
+
+export async function publisher(options: PublisherOptions = {}): Promise<PublisherFixture> {
   const dataDir = options.dataDir ?? temporary();
   const chain = options.chain ?? new MockChainProvider();
   const images = options.images ?? fakeImages();
@@ -220,6 +246,67 @@ export async function publisher(options: { dataDir?: string; targets?: Publisher
   });
   services.push(service);
   return { service, app: createPaperPublisherApp(service), chain, images, launches, dataDir };
+}
+
+/**
+ * The state that publishing leaves: the data directory, and the chain transactions of the adverts. A case restores it and opens a
+ * publisher on it, so it does not publish again. The database holds `work_dir` as an absolute path inside the data directory, so each
+ * restore goes to the same path: a copy at another path would still point to the first one. Each `open` replaces the data directory,
+ * so close the publisher of an earlier `open` first.
+ */
+export interface Release {
+  dataDir: string;
+  pkg: ReviewedPackage;
+  /** The advert reference of each published slot, in the order that `publishRelease` got the slots. */
+  refs: string[];
+  /** Puts the data directory back as published, replays the transactions on the chain (default: a new mock chain), opens a publisher. */
+  open(options?: PublisherOptions): Promise<PublisherFixture>;
+  /** Removes the data directory and the copy of it. */
+  drop(): void;
+}
+
+const RELEASE_SLOTS = { "slot-a": { key: KEY_A, job: JOB_ID }, "slot-b": { key: KEY_B, job: JOB_B } };
+
+/** Publishes the slots once with the legacy advert flow on the mock chain, closes the publisher and keeps a copy of its data directory. */
+export async function publishRelease(slots: Array<keyof typeof RELEASE_SLOTS> = ["slot-a"]): Promise<Release> {
+  const dataDir = mkdtempSync(join(tmpdir(), "p2a-release-"));
+  const pristine = mkdtempSync(join(tmpdir(), "p2a-release-copy-"));
+  const drop = () => {
+    rmSync(dataDir, { recursive: true, force: true });
+    rmSync(pristine, { recursive: true, force: true });
+  };
+  try {
+    const chain = new MockChainProvider();
+    const submit = vi.spyOn(chain, "submitTx");
+    const first = await publisher({ dataDir, chain, targets: slots.map((slot) => target(slot, RELEASE_SLOTS[slot].key)) });
+    const pkg = await reviewedPackage();
+    const refs: string[] = [];
+    for (const slot of slots) {
+      const { job } = RELEASE_SLOTS[slot];
+      expect((await request(first.app).post("/publications").set(AUTH).send(preparation(pkg, terms(pkg.artifact, slot), job))).status).toBe(200);
+      const published = await request(first.app).post(`/publications/${job}/publish`).set(AUTH)
+        .send({ artifact_sha256: pkg.artifact.sha256, confirm: true, max_debit_lovelace: "5000000" });
+      expect(published.body.state).toBe("published");
+      refs.push(published.body.advert_ref as string);
+    }
+    // The copy comes after the close: the database is flushed and no child runs.
+    await first.service.close();
+    const transactions = submit.mock.calls.map(([cbor]) => cbor);
+    cpSync(dataDir, pristine, { recursive: true });
+    return {
+      dataDir, pkg, refs, drop,
+      async open(options = {}) {
+        rmSync(dataDir, { recursive: true, force: true });
+        cpSync(pristine, dataDir, { recursive: true });
+        const chain = options.chain ?? new MockChainProvider();
+        for (const cbor of transactions) await chain.submitTx(cbor);
+        return publisher({ ...options, dataDir, chain, images: options.images ?? fakeImages(0, true) });
+      },
+    };
+  } catch (error) {
+    drop();
+    throw error;
+  }
 }
 
 /**

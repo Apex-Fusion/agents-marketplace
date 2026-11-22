@@ -1,6 +1,7 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import request from "supertest";
 import type { Express } from "express";
+import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { inspect } from "node:util";
@@ -17,7 +18,8 @@ import { PaperPublisherStore, type SignedAdvert } from "../src/publisher-store.j
 import { AGENT_ID, CONTROLLER, IDENTITY, recordUtxo, supplierAgentRecord, testIdentity } from "../../tests/fixtures/supplier-side/identity.js";
 import {
   AUTH, BASE_IMAGE, JOB_ID, KEY_A, KEY_B, PUBLIC_URL, RUNTIME_IMAGE, TOKEN, TOOL_TOKEN, cleanup, fakeImages, fundWallet, preparation,
-  publisher, reviewedPackage, target, temporary, terms, tick, until, walletFundedAdvert, type LaunchHook,
+  publishRelease, publisher, reviewedPackage, target, temporary, terms, tick, until, walletFundedAdvert, type LaunchHook,
+  type PublisherOptions, type Release,
 } from "./publisher-fixtures.js";
 
 afterEach(cleanup);
@@ -302,7 +304,9 @@ describe("publisher journal invariants", () => {
     store.recover(7);
     expect(["unsigned", "signed", "building"].map((id) => store.get(id)?.phase)).toEqual(["prepared", "confirmation_pending", "failed"]);
     expect(() => store.update("signed", ["confirmation_pending"], { phase: "prepared" }, 8)).toThrow(/cannot be reset/);
-    expect(() => store.journal(transaction("unsigned", "slot-b", "cd".repeat(32)), 9)).toThrow();
+    // Slot slot-b belongs to the signed publication: another publication cannot journal an advert for it.
+    expect(() => store.journal(transaction("unsigned", "slot-b", "cd".repeat(32)), 9))
+      .toThrow("an advert transaction belongs to the slot of its publication");
     expect(store.heldTargets()).toEqual(new Set(["slot-a", "slot-b"]));
     store.close();
   });
@@ -356,15 +360,26 @@ const identitySlot = (agentId?: string) => new PublisherTarget("slot-a", "Slot s
   OGMIOS_URL: "http://127.0.0.1:1337", LIVE_CHAIN: "1", IDENTITY_POLICY_ID: IDENTITY.identityHash,
   ...(agentId === undefined ? {} : { AGENT_ID: agentId }) }, PUBLIC_URL);
 const controller = { controller: CONTROLLER.pubKeyHex, accountable: { type: "ControllerSet" as const } };
-/** A stand-in Register builder: the slot key and the controller must sign. */
-const registrar: PaperPublisherDeps["registrar"] = () => ({
-  async build(args) {
-    const signers = [args.wallet.pubKeyHash, deriveSupplierKey(CONTROLLER.privateKeyHex, 0).pubKeyHash].sort();
-    return { txCborHex: "84a0a0f5f6", txHash: "ab".repeat(32), agentId: AGENT_ID, requiredSigners: signers };
-  },
-  sign: async (tx) => tx,
-  txId: () => "ab".repeat(32),
-});
+/**
+ * A stand-in Register builder: the slot key and the controller must sign. Each build is a new transaction with its own hash, so a
+ * registration that the publisher builds again shows as another entry in `hashes`.
+ */
+function registrarStandIn(): { registrar: PaperPublisherDeps["registrar"]; hashes: string[] } {
+  const hashes: string[] = [];
+  const txId = (txCborHex: string) => createHash("sha256").update(txCborHex).digest("hex");
+  const registrar: PaperPublisherDeps["registrar"] = () => ({
+    async build(args) {
+      const signers = [args.wallet.pubKeyHash, deriveSupplierKey(CONTROLLER.privateKeyHex, 0).pubKeyHash].sort();
+      const txCborHex = `84a0a0f5f6${hashes.length.toString(16).padStart(2, "0")}`;
+      const txHash = txId(txCborHex);
+      hashes.push(txHash);
+      return { txCborHex, txHash, agentId: AGENT_ID, requiredSigners: signers };
+    },
+    sign: async (tx) => tx,
+    txId,
+  });
+  return { registrar, hashes };
+}
 
 describe("slot identity records (Part 2 §9.2)", () => {
   async function prepared(options: Parameters<typeof publisher>[0]) {
@@ -378,19 +393,23 @@ describe("slot identity records (Part 2 §9.2)", () => {
 
   it("builds the slot key's Register for the offline controller, once, and shows the agent", async () => {
     const chain = new MockChainProvider();
+    const { registrar, hashes } = registrarStandIn();
     const { app } = await publisher({ chain, targets: [identitySlot()], identityController: controller, registrar,
       identity: () => testIdentity(chain) });
     const built = await request(app).post("/targets/slot-a/record").set(AUTH);
     expect(built.status).toBe(200);
     expect(built.body).toMatchObject({ agent_id: AGENT_ID, agent_did: `did:vector:${AGENT_ID}`, state: "awaiting_signatures",
-      tx_hash: "ab".repeat(32), missing_signers: [deriveSupplierKey(CONTROLLER.privateKeyHex, 0).pubKeyHash] });
+      tx_hash: hashes[0], missing_signers: [deriveSupplierKey(CONTROLLER.privateKeyHex, 0).pubKeyHash] });
+    // A second request returns the stored registration: no second build, so the hash stays the same.
     expect((await request(app).post("/targets/slot-a/record").set(AUTH)).body.tx_hash).toBe(built.body.tx_hash);
+    expect(hashes).toHaveLength(1);
     expect((await request(app).get("/targets").set(AUTH)).body.targets[0].agent_id).toBe(AGENT_ID);
     expect((await request(app).get("/targets/slot-a/record").set(AUTH)).body.state).toBe("awaiting_signatures");
   });
 
   it("refuses a registration for a legacy slot, without a controller, or when the key is already listed", async () => {
     const chain = new MockChainProvider();
+    const { registrar } = registrarStandIn();
     const legacy = await publisher({ chain, identityController: controller, registrar });
     expect((await request(legacy.app).post("/targets/slot-a/record").set(AUTH)).body.error).toBe("identity_not_configured");
     const noController = await publisher({ chain, targets: [identitySlot()], registrar, identity: () => testIdentity(chain) });
@@ -529,7 +548,6 @@ describe("advert journal migration", () => {
 });
 
 describe("identity re-advertisement of a published slot (Part 2 §9.6)", () => {
-  const JOB_B = "7d6c5b4a-3e2f-4a1b-8c9d-0e1f2a3b4c5d";
   const approval = { confirm: true, max_debit_lovelace: "5000000" };
   const readvert = (app: Express, body: object = approval) => request(app).post("/targets/slot-a/readvert").set(AUTH).send(body);
   const switchAdvert = (app: Express) => request(app).post("/targets/slot-a/switch").set(AUTH);
@@ -538,43 +556,44 @@ describe("identity re-advertisement of a published slot (Part 2 §9.6)", () => {
   const outputOf = (ref: string) => ({ txHash: ref.split("#")[0]!, index: Number(ref.split("#")[1]) });
   const states = (rows: SlotAdvertView[]) => rows.map((row) => [row.generation, row.layout, row.state, row.serving]);
 
+  /** slot-a published by the legacy release (and slot-b too, for the case with a second slot): built once, restored for each case. */
+  let oneSlot: Release;
+  let twoSlots: Release;
+  beforeAll(async () => {
+    oneSlot = await publishRelease(["slot-a"]);
+    twoSlots = await publishRelease(["slot-a", "slot-b"]);
+  });
+  afterAll(() => {
+    oneSlot?.drop();
+    twoSlots?.drop();
+  });
+
   /**
    * slot-a (and slot-b with secondSlot) published with legacy adverts by the
-   * legacy release; then the publisher restarts with the identity settings of
-   * slot-a. `record` (default) puts the record of AGENT_ID on chain; `register`
-   * builds the slot's record registration first (a slot without AGENT_ID).
+   * legacy release (restored from the release); then the publisher restarts
+   * with the identity settings of slot-a. `record` (default) puts the record
+   * of AGENT_ID on chain; `register` builds the slot's record registration
+   * first (a slot without AGENT_ID). Each restore replaces the data directory:
+   * a case closes the publisher of one `republished` before the next call.
    */
   async function republished(options: { chain?: MockChainProvider; slot?: PublisherTarget; record?: boolean; register?: boolean;
     secondSlot?: boolean; postAdvert?: PaperPublisherDeps["postAdvert"]; onLaunch?: LaunchHook } = {}) {
+    const release = options.secondSlot ? twoSlots : oneSlot;
     const chain = options.chain ?? new MockChainProvider();
-    const dataDir = temporary();
-    const legacySlots = [target("slot-a", KEY_A), ...(options.secondSlot ? [target("slot-b", KEY_B)] : [])];
-    const legacy = await publisher({ dataDir, chain, targets: legacySlots });
-    const pkg = await reviewedPackage();
-    const legacyRefs: string[] = [];
-    for (const [slot, job] of [["slot-a", JOB_ID], ["slot-b", JOB_B]].slice(0, legacySlots.length)) {
-      expect((await request(legacy.app).post("/publications").set(AUTH).send(preparation(pkg, terms(pkg.artifact, slot), job))).status)
-        .toBe(200);
-      const published = await request(legacy.app).post(`/publications/${job}/publish`).set(AUTH)
-        .send({ artifact_sha256: pkg.artifact.sha256, confirm: true, max_debit_lovelace: "5000000" });
-      expect(published.body.state).toBe("published");
-      legacyRefs.push(published.body.advert_ref);
-    }
-    await legacy.service.close();
-    const settings = { dataDir, chain, images: legacy.images, targets: [options.slot ?? identitySlot(AGENT_ID), ...legacySlots.slice(1)],
-      identity: () => testIdentity(chain), identityController: controller, registrar };
-    const fixture = await publisher({ ...settings, postAdvert: options.postAdvert, onLaunch: options.onLaunch });
+    const settings = { targets: [options.slot ?? identitySlot(AGENT_ID), ...(options.secondSlot ? [target("slot-b", KEY_B)] : [])],
+      identity: () => testIdentity(chain), identityController: controller, registrar: registrarStandIn().registrar };
+    const fixture = await release.open({ ...settings, chain, postAdvert: options.postAdvert, onLaunch: options.onLaunch });
     await fixture.service.idle();
     if (options.register) expect((await request(fixture.app).post("/targets/slot-a/record").set(AUTH)).body.agent_id).toBe(AGENT_ID);
     if (options.record !== false) chain.seed(recordUtxo(supplierAgentRecord(deriveSupplierKey(KEY_A, 0), [PAPER2AGENT_CAPABILITY_ID])));
     /** A publisher restart on the same state and chain. */
-    const restart = async (deps: Pick<Parameters<typeof publisher>[0] & object, "postAdvert" | "retireAdvert"> = {}) => {
+    const restart = async (deps: Pick<PublisherOptions, "postAdvert" | "retireAdvert"> = {}) => {
       await fixture.service.close();
-      const next = await publisher({ ...settings, ...deps });
+      const next = await publisher({ ...settings, dataDir: release.dataDir, chain, images: fixture.images, ...deps });
       await next.service.idle();
       return next;
     };
-    return { ...fixture, chain, pkg, legacyRef: legacyRefs[0]!, restart };
+    return { ...fixture, chain, pkg: release.pkg, legacyRef: release.refs[0]!, restart };
   }
 
   it("refuses an unpublished slot, a slot without identity settings or a listed record, and an unapproved request", async () => {
@@ -588,20 +607,25 @@ describe("identity re-advertisement of a published slot (Part 2 §9.6)", () => {
     expect((await adverts(unpublished.app)).status).toBe(404);
     for (const call of [switchAdvert(unpublished.app), retireLegacy(unpublished.app)]) expect((await call).body.error).toBe("slot_not_published");
 
+    // A restore replaces the data directory: each publisher closes before the next one opens.
     const legacyOnly = await republished({ slot: target("slot-a", KEY_A) });
-    const noRecord = await republished({ slot: identitySlot(), record: false });
-    const unlisted = await republished({ record: false });
-    const submits = [legacyOnly, noRecord, unlisted].map((fixture) => vi.spyOn(fixture.chain, "submitTx"));
+    const legacySubmit = vi.spyOn(legacyOnly.chain, "submitTx");
     expect((await readvert(legacyOnly.app)).body.error).toBe("identity_not_configured");
+    await legacyOnly.service.close();
+    const noRecord = await republished({ slot: identitySlot(), record: false });
+    const noRecordSubmit = vi.spyOn(noRecord.chain, "submitTx");
     const required = await readvert(noRecord.app);
     expect([required.status, required.body.error]).toEqual([409, "slot_record_required"]);
+    await noRecord.service.close();
+    const unlisted = await republished({ record: false });
+    const unlistedSubmit = vi.spyOn(unlisted.chain, "submitTx");
     const invalid = await readvert(unlisted.app);
     expect([invalid.status, invalid.body.error]).toEqual([409, "slot_record_invalid"]);
     expect(invalid.body.message).toMatch(/agent record not found/);
     expect((await readvert(unlisted.app, { confirm: false, max_debit_lovelace: "5000000" })).body.error).toBe("confirmation_required");
     expect((await readvert(unlisted.app, { confirm: true })).status).toBe(400);
     expect((await adverts(unlisted.app)).body.adverts.map((row: SlotAdvertView) => row.layout)).toEqual(["legacy"]);
-    for (const submit of submits) expect(submit).not.toHaveBeenCalled();
+    for (const submit of [legacySubmit, noRecordSubmit, unlistedSubmit]) expect(submit).not.toHaveBeenCalled();
   });
 
   it("posts one identity advert with the publish advert's offer and keeps serving the legacy advert until the switch", async () => {
