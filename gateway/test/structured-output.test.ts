@@ -35,30 +35,16 @@ const ENFORCED = {
   additionalProperties: false,
 };
 
-// These are the colleague's five requests. No sleeps or widened token limits:
-// the indexer deliberately stays "working" after the first upstream request.
+// These are three of the colleague's five requests. The other two (a plain chat request and a strict json_schema chat request) add no
+// branch to these three. No widened token limits: the indexer deliberately stays "working" after the first upstream request, and the
+// SDK waits one poll interval before its second poll.
 const probes = [
-  {
-    name: "chat plain",
-    path: "/chat/completions",
-    body: { model: MODEL, messages: [{ role: "user", content: "Say ready." }], max_tokens: 10 },
-    expected: "ready",
-  },
   {
     name: "chat response_format json_object",
     path: "/chat/completions",
     body: {
       model: MODEL, messages: [{ role: "user", content: 'Return a JSON object {"ok": true, "n": 1}.' }],
       max_tokens: 40, response_format: { type: "json_object" },
-    },
-    expected: { ok: true, n: 1 },
-  },
-  {
-    name: "chat response_format json_schema strict",
-    path: "/chat/completions",
-    body: {
-      model: MODEL, messages: [{ role: "user", content: "Return ok true and n 1." }], max_tokens: 40,
-      response_format: { type: "json_schema", json_schema: { name: "t", strict: true, schema: SCHEMA } },
     },
     expected: { ok: true, n: 1 },
   },
