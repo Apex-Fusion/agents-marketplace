@@ -1,7 +1,7 @@
 // Golden CBOR fixtures of the delegation types (contracts/identity-marketplace/fixtures/cbor-fixtures.json,
 // written by the contracts with cbor.serialise): the gateway's delegation codec decodes them and
 // encodes them back byte for byte. The vault fixtures carry the shared Delegator type (both
-// constructors). IDENTITY_CBOR_FIXTURES overrides the path; the suite is skipped only without the file.
+// constructors). IDENTITY_CBOR_FIXTURES overrides the path. Without the file, the suite fails.
 
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -17,28 +17,36 @@ interface Fixture {
 
 const path =
   process.env.IDENTITY_CBOR_FIXTURES ?? resolve(dirname(fileURLToPath(import.meta.url)), "../../../contracts/identity-marketplace/fixtures/cbor-fixtures.json");
-const fixtures: Record<string, Fixture> = existsSync(path) ? (JSON.parse(readFileSync(path, "utf8")) as { fixtures: Record<string, Fixture> }).fixtures : {};
+// `fixtures/generate.mjs` writes the file, so its shape is fixed and a cast is enough.
+const file = existsSync(path) ? (JSON.parse(readFileSync(path, "utf8")) as { fixtures: Record<string, Fixture> }) : null;
+const fixtures = file === null ? null : file.fixtures;
 const bytes = (hex: string) => Uint8Array.from(Buffer.from(hex, "hex"));
 const hex = (data: Uint8Array) => Buffer.from(data).toString("hex");
 const filled = (byte: string, length: number) => byte.repeat(length);
 const utf8Hex = (text: string) => Buffer.from(text, "utf8").toString("hex");
 
-describe.skipIf(Object.keys(fixtures).length === 0)(`golden delegation fixtures (${path})`, () => {
-  const delegationDatums = Object.entries(fixtures).filter(([, f]) => f.type.endsWith("types.DelegationDatum"));
-  const vaultDatums = Object.entries(fixtures).filter(([, f]) => f.type.endsWith("types.VaultDatum"));
+/** The fixture `name`. A fixture that the file lacks fails the test: it never falls back to another value. */
+function fixture(name: string): Fixture {
+  const found = fixtures?.[name];
+  if (!found) throw new Error(`fixture ${name} is missing from ${path}`);
+  return found;
+}
 
-  test("the file has delegation and vault datum fixtures", () => {
-    expect(delegationDatums.map(([name]) => name)).toContain("delegation_datum");
-    expect(vaultDatums.length).toBeGreaterThan(0);
-  });
+test("finds the fixture file", () => {
+  expect(fixtures, `missing ${path}; set IDENTITY_CBOR_FIXTURES to its path`).not.toBeNull();
+});
 
-  test.each(delegationDatums)("%s: DelegationDatum decode and encode give the same bytes", (_name, fixture) => {
-    expect(hex(encodeDelegationDatum(decodeDelegationDatum(bytes(fixture.cbor))))).toBe(fixture.cbor);
+describe.skipIf(fixtures === null)(`golden delegation fixtures (${path})`, () => {
+  const delegationDatums = Object.entries(fixtures ?? {}).filter(([, f]) => f.type.endsWith("types.DelegationDatum"));
+  const vaultDatums = Object.entries(fixtures ?? {}).filter(([, f]) => f.type.endsWith("types.VaultDatum"));
+
+  test.each(delegationDatums)("%s: DelegationDatum decode and encode give the same bytes", (_name, entry) => {
+    expect(hex(encodeDelegationDatum(decodeDelegationDatum(bytes(entry.cbor))))).toBe(entry.cbor);
   });
 
   test("delegation_datum decodes to the values of lib/identity_marketplace/cbor_fixtures.ak", () => {
     const t0 = 1_793_577_600_000;
-    expect(decodeDelegationDatum(bytes(fixtures.delegation_datum!.cbor))).toEqual({
+    expect(decodeDelegationDatum(bytes(fixture("delegation_datum").cbor))).toEqual({
       delegator: { type: "Agent", id: filled("b1", 32) },
       parent: filled("b2", 32),
       delegate: filled("b3", 32),
@@ -54,21 +62,21 @@ describe.skipIf(Object.keys(fixtures).length === 0)(`golden delegation fixtures 
     });
   });
 
-  test.each(vaultDatums)("%s: the Delegator in the vault datum decodes and encodes back to the same data", (_name, fixture) => {
-    const data = decodePlutusData(bytes(fixture.cbor));
+  test.each(vaultDatums)("%s: the Delegator in the vault datum decodes and encodes back to the same data", (_name, entry) => {
+    const data = decodePlutusData(bytes(entry.cbor));
     if (data.type !== "constr") throw new Error("a vault datum is a constructor");
     const owner = data.fields[0]!;
     expect(hex(encodePlutusData(delegatorToData(delegatorFromData(owner))))).toBe(hex(encodePlutusData(owner)));
   });
 
   test("vault_datum_live holds a principal key with an organisation", () => {
-    const data = decodePlutusData(bytes(fixtures.vault_datum_live!.cbor));
+    const data = decodePlutusData(bytes(fixture("vault_datum_live").cbor));
     if (data.type !== "constr") throw new Error("a vault datum is a constructor");
     expect(delegatorFromData(data.fields[0]!)).toEqual({ type: "PrincipalKey", hash: filled("c1", 28), organisation: utf8Hex("example.org") });
   });
 
   test("a datum with another layout is refused", () => {
-    expect(() => decodeDelegationDatum(bytes(fixtures.delegation_mint_undelegate?.cbor ?? "d87a80"))).toThrow(/delegation datum/);
+    expect(() => decodeDelegationDatum(bytes(fixture("delegation_mint_undelegate").cbor))).toThrow(/delegation datum/);
     expect(() => decodeDelegationDatum(bytes("d87980"))).toThrow(/constructor 0 has 0 fields/);
   });
 });
