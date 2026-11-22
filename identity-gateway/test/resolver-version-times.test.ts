@@ -2,6 +2,7 @@ import fc from "fast-check";
 import { describe, expect, test } from "vitest";
 import { httpStatus } from "../src/resolve/resolver.js";
 import { formatTime } from "../src/resolve/time.js";
+import { nightly } from "./support/depth.js";
 import { CONTROLLER_2, LedgerBuilder, PARTY_KEY, identityDatum, idOf, keySigner, timeAt, utf8 } from "./support/ledger.js";
 import { didOf, errorType, resolveIn, resolverFor, tombstoneOf } from "./support/resolve.js";
 
@@ -28,41 +29,7 @@ function threeVersions(): LedgerBuilder {
   return b;
 }
 
-/** Versions 1 and 2 are two transactions of block 200: the same block time. */
-function twoUpdatesInOneSecond(): LedgerBuilder {
-  const b = new LedgerBuilder();
-  b.register(ID, named("zero"), { height: 100 });
-  b.update(ID, named("one"), { height: 200, txIndex: 0 });
-  b.update(ID, named("two"), { height: 200, txIndex: 1 });
-  b.update(ID, named("three"), { height: 300 });
-  return b;
-}
-
 describe("a version in the middle of the history", () => {
-  test("versionId gives the time of its own update and the time of the next update", async () => {
-    const result = await resolveIn(threeVersions(), DID, { versionId: "1" });
-    expect(httpStatus(result)).toBe(200);
-    expect(result.didDocumentMetadata).toMatchObject({
-      created: stamp(100),
-      updated: stamp(200),
-      versionId: "1",
-      nextVersionId: "2",
-      nextUpdate: stamp(300),
-      vectorProfile: { name: "one" },
-    });
-  });
-
-  test("versionTime between the two updates gives the same two times", async () => {
-    const result = await resolveIn(threeVersions(), DID, { versionTime: stamp(250) });
-    expect(result.didDocumentMetadata).toMatchObject({
-      updated: stamp(200),
-      versionId: "1",
-      nextVersionId: "2",
-      nextUpdate: stamp(300),
-      vectorProfile: { name: "one" },
-    });
-  });
-
   test("the metadata of this version has exactly these members", async () => {
     const result = await resolveIn(threeVersions(), DID, { versionId: "1" });
     expect(Object.keys(result.didDocumentMetadata).sort()).toEqual([
@@ -81,41 +48,11 @@ describe("a version in the middle of the history", () => {
       "versionId",
     ]);
   });
-
-  test("the time of each next update is the time of the next version, so the versions chain without a gap", async () => {
-    const b = twoUpdatesInOneSecond();
-    for (let version = 0; version < 3; version++) {
-      const here = (await resolveIn(b, DID, { versionId: String(version) })).didDocumentMetadata;
-      const next = (await resolveIn(b, DID, { versionId: String(version + 1) })).didDocumentMetadata;
-      expect(here.nextVersionId).toBe(String(version + 1));
-      expect(here.nextUpdate).toBe(next.updated);
-    }
-  });
-});
-
-describe("the first version", () => {
-  test.each([
-    ["versionId 0", { versionId: "0" }],
-    ["versionTime after the first mint", { versionTime: stamp(100, 1) }],
-  ])("%s has no updated, because no update happened; nextUpdate is the time of version 1", async (_name, options) => {
-    const result = await resolveIn(threeVersions(), DID, options);
-    expect(result.didDocumentMetadata).toMatchObject({ created: stamp(100), versionId: "0", nextVersionId: "1", nextUpdate: stamp(200) });
-    expect(result.didDocumentMetadata.updated).toBeUndefined();
-  });
-
-  test("versionTime at the time of the first mint is NOT_FOUND: no version is before it", async () => {
-    expect(errorType(await resolveIn(threeVersions(), DID, { versionTime: stamp(100) }))).toBe("NOT_FOUND");
-  });
 });
 
 describe("the current version", () => {
-  test.each([
-    ["no option", undefined],
-    ["versionId of the newest version", { versionId: "2" }],
-    ["versionTime after the newest update", { versionTime: stamp(300, 1) }],
-    ["versionTime later than the tip", { versionTime: "9999-12-31T23:59:59Z" }],
-  ])("%s: updated is the newest update; no nextUpdate and no nextVersionId", async (_name, options) => {
-    const result = await resolveIn(threeVersions(), DID, options);
+  test("no option: updated is the newest update; no nextUpdate and no nextVersionId", async () => {
+    const result = await resolveIn(threeVersions(), DID);
     expect(result.didDocumentMetadata).toMatchObject({ updated: stamp(300), versionId: "2", vectorProfile: { name: "two" } });
     expect(result.didDocumentMetadata.nextUpdate).toBeUndefined();
     expect(result.didDocumentMetadata.nextVersionId).toBeUndefined();
@@ -172,66 +109,6 @@ describe("versionTime and the time of an update (a version counts only when its 
     expect(metadata.versionId).toBe(expected.versionId);
     expect(metadata.updated).toBe(expected.updated);
     expect(metadata.nextUpdate).toBe(expected.nextUpdate);
-  });
-
-  test("at an update the next update is not after the requested time, so DID Core accepts no signature made at that second", async () => {
-    const requested = stamp(200);
-    const metadata = (await resolveIn(threeVersions(), DID, { versionTime: requested })).didDocumentMetadata;
-    expect(metadata.nextUpdate).toBe(requested);
-    expect(Date.parse(metadata.nextUpdate!)).not.toBeGreaterThan(Date.parse(requested));
-  });
-
-  test("whatever the time, updated (or created, for version 0) is before it, and nextUpdate is not before it", async () => {
-    for (const b of [threeVersions(), twoUpdatesInOneSecond()]) {
-      for (const height of [100, 200, 300, 400]) {
-        for (const seconds of [-10, -1, 0, 1, 5]) {
-          const requested = stamp(height, seconds);
-          const result = await resolveIn(b, DID, { versionTime: requested });
-          if (errorType(result) !== undefined) {
-            expect(errorType(result)).toBe("NOT_FOUND");
-            expect(Date.parse(requested)).toBeLessThanOrEqual(Date.parse(stamp(100)));
-            continue;
-          }
-          const metadata = result.didDocumentMetadata;
-          expect(Date.parse(metadata.updated ?? metadata.created!)).toBeLessThan(Date.parse(requested));
-          if (metadata.nextUpdate !== undefined) expect(Date.parse(metadata.nextUpdate)).toBeGreaterThanOrEqual(Date.parse(requested));
-          expect(metadata.nextUpdate === undefined).toBe(metadata.nextVersionId === undefined);
-        }
-      }
-    }
-  });
-});
-
-describe("two updates in the same second", () => {
-  test("versionId of the first one: updated and nextUpdate are the same time", async () => {
-    const metadata = (await resolveIn(twoUpdatesInOneSecond(), DID, { versionId: "1" })).didDocumentMetadata;
-    expect(metadata).toMatchObject({ versionId: "1", updated: stamp(200), nextVersionId: "2", nextUpdate: stamp(200), vectorProfile: { name: "one" } });
-  });
-
-  test("versionId of the second one: nextUpdate is the time of the update after it", async () => {
-    const metadata = (await resolveIn(twoUpdatesInOneSecond(), DID, { versionId: "2" })).didDocumentMetadata;
-    expect(metadata).toMatchObject({ versionId: "2", updated: stamp(200), nextVersionId: "3", nextUpdate: stamp(300), vectorProfile: { name: "two" } });
-  });
-
-  test("versionTime at that second gives the version before both", async () => {
-    const metadata = (await resolveIn(twoUpdatesInOneSecond(), DID, { versionTime: stamp(200) })).didDocumentMetadata;
-    expect(metadata).toMatchObject({ versionId: "0", nextVersionId: "1", nextUpdate: stamp(200) });
-    expect(metadata.updated).toBeUndefined();
-  });
-
-  test("versionTime one second later gives the second one; no time gives the first one", async () => {
-    const b = twoUpdatesInOneSecond();
-    expect((await resolveIn(b, DID, { versionTime: stamp(200, 1) })).didDocumentMetadata).toMatchObject({
-      versionId: "2",
-      updated: stamp(200),
-      nextVersionId: "3",
-      nextUpdate: stamp(300),
-      vectorProfile: { name: "two" },
-    });
-    for (const seconds of [-100, -1, 0, 1, 2, 5, 100]) {
-      const metadata = (await resolveIn(b, DID, { versionTime: stamp(200, seconds) })).didDocumentMetadata;
-      expect(metadata.versionId).not.toBe("1");
-    }
   });
 });
 
@@ -309,25 +186,11 @@ describe("a time at or after the invalid-from time of a revocation", () => {
     return b;
   }
 
-  test("one second before it: the document of version 0", async () => {
-    const result = await resolveIn(invalidatedFrom150(), DID, { versionTime: stamp(150, -1) });
-    expect(httpStatus(result)).toBe(410);
-    expect(result.didDocument).not.toBeNull();
-    expect(result.didDocumentMetadata).toMatchObject({
-      deactivated: true,
-      versionId: "0",
-      nextVersionId: "1",
-      nextUpdate: stamp(200),
-      vectorStatus: { effective: "active" },
-    });
-    expect(result.didDocumentMetadata.updated).toBeUndefined();
-  });
-
+  // The requests one second before the invalid-from time, at it, at the revocation and one second after it, and versionId 0, are
+  // in vectors/revoked-invalid-from.json (vectors.test.ts).
   test.each([
-    ["at the invalid-from time", stamp(150), { versionId: "0", updated: undefined, nextUpdate: stamp(200) }],
     ["after it and before version 1", stamp(150, 1), { versionId: "0", updated: undefined, nextUpdate: stamp(200) }],
     ["between version 1 and the revocation", stamp(250), { versionId: "1", updated: stamp(200), nextUpdate: stamp(300) }],
-    ["at the block time of the revocation", stamp(300), { versionId: "1", updated: stamp(200), nextUpdate: stamp(300) }],
   ])("%s: no document, whichever version is the base", async (_name, versionTime, expected) => {
     const result = await resolveIn(invalidatedFrom150(), DID, { versionTime });
     expect(httpStatus(result)).toBe(410);
@@ -338,19 +201,6 @@ describe("a time at or after the invalid-from time of a revocation", () => {
     expect(metadata.versionId).toBe(expected.versionId);
     expect(metadata.updated).toBe(expected.updated);
     expect(metadata.nextUpdate).toBe(expected.nextUpdate);
-  });
-
-  test("after the revocation: no document, the revocation is the base, no nextUpdate", async () => {
-    const result = await resolveIn(invalidatedFrom150(), DID, { versionTime: stamp(300, 1) });
-    expect(result.didDocument).toBeNull();
-    expect(result.didDocumentMetadata).toMatchObject({ versionId: "2", updated: stamp(300) });
-    expect(result.didDocumentMetadata.nextUpdate).toBeUndefined();
-  });
-
-  test("versionId 0 keeps its document, because its own time is before the invalid-from time", async () => {
-    const result = await resolveIn(invalidatedFrom150(), DID, { versionId: "0" });
-    expect(result.didDocument).not.toBeNull();
-    expect(result.didDocumentMetadata).toMatchObject({ versionId: "0", nextUpdate: stamp(200) });
   });
 });
 
@@ -396,7 +246,9 @@ describe("any history", () => {
   /** Each step is 0 (another transaction of the same block) or 1 to 3 (blocks later). */
   const steps = fc.array(fc.constantFrom(0, 0, 1, 2, 3), { maxLength: 7 });
 
-  test("updated and nextUpdate are the version times that the versionTime rule and the version number pick", async () => {
+  test("the version that versionTime or versionId picks has its own profile and the times created, updated and nextUpdate", async () => {
+    const seed = Date.now();
+    console.info(`resolver-version-times: seed ${seed}`);
     await fc.assert(
       fc.asyncProperty(steps, async (history) => {
         const b = new LedgerBuilder();
@@ -428,17 +280,21 @@ describe("any history", () => {
             expect(errorType(result)).toBe("NOT_FOUND");
             continue;
           }
-          const { versionId, updated, nextVersionId, nextUpdate } = result.didDocumentMetadata;
+          const { versionId, created, updated, nextVersionId, nextUpdate, vectorProfile } = result.didDocumentMetadata;
           const hasNext = base + 1 < times.length;
-          expect({ versionId, updated, nextVersionId, nextUpdate }).toEqual({
+          expect({ versionId, created, updated, nextVersionId, nextUpdate, name: vectorProfile?.name }).toEqual({
             versionId: String(base),
+            created: formatTime(times[0]!),
             updated: base > 0 ? formatTime(times[base]!) : undefined,
             nextVersionId: hasNext ? String(base + 1) : undefined,
             nextUpdate: hasNext ? formatTime(times[base + 1]!) : undefined,
+            name: `version ${base}`,
           });
         }
       }),
-      { numRuns: 60 },
+      // The examples are the shapes of the cases that this property replaced (a chain of three versions, and two updates in one block)
+      // and two edges: no update, and an update in the block of the mint.
+      { seed, numRuns: nightly ? 200 : 15, examples: [[[]], [[0]], [[1, 1]], [[1, 0, 1]]] },
     );
   });
 });

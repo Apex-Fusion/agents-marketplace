@@ -12,7 +12,7 @@ import { FactsStore } from "../src/fetch/facts.js";
 import { DID_CONFIGURATION_CONTEXT } from "../src/fetch/linkage.js";
 import { DAY_MS, FetchScheduler } from "../src/fetch/scheduler.js";
 import type { RenderConfig } from "../src/render/config.js";
-import type { SingleUseStore } from "../src/m4/replay.js";
+import { CapacityError, type SingleUseStore } from "../src/m4/replay.js";
 import { TokenRegistry } from "../src/m4/tokens.js";
 import { signingCertificate } from "../src/m4/x509.js";
 import { VectorResolver } from "../src/resolve/resolver.js";
@@ -21,6 +21,7 @@ import { createResolverServer } from "../src/server/http.js";
 import { renderRoutes } from "../src/server/routes-render.js";
 import { FakeNet, compactJws, ed25519Signer } from "./fetch/support.js";
 import { JWT_TYPE, TOKEN_EXCHANGE, TRUST_DOMAIN, agentJwt, at, bodyOf, decodeJwt, dpopProof, edKey, gatewayKeys, postForm, requestToken, startGateway, stopGateways, text } from "./m4/support.js";
+import { nightly } from "./support/depth.js";
 import { KEY_A, LEGACY, LEGACY_OWNER, LEGACY_OWNER_2, LedgerBuilder, PARTY_KEY, identityDatum, idOf, keySigner, legacyDatum, party, timeAt, utf8 } from "./support/ledger.js";
 
 const servers: Server[] = [];
@@ -81,26 +82,32 @@ async function listen(server: Server): Promise<string> {
 }
 
 describe("F1: the legacy key search is bounded and cached; status lists do not wait for it", () => {
-  test("a history of 302 transactions takes 10 ledger reads once; later resolutions and currentRecord read no block", async () => {
+  // Each update is a block. The legacy key search reads windows of 1, 2, 4, ... blocks, but none of more than 64 (MAX_WINDOW_BLOCKS):
+  // 127 blocks in 7 reads, then 64 blocks in each read. So 192 transactions take 9 reads (a window that kept growing would take 8),
+  // and 302 take 10. The gate uses the first size and the night the second. The two other cases need only a history that a full read
+  // would show.
+  const LONG = nightly ? { updates: 300, reads: 10 } : { updates: 190, reads: 9 };
+  const UPDATES = nightly ? 300 : 30;
+
+  test(`a history of ${LONG.updates + 2} transactions takes ${LONG.reads} ledger reads once; later resolutions and currentRecord read no block`, async () => {
     const b = new LedgerBuilder();
     const id = idOf("r3 long legacy history");
-    longLegacyHistory(b, id, 300);
+    longLegacyHistory(b, id, LONG.updates);
     const resolver = new VectorResolver(b.chain, b.settings, { log: () => undefined });
     const first = await resolver.resolveDid(`did:vector:${id}`);
     expect(first.didDocumentMetadata.vectorMetadataError).toBe("controllerKeyNotFound");
-    // Windows of 1, 2, 4, ..., 64 blocks: 302 blocks in 10 reads.
-    expect(blockReads(b)).toBe(10);
-    expect(b.chain.blocksRead).toHaveLength(302);
+    expect(blockReads(b)).toBe(LONG.reads);
+    expect(b.chain.blocksRead).toHaveLength(LONG.updates + 2);
     await resolver.resolveDid(`did:vector:${id}`);
     const lookup = await resolver.currentRecord(id);
     expect(lookup.found && lookup.record.legacyControllerKey).toBeNull();
-    expect(blockReads(b)).toBe(10);
+    expect(blockReads(b)).toBe(LONG.reads);
   });
 
   test("a new transaction of the record costs one block, not the whole history again", async () => {
     const b = new LedgerBuilder();
     const id = idOf("r3 growing legacy history");
-    longLegacyHistory(b, id, 300);
+    longLegacyHistory(b, id, UPDATES);
     const resolver = new VectorResolver(b.chain, b.settings, { log: () => undefined });
     await resolver.resolveDid(`did:vector:${id}`);
     const reads = blockReads(b);
@@ -118,7 +125,7 @@ describe("F1: the legacy key search is bounded and cached; status lists do not w
 
   test("status lists read no block, and a request during a rebuild gets the previous lists at once", async () => {
     const b = agentLedger();
-    longLegacyHistory(b, idOf("r3 long legacy history"), 300);
+    longLegacyHistory(b, idOf("r3 long legacy history"), UPDATES);
     const h = await startGateway(b);
     const first = await fetch(`${h.url}/status/tsl/0`);
     expect(first.status).toBe(200);
@@ -148,9 +155,13 @@ describe("F1: the legacy key search is bounded and cached; status lists do not w
 });
 
 describe("F2: detection keeps small details; a card is built and signed once for the same facts", () => {
-  test("a card with 6,000 interfaces and 41 modes: detection keeps 8 and 16; the signed card is small and signed once", async () => {
+  // A card of 6,000 interfaces is about 1 MiB, the size limit of a fetch. 300 interfaces are about 48 KB: more than the 16,384 bytes
+  // that the signed card may have, and more than the 8 interfaces that detection keeps.
+  const INTERFACES = nightly ? 6_000 : 300;
+
+  test(`a card with ${INTERFACES} interfaces and 41 modes: detection keeps 8 and 16; the signed card is small and signed once`, async () => {
     const ID = idOf("r3 big card agent");
-    const interfaces = Array.from({ length: 6_000 }, (_, i) => ({ url: `https://big.example.org/a2a/${String(i).padStart(70, "0")}`, protocolBinding: "JSONRPC", protocolVersion: "1.0" }));
+    const interfaces = Array.from({ length: INTERFACES }, (_, i) => ({ url: `https://big.example.org/a2a/${String(i).padStart(70, "0")}`, protocolBinding: "JSONRPC", protocolVersion: "1.0" }));
     const modes = [`text/${"x".repeat(300)}`, ...Array.from({ length: 40 }, (_, i) => `text/x-mode-${i}`)];
     const card = { name: "Big", description: "", version: "1", supportedInterfaces: interfaces, capabilities: {}, defaultInputModes: modes, defaultOutputModes: ["text/plain"], skills: [] };
     const net = new FakeNet().host("big.example.org");
@@ -259,11 +270,11 @@ describe("F3: a token request that does not authenticate writes no single-use en
 describe("F4: nonce requests cannot exhaust the SPIFFE service", () => {
   test("POST /spiffe/nonce stores nothing: each request succeeds, and each nonce works once", async () => {
     const h = await startGateway(agentLedger());
-    // A nonce store with a cap of 3 (the earlier design) refused the fourth nonce; issuing has no cap now.
-    const capped = h.services.spiffe.nonces as unknown as { max: number };
-    capped.max = 3;
-    const internals = h.services.tokens as unknown as { readonly replay: SingleUseStore };
-    const before = internals.replay.size;
+    // The single-use store of the token service holds the used nonces of the SPIFFE service. It has a cap of 3 values here. A design
+    // that stored each issued nonce refused the fourth one; issuing stores nothing, so ten requests succeed.
+    const store = (h.services.tokens as unknown as { readonly replay: { max: number; readonly size: number; use(key: string, expiresAt: number, now: number): boolean } }).replay;
+    store.max = 3;
+    const before = store.size;
     const issued: string[] = [];
     for (let i = 0; i < 10; i++) {
       const res = await fetch(`${h.url}/spiffe/nonce`, { method: "POST" });
@@ -271,9 +282,12 @@ describe("F4: nonce requests cannot exhaust the SPIFFE service", () => {
       issued.push(text((await bodyOf(res)).nonce));
     }
     expect(new Set(issued).size).toBe(10);
-    expect(internals.replay.size).toBe(before);
+    expect(store.size).toBe(before);
     expect(h.services.spiffe.nonces.consume(issued[9]!, h.now)).toBe("ok");
     expect(h.services.spiffe.nonces.consume(issued[9]!, h.now)).toBe("unknown");
+    // The cap is in force: the store takes values up to 3 and refuses the next one.
+    while (store.size < 3) store.use(`fill ${store.size}`, h.now + 60_000, h.now);
+    expect(() => store.use("one more", h.now + 60_000, h.now)).toThrow(CapacityError);
   });
 });
 
@@ -414,9 +428,11 @@ describe("F8: each SPIFFE CA certificate has its own serial number and starts be
 });
 
 describe("F9: an index build does not read the legacy mints made at or after the cutoff", () => {
-  test("1,000 late legacy mints: the first build reads only the other mint, and a later build reads none", async () => {
+  const late = nightly ? 1_000 : 100;
+
+  test(`${late} late legacy mints: the first build reads only the other mint, and a later build reads none`, async () => {
     const b = agentLedger();
-    for (let i = 0; i < 1000; i++) b.legacyRegister(idOf(`r3 late legacy ${i}`), legacyDatum(), { height: 600 + (i % 300), txIndex: 1 + Math.floor(i / 300) });
+    for (let i = 0; i < late; i++) b.legacyRegister(idOf(`r3 late legacy ${i}`), legacyDatum(), { height: 600 + (i % 300), txIndex: 1 + Math.floor(i / 300) });
     const resolver = new VectorResolver(b.chain, b.settings, { log: () => undefined });
     const requested: number[] = [];
     const transactions = b.chain.transactions.bind(b.chain);
