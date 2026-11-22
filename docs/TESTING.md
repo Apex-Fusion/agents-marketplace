@@ -33,6 +33,7 @@ All commands that load the CPU run on a build host through `rx` (`rx --help`).
 | One Aiken shard | `rx mise exec github:aiken-lang/aiken@1.1.24 node@20 -- scripts/aiken-check --shard 1 --of 4 --seed 358316146` |
 | The legacy contract | `rx mise exec github:aiken-lang/aiken@1.1.24 node@20 -- scripts/aiken-check --project contracts/marketplace --all` |
 | The plan of the Aiken shards | `scripts/aiken-check --check-plan` |
+| The maps of the Aiken tests: does each name exist? | `node scripts/aiken-check-maps` (runs no aiken, about 1 s) |
 | The jobs that CI would run for a change | `printf 'gateway/src/sweeper.ts\n' \| node scripts/ci/changes.mjs --files -` |
 | The tests of the CI scripts | `rx node --test scripts/ci/*.test.mjs` |
 | Coverage before and after a pruning change | `scripts/coverage-diff` (section 7) |
@@ -92,7 +93,7 @@ The workflow `CI` has the same triggers as before: a push on `main`, and each pu
 | `typecheck` | The change is not docs only | `pnpm -r typecheck` (blocking). Then the type check of the test files in report mode: `tests/tsconfig.json`, `gateway/tsconfig.test.json`, `paper2agent/tsconfig.test.json` and three folder configs. The error count of each config is in the job summary. |
 | `vitest` | The selection is not empty | The projects `unit` and `ui`: the selected test files, or every file of the two projects when the selection is `all`. Fails when it runs no file. The 10 slowest test files are in the job summary. |
 | `aiken-eval` | `contracts/identity-marketplace/` changed, or a file that the tests of the project `aiken-eval` reach | `aiken build` with the blueprint diff, the project `aiken-eval` (the 4 folders, one run, the 10 slowest files in the job summary), `tsc -p tests/identity-deploy/tsconfig.json`, and `fixtures/generate.mjs --check`. Aiken v1.1.21. |
-| `aiken-check` | The identity contract changed, or the Aiken tool changed | 4 shards of `scripts/aiken-check`, aiken v1.1.24, one fixed seed. |
+| `aiken-check` | The identity contract changed, the Aiken tool changed, or a map `contracts/identity-marketplace/tests/*.md` changed | The map check (`scripts/aiken-check-maps`), then 4 shards of `scripts/aiken-check`, aiken v1.1.24, one fixed seed. |
 | `legacy-contract` | `contracts/marketplace/` changed, or the Aiken tool changed | `scripts/aiken-check --project contracts/marketplace --all` on aiken v1.1.24, then `aiken build` on v1.1.21 with the blueprint diff (a v1.1.21 build equals the committed `plutus.json` byte for byte). |
 | `gate` | Always (`if: always()`) | Reads the result of each job (`scripts/ci/gate.mjs`). |
 
@@ -126,6 +127,7 @@ the graph follows each quoted text that names a file or a folder of the reposito
    `vitest.workspace.ts`), `tests/setup.ts`. A change of `.github/**` or `scripts/ci/**` selects everything and switches on every job.
 8. A change of documents only (`*.md`, `docs/**`, images, `LICENSE`) selects nothing and runs no job. A document that a test names
    by its path is not "documents only".
+   The maps `contracts/identity-marketplace/tests/*.md` are an exception: a change of a map runs the job `aiken-check` (the map check).
 
 The vitest filter is a substring match on the path: `gateway/test/http.test.ts` also matches `identity-gateway/test/http.test.ts`.
 `changes.mjs` lists the files that the filter would add by mistake in `vitest_exclude`. `scripts/ci/vitest-run.mjs` gives the list
@@ -138,7 +140,8 @@ that it starts) can miss the gate. The nightly run finds it. Add the test to the
 
 Other jobs, same rule: `aiken-eval` also runs when a file that the tests of the project `aiken-eval` reach changes (for example
 `packages/shared/src/**`, `identity-gateway/src/**`). `aiken-check` runs for `contracts/identity-marketplace/{lib,validators}/**`,
-`aiken.toml`, `aiken.lock`, `plutus.json`, `aiken-shards.json`, `scripts/aiken-check`. `legacy-contract` runs for
+`aiken.toml`, `aiken.lock`, `plutus.json`, `aiken-shards.json`, `scripts/aiken-check`, `scripts/aiken-check-maps` and the maps
+`contracts/identity-marketplace/tests/*.md`. `legacy-contract` runs for
 `contracts/marketplace/**` and for the same tool files.
 
 ### What a pull request needs in practice
@@ -175,11 +178,18 @@ test fails, or when the number or the names of the tests that ran differ from th
 `mise exec <tool> --` starts a clean environment, so name `node@20` in the same call (the script starts with `#!/usr/bin/env node`).
 `aiken fmt --check` is not part of any job: it fails today for the legacy contract (3 files) and, on v1.1.24, for the identity contract.
 
-The shard plan splits the 1,271 tests by measured cost (one thread: the slowest shard takes 161 s on v1.1.21 and 68 s on v1.1.24 on
-a calm host; the shards at the time of the check were 363, 359, 284 and 265 tests). Each module with tests is in one shard, except the
-property modules: their 15 `prop_*` tests are split by name (`records` goes over all 4 shards). After you add, rename or delete a test
-module, or a `prop_*` test in a property module, run `scripts/aiken-check --check-plan` and change `aiken-shards.json`. A run fails when
-a test is in no shard or in two, or when the tests that aiken ran are not the tests of the files.
+The shard plan splits the 1,156 tests by measured cost. 454 of them are `fail` tests and 15 are property tests (`prop_*`). The 4 shards
+hold 324, 342, 238 and 252 tests. One thread: the slowest shard took 161 s on v1.1.21 and 68 s on v1.1.24 on a calm host before 115
+tests were pruned. No calm host measured it again, and `estimated_seconds` of the plan keeps the old values. Each module with tests is
+in one shard, except the property modules: their 15 `prop_*` tests are split by name (`records` goes over all 4 shards). After you add,
+rename or delete a test module, or a `prop_*` test in a property module, run `scripts/aiken-check --check-plan` and change
+`aiken-shards.json`. A run fails when a test is in no shard or in two, or when the tests that aiken ran are not the tests of the files.
+
+`scripts/aiken-check-maps` checks the maps `contracts/identity-marketplace/tests/*.md`. A map tells which Aiken tests cover each attack
+row of `docs/IDENTITY_REGISTRY.md` §12.1. The script reads the `.ak` files and the maps, and runs no aiken (about 1 s). It fails when a
+name in backticks that looks like a test name is not a test, when a pattern such as `datum_valid_*` matches no test, when a row of an
+attack table names no test, or when a count row is wrong. Run `node scripts/aiken-check-maps` after you delete or rename an Aiken test.
+The job `aiken-check` runs it before its shard, and the nightly job `aiken-check` runs it too.
 
 Seeds: the gate uses the fixed seed `358316146`, so that a failure repeats. The nightly run draws a new random seed each night, prints
 it, and puts it in the issue. To repeat a night: run the same shard with that seed and `--max-success 100` (on v1.1.21).
@@ -191,7 +201,7 @@ The job `plan` skips the run when the head of the branch already has a successfu
 
 - `vitest`: `pnpm test` (the three projects `unit`, `ui` and `aiken-eval`), with `TEST_DEPTH=nightly` (the deep variants of "Test depth");
 - `typecheck-tests`: the type check of the test files, report only;
-- `aiken-check`: 4 shards on aiken v1.1.21, one thread, the seed of the night, `--max-success 100`;
+- `aiken-check`: the map check, then 4 shards on aiken v1.1.21, one thread, the seed of the night, `--max-success 100`;
 - `legacy-contract`: the legacy contract on v1.1.21;
 - `blueprints`: the blueprint diff of the identity contract and `fixtures/generate.mjs --check`;
 - `report`: opens or updates ONE issue with the label `nightly-failure` (assigned to `dcejtlin-apex`, with the run, the commit, the
@@ -225,8 +235,9 @@ or for branches, the percentage fell by more than `--epsilon` (default 0.005 poi
 before: the v8 provider changes the branch count of a file by a few between two runs of the same code, so a fall with no new
 uncovered item is noise. A drop in a guarded file stops the change until a test covers the lines again, or the owner accepts the drop.
 When a guarded source file moves or goes, change `tests/coverage-guard.json` in the same pull request (the script fails on a guard
-path that no summary holds). A test with a wall-clock limit (`packages/shared/src/cbor-depth.test.ts`) can fail when the build host is
-busy: run the script again.
+path that no summary holds). The wall-clock limit of `packages/shared/src/cbor-depth.test.ts` applies only in the night run
+(`TEST_DEPTH=nightly`) since #53, so the gate has no test that a busy build host can fail on time. A test that failed for another reason
+on a busy host: run the script again.
 
 ## 8. Gaps that deleted tests described
 
@@ -235,3 +246,30 @@ test, the behavior, why it is not covered now, and the pull request.
 
 | Deleted test | Behavior it described | Why it is not covered now | Pull request |
 |---|---|---|---|
+| `supplier-config.test.ts:36,43,50,55,201,247,316,372` | The defaults and the custom values of `PORT`, `OLLAMA_TIMEOUT_MS`, `OPENAI_UPSTREAM_API`, `CHAT_SETTLE_MODE` and `OPENAI_MODEL_OVERRIDE` | The owner rule: no test for config defaults, or for a value that the test sets and reads back. | #44 |
+| `supplier-config.test.ts:122,128,134` | `loadConfig` reads `ADVERT_REF` | `parseAdvertRef` has the same cases. No test shows that `loadConfig` refuses a malformed `ADVERT_REF`. | #44 |
+| `supplier-jobs.test.ts:65,90` | `JobStore.create` gives a UUID v4 | `supplier-routes-chat-async.test.ts` checks the format of the `job_id` in the 202 body. | #44 |
+| `supplier-chat-deadline-live.test.ts:320,407` ("not 408" on a live chain and on the mock chain) | The request goes on to the Claim. On a live chain this ran `runConsolidateWallet` (lines 65 to 73) through the wallet-health hook, by accident. | No test targets `runConsolidateWallet.ts`. | #45 |
+| `supplier-routes-chat.test.ts:354` (the cap, "not 400") | A background run of the real `callOllama` with no fetch stub gave a network error (`ollama.ts` lines 61, 63, 64, 90, 91), by accident. | The case "network error" of `supplier-ollama.test.ts` runs that path since #44. | #45 |
+| `buyer-server-config.test.ts`, "serves static dist" | The static bundle mount of the buyer server (`buyer/src/server.ts:1404-1458`) | The case passed a folder that does not exist, so it never reached the mount. No test reaches it. | #48 |
+| None. The pull request found the gap. | `Marketplace.discoverSuppliers`: a network or timeout `HttpError`, and a body that is not an array | These two branches had no test before. | #48 |
+| `buyer-ui-disputes.test.tsx`, "stops at 200 cases" | The notice at the 200-case cap (`Disputes.tsx:933-935`) | The owner ordered the deletion. No other test shows the notice. | #48 |
+| `buyer-ui-resale-dashboard.test.tsx`, the class checks | The proof states `pending` and `failed` of `ResaleDashboard` differ by text and class only | No test id or role tells them apart, so no test checks them. | #48 |
+| The boot cases of the indexer server test | `createApp` adds app-level listeners for `chain-event` and `sync-progress` (`server.ts:116-124`) | No test asserts `listenerCount` now. That code exists only for the deleted boot cases. | #49 |
+| `indexer-config.test.ts`, the default and pass-through cases | The defaults of `loadConfig` (8090, 20000, 0, 600), the pass-through of `ogmiosUrl` and `dbPath`, and the empty legacy addresses | The owner rule: no test for config defaults. | #49 |
+| `indexer-block-processor.test.ts`, the fixture cases | The `address` field of the PostAdvert event | No other test asserts it. | #49 |
+| `indexer-ui-events-log.test.tsx`, the scroll case | The label `live` or `disconnected` of the connection (`EventsLog.tsx:111-112`) | The deleted case was the only test that set `connected`. The label has no test id or role. | #50 |
+| Text checks of the indexer UI tests | The datum marker of `escrow-refund` and the status of `status-pill` | No data handle exists (the test id has no attribute), so no test checks them. | #50 |
+| `identity-gateway/test/render/units.test.ts:7-9` ("defaults") | `loadRenderConfig({})` gives the defaults of `GATEWAY_BASE_URL` and `ACCESS_LOG_RETENTION` | It was the only test with an empty environment. The owner rule: no test for config defaults. `render/config.ts` lost 2 branch arms. | #51 |
+| `identity-gateway/test/render/policy.test.ts:266-277` | The formula strings of the main cells of `/policy` | They copied the constants `F` of `policy-bounds.ts`. No test pins the strings any more. | #51 |
+| `paper2agent/test/serve.test.ts:152-162` | The control role gets no decoder health check through `main` | The case counted the calls of a stand-in. No other test checks it. | #51 |
+| None. `tx-submit-live.test.ts`, `tx-submit-live-time.test.ts` and `tx-live-integration.test.ts` had only skipped live cases. | Live Release of the legacy layout (`buildLiveTxForRelease`) builds a real transaction | No test builds it. `tx-release-live-dispatch.test.ts` mocks the builder and tests the dispatch only. A drain of legacy escrows can still need it. | #55 |
+| None (same files). | Live RetireAdvert of the legacy layout (`buildLiveTxForRetireAdvert`) builds a real transaction | No test builds it. `tx-retire-advert.test.ts` tests the mock chain only. | #55 |
+| `cbor-escrow-datum.test.ts`, "invalid state constructor tag" | The state check of `decodeEscrowDatum` (`EscrowDatum.ts:238-246`), its odd-length check and its non-hex check | The deleted case had 1 field, so the decoder refused it at the field count. It never reached the state check. No test covers these three checks, before or after. | #53 |
+| `lucid-context.test.ts`, "`lucid.wallet()` does not throw" | `createLucidContext` selects the wallet of the key that it gets | The deleted case checked only that `wallet()` does not throw. No test asserts the wallet address. | #54 |
+| `mock-chain-provider.test.ts`, the cases of the injected `evaluator` | `evaluateTx` passes `ok`, `error` and `cost` of an injected evaluator through | The cases tested the mock only. No other test calls it with an injected evaluator. | #54 |
+| `cli-post-advert-flow.test.ts`, the log cases | The log lines of `runPostAdvert` and their order, the default `console.log`, and the default `awaitTimeoutMs` of 120,000 (in the parser and in the flow) | The rules of `AGENTS.md` forbid tests for logs and for config defaults. | #54 |
+
+The skipped live cases also described the live Submit of the legacy layout. A running case covers it since #55: the lifecycle case of
+`tests/unit/tx-post-escrow-live.test.ts` builds Post, Claim, Submit and Accept with a fixed clock. It reads the receipt hash and the
+submit stamp of the Submit datum.
