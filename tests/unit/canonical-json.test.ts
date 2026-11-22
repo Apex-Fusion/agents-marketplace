@@ -10,46 +10,40 @@
 import { describe, it, expect } from "vitest";
 import { canonicalize } from "../../packages/shared/src/cbor/canonical.js";
 
-// ─── Key sorting ─────────────────────────────────────────────────────────────
+// ─── Output of canonicalize ───────────────────────────────────────────────────
 
-describe("canonicalize — key sorting", () => {
-  it("sorts object keys alphabetically", () => {
-    const result = canonicalize({ z: 1, a: 2, m: 3 });
-    expect(result).toBe('{"a":2,"m":3,"z":1}');
-  });
-
-  it("sorts keys lexicographically by code-unit (uppercase before lowercase)", () => {
+describe("canonicalize — output", () => {
+  // [description, input, canonical JSON]
+  const rows: Array<[string, unknown, string]> = [
+    ["sorts object keys alphabetically", { z: 1, a: 2, m: 3 }, '{"a":2,"m":3,"z":1}'],
     // In JS string comparison, 'A' (0x41) < 'a' (0x61)
-    const result = canonicalize({ b: 1, A: 2, a: 3 });
-    expect(result).toBe('{"A":2,"a":3,"b":1}');
-  });
+    ["sorts keys lexicographically by code-unit (uppercase before lowercase)", { b: 1, A: 2, a: 3 }, '{"A":2,"a":3,"b":1}'],
+    ["sorts keys at every nesting level", { z: { y: 1, a: 2 }, a: { z: 3, b: 4 } }, '{"a":{"b":4,"z":3},"z":{"a":2,"y":1}}'],
+    ["preserves array element order, also in a nested array (JCS requirement — arrays are ordered)", [3, 1, [2, 0]], "[3,1,[2,0]]"],
+    ["array of objects — each object's keys are sorted but array order is preserved", [{ z: 1, a: 2 }, { y: 3, b: 4 }], '[{"a":2,"z":1},{"b":4,"y":3}]'],
+    ["drops undefined values from objects", { a: 1, b: undefined, c: 3 }, '{"a":1,"c":3}'],
+    ["drops all-undefined object to empty object", { a: undefined, b: undefined }, "{}"],
+    ["does NOT drop null (null is a valid JSON value)", { a: null, b: 1 }, '{"a":null,"b":1}'],
+    ["writes an empty object and an empty array", [{}, []], "[{},[]]"],
+    ["passes booleans and numbers through", { t: true, f: false, i: 42, d: 3.14, z: 0, n: -7 }, '{"d":3.14,"f":false,"i":42,"n":-7,"t":true,"z":0}'],
+    // The newline inside the string value is escaped; the JSON structure has no whitespace.
+    ["writes no whitespace", { a: "multi\nline", b: [2, 3], c: { d: 4 } }, '{"a":"multi\\nline","b":[2,3],"c":{"d":4}}'],
+    [
+      "a realistic request envelope",
+      {
+        supplier_pkh: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef01",
+        capability_id: "llm.text.generate.v1",
+        model: "qwen2.5:0.5b",
+        max_output_tokens: 512,
+        price_lovelace: 2000000,
+      },
+      // Keys must be sorted: capability_id < max_output_tokens < model < price_lovelace < supplier_pkh
+      '{"capability_id":"llm.text.generate.v1","max_output_tokens":512,"model":"qwen2.5:0.5b","price_lovelace":2000000,"supplier_pkh":"abcdef0123456789abcdef0123456789abcdef0123456789abcdef01"}',
+    ],
+  ];
 
-  it("already-sorted keys produce the same output", () => {
-    const result = canonicalize({ a: 1, b: 2, c: 3 });
-    expect(result).toBe('{"a":1,"b":2,"c":3}');
-  });
-
-  it("single-key object is unaffected by sorting", () => {
-    const result = canonicalize({ only: "one" });
-    expect(result).toBe('{"only":"one"}');
-  });
-
-  it("empty object produces empty braces", () => {
-    expect(canonicalize({})).toBe("{}");
-  });
-});
-
-// ─── Nested object key sorting ────────────────────────────────────────────────
-
-describe("canonicalize — nested object key sorting", () => {
-  it("sorts keys at every nesting level", () => {
-    const result = canonicalize({ z: { y: 1, a: 2 }, a: { z: 3, b: 4 } });
-    expect(result).toBe('{"a":{"b":4,"z":3},"z":{"a":2,"y":1}}');
-  });
-
-  it("deeply nested objects are all sorted", () => {
-    const input = { c: { b: { a: "deep" } } };
-    expect(canonicalize(input)).toBe('{"c":{"b":{"a":"deep"}}}');
+  it.each(rows)("%s", (_description, input, expected) => {
+    expect(canonicalize(input)).toBe(expected);
   });
 
   it("binds prototype-named JSON properties instead of dropping them from a commitment", () => {
@@ -59,149 +53,27 @@ describe("canonicalize — nested object key sorting", () => {
   });
 });
 
-// ─── Array order preservation ─────────────────────────────────────────────────
-
-describe("canonicalize — array order preservation", () => {
-  it("preserves array element order (JCS requirement — arrays are ordered)", () => {
-    const result = canonicalize([3, 1, 2]);
-    expect(result).toBe("[3,1,2]");
-  });
-
-  it("empty array serializes as []", () => {
-    expect(canonicalize([])).toBe("[]");
-  });
-
-  it("array of strings preserves order", () => {
-    const result = canonicalize(["z", "a", "m"]);
-    expect(result).toBe('["z","a","m"]');
-  });
-
-  it("array of objects — each object's keys are sorted but array order is preserved", () => {
-    const result = canonicalize([{ z: 1, a: 2 }, { y: 3, b: 4 }]);
-    expect(result).toBe('[{"a":2,"z":1},{"b":4,"y":3}]');
-  });
-
-  it("nested array order is preserved", () => {
-    const result = canonicalize([[3, 1], [2, 0]]);
-    expect(result).toBe("[[3,1],[2,0]]");
-  });
-});
-
-// ─── Undefined-drop ───────────────────────────────────────────────────────────
-
-describe("canonicalize — undefined value dropping", () => {
-  it("drops undefined values from objects", () => {
-    const result = canonicalize({ a: 1, b: undefined, c: 3 });
-    expect(result).toBe('{"a":1,"c":3}');
-  });
-
-  it("drops all-undefined object to empty object", () => {
-    const result = canonicalize({ a: undefined, b: undefined });
-    expect(result).toBe("{}");
-  });
-
-  it("does NOT drop null (null is a valid JSON value)", () => {
-    const result = canonicalize({ a: null, b: 1 });
-    expect(result).toBe('{"a":null,"b":1}');
-  });
-});
-
-// ─── Scalar value handling ────────────────────────────────────────────────────
-
-describe("canonicalize — null, boolean, number", () => {
-  it("null top-level value serializes as 'null'", () => {
-    expect(canonicalize(null)).toBe("null");
-  });
-
-  it("boolean true serializes as 'true'", () => {
-    expect(canonicalize(true)).toBe("true");
-  });
-
-  it("boolean false serializes as 'false'", () => {
-    expect(canonicalize(false)).toBe("false");
-  });
-
-  it("integer number serializes without decimal", () => {
-    expect(canonicalize(42)).toBe("42");
-  });
-
-  it("float number serializes with decimal", () => {
-    expect(canonicalize(3.14)).toBe("3.14");
-  });
-
-  it("zero serializes as 0", () => {
-    expect(canonicalize(0)).toBe("0");
-  });
-
-  it("negative integer serializes correctly", () => {
-    expect(canonicalize(-7)).toBe("-7");
-  });
-});
-
 // ─── UTF-8 NFC normalization ──────────────────────────────────────────────────
 
 describe("canonicalize — UTF-8 NFC normalization", () => {
-  it("NFC-composed string stays the same", () => {
-    // U+00E9 = é (precomposed)
-    const composed = "é";
-    const result = canonicalize({ key: composed });
-    const expected = JSON.stringify({ key: "é" });
-    expect(result).toBe(expected);
-  });
-
-  it("NFD-decomposed string is NFC-normalized (key value)", () => {
-    // U+0065 + U+0301 = e + combining acute = é (decomposed)
-    const decomposed = "é";
-    const composed = "é";
-    const resultKey = canonicalize({ [decomposed]: 1 });
-    const resultComposed = canonicalize({ [composed]: 1 });
-    // Both should produce identical output after NFC normalization
-    expect(resultKey).toBe(resultComposed);
-  });
+  // The escapes keep the two forms apart in the source: U+0065 U+0301 is e + combining acute (NFD), U+00E9 is é (NFC, precomposed).
+  // The expected text is the NFC form, so a code that normalizes to NFD fails too.
+  const decomposed = "e\u0301";
+  const composed = "\u00e9";
 
   it("NFD-decomposed string value is NFC-normalized", () => {
-    const decomposed = "é"; // NFD é
-    const composed = "é"; // NFC é
-    const r1 = canonicalize(decomposed);
-    const r2 = canonicalize(composed);
-    expect(r1).toBe(r2);
+    expect(canonicalize(decomposed)).toBe(`"${composed}"`);
   });
 
-  it("ASCII string (no normalization needed) is unchanged", () => {
-    expect(canonicalize("hello world")).toBe('"hello world"');
-  });
-});
-
-// ─── Determinism ──────────────────────────────────────────────────────────────
-
-describe("canonicalize — determinism (same input → same output)", () => {
-
-  it("structurally equal objects with same keys produce identical output", () => {
-    const o1 = { b: 2, a: 1 };
-    const o2 = { a: 1, b: 2 };
-    expect(canonicalize(o1)).toBe(canonicalize(o2));
-  });
-});
-
-// ─── No whitespace ────────────────────────────────────────────────────────────
-
-describe("canonicalize — no whitespace in output", () => {
-  it("output contains no spaces", () => {
-    const result = canonicalize({ a: 1, b: [2, 3], c: { d: 4 } });
-    expect(result).not.toMatch(/\s/);
-  });
-
-  it("output contains no newlines", () => {
-    const result = canonicalize({ a: "multi\nline", b: 1 });
-    // The newline inside the string value is allowed (escaped), but the JSON structure has none
-    expect(result.replace(/"[^"]*"/g, '""')).not.toMatch(/\n/);
+  it("NFD-decomposed key is NFC-normalized", () => {
+    expect(canonicalize({ [decomposed]: 1 })).toBe(`{"${composed}":1}`);
   });
 });
 
 // ─── Request spec / prompt hash scenario ─────────────────────────────────────
 
 describe("canonicalize — request_spec_hash / prompt_hash use case", () => {
-  it("two request specs differing only in field order produce identical canonical JSON", () => {
+  it("request specs that differ only in field order give identical canonical JSON; a different value gives different JSON", () => {
     const spec1 = {
       model: "qwen2.5:0.5b",
       capability_id: "llm.text.generate.v1",
@@ -213,29 +85,6 @@ describe("canonicalize — request_spec_hash / prompt_hash use case", () => {
       model: "qwen2.5:0.5b",
     };
     expect(canonicalize(spec1)).toBe(canonicalize(spec2));
-  });
-
-  it("two request specs with different values produce different canonical JSON", () => {
-    const spec1 = { model: "qwen2.5:0.5b", max_output_tokens: 512 };
-    const spec2 = { model: "qwen2.5:1.5b", max_output_tokens: 512 };
-    expect(canonicalize(spec1)).not.toBe(canonicalize(spec2));
-  });
-
-  it("canonical form of a realistic request envelope is stable", () => {
-    const envelope = {
-      supplier_pkh: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef01",
-      capability_id: "llm.text.generate.v1",
-      model: "qwen2.5:0.5b",
-      max_output_tokens: 512,
-      price_lovelace: 2000000,
-    };
-    // Must be deterministic and no whitespace
-    const result = canonicalize(envelope);
-    expect(result).toBe(canonicalize(envelope));
-    expect(result).not.toMatch(/\s/);
-    // Keys must be sorted: capability_id < max_output_tokens < model < price_lovelace < supplier_pkh
-    expect(result).toBe(
-      '{"capability_id":"llm.text.generate.v1","max_output_tokens":512,"model":"qwen2.5:0.5b","price_lovelace":2000000,"supplier_pkh":"abcdef0123456789abcdef0123456789abcdef0123456789abcdef01"}'
-    );
+    expect(canonicalize({ ...spec1, model: "qwen2.5:1.5b" })).not.toBe(canonicalize(spec1));
   });
 });
