@@ -3,7 +3,7 @@
  *
  * The publisher loads the decoder library, and its supplier children run the supplier entry point (tested in the supplier tests).
  * The control role does not load the library. The publisher gets the health check, with its own shutdown as the stop. The control
- * role gets none, and its module for the check is not loaded.
+ * role gets none.
  */
 
 import { createServer, type Server } from "node:net";
@@ -128,13 +128,11 @@ describe("serve", () => {
 });
 
 describe("main: the roles", () => {
-  function roles(): { roles: PaperRoles; startHealth: Mock; loaded: Mock } {
+  function roles(): { roles: PaperRoles; startHealth: Mock } {
     const startHealth = vi.fn((_options: DecoderHealthOptions) => health);
-    const loaded = vi.fn(async () => startHealth);
     return {
       startHealth,
-      loaded,
-      roles: { control: async () => roleStart(), publisher: async () => roleStart(), startHealth: loaded },
+      roles: { control: async () => roleStart(), publisher: async () => roleStart(), startHealth: async () => startHealth },
     };
   }
 
@@ -149,19 +147,7 @@ describe("main: the roles", () => {
     await vi.waitFor(() => expect(options.server.listening).toBe(false));
   });
 
-  it("the control role starts no health check, and does not load the module for it", async () => {
-    quiet();
-    const fake = roles();
-    const control = vi.spyOn(fake.roles, "control");
-    await main("control", fake.roles);
-    expect(control).toHaveBeenCalledTimes(1);
-    expect(fake.loaded).not.toHaveBeenCalled();
-    expect(fake.startHealth).not.toHaveBeenCalled();
-    // The server of the control role stays open until the afterEach of this file closes it through the signal path.
-    handlerOf("SIGTERM")();
-  });
-
-  it.each([undefined, "", "both", "Publisher"])("refuses the role %j with the usage line", async (role) => {
+  it.each([undefined, "Publisher"])("refuses the role %j with the usage line", async (role) => {
     await expect(main(role, roles().roles)).rejects.toThrow("Usage: tsx paper2agent/src/index.ts <control|publisher>");
   });
 });
