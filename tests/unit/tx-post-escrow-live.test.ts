@@ -1,623 +1,219 @@
 /**
- * tx-post-escrow-live.test.ts — RED phase tests for buildPostEscrowTx() with LiveOgmiosProvider
+ * tx-post-escrow-live.test.ts: the live transactions of the legacy layout that start an escrow or an advert, the live lifecycle of
+ * an escrow, and the time source of the mock chain, which the live path replaces. Lucid builds real Cardano CBOR; the fake Ogmios
+ * and the pinned clock are in tests/fixtures/onchain-tx/legacy-live.ts. The pre-checks of the Post builder (buyer is supplier, no
+ * messages, advert missing or retired, wrong payment) are shared with the mock path and are tested in tx-post-escrow.test.ts.
  *
- * The live path uses lucid-evolution to produce real Cardano CBOR instead of
- * synthetic JSON-in-hex. Ogmios fetch is fully mocked; lucid-evolution is
- * exercised for real (no mocking of TxBuilder).
- *
- * Existing MockChainProvider tests in tx-post-escrow.test.ts are NOT modified
- * — the Tier-1 mock path must continue to pass without regression.
- *
- * Coverage:
- *   A. Output CBOR shape (Conway-era prefix bytes)
- *   B. Inline datum present at escrow script output
- *   C. Locked value calculation
- *   D. Required signers / collateral
- *   E. Validity range (deliver_by upper bound)
- *   F. Rejection paths (buyer==supplier, empty messages, advert not found, retired, payment mismatch)
- *
- * M1-F-4 RED — tests fail until Catherine implements the live CBOR path.
+ * Time source: the live path reads the clock (`Date.now()`), not the tip slot. The fake tip slot, read as slot x 1000, is far
+ * from the clock, so the stamp cases fail when a builder reads the tip. The mock chain reads the tip slot as slot x 1000, and the
+ * production CLIs in mock mode rely on it.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Decoder } from "cbor-x";
-import { inspectSignedTransaction, inspectSignedTransactionFinancials } from "../../packages/shared/src/tx/server.js";
-import { LiveOgmiosProvider } from "../../packages/shared/src/chain/LiveOgmiosProvider.js";
+import { MockChainProvider } from "../../packages/shared/src/chain/MockChainProvider.js";
 import { buildPostEscrowTx } from "../../packages/shared/src/tx/escrow/postEscrow.js";
-import { TxConstructionError } from "../../packages/shared/src/tx/types.js";
-import { encodeAdvertDatum } from "../../packages/shared/src/cbor/AdvertDatum.js";
+import { buildClaimTx } from "../../packages/shared/src/tx/escrow/claim.js";
+import { buildSubmitTx } from "../../packages/shared/src/tx/escrow/submit.js";
+import { buildAcceptTx } from "../../packages/shared/src/tx/escrow/accept.js";
+import { MIN_UTXO_LOVELACE, NETWORK_BUFFER_MS } from "../../packages/shared/src/tx/internal/constants.js";
+import { inspectSignedTransaction, inspectSignedTransactionFinancials } from "../../packages/shared/src/tx/internal/signedTransaction.js";
+import { TxConstructionError, type BuildResult, type ChatMessage } from "../../packages/shared/src/tx/types.js";
+import { decodeAdvertDatum } from "../../packages/shared/src/cbor/AdvertDatum.js";
 import { decodeEscrowDatum } from "../../packages/shared/src/cbor/EscrowDatum.js";
-import { loadBlueprint } from "../../packages/shared/src/tx/blueprint.js";
+import type { AdvertDatum, EscrowDatum } from "../../packages/shared/src/cbor/types.js";
+import { runPostAdvert } from "../../supplier/src/cli/postAdvertFlow.js";
 import { buildBuyerWalletKey } from "../fixtures/buyer-side/wallet-keys.js";
 import { buildSupplierWalletKey } from "../fixtures/supplier-side/wallet-keys.js";
-import type { AdvertDatum } from "../../packages/shared/src/cbor/types.js";
-import type { ChatMessage } from "../../packages/shared/src/tx/types.js";
+import { buildCliAdvertDatum } from "../fixtures/supplier-side/sample-advert-datum.js";
+import { AP3X, outputOf } from "../fixtures/identity-builders/world.js";
+import { activeAdvertDatum, seedAdvertUtxo } from "../fixtures/onchain-tx/legacy-advert.js";
+import { legacyAdvertUtxo, legacyLive, lucidWallet } from "../fixtures/onchain-tx/legacy-live.js";
 
-// ─── Fixtures ──────────────────────────────────────────────────────────────────
+const NOW_MS = Date.UTC(2026, 3, 27, 12, 0, 0);
+const ADVERT_REF = { txHash: "b".repeat(64), index: 0 };
+const MESSAGES: ChatMessage[] = [{ role: "user", content: "What is 2+2?" }];
+const RECEIPT_HASH = "e".repeat(64);
 
-const ADVERT_TX_HASH = "b".repeat(64);
-const ADVERT_INDEX = 0;
-const SAMPLE_MESSAGES: ChatMessage[] = [{ role: "user", content: "What is 2+2?" }];
-const PAYMENT = 2_000_000n;
+const buyer = buildBuyerWalletKey();
+const supplier = buildSupplierWalletKey();
+const live = legacyLive(NOW_MS);
 
-// 100 ADA wallet UTxO at buyer address — must cover: payment(2 ADA) + buyer_bond(1 ADA)
-// + supplier_bond(1 ADA) locked in escrow output, plus change min-ADA + tx fee + collateral.
-// 5 ADA was insufficient once the synthetic padding-input shortcut was removed (ARCHITECTURE.md §9 #14).
-const BUYER_COLLATERAL_LOVELACE = 100_000_000;
-
-const mockFetch = vi.fn();
-
-beforeEach(() => {
-  mockFetch.mockReset();
-});
-
-function makeActiveAdvert(): AdvertDatum {
-  const supplier = buildSupplierWalletKey();
-  return {
-    supplier_pkh: supplier.pubKeyHash,
-    capability_id: "llm.text.generate.v1",
-    model: "qwen2.5:0.5b",
-    max_output_tokens: 512,
-    max_processing_ms: 60_000,
-    price_lovelace: PAYMENT,
-    supplier_bond_lovelace: 1_000_000n,
-    buyer_bond_lovelace: 1_000_000n,
-    endpoint_url: "https://supplier.example.com/v1",
-    detail_uri: "ipfs://Qm000",
-    detail_hash: "a".repeat(64),
-    advertised_at: 1_745_500_000_000,
-    status: "Active",
-  };
+/** An advert on the fake chain (default: the advert of the fixtures), and a buyer wallet with `funds`. Returns the funds. */
+function seedPost(funds: bigint[] = [100n * AP3X], advert: AdvertDatum = activeAdvertDatum()) {
+  live.ogmios.add(legacyAdvertUtxo(advert, ADVERT_REF));
+  return live.ogmios.fund(lucidWallet(buyer), ...funds);
 }
 
-interface OgmiosUtxo {
-  transaction: { id: string };
-  index: number;
-  address: string;
-  value: { ada: { lovelace: number } };
-  datum: string | null;
-  datumHash: null;
-  script: null;
-}
-
-function makeOgmiosUtxo(
-  txId: string,
-  index: number,
-  address: string,
-  lovelace: number,
-  datumHex?: string,
-): OgmiosUtxo {
-  return {
-    transaction: { id: txId },
-    index,
-    address,
-    value: { ada: { lovelace } },
-    datum: datumHex ?? null,
-    datumHash: null,
-    script: null,
-  };
-}
-
-function rpcOk<T>(result: T) {
-  return {
-    ok: true,
-    json: async () => ({ jsonrpc: "2.0", result }),
-  };
-}
-
-/** Build a mock fetch that handles protocol-params, utxo queries, and submit. */
-function buildLiveChain(): LiveOgmiosProvider {
-  return new LiveOgmiosProvider({ ogmiosUrl: "http://ogmios:1337", fetch: mockFetch });
-}
-
-function setupMocksForHappyPath(extraWalletUtxos: OgmiosUtxo[] = []): void {
-  const buyer = buildBuyerWalletKey();
-  const advert = makeActiveAdvert();
-  const advertDatumHex = encodeAdvertDatum(advert);
-
-  // Protocol params (called by lucid at init)
-  mockFetch.mockImplementation(async (_url: string, init?: RequestInit) => {
-    const body = JSON.parse((init?.body as string) ?? "{}");
-    const method: string = body.method ?? "";
-
-    if (method === "queryLedgerState/protocolParameters") {
-      return rpcOk({
-        minFeeCoefficient: 44,
-        minFeeConstant: { ada: { lovelace: 155381 } },
-        maxTransactionSize: { bytes: 16384 },
-        maxValueSize: { bytes: 5000 },
-        stakeCredentialDeposit: { ada: { lovelace: 2000000 } },
-        stakePoolDeposit: { ada: { lovelace: 500000000 } },
-        prices: { memory: "0.0577", steps: "0.0000721" },
-        maxExecutionUnitsPerTransaction: { memory: 14000000, cpu: 10000000000 },
-        coinsPerUtxoByte: { ada: { lovelace: 4310 } },
-        collateralPercentage: 150,
-        maxCollateralInputs: 3,
-        plutusCostModels: { "plutus:v1": {}, "plutus:v2": {}, "plutus:v3": {} },
-        monetaryExpansion: "0.003",
-        treasuryExpansion: "0.2",
-        minStakePoolCost: { ada: { lovelace: 340000000 } },
-        minFeeReferenceScripts: { base: 15 },
-        governanceActionDeposit: { ada: { lovelace: 100000000000 } },
-        delegateRepresentativeDeposit: { ada: { lovelace: 500000000 } },
-      });
-    }
-
-    if (method === "queryLedgerState/utxo") {
-      const params = body.params ?? {};
-      // If querying by outRef (advert), return advert UTxO with datum
-      if (params.outputReferences) {
-        return rpcOk([makeOgmiosUtxo(ADVERT_TX_HASH, ADVERT_INDEX, "addr_script_advert", 2_000_000, advertDatumHex)]);
-      }
-      // If querying by address (buyer wallet for UTxO selection / collateral)
-      return rpcOk([makeOgmiosUtxo("c".repeat(64), 0, buyer.address, BUYER_COLLATERAL_LOVELACE), ...extraWalletUtxos]);
-    }
-
-    if (method === "queryNetwork/tip") {
-      return rpcOk({ slot: 1_745_500_000, id: "a".repeat(64) });
-    }
-
-    if (method === "submitTransaction") {
-      return rpcOk({ transaction: { id: "d".repeat(64) } });
-    }
-
-    return rpcOk({});
+const post = (extra: Partial<Parameters<typeof buildPostEscrowTx>[0]> = {}) =>
+  buildPostEscrowTx({
+    chain: live.ogmios.chain(),
+    buyerKey: buyer,
+    advertRef: ADVERT_REF,
+    messages: MESSAGES,
+    payment_lovelace: activeAdvertDatum().price_lovelace,
+    ...extra,
   });
+
+/** The escrow datum in output `index` of a built transaction. */
+function escrowDatumAt(built: BuildResult, index = 0): EscrowDatum {
+  const output = inspectSignedTransactionFinancials(built.txCborHex).outputs[index];
+  return decodeEscrowDatum(output!.datumHex!);
 }
 
-// ─── A. Output CBOR shape ──────────────────────────────────────────────────────
+describe("buildPostEscrowTx() [live]", () => {
+  it("gives the transaction hash and the validity end that recovery needs", async () => {
+    seedPost();
 
-describe("buildPostEscrowTx() [live] — CBOR shape", () => {
-  it("extracts the live transaction identity and validity for recovery", async () => {
-    setupMocksForHappyPath();
-    const result = await buildPostEscrowTx({
-      chain: buildLiveChain(),
-      buyerKey: buildBuyerWalletKey(),
-      advertRef: { txHash: ADVERT_TX_HASH, index: ADVERT_INDEX },
-      messages: SAMPLE_MESSAGES,
-      payment_lovelace: PAYMENT,
-    });
+    const result = await post();
+
     const decoded: unknown = new Decoder({ mapsAsObjects: false }).decode(Buffer.from(result.txCborHex, "hex"));
-    if (!Array.isArray(decoded) || !(decoded[0] instanceof Map)) {
-      throw new Error("live transaction has no CBOR body map");
-    }
-    const body: Map<number, unknown> = decoded[0];
+    if (!Array.isArray(decoded) || !(decoded[0] instanceof Map)) throw new Error("live transaction has no CBOR body map");
     const inspected = inspectSignedTransaction(result.txCborHex);
     expect(inspected.txHash).toBe(result.expectedTxHash);
-    expect(inspected.validUntilSlot).toBe(Number(body.get(3)));
+    expect(inspected.validUntilSlot).toBe(Number((decoded[0] as Map<number, unknown>).get(3)));
   });
 
-  it("txCborHex starts with 83 or 84 (Conway-era tx body CBOR array)", async () => {
-    setupMocksForHappyPath();
-    const chain = buildLiveChain();
-    const buyer = buildBuyerWalletKey();
+  it("stamps posted_at and deliver_by from the clock, not from the tip slot", async () => {
+    seedPost();
 
-    const result = await buildPostEscrowTx({
-      chain,
-      buyerKey: buyer,
-      advertRef: { txHash: ADVERT_TX_HASH, index: ADVERT_INDEX },
-      messages: SAMPLE_MESSAGES,
-      payment_lovelace: PAYMENT,
+    const result = await post();
+
+    expect(escrowDatumAt(result, result.escrowOutputRef.index)).toMatchObject({
+      state: "Open",
+      posted_at: NOW_MS,
+      deliver_by: NOW_MS + activeAdvertDatum().max_processing_ms + NETWORK_BUFFER_MS,
+      payment_lovelace: activeAdvertDatum().price_lovelace,
+      advert_ref: ADVERT_REF,
     });
-
-    // Conway-era tx = CBOR array of 3 or 4 items → first byte 0x83 or 0x84
-    const firstByte = result.txCborHex.slice(0, 2).toLowerCase();
-    expect(["83", "84"]).toContain(firstByte);
   });
 
-  it("txCborHex is NOT a JSON-encoded hex string (legacy synthetic format)", async () => {
-    setupMocksForHappyPath();
-    const chain = buildLiveChain();
-    const buyer = buildBuyerWalletKey();
+  it("locks at least the 2 AP3X output floor when the price and both bonds are tiny", async () => {
+    seedPost([100n * AP3X], activeAdvertDatum({ price_lovelace: 1n, supplier_bond_lovelace: 1n, buyer_bond_lovelace: 1n }));
 
-    const result = await buildPostEscrowTx({
-      chain,
-      buyerKey: buyer,
-      advertRef: { txHash: ADVERT_TX_HASH, index: ADVERT_INDEX },
-      messages: SAMPLE_MESSAGES,
-      payment_lovelace: PAYMENT,
-    });
+    const result = await post({ payment_lovelace: 1n });
 
-    // The old synthetic format starts with 8 hex chars that encode JSON byte-length.
-    // A real CBOR tx will NOT begin with a length-prefixed JSON encoding.
-    // We verify by checking the first byte is a CBOR array marker, NOT a JSON structure.
-    const firstByte = result.txCborHex.slice(0, 2).toLowerCase();
-    // JSON-in-hex would decode the first 4 bytes as a uint32 JSON length —
-    // real CBOR always has 0x83 or 0x84 as the first byte.
-    expect(firstByte).not.toBe("00"); // length prefix starts with 00 for small JSON
+    const { outputs } = inspectSignedTransactionFinancials(result.txCborHex);
+    expect(outputs[result.escrowOutputRef.index]!.lovelace).toBeGreaterThanOrEqual(MIN_UTXO_LOVELACE);
   });
 
-  it("runs the persist hook with signed CBOR before the live broadcast", async () => {
-    setupMocksForHappyPath();
-    const chain = buildLiveChain();
+  it("runs the persist hook with the signed CBOR before the broadcast", async () => {
+    seedPost();
     let hookTxHash = "";
 
-    const result = await buildPostEscrowTx({
-      chain,
-      buyerKey: buildBuyerWalletKey(),
-      advertRef: { txHash: ADVERT_TX_HASH, index: ADVERT_INDEX },
-      messages: SAMPLE_MESSAGES,
-      payment_lovelace: PAYMENT,
+    const result = await post({
       beforeSubmit: async (built) => {
         hookTxHash = built.expectedTxHash;
-        const methodsBeforeHook = mockFetch.mock.calls.map((call: unknown[]) => {
-          const init = call[1] as RequestInit | undefined;
-          const body = JSON.parse(String(init?.body ?? "{}")) as { method?: string };
-          return body.method;
-        });
-        expect(methodsBeforeHook).not.toContain("submitTransaction");
+        expect(live.ogmios.submitted).toEqual([]);
       },
     });
 
     expect(hookTxHash).toBe(result.expectedTxHash);
-    const submitted = mockFetch.mock.calls.some((call: unknown[]) => {
-      const init = call[1] as RequestInit | undefined;
-      const body = JSON.parse(String(init?.body ?? "{}")) as { method?: string };
-      return body.method === "submitTransaction";
-    });
-    expect(submitted).toBe(true);
+    expect(live.ogmios.submitted).toEqual([result.txCborHex]);
   });
-});
 
-describe("buildPostEscrowTx() [live] — excluded inputs", () => {
   it("never spends a wallet output that a pending transaction spends", async () => {
-    const buyer = buildBuyerWalletKey();
     // Coin selection would fund from the larger output and keep the smaller one for collateral.
-    setupMocksForHappyPath([makeOgmiosUtxo("e".repeat(64), 0, buyer.address, 2 * BUYER_COLLATERAL_LOVELACE)]);
-    const pending = { txHash: "e".repeat(64), index: 0 };
+    const [kept, pending] = seedPost([100n * AP3X, 200n * AP3X]);
 
-    const result = await buildPostEscrowTx({
-      chain: buildLiveChain(),
-      buyerKey: buyer,
-      advertRef: { txHash: ADVERT_TX_HASH, index: ADVERT_INDEX },
-      messages: SAMPLE_MESSAGES,
-      payment_lovelace: PAYMENT,
-      excludeInputs: [pending],
-    });
+    const result = await post({ excludeInputs: [pending!.ref] });
 
-    const inputs = inspectSignedTransactionFinancials(result.txCborHex).inputs;
-    expect(inputs).not.toContainEqual(pending);
-    expect(inputs).toContainEqual({ txHash: "c".repeat(64), index: 0 });
+    const { inputs } = inspectSignedTransactionFinancials(result.txCborHex);
+    expect(inputs).not.toContainEqual(pending!.ref);
+    expect(inputs).toContainEqual(kept!.ref);
+  });
+
+  it.each([
+    ["a wallet with one small output", [1n * AP3X]],
+    ["an empty wallet", []],
+  ])("refuses %s with a collateral reason", async (_name, funds) => {
+    seedPost(funds);
+
+    const error = await post().then(() => null, (e: unknown) => e);
+
+    expect(error).toBeInstanceOf(TxConstructionError);
+    expect((error as TxConstructionError).reason).toContain("collateral");
   });
 });
 
-// ─── B. Inline datum at escrow script output ──────────────────────────────────
+describe("runPostAdvert() [live]", () => {
+  it("stamps advertised_at from the clock, not from the tip slot", async () => {
+    live.ogmios.fund(lucidWallet(supplier), 10n * AP3X);
+    const chain = live.ogmios.chain();
+    vi.spyOn(chain, "awaitTx").mockResolvedValue(undefined); // the fake chain never confirms a transaction
 
-describe("buildPostEscrowTx() [live] — inline datum", () => {
-  it("escrowOutputRef is returned with a 64-char txHash", async () => {
-    setupMocksForHappyPath();
-    const chain = buildLiveChain();
-    const buyer = buildBuyerWalletKey();
+    await runPostAdvert({ chain, walletKey: supplier, advertDatum: buildCliAdvertDatum(), log: () => {} });
 
-    const result = await buildPostEscrowTx({
-      chain,
-      buyerKey: buyer,
-      advertRef: { txHash: ADVERT_TX_HASH, index: ADVERT_INDEX },
-      messages: SAMPLE_MESSAGES,
-      payment_lovelace: PAYMENT,
-    });
-
-    expect(result.escrowOutputRef.txHash).toHaveLength(64);
-    expect(result.escrowOutputRef.index).toBe(0);
+    expect(live.ogmios.submitted).toHaveLength(1);
+    const advert = inspectSignedTransactionFinancials(live.ogmios.submitted[0]!).outputs.find((output) => output.datumHex !== undefined);
+    expect(decodeAdvertDatum(advert!.datumHex!).advertised_at).toBe(NOW_MS);
   });
 });
 
-// ─── C. Locked value ──────────────────────────────────────────────────────────
-
-describe("buildPostEscrowTx() [live] — locked value", () => {
-  it("min locked value is max(price+bonds, 2_000_000) — min-UTxO floor", async () => {
-    // Advert with very small bonds (1 lovelace each) — floor kicks in
-    const supplier = buildSupplierWalletKey();
-    const tinyAdvert: AdvertDatum = {
-      ...makeActiveAdvert(),
-      price_lovelace: 1n,
-      buyer_bond_lovelace: 1n,
-      supplier_bond_lovelace: 1n,
-      supplier_pkh: supplier.pubKeyHash,
-    };
-    const tinyAdvertDatumHex = encodeAdvertDatum(tinyAdvert);
-
-    mockFetch.mockImplementation(async (_url: string, init?: RequestInit) => {
-      const body = JSON.parse((init?.body as string) ?? "{}");
-      const method: string = body.method ?? "";
-      const buyer = buildBuyerWalletKey();
-
-      if (method === "queryLedgerState/protocolParameters") {
-        return rpcOk({
-          minFeeCoefficient: 44, minFeeConstant: { ada: { lovelace: 155381 } },
-          maxTransactionSize: { bytes: 16384 }, maxValueSize: { bytes: 5000 },
-          stakeCredentialDeposit: { ada: { lovelace: 2000000 } },
-          stakePoolDeposit: { ada: { lovelace: 500000000 } },
-          prices: { memory: "0.0577", steps: "0.0000721" },
-          maxExecutionUnitsPerTransaction: { memory: 14000000, cpu: 10000000000 },
-          coinsPerUtxoByte: { ada: { lovelace: 4310 } },
-          collateralPercentage: 150, maxCollateralInputs: 3,
-          plutusCostModels: { "plutus:v1": {}, "plutus:v2": {}, "plutus:v3": {} },
-          monetaryExpansion: "0.003", treasuryExpansion: "0.2",
-          minStakePoolCost: { ada: { lovelace: 340000000 } },
-          minFeeReferenceScripts: { base: 15 },
-          governanceActionDeposit: { ada: { lovelace: 100000000000 } },
-          delegateRepresentativeDeposit: { ada: { lovelace: 500000000 } },
-        });
-      }
-      if (method === "queryLedgerState/utxo") {
-        if ((body.params ?? {}).outputReferences) {
-          return rpcOk([makeOgmiosUtxo(ADVERT_TX_HASH, ADVERT_INDEX, "addr_advert", 2_000_000, tinyAdvertDatumHex)]);
-        }
-        return rpcOk([makeOgmiosUtxo("c".repeat(64), 0, buyer.address, BUYER_COLLATERAL_LOVELACE)]);
-      }
-      if (method === "queryNetwork/tip") return rpcOk({ slot: 1_745_500_000, id: "a".repeat(64) });
-      if (method === "submitTransaction") return rpcOk({ transaction: { id: "d".repeat(64) } });
-      return rpcOk({});
-    });
-
-    const chain = buildLiveChain();
-    const buyer = buildBuyerWalletKey();
+describe("the mock chain reads the tip slot as slot x 1000", () => {
+  it("stamps posted_at of a Post from the tip slot, not from the clock", async () => {
+    const chain = new MockChainProvider();
+    chain.advanceSlot(1_000);
+    seedAdvertUtxo(chain, activeAdvertDatum(), ADVERT_REF);
 
     const result = await buildPostEscrowTx({
       chain,
       buyerKey: buyer,
-      advertRef: { txHash: ADVERT_TX_HASH, index: ADVERT_INDEX },
-      messages: SAMPLE_MESSAGES,
-      payment_lovelace: 1n,
+      advertRef: ADVERT_REF,
+      messages: MESSAGES,
+      payment_lovelace: activeAdvertDatum().price_lovelace,
     });
 
-    // The tx was built; the locked amount must be >= 2_000_000 (min-UTxO floor)
-    expect(result.txCborHex.length).toBeGreaterThan(0);
+    const stored = await chain.queryUtxo(result.escrowOutputRef);
+    expect(decodeEscrowDatum(stored!.datumHex!).posted_at).toBe(1_000_000);
+  });
+
+  it("stamps advertised_at of runPostAdvert from the tip slot, not from the datum or the clock", async () => {
+    const chain = new MockChainProvider();
+    chain.advanceSlot(1_000);
+
+    // buildCliAdvertDatum() carries advertised_at 0: the flow replaces it.
+    const result = await runPostAdvert({ chain, walletKey: supplier, advertDatum: buildCliAdvertDatum(), log: () => {} });
+
+    const stored = await chain.queryUtxo(result.advertRef);
+    expect(decodeAdvertDatum(stored!.datumHex!).advertised_at).toBe(1_000_000);
   });
 });
 
-// ─── D. Collateral requirement ────────────────────────────────────────────────
+describe("the legacy lifecycle on the live path", () => {
+  it("builds Post, Claim, Submit and Accept, each from the output of the step before", async () => {
+    const chain = live.ogmios.chain();
+    seedPost();
+    live.ogmios.fund(lucidWallet(supplier), 100n * AP3X);
 
-describe("buildPostEscrowTx() [live] — collateral", () => {
-  it("throws TxConstructionError('collateral required') when buyer has no ≥5 ADA pure-ADA UTxO", async () => {
-    const buyer = buildBuyerWalletKey();
-    const advert = makeActiveAdvert();
-    const advertDatumHex = encodeAdvertDatum(advert);
+    const posted = await post();
+    live.ogmios.add(outputOf(posted.txCborHex, posted.expectedTxHash, posted.escrowOutputRef.index));
+    expect(escrowDatumAt(posted, posted.escrowOutputRef.index).state).toBe("Open");
 
-    // Buyer wallet has ONLY a small UTxO (< 5 ADA)
-    mockFetch.mockImplementation(async (_url: string, init?: RequestInit) => {
-      const body = JSON.parse((init?.body as string) ?? "{}");
-      const method: string = body.method ?? "";
+    const claimed = await buildClaimTx({ chain, supplierKey: supplier, escrowRef: posted.escrowOutputRef });
+    live.ogmios.add(outputOf(claimed.txCborHex, claimed.expectedTxHash, 0));
+    expect(escrowDatumAt(claimed).state).toBe("Claimed");
 
-      if (method === "queryLedgerState/protocolParameters") {
-        return rpcOk({
-          minFeeCoefficient: 44, minFeeConstant: { ada: { lovelace: 155381 } },
-          maxTransactionSize: { bytes: 16384 }, maxValueSize: { bytes: 5000 },
-          stakeCredentialDeposit: { ada: { lovelace: 2000000 } },
-          stakePoolDeposit: { ada: { lovelace: 500000000 } },
-          prices: { memory: "0.0577", steps: "0.0000721" },
-          maxExecutionUnitsPerTransaction: { memory: 14000000, cpu: 10000000000 },
-          coinsPerUtxoByte: { ada: { lovelace: 4310 } },
-          collateralPercentage: 150, maxCollateralInputs: 3,
-          plutusCostModels: { "plutus:v1": {}, "plutus:v2": {}, "plutus:v3": {} },
-          monetaryExpansion: "0.003", treasuryExpansion: "0.2",
-          minStakePoolCost: { ada: { lovelace: 340000000 } },
-          minFeeReferenceScripts: { base: 15 },
-          governanceActionDeposit: { ada: { lovelace: 100000000000 } },
-          delegateRepresentativeDeposit: { ada: { lovelace: 500000000 } },
-        });
-      }
-      if (method === "queryLedgerState/utxo") {
-        if ((body.params ?? {}).outputReferences) {
-          return rpcOk([makeOgmiosUtxo(ADVERT_TX_HASH, ADVERT_INDEX, "addr_advert", 2_000_000, advertDatumHex)]);
-        }
-        // Buyer has only 1 ADA (below 5 ADA collateral minimum)
-        return rpcOk([makeOgmiosUtxo("c".repeat(64), 0, buyer.address, 1_000_000)]);
-      }
-      if (method === "queryNetwork/tip") return rpcOk({ slot: 1_745_500_000, id: "a".repeat(64) });
-      return rpcOk({});
+    const submitted = await buildSubmitTx({
+      chain,
+      supplierKey: supplier,
+      escrowRef: { txHash: claimed.expectedTxHash, index: 0 },
+      receiptHash: RECEIPT_HASH,
+    });
+    live.ogmios.add(outputOf(submitted.txCborHex, submitted.expectedTxHash, 0));
+    // The Submit changes the state, the receipt hash and the stamp, and nothing else. The stamp is the end of the validity range:
+    // 2 minutes past the clock, capped at deliver_by (90 s here).
+    const claimedDatum = escrowDatumAt(claimed);
+    expect(escrowDatumAt(submitted)).toEqual({
+      ...claimedDatum,
+      state: "Submitted",
+      submitted_at: claimedDatum.deliver_by,
+      result_receipt_hash: RECEIPT_HASH,
     });
 
-    const chain = buildLiveChain();
-
-    await expect(
-      buildPostEscrowTx({
-        chain,
-        buyerKey: buyer,
-        advertRef: { txHash: ADVERT_TX_HASH, index: ADVERT_INDEX },
-        messages: SAMPLE_MESSAGES,
-        payment_lovelace: PAYMENT,
-      }),
-    ).rejects.toThrow(TxConstructionError);
-  });
-
-  it("TxConstructionError.reason contains 'collateral' when no collateral UTxO", async () => {
-    const buyer = buildBuyerWalletKey();
-    const advert = makeActiveAdvert();
-    const advertDatumHex = encodeAdvertDatum(advert);
-
-    mockFetch.mockImplementation(async (_url: string, init?: RequestInit) => {
-      const body = JSON.parse((init?.body as string) ?? "{}");
-      const method: string = body.method ?? "";
-      if (method === "queryLedgerState/protocolParameters") {
-        return rpcOk({
-          minFeeCoefficient: 44, minFeeConstant: { ada: { lovelace: 155381 } },
-          maxTransactionSize: { bytes: 16384 }, maxValueSize: { bytes: 5000 },
-          stakeCredentialDeposit: { ada: { lovelace: 2000000 } },
-          stakePoolDeposit: { ada: { lovelace: 500000000 } },
-          prices: { memory: "0.0577", steps: "0.0000721" },
-          maxExecutionUnitsPerTransaction: { memory: 14000000, cpu: 10000000000 },
-          coinsPerUtxoByte: { ada: { lovelace: 4310 } }, collateralPercentage: 150,
-          maxCollateralInputs: 3,
-          plutusCostModels: { "plutus:v1": {}, "plutus:v2": {}, "plutus:v3": {} },
-          monetaryExpansion: "0.003", treasuryExpansion: "0.2",
-          minStakePoolCost: { ada: { lovelace: 340000000 } },
-          minFeeReferenceScripts: { base: 15 },
-          governanceActionDeposit: { ada: { lovelace: 100000000000 } },
-          delegateRepresentativeDeposit: { ada: { lovelace: 500000000 } },
-        });
-      }
-      if (method === "queryLedgerState/utxo") {
-        if ((body.params ?? {}).outputReferences) {
-          return rpcOk([makeOgmiosUtxo(ADVERT_TX_HASH, ADVERT_INDEX, "addr", 2_000_000, advertDatumHex)]);
-        }
-        return rpcOk([]); // empty wallet — no collateral
-      }
-      if (method === "queryNetwork/tip") return rpcOk({ slot: 1_745_500_000, id: "a".repeat(64) });
-      return rpcOk({});
-    });
-
-    const chain = buildLiveChain();
-    let caught: unknown;
-    try {
-      await buildPostEscrowTx({
-        chain,
-        buyerKey: buyer,
-        advertRef: { txHash: ADVERT_TX_HASH, index: ADVERT_INDEX },
-        messages: SAMPLE_MESSAGES,
-        payment_lovelace: PAYMENT,
-      });
-    } catch (e) {
-      caught = e;
-    }
-
-    expect(caught).toBeInstanceOf(TxConstructionError);
-    expect((caught as TxConstructionError).reason).toContain("collateral");
-  });
-});
-
-// ─── E. Rejection paths (pre-chain, preserved from Tier-1) ───────────────────
-
-describe("buildPostEscrowTx() [live] — rejection paths (pre-chain checks preserved)", () => {
-  it("throws TxConstructionError('buyer cannot be supplier') when buyerKey.pkh === supplier_pkh", async () => {
-    setupMocksForHappyPath();
-    const chain = buildLiveChain();
-    const supplier = buildSupplierWalletKey();
-
-    await expect(
-      buildPostEscrowTx({
-        chain,
-        buyerKey: supplier,  // same key as supplier in advert
-        advertRef: { txHash: ADVERT_TX_HASH, index: ADVERT_INDEX },
-        messages: SAMPLE_MESSAGES,
-        payment_lovelace: PAYMENT,
-      }),
-    ).rejects.toMatchObject({ reason: "buyer cannot be supplier" });
-  });
-
-  it("throws TxConstructionError('messages required') before any chain query", async () => {
-    const chain = buildLiveChain();
-    const buyer = buildBuyerWalletKey();
-
-    await expect(
-      buildPostEscrowTx({
-        chain,
-        buyerKey: buyer,
-        advertRef: { txHash: ADVERT_TX_HASH, index: ADVERT_INDEX },
-        messages: [],
-        payment_lovelace: PAYMENT,
-      }),
-    ).rejects.toMatchObject({ reason: "messages required" });
-
-    // No fetch should have been called (messages check is before chain query)
-    expect(mockFetch).not.toHaveBeenCalled();
-  });
-
-  it("throws TxConstructionError('advert ref not on chain') when outRef absent", async () => {
-    const buyer = buildBuyerWalletKey();
-
-    // Return empty for outRef queries but don't set up other mocks
-    mockFetch.mockImplementation(async (_url: string, init?: RequestInit) => {
-      const body = JSON.parse((init?.body as string) ?? "{}");
-      const method: string = body.method ?? "";
-      if (method === "queryLedgerState/protocolParameters") {
-        return rpcOk({
-          minFeeCoefficient: 44, minFeeConstant: { ada: { lovelace: 155381 } },
-          maxTransactionSize: { bytes: 16384 }, maxValueSize: { bytes: 5000 },
-          stakeCredentialDeposit: { ada: { lovelace: 2000000 } },
-          stakePoolDeposit: { ada: { lovelace: 500000000 } },
-          prices: { memory: "0.0577", steps: "0.0000721" },
-          maxExecutionUnitsPerTransaction: { memory: 14000000, cpu: 10000000000 },
-          coinsPerUtxoByte: { ada: { lovelace: 4310 } }, collateralPercentage: 150,
-          maxCollateralInputs: 3,
-          plutusCostModels: { "plutus:v1": {}, "plutus:v2": {}, "plutus:v3": {} },
-          monetaryExpansion: "0.003", treasuryExpansion: "0.2",
-          minStakePoolCost: { ada: { lovelace: 340000000 } },
-          minFeeReferenceScripts: { base: 15 },
-          governanceActionDeposit: { ada: { lovelace: 100000000000 } },
-          delegateRepresentativeDeposit: { ada: { lovelace: 500000000 } },
-        });
-      }
-      // All UTxO queries return empty
-      return rpcOk([]);
-    });
-
-    const chain = buildLiveChain();
-
-    await expect(
-      buildPostEscrowTx({
-        chain,
-        buyerKey: buyer,
-        advertRef: { txHash: ADVERT_TX_HASH, index: ADVERT_INDEX },
-        messages: SAMPLE_MESSAGES,
-        payment_lovelace: PAYMENT,
-      }),
-    ).rejects.toMatchObject({ reason: "advert ref not on chain" });
-  });
-
-  it("throws TxConstructionError('advert is retired') when advert.status === Retired", async () => {
-    const buyer = buildBuyerWalletKey();
-    const retiredAdvert = { ...makeActiveAdvert(), status: "Retired" as const };
-    const retiredDatumHex = encodeAdvertDatum(retiredAdvert);
-
-    mockFetch.mockImplementation(async (_url: string, init?: RequestInit) => {
-      const body = JSON.parse((init?.body as string) ?? "{}");
-      const method: string = body.method ?? "";
-      if (method === "queryLedgerState/protocolParameters") {
-        return rpcOk({
-          minFeeCoefficient: 44, minFeeConstant: { ada: { lovelace: 155381 } },
-          maxTransactionSize: { bytes: 16384 }, maxValueSize: { bytes: 5000 },
-          stakeCredentialDeposit: { ada: { lovelace: 2000000 } },
-          stakePoolDeposit: { ada: { lovelace: 500000000 } },
-          prices: { memory: "0.0577", steps: "0.0000721" },
-          maxExecutionUnitsPerTransaction: { memory: 14000000, cpu: 10000000000 },
-          coinsPerUtxoByte: { ada: { lovelace: 4310 } }, collateralPercentage: 150,
-          maxCollateralInputs: 3,
-          plutusCostModels: { "plutus:v1": {}, "plutus:v2": {}, "plutus:v3": {} },
-          monetaryExpansion: "0.003", treasuryExpansion: "0.2",
-          minStakePoolCost: { ada: { lovelace: 340000000 } },
-          minFeeReferenceScripts: { base: 15 },
-          governanceActionDeposit: { ada: { lovelace: 100000000000 } },
-          delegateRepresentativeDeposit: { ada: { lovelace: 500000000 } },
-        });
-      }
-      if (method === "queryLedgerState/utxo") {
-        if ((body.params ?? {}).outputReferences) {
-          return rpcOk([makeOgmiosUtxo(ADVERT_TX_HASH, ADVERT_INDEX, "addr", 2_000_000, retiredDatumHex)]);
-        }
-        return rpcOk([makeOgmiosUtxo("c".repeat(64), 0, buyer.address, BUYER_COLLATERAL_LOVELACE)]);
-      }
-      if (method === "queryNetwork/tip") return rpcOk({ slot: 1_745_500_000, id: "a".repeat(64) });
-      return rpcOk({});
-    });
-
-    const chain = buildLiveChain();
-
-    await expect(
-      buildPostEscrowTx({
-        chain,
-        buyerKey: buyer,
-        advertRef: { txHash: ADVERT_TX_HASH, index: ADVERT_INDEX },
-        messages: SAMPLE_MESSAGES,
-        payment_lovelace: PAYMENT,
-      }),
-    ).rejects.toMatchObject({ reason: "advert is retired" });
-  });
-
-  it("throws TxConstructionError('payment must equal advertised price') on mismatch", async () => {
-    setupMocksForHappyPath();
-    const chain = buildLiveChain();
-    const buyer = buildBuyerWalletKey();
-
-    await expect(
-      buildPostEscrowTx({
-        chain,
-        buyerKey: buyer,
-        advertRef: { txHash: ADVERT_TX_HASH, index: ADVERT_INDEX },
-        messages: SAMPLE_MESSAGES,
-        payment_lovelace: 999n,  // wrong amount
-      }),
-    ).rejects.toMatchObject({ reason: "payment must equal advertised price" });
+    const accepted = await buildAcceptTx({ chain, buyerKey: buyer, escrowRef: { txHash: submitted.expectedTxHash, index: 0 } });
+    const { inputs, outputs } = inspectSignedTransactionFinancials(accepted.txCborHex);
+    expect(inputs).toContainEqual({ txHash: submitted.expectedTxHash, index: 0 });
+    expect(outputs.filter((output) => output.datumHex !== undefined)).toEqual([]);
   });
 });
