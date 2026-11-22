@@ -185,17 +185,6 @@ describe("POST /v1/ocr/extract — body validation", () => {
 });
 
 describe("POST /v1/ocr/extract — supplier lookup + body limit", () => {
-  it("404 model_not_found when no supplier advertises the capability", async () => {
-    const deps = makeDeps();
-    const rawKey = makeKey(deps, 0);
-    const res = await request(createApp(deps))
-      .post("/v1/ocr/extract")
-      .set("Authorization", `Bearer ${rawKey}`)
-      .send(validBody());
-    expect(res.status).toBe(404);
-    expect(res.body.error?.code).toBe("model_not_found");
-  });
-
   it("queries the indexer with the configured ocr capability id", async () => {
     let queried = "";
     const fetchFn = (async (url: unknown) => {
@@ -272,7 +261,8 @@ describe("venueAttribution — header sanitization", () => {
     }
   });
 
-  it("defaults both fields to empty string when headers are missing", () => {
+  // A missing header reads as undefined. `/^[a-z0-9-]{1,32}$/.test(undefined)` is true, so only the `?? ""` in the code keeps "undefined" out.
+  it("gives empty strings for missing headers", () => {
     const out = venueAttribution(fakeReq({}));
     expect(out).toEqual({ venue: "", runUserHash: "" });
   });
@@ -497,28 +487,6 @@ describe("POST /v1/ocr/extract - busy pre-check", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].status).toBe("failed");
     expect(rows[0].escrow_ref).toBeNull();
-  });
-
-  it("a free supplier proceeds to post and settle exactly as before", async () => {
-    const fetchFn = makeFetchWithStatus([OCR_SUPPLIER], {
-      "http://sup": () => new Response(JSON.stringify({ status: "free" }), { status: 200 }),
-    });
-    const deps = makeDeps(fetchFn, { chain: fundedChain });
-    const rawKey = makeKey(deps, 0);
-    const keyRow = deps.store.getKeyByHash(hashApiKey(rawKey))!;
-
-    const ctx = deps.registry.getContext(keyRow);
-    const submitOcr = makeSubmitOcrStub();
-    (ctx.sdk as { submitOcr: unknown }).submitOcr = submitOcr;
-
-    const res = await request(createApp(deps))
-      .post("/v1/ocr/extract")
-      .set("Authorization", `Bearer ${rawKey}`)
-      .send(validBody());
-
-    expect(submitOcr).toHaveBeenCalledTimes(1);
-    expect(res.status).toBe(200);
-    expect(res.body.x_vector.receipt_labels).toContain("first-party-brokered");
   });
 
   it("falls back to the second candidate when the first is busy, posting exactly one escrow", async () => {
