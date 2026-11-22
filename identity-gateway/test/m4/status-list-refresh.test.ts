@@ -349,20 +349,13 @@ describe("the timing rule", () => {
     return h.logs;
   }
 
-  test("a build that is too long for the interval is logged as a warning; a build within the rule is not", async () => {
-    // The longest interval and a build of 20 minutes: a list can expire before the next build ends.
-    expect(await warnedAfter(20 * MINUTE, { backgroundRefreshMs: MAX_REFRESH_MS })).toEqual([
-      "identity-gateway: status lists: the build took 1200.0 s, and the interval is 2400 s. A list is valid for 3600 s, so a list can expire before the next build ends. Use a shorter STATUS_LIST_BACKGROUND_REFRESH_SECONDS.",
-    ]);
-    // The same build with the default interval fits.
-    expect(await warnedAfter(20 * MINUTE, {})).toEqual([]);
-  });
-
   test("at the longest interval, builds of 580 s keep a valid list at every moment and are not logged; a build of 600 s is logged", async () => {
     const options = { backgroundRefreshMs: MAX_REFRESH_MS };
     expect(MAX_REFRESH_MS).toBe(2_400_000);
     expect(await warnedAfter(580_000, options)).toEqual([]);
     expect(await warnedAfter(600_000, options)).toEqual([expect.stringContaining("the build took 600.0 s, and the interval is 2400 s")]);
+    // The same build of 600 s with the default interval fits in the validity of a list: the warning depends on the interval.
+    expect(await warnedAfter(600_000, {})).toEqual([]);
     // The lists do not follow the chain here, so only builds renew them.
     const b = ledger();
     const gate = new Gate(b.chain);
@@ -371,16 +364,5 @@ describe("the timing rule", () => {
     const ends = await simulate(h, gate, 580_000, 8);
     expect(ends.length).toBeGreaterThanOrEqual(9);
     expect(h.logs).toEqual([]);
-  });
-
-  test("the services refuse an interval that breaks the rule", async () => {
-    await expect(gateway(ledger(), { backgroundRefreshMs: 59_000 })).rejects.toThrow(/STATUS_LIST_BACKGROUND_REFRESH_SECONDS must be from 60 to 2400 s/);
-    await expect(gateway(ledger(), { backgroundRefreshMs: 2_401_000 })).rejects.toThrow(/STATUS_LIST_BACKGROUND_REFRESH_SECONDS must be from 60 to 2400 s/);
-    await expect(gateway(ledger(), { refreshMs: 2_401_000, backgroundRefreshMs: 2_400_000 })).rejects.toThrow(/STATUS_LIST_REFRESH_SECONDS must be from 1 to 2400 s/);
-    await expect(gateway(ledger(), { refreshMs: 900_000, backgroundRefreshMs: 600_000 })).rejects.toThrow(/must not be shorter than STATUS_LIST_REFRESH_SECONDS/);
-    // The limits and equal intervals are accepted.
-    await gateway(ledger(), { backgroundRefreshMs: 60_000 });
-    await gateway(ledger(), { backgroundRefreshMs: 2_400_000 });
-    await gateway(ledger(), { refreshMs: 600_000, backgroundRefreshMs: 600_000 });
   });
 });

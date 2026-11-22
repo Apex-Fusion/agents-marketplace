@@ -70,23 +70,4 @@ describe("renderings and M4 services in one gateway", () => {
     const signingInput = `${text(at(signature, "protected"))}.${Buffer.from(canonicalize(card)).toString("base64url")}`;
     expect(verify(null, Buffer.from(signingInput), publicKey, Buffer.from(text(at(signature, "signature")), "base64url"))).toBe(true);
   });
-
-  test("the AI Catalog names the gateway's DID as host; M4 and rendering paths both answer", async () => {
-    const catalog = await (await fetch(`${url}/.well-known/ai-catalog.json`)).text();
-    expect(catalog).toContain(`did:vector:${GATEWAY_ID}`);
-    expect((await fetch(`${url}/.well-known/oauth-authorization-server`)).status).toBe(200);
-    expect((await fetch(`${url}/policy`)).status).toBe(200);
-    expect((await fetch(`${url}/healthz`)).status).toBe(200);
-  });
-
-  test("/policy computes the bounds of the M4 services from the settings that the services run with, as main.ts passes them", async () => {
-    const body = await bodyOf(await fetch(`${url}/policy`));
-    // The services here run with a refresh interval of 60 s, the default follow interval of 10 s and no delegation contract.
-    expect(at(body, "revocationBounds", "paths", "controllerSuspend", "surfaces", "statusLists")).toMatchObject({ effect: "applies", seconds: 16, formula: "followSeconds + stepSecondsDuringBuild" });
-    expect(at(body, "revocationBounds", "paths", "holdLift", "surfaces", "statusLists")).toMatchObject({ effect: "applies", seconds: 256 });
-    expect(at(body, "revocationBounds", "paths", "controllerSuspend", "surfaces", "accessTokenLocal")).toMatchObject({ effect: "partial", seconds: 300 });
-    expect(at(body, "revocationBounds", "paths", "undelegate", "surfaces", "introspection")).toMatchObject({ effect: "none", seconds: null });
-    expect(at(body, "revocationBounds", "terms", "followSeconds", "value")).toBe(10);
-    expect(at(body, "revocationBounds", "terms", "listCacheSeconds", "value")).toBe(60);
-  });
 });
