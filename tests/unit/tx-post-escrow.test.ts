@@ -1,395 +1,209 @@
 /**
- * tx-post-escrow.test.ts — RED phase tests for buildPostEscrowTx()
- *
- * PostEscrow is the most complex builder: it must query the advert UTxO,
- * verify it is Active and matches the buyer's expectations, then construct
- * the EscrowDatum and lock payment + bonds at the escrow script.
- *
- * Ref: ARCHITECTURE.md §4.2, escrow.ak (advert_ref is SPEC-LOCK),
- *      Catherine's requirement 2 and 3 from the M1-B brief.
+ * Tests buildPostEscrowTx() (chat) on the mock chain. The builder reads the Active advert, checks the buyer and the payment,
+ * and locks payment + both bonds in an Open escrow datum (ARCHITECTURE.md §4.2; escrow.ak: advert_ref is SPEC-LOCK).
+ * The last table checks a precomputed prompt_hash on the chat, OCR and TTS builders.
+ * Each builder has its own code for these checks, so each builder has its own rows.
  */
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect } from "vitest";
 import { createHash } from "crypto";
 import { MockChainProvider } from "../../packages/shared/src/chain/MockChainProvider.js";
-import { buildPostEscrowTx } from "../../packages/shared/src/tx/escrow/postEscrow.js";
-import { TxConstructionError } from "../../packages/shared/src/tx/types.js";
-import { encodeAdvertDatum } from "../../packages/shared/src/cbor/AdvertDatum.js";
+import { buildPostEscrowTx, type PostEscrowParams } from "../../packages/shared/src/tx/escrow/postEscrow.js";
+import { buildPostOcrEscrowTx, type OcrRequest } from "../../packages/shared/src/tx/escrow/postOcrEscrow.js";
+import { buildPostTtsEscrowTx, type TtsRequest } from "../../packages/shared/src/tx/escrow/postTtsEscrow.js";
 import { decodeEscrowDatum } from "../../packages/shared/src/cbor/EscrowDatum.js";
-import type { AdvertDatum } from "../../packages/shared/src/cbor/types.js";
-import type { Utxo, OutputReference } from "../../packages/shared/src/chain/ChainProvider.js";
+import { canonicalize } from "../../packages/shared/src/cbor/canonical.js";
+import type { AdvertDatum, EscrowDatum } from "../../packages/shared/src/cbor/types.js";
+import type { OutputReference, Utxo } from "../../packages/shared/src/chain/ChainProvider.js";
+import type { ChatMessage, PostEscrowBuildResult } from "../../packages/shared/src/tx/types.js";
 import { buildBuyerWalletKey } from "../fixtures/buyer-side/wallet-keys.js";
 import { buildSupplierWalletKey } from "../fixtures/supplier-side/wallet-keys.js";
+import { activeAdvertDatum, seedAdvertUtxo } from "../fixtures/onchain-tx/legacy-advert.js";
 
-// ─── Fixtures ────────────────────────────────────────────────────────────────
-
-const ADVERT_SCRIPT_ADDRESS = "addr_test1wrqq9qqjzf3uh4w9hm0kqzrpvt60r4ryjp5rjf5epd3nptq7yscm6";
-const ADVERT_TX_HASH = "b".repeat(64);
-const ADVERT_INDEX = 0;
-const ADVERT_REF: OutputReference = { txHash: ADVERT_TX_HASH, index: ADVERT_INDEX };
-
-function makeActiveAdvert(): AdvertDatum {
-  const supplier = buildSupplierWalletKey();
-  return {
-    supplier_pkh: supplier.pubKeyHash,
-    capability_id: "llm.text.generate.v1",
-    model: "qwen2.5:0.5b",
-    max_output_tokens: 512,
-    max_processing_ms: 60_000,
-    price_lovelace: 2_000_000n,
-    supplier_bond_lovelace: 1_000_000n,
-    buyer_bond_lovelace: 1_000_000n,
-    endpoint_url: "https://supplier.example.com/v1",
-    detail_uri: "ipfs://Qm000",
-    detail_hash: "a".repeat(64),
-    advertised_at: 1_745_500_000_000,
-    status: "Active",
-  };
-}
-
-function seedAdvertUtxo(chain: MockChainProvider, datum: AdvertDatum, ref = ADVERT_REF): void {
-  const utxo: Utxo = {
-    ref,
-    address: ADVERT_SCRIPT_ADDRESS,
-    lovelace: 2_000_000n,
-    assets: {},
-    datumHex: encodeAdvertDatum(datum),
-    scriptRef: null,
-  };
-  chain.seed(utxo);
-}
-
-// SPEC FIX 2026-04-25: prompt_hash hashes canonical(messages) per ARCHITECTURE §4.2.
-import type { ChatMessage } from "../../packages/shared/src/tx/types.js";
-import { canonicalize } from "../../packages/shared/src/cbor/canonical.js";
+const ADVERT_REF: OutputReference = { txHash: "b".repeat(64), index: 0 };
+const ADVERT = activeAdvertDatum();
 const SAMPLE_MESSAGES: ChatMessage[] = [{ role: "user", content: "What is 2+2?" }];
 const PAYMENT = 2_000_000n;
+/** A synthetic tip. The mock chain reads slot x 1000 as the time. */
+const TIP_SLOT = 1_745_500_000;
 
-// ─── Happy path ───────────────────────────────────────────────────────────────
+const buyer = buildBuyerWalletKey();
 
-describe("buildPostEscrowTx() — happy path", () => {
-  let chain: MockChainProvider;
+/** A mock chain with `advert` at ADVERT_REF. */
+function chainWith(advert: AdvertDatum): MockChainProvider {
+  const chain = new MockChainProvider();
+  chain.advanceSlot(TIP_SLOT);
+  seedAdvertUtxo(chain, advert, ADVERT_REF);
+  return chain;
+}
 
-  beforeEach(() => {
-    chain = new MockChainProvider();
-    chain.advanceSlot(1_745_500_000);   // synthetic tip
-    seedAdvertUtxo(chain, makeActiveAdvert());
+/** Posts a chat escrow. A test changes a parameter with `overrides`. */
+function postChat(chain: MockChainProvider, overrides: Partial<PostEscrowParams> = {}): Promise<PostEscrowBuildResult> {
+  return buildPostEscrowTx({ chain, buyerKey: buyer, advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT, ...overrides });
+}
+
+/** Posts a chat escrow on the default advert. Returns the result, the escrow output and its decoded datum. */
+async function postOnDefaultAdvert(): Promise<{ result: PostEscrowBuildResult; escrow: Utxo; datum: EscrowDatum }> {
+  const chain = chainWith(ADVERT);
+  const result = await postChat(chain);
+  const escrow = await chain.queryUtxo(result.escrowOutputRef);
+  if (escrow === null) throw new Error("PostEscrow wrote no escrow output");
+  return { result, escrow, datum: decodeEscrowDatum(escrow.datumHex!) };
+}
+
+describe("buildPostEscrowTx()", () => {
+  it("returns the transaction hash and the reference of output 0", async () => {
+    const { result } = await postOnDefaultAdvert();
+    expect(result.expectedTxHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(result.escrowOutputRef).toEqual({ txHash: result.expectedTxHash, index: 0 });
   });
 
-  it("queries the advert UTxO at advertRef before building", async () => {
-    const buyer = buildBuyerWalletKey();
-    // If chain has no advert UTxO, builder must throw TxConstructionError
-    const emptyChain = new MockChainProvider();
-    await expect(
-      buildPostEscrowTx({ chain: emptyChain, buyerKey: buyer, advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT }),
-    ).rejects.toThrow(TxConstructionError);
+  it("posts an Open datum with no submission time and no receipt hash", async () => {
+    const { datum } = await postOnDefaultAdvert();
+    expect(datum).toMatchObject({ state: "Open", submitted_at: null, result_receipt_hash: null });
   });
 
-  it("returns a non-empty txCborHex", async () => {
-    const buyer = buildBuyerWalletKey();
-    const result = await buildPostEscrowTx({ chain, buyerKey: buyer, advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT });
-    expect(typeof result.txCborHex).toBe("string");
-    expect(result.txCborHex.length).toBeGreaterThan(0);
+  it("binds the datum to the advert ref", async () => {
+    const { datum } = await postOnDefaultAdvert();
+    expect(datum.advert_ref).toEqual(ADVERT_REF);
   });
 
-  it("returns escrowOutputRef with txHash and index", async () => {
-    const buyer = buildBuyerWalletKey();
-    const result = await buildPostEscrowTx({ chain, buyerKey: buyer, advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT });
-    expect(result.escrowOutputRef).toBeDefined();
-    expect(result.escrowOutputRef.txHash).toHaveLength(64);
+  it("copies capability_id from the advert", async () => {
+    const { datum } = await postOnDefaultAdvert();
+    expect(datum.capability_id).toBe(ADVERT.capability_id);
   });
 
-  it("constructs EscrowDatum with state: Open", async () => {
-    const buyer = buildBuyerWalletKey();
-    const result = await buildPostEscrowTx({ chain, buyerKey: buyer, advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT });
-    const utxo = await chain.queryUtxo(result.escrowOutputRef);
-    const datum = decodeEscrowDatum(utxo!.datumHex!);
-    expect(datum.state).toBe("Open");
+  it("sets prompt_hash to sha256 of canonical(messages) — ARCHITECTURE §4.2", async () => {
+    const { datum } = await postOnDefaultAdvert();
+    expect(datum.prompt_hash).toBe(createHash("sha256").update(canonicalize(SAMPLE_MESSAGES), "utf8").digest("hex"));
   });
 
-  it("constructs EscrowDatum with submitted_at: null (None)", async () => {
-    const buyer = buildBuyerWalletKey();
-    const result = await buildPostEscrowTx({ chain, buyerKey: buyer, advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT });
-    const utxo = await chain.queryUtxo(result.escrowOutputRef);
-    const datum = decodeEscrowDatum(utxo!.datumHex!);
-    expect(datum.submitted_at).toBeNull();
-  });
-
-  it("constructs EscrowDatum with result_receipt_hash: null (None)", async () => {
-    const buyer = buildBuyerWalletKey();
-    const result = await buildPostEscrowTx({ chain, buyerKey: buyer, advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT });
-    const utxo = await chain.queryUtxo(result.escrowOutputRef);
-    const datum = decodeEscrowDatum(utxo!.datumHex!);
-    expect(datum.result_receipt_hash).toBeNull();
-  });
-
-  it("constructs EscrowDatum with advert_ref matching the queried advertRef", async () => {
-    const buyer = buildBuyerWalletKey();
-    const result = await buildPostEscrowTx({ chain, buyerKey: buyer, advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT });
-    const utxo = await chain.queryUtxo(result.escrowOutputRef);
-    const datum = decodeEscrowDatum(utxo!.datumHex!);
-    expect(datum.advert_ref.txHash).toBe(ADVERT_TX_HASH);
-    expect(datum.advert_ref.index).toBe(ADVERT_INDEX);
-  });
-
-  it("constructs EscrowDatum with capability_id copied from advert", async () => {
-    const buyer = buildBuyerWalletKey();
-    const result = await buildPostEscrowTx({ chain, buyerKey: buyer, advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT });
-    const utxo = await chain.queryUtxo(result.escrowOutputRef);
-    const datum = decodeEscrowDatum(utxo!.datumHex!);
-    expect(datum.capability_id).toBe("llm.text.generate.v1");
-  });
-
-  it("constructs prompt_hash as sha256 of canonical(messages) — ARCHITECTURE §4.2", async () => {
-    // SPEC FIX 2026-04-25: prompt_hash binds the full messages envelope, not the bare prompt string.
-    const buyer = buildBuyerWalletKey();
-    const result = await buildPostEscrowTx({ chain, buyerKey: buyer, advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT });
-    const utxo = await chain.queryUtxo(result.escrowOutputRef);
-    const datum = decodeEscrowDatum(utxo!.datumHex!);
-    const expectedHash = createHash("sha256").update(canonicalize(SAMPLE_MESSAGES), "utf8").digest("hex");
-    expect(datum.prompt_hash).toBe(expectedHash);
-  });
-
-  it("constructs request_spec_hash as sha256 of canonical {capability_id, model, max_output_tokens}", async () => {
-    const buyer = buildBuyerWalletKey();
-    const advert = makeActiveAdvert();
-    const result = await buildPostEscrowTx({ chain, buyerKey: buyer, advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT });
-    const utxo = await chain.queryUtxo(result.escrowOutputRef);
-    const datum = decodeEscrowDatum(utxo!.datumHex!);
-    // Canonical: sorted keys, no whitespace (RFC-8785 subset)
+  it("sets request_spec_hash to sha256 of canonical {capability_id, model, max_output_tokens}", async () => {
+    const { datum } = await postOnDefaultAdvert();
+    // Canonical: sorted keys, no whitespace (RFC-8785 subset).
     const canonicalSpec = JSON.stringify({
-      capability_id: advert.capability_id,
-      max_output_tokens: advert.max_output_tokens,
-      model: advert.model,
+      capability_id: ADVERT.capability_id,
+      max_output_tokens: ADVERT.max_output_tokens,
+      model: ADVERT.model,
     });
-    const expectedHash = createHash("sha256").update(canonicalSpec, "utf8").digest("hex");
-    expect(datum.request_spec_hash).toBe(expectedHash);
+    expect(datum.request_spec_hash).toBe(createHash("sha256").update(canonicalSpec, "utf8").digest("hex"));
   });
 
-  it("constructs deliver_by = posted_at + max_processing_ms + 30_000", async () => {
-    const buyer = buildBuyerWalletKey();
-    const advert = makeActiveAdvert();
-    const result = await buildPostEscrowTx({ chain, buyerKey: buyer, advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT });
-    const utxo = await chain.queryUtxo(result.escrowOutputRef);
-    const datum = decodeEscrowDatum(utxo!.datumHex!);
-    // deliver_by = posted_at + 60_000 (max_processing_ms) + 30_000 (network_buffer)
-    expect(datum.deliver_by).toBe(datum.posted_at + advert.max_processing_ms + 30_000);
+  it("sets deliver_by to posted_at + max_processing_ms + 30_000", async () => {
+    const { datum } = await postOnDefaultAdvert();
+    expect(datum.deliver_by).toBe(datum.posted_at + ADVERT.max_processing_ms + 30_000);
   });
 
-  it("locked value equals price + buyer_bond + supplier_bond", async () => {
-    const buyer = buildBuyerWalletKey();
-    const advert = makeActiveAdvert();
-    const result = await buildPostEscrowTx({ chain, buyerKey: buyer, advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT });
-    const utxo = await chain.queryUtxo(result.escrowOutputRef);
-    expect(utxo!.lovelace).toBe(advert.price_lovelace + advert.buyer_bond_lovelace + advert.supplier_bond_lovelace);
+  it("locks price + buyer_bond + supplier_bond", async () => {
+    const { escrow } = await postOnDefaultAdvert();
+    expect(escrow.lovelace).toBe(ADVERT.price_lovelace + ADVERT.buyer_bond_lovelace + ADVERT.supplier_bond_lovelace);
+  });
+
+  it("refuses an advert ref that is not on chain", async () => {
+    await expect(postChat(new MockChainProvider())).rejects.toMatchObject({
+      name: "TxConstructionError",
+      reason: "advert ref not on chain",
+    });
+  });
+
+  it("refuses a Retired advert", async () => {
+    await expect(postChat(chainWith({ ...ADVERT, status: "Retired" }))).rejects.toMatchObject({
+      name: "TxConstructionError",
+      reason: "advert is retired",
+    });
+  });
+
+  it("refuses a payment that is not the advertised price", async () => {
+    await expect(postChat(chainWith(ADVERT), { payment_lovelace: 1_000_000n })).rejects.toMatchObject({
+      name: "TxConstructionError",
+      reason: "payment must equal advertised price",
+    });
+  });
+
+  it("refuses a buyer that is the supplier", async () => {
+    await expect(postChat(chainWith(ADVERT), { buyerKey: buildSupplierWalletKey() })).rejects.toMatchObject({
+      name: "TxConstructionError",
+      reason: "buyer cannot be supplier",
+    });
+  });
+
+  it("refuses an empty messages array", async () => {
+    await expect(postChat(chainWith(ADVERT), { messages: [] })).rejects.toMatchObject({
+      name: "TxConstructionError",
+      reason: "messages required",
+    });
   });
 });
 
-describe("buildPostEscrowTx() — precomputed prompt_hash", () => {
-  it("stores a precomputed hash in lowercase without requiring messages", async () => {
-    const chain = new MockChainProvider();
-    chain.advanceSlot(1_745_500_000);
-    seedAdvertUtxo(chain, makeActiveAdvert());
+// ─── Precomputed prompt_hash: chat, OCR and TTS ──────────────────────────────
 
-    const result = await buildPostEscrowTx({
-      chain,
-      buyerKey: buildBuyerWalletKey(),
-      advertRef: ADVERT_REF,
-      prompt_hash: "AB".repeat(32),
-      payment_lovelace: PAYMENT,
-    });
-    const utxo = await chain.queryUtxo(result.escrowOutputRef);
-    const datum = decodeEscrowDatum(utxo!.datumHex!);
+interface PromptBuilder {
+  name: string;
+  /** The input that carries the prompt content: `messages` (chat) or `request` (OCR and TTS). */
+  field: string;
+  advert: AdvertDatum;
+  /** Posts with the valid prompt content when `withContent` is true, and with `prompt_hash` when it is given. */
+  post: (chain: MockChainProvider, options: { withContent: boolean; prompt_hash?: string }) => Promise<PostEscrowBuildResult>;
+  /** The reason when the builder gets neither the prompt content nor a prompt_hash. */
+  missingReason: string;
+}
 
-    expect(datum.prompt_hash).toBe("ab".repeat(32));
+const OCR_REQUEST: OcrRequest = { image_b64: "aGVsbG8=", mime: "image/png", output_format: "markdown" };
+const TTS_REQUEST: TtsRequest = { text: "Hello world.", voice: "nova", format: "mp3", speed: 1 };
+
+const PROMPT_BUILDERS: PromptBuilder[] = [
+  {
+    name: "chat",
+    field: "messages",
+    advert: ADVERT,
+    missingReason: "prompt required",
+    post: (chain, { withContent, prompt_hash }) =>
+      buildPostEscrowTx({ chain, buyerKey: buyer, advertRef: ADVERT_REF, payment_lovelace: PAYMENT, prompt_hash, messages: withContent ? SAMPLE_MESSAGES : undefined }),
+  },
+  {
+    name: "OCR",
+    field: "request",
+    advert: activeAdvertDatum({ capability_id: "ocr.page.extract.chandra-ocr-2.v1", model: "chandra-ocr-2", max_output_tokens: 4096 }),
+    missingReason: "request required",
+    post: (chain, { withContent, prompt_hash }) =>
+      buildPostOcrEscrowTx({ chain, buyerKey: buyer, advertRef: ADVERT_REF, payment_lovelace: PAYMENT, prompt_hash, request: withContent ? OCR_REQUEST : undefined }),
+  },
+  {
+    name: "TTS",
+    field: "request",
+    advert: activeAdvertDatum({ capability_id: "audio.synthesize.piper.v1", model: "piper", max_output_tokens: 4096 }),
+    missingReason: "request required",
+    post: (chain, { withContent, prompt_hash }) =>
+      buildPostTtsEscrowTx({ chain, buyerKey: buyer, advertRef: ADVERT_REF, payment_lovelace: PAYMENT, prompt_hash, request: withContent ? TTS_REQUEST : undefined }),
+  },
+];
+
+describe.each(PROMPT_BUILDERS)("$name builder: precomputed prompt_hash", ({ field, advert, post, missingReason }) => {
+  it(`stores a precomputed hash in lowercase without ${field}`, async () => {
+    const chain = chainWith(advert);
+    const result = await post(chain, { withContent: false, prompt_hash: "AB".repeat(32) });
+    const escrow = await chain.queryUtxo(result.escrowOutputRef);
+    expect(decodeEscrowDatum(escrow!.datumHex!).prompt_hash).toBe("ab".repeat(32));
   });
 
-  it("rejects when neither messages nor prompt_hash is provided", async () => {
-    await expect(buildPostEscrowTx({
-      chain: new MockChainProvider(),
-      buyerKey: buildBuyerWalletKey(),
-      advertRef: ADVERT_REF,
-      payment_lovelace: PAYMENT,
-    })).rejects.toMatchObject({
+  it(`refuses when neither ${field} nor prompt_hash is given`, async () => {
+    await expect(post(new MockChainProvider(), { withContent: false })).rejects.toMatchObject({
       name: "TxConstructionError",
-      reason: "prompt required",
+      reason: missingReason,
     });
   });
 
-  it("rejects when both messages and prompt_hash are provided", async () => {
-    await expect(buildPostEscrowTx({
-      chain: new MockChainProvider(),
-      buyerKey: buildBuyerWalletKey(),
-      advertRef: ADVERT_REF,
-      messages: SAMPLE_MESSAGES,
-      prompt_hash: "ab".repeat(32),
-      payment_lovelace: PAYMENT,
-    })).rejects.toMatchObject({
+  it(`refuses when both ${field} and prompt_hash are given`, async () => {
+    await expect(post(new MockChainProvider(), { withContent: true, prompt_hash: "ab".repeat(32) })).rejects.toMatchObject({
       name: "TxConstructionError",
       reason: "ambiguous prompt commitment",
     });
   });
 
-  it("rejects a malformed prompt_hash", async () => {
-    await expect(buildPostEscrowTx({
-      chain: new MockChainProvider(),
-      buyerKey: buildBuyerWalletKey(),
-      advertRef: ADVERT_REF,
-      prompt_hash: "not-32-byte-hex",
-      payment_lovelace: PAYMENT,
-    })).rejects.toMatchObject({
+  it("refuses a malformed prompt_hash", async () => {
+    await expect(post(new MockChainProvider(), { withContent: false, prompt_hash: "not-32-byte-hex" })).rejects.toMatchObject({
       name: "TxConstructionError",
       reason: "prompt_hash malformed",
     });
-  });
-});
-
-// ─── Rejection: advert UTxO not found ────────────────────────────────────────
-
-describe("buildPostEscrowTx() — rejects missing advert UTxO", () => {
-  it("throws TxConstructionError when advert ref not on chain", async () => {
-    const buyer = buildBuyerWalletKey();
-    const chain = new MockChainProvider();
-    // No advert seeded
-
-    await expect(
-      buildPostEscrowTx({ chain, buyerKey: buyer, advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT }),
-    ).rejects.toThrow(TxConstructionError);
-  });
-
-  it("TxConstructionError.reason is 'advert ref not on chain'", async () => {
-    const buyer = buildBuyerWalletKey();
-    const chain = new MockChainProvider();
-
-    let caught: unknown;
-    try {
-      await buildPostEscrowTx({ chain, buyerKey: buyer, advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT });
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toBeInstanceOf(TxConstructionError);
-    expect((caught as TxConstructionError).reason).toBe("advert ref not on chain");
-  });
-});
-
-// ─── Rejection: advert is Retired ────────────────────────────────────────────
-
-describe("buildPostEscrowTx() — rejects Retired advert", () => {
-  it("throws TxConstructionError when advert datum.status = Retired", async () => {
-    const buyer = buildBuyerWalletKey();
-    const chain = new MockChainProvider();
-    seedAdvertUtxo(chain, { ...makeActiveAdvert(), status: "Retired" });
-
-    await expect(
-      buildPostEscrowTx({ chain, buyerKey: buyer, advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT }),
-    ).rejects.toThrow(TxConstructionError);
-  });
-
-  it("TxConstructionError.reason is 'advert is retired'", async () => {
-    const buyer = buildBuyerWalletKey();
-    const chain = new MockChainProvider();
-    seedAdvertUtxo(chain, { ...makeActiveAdvert(), status: "Retired" });
-
-    let caught: unknown;
-    try {
-      await buildPostEscrowTx({ chain, buyerKey: buyer, advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT });
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toBeInstanceOf(TxConstructionError);
-    expect((caught as TxConstructionError).reason).toBe("advert is retired");
-  });
-});
-
-// ─── Rejection: payment mismatch ─────────────────────────────────────────────
-
-describe("buildPostEscrowTx() — rejects wrong payment amount", () => {
-  it("throws TxConstructionError when payment_lovelace != advert.price_lovelace", async () => {
-    const buyer = buildBuyerWalletKey();
-    const chain = new MockChainProvider();
-    chain.advanceSlot(1_745_500_000);
-    seedAdvertUtxo(chain, makeActiveAdvert());  // price = 2_000_000n
-
-    await expect(
-      buildPostEscrowTx({ chain, buyerKey: buyer, advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: 1_000_000n }),
-    ).rejects.toThrow(TxConstructionError);
-  });
-
-  it("TxConstructionError.reason is 'payment must equal advertised price'", async () => {
-    const buyer = buildBuyerWalletKey();
-    const chain = new MockChainProvider();
-    chain.advanceSlot(1_745_500_000);
-    seedAdvertUtxo(chain, makeActiveAdvert());
-
-    let caught: unknown;
-    try {
-      await buildPostEscrowTx({ chain, buyerKey: buyer, advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: 1_000_000n });
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toBeInstanceOf(TxConstructionError);
-    expect((caught as TxConstructionError).reason).toBe("payment must equal advertised price");
-  });
-});
-
-// ─── Rejection: buyer is supplier ────────────────────────────────────────────
-
-describe("buildPostEscrowTx() — rejects buyer == supplier", () => {
-  it("throws TxConstructionError when buyerKey pkh equals supplier_pkh", async () => {
-    const supplier = buildSupplierWalletKey();
-    const chain = new MockChainProvider();
-    chain.advanceSlot(1_745_500_000);
-    seedAdvertUtxo(chain, makeActiveAdvert());
-
-    await expect(
-      buildPostEscrowTx({ chain, buyerKey: supplier, advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT }),
-    ).rejects.toThrow(TxConstructionError);
-  });
-
-  it("TxConstructionError.reason is 'buyer cannot be supplier'", async () => {
-    const supplier = buildSupplierWalletKey();
-    const chain = new MockChainProvider();
-    chain.advanceSlot(1_745_500_000);
-    seedAdvertUtxo(chain, makeActiveAdvert());
-
-    let caught: unknown;
-    try {
-      await buildPostEscrowTx({ chain, buyerKey: supplier, advertRef: ADVERT_REF, messages: SAMPLE_MESSAGES, payment_lovelace: PAYMENT });
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toBeInstanceOf(TxConstructionError);
-    expect((caught as TxConstructionError).reason).toBe("buyer cannot be supplier");
-  });
-});
-
-// ─── Rejection: empty messages ───────────────────────────────────────────────
-
-describe("buildPostEscrowTx() — rejects empty messages", () => {
-  it("throws TxConstructionError when messages is empty array", async () => {
-    const buyer = buildBuyerWalletKey();
-    const chain = new MockChainProvider();
-    chain.advanceSlot(1_745_500_000);
-    seedAdvertUtxo(chain, makeActiveAdvert());
-
-    await expect(
-      buildPostEscrowTx({ chain, buyerKey: buyer, advertRef: ADVERT_REF, messages: [], payment_lovelace: PAYMENT }),
-    ).rejects.toThrow(TxConstructionError);
-  });
-
-  it("TxConstructionError.reason is 'messages required'", async () => {
-    const buyer = buildBuyerWalletKey();
-    const chain = new MockChainProvider();
-    chain.advanceSlot(1_745_500_000);
-    seedAdvertUtxo(chain, makeActiveAdvert());
-
-    let caught: unknown;
-    try {
-      await buildPostEscrowTx({ chain, buyerKey: buyer, advertRef: ADVERT_REF, messages: [], payment_lovelace: PAYMENT });
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toBeInstanceOf(TxConstructionError);
-    expect((caught as TxConstructionError).reason).toBe("messages required");
   });
 });

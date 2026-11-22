@@ -1,18 +1,13 @@
 /**
- * tx-reclaim.test.ts — RED phase tests for buildReclaimTx() (Open|Claimed → Reclaimed, terminal)
- *
- * Tests mirror escrow.ak:handle_reclaim invariants:
- *   - signed by buyer_pkh
- *   - old state ∈ {Open, Claimed}
- *   - buyer receives ≥ payment + buyer_bond + supplier_bond
- *   - validity lower-bound ≥ deliver_by
- *   - terminal: no continuing escrow output
+ * Tests buildReclaimTx() on the mock chain (Open or Claimed -> Reclaimed, terminal).
+ * The cases follow escrow.ak handle_reclaim: the buyer signs, the old state is Open or Claimed, the tip is at or past
+ * deliver_by, the buyer gets payment + buyer_bond + supplier_bond, and no escrow output is left.
  */
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect } from "vitest";
 import { MockChainProvider } from "../../packages/shared/src/chain/MockChainProvider.js";
+import type { Utxo } from "../../packages/shared/src/chain/ChainProvider.js";
 import { buildReclaimTx } from "../../packages/shared/src/tx/escrow/reclaim.js";
-import { TxConstructionError } from "../../packages/shared/src/tx/types.js";
 import { buildBuyerWalletKey } from "../fixtures/buyer-side/wallet-keys.js";
 import { buildSupplierWalletKey } from "../fixtures/supplier-side/wallet-keys.js";
 import {
@@ -24,123 +19,50 @@ import {
   SUPPLIER_BOND,
 } from "../fixtures/buyer-side/sample-escrow-utxos.js";
 
-// ─── Happy path — from Open ───────────────────────────────────────────────────
+const open = buildOpenEscrowUtxo();
+const BEFORE_DELIVER_BY_MS = -60_000;
+const AFTER_DELIVER_BY_MS = 60_000;
 
-describe("buildReclaimTx() — happy path from Open state", () => {
-  let chain: MockChainProvider;
+/** A mock chain with `escrow` and a tip `fromDeliverByMs` after deliver_by (negative: before it). The mock chain reads slot x 1000 as the time. */
+function chainAt(fromDeliverByMs: number, escrow: Utxo = open): MockChainProvider {
+  const chain = new MockChainProvider();
+  chain.advanceSlot(Math.floor((DELIVER_BY + fromDeliverByMs) / 1000));
+  chain.seed(escrow);
+  return chain;
+}
 
-  beforeEach(() => {
-    chain = new MockChainProvider();
-    // Tip is past deliver_by
-    chain.advanceSlot(Math.floor((DELIVER_BY + 60_000) / 1000));
-    chain.seed(buildOpenEscrowUtxo());
-  });
-
-  it("buyer receives >= payment + buyer_bond + supplier_bond", async () => {
+describe("buildReclaimTx()", () => {
+  it("pays the buyer at least payment + buyer_bond + supplier_bond", async () => {
+    const chain = chainAt(AFTER_DELIVER_BY_MS);
     const buyer = buildBuyerWalletKey();
-    const utxo = buildOpenEscrowUtxo();
-    await buildReclaimTx({ chain, buyerKey: buyer, escrowRef: utxo.ref });
+    await buildReclaimTx({ chain, buyerKey: buyer, escrowRef: open.ref });
     const buyerUtxos = await chain.queryUtxosByAddress(buyer.address);
-    const total = buyerUtxos.reduce((sum, u) => sum + u.lovelace, 0n);
+    const total = buyerUtxos.reduce((sum, utxo) => sum + utxo.lovelace, 0n);
     expect(total).toBeGreaterThanOrEqual(PAYMENT_LOVELACE + BUYER_BOND + SUPPLIER_BOND);
   });
 
-  it("escrow UTxO is spent (not present after reclaim)", async () => {
-    const buyer = buildBuyerWalletKey();
-    const utxo = buildOpenEscrowUtxo();
-    await buildReclaimTx({ chain, buyerKey: buyer, escrowRef: utxo.ref });
-    const spent = await chain.queryUtxo(utxo.ref);
-    expect(spent).toBeNull();
+  it("spends the escrow UTxO", async () => {
+    const chain = chainAt(AFTER_DELIVER_BY_MS);
+    await buildReclaimTx({ chain, buyerKey: buildBuyerWalletKey(), escrowRef: open.ref });
+    expect(await chain.queryUtxo(open.ref)).toBeNull();
   });
-});
 
-// ─── Rejection: before deliver_by ────────────────────────────────────────────
-
-describe("buildReclaimTx() — rejects before deliver_by", () => {
-  it("throws TxConstructionError when chain tip is before deliver_by", async () => {
-    const buyer = buildBuyerWalletKey();
-    const chain = new MockChainProvider();
-    // Tip is BEFORE deliver_by
-    chain.advanceSlot(Math.floor((DELIVER_BY - 60_000) / 1000));
-    chain.seed(buildOpenEscrowUtxo());
-    const utxo = buildOpenEscrowUtxo();
-
+  it("refuses a tip before deliver_by", async () => {
     await expect(
-      buildReclaimTx({ chain, buyerKey: buyer, escrowRef: utxo.ref }),
-    ).rejects.toThrow(TxConstructionError);
+      buildReclaimTx({ chain: chainAt(BEFORE_DELIVER_BY_MS), buyerKey: buildBuyerWalletKey(), escrowRef: open.ref }),
+    ).rejects.toMatchObject({ name: "TxConstructionError", reason: "reclaim before deliver_by" });
   });
 
-  it("TxConstructionError.reason is 'reclaim before deliver_by'", async () => {
-    const buyer = buildBuyerWalletKey();
-    const chain = new MockChainProvider();
-    chain.advanceSlot(Math.floor((DELIVER_BY - 60_000) / 1000));
-    chain.seed(buildOpenEscrowUtxo());
-    const utxo = buildOpenEscrowUtxo();
-
-    let caught: unknown;
-    try {
-      await buildReclaimTx({ chain, buyerKey: buyer, escrowRef: utxo.ref });
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toBeInstanceOf(TxConstructionError);
-    expect((caught as TxConstructionError).reason).toBe("reclaim before deliver_by");
-  });
-});
-
-// ─── Rejection: non-buyer signer ─────────────────────────────────────────────
-
-describe("buildReclaimTx() — rejects non-buyer signer", () => {
-  it("throws TxConstructionError when signed by supplier", async () => {
-    const supplier = buildSupplierWalletKey();
-    const chain = new MockChainProvider();
-    chain.advanceSlot(Math.floor((DELIVER_BY + 60_000) / 1000));
-    chain.seed(buildOpenEscrowUtxo());
-    const utxo = buildOpenEscrowUtxo();
-
+  it("refuses a signer that is not the buyer", async () => {
     await expect(
-      buildReclaimTx({ chain, buyerKey: supplier, escrowRef: utxo.ref }),
-    ).rejects.toThrow(TxConstructionError);
+      buildReclaimTx({ chain: chainAt(AFTER_DELIVER_BY_MS), buyerKey: buildSupplierWalletKey(), escrowRef: open.ref }),
+    ).rejects.toMatchObject({ name: "TxConstructionError", reason: "buyer signature mismatch" });
   });
 
-  it("TxConstructionError.reason is 'buyer signature mismatch'", async () => {
-    const supplier = buildSupplierWalletKey();
-    const chain = new MockChainProvider();
-    chain.advanceSlot(Math.floor((DELIVER_BY + 60_000) / 1000));
-    chain.seed(buildOpenEscrowUtxo());
-    const utxo = buildOpenEscrowUtxo();
-
-    let caught: unknown;
-    try {
-      await buildReclaimTx({ chain, buyerKey: supplier, escrowRef: utxo.ref });
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toBeInstanceOf(TxConstructionError);
-    expect((caught as TxConstructionError).reason).toBe("buyer signature mismatch");
-  });
-});
-
-// ─── Rejection: wrong state (Submitted) ──────────────────────────────────────
-
-describe("buildReclaimTx() — rejects Submitted state", () => {
-  it("throws TxConstructionError when state is Submitted (not Open or Claimed)", async () => {
-    const buyer = buildBuyerWalletKey();
-    const chain = new MockChainProvider();
-    chain.advanceSlot(Math.floor((DELIVER_BY + 60_000) / 1000));
-    const utxo = buildSubmittedEscrowUtxo();  // Submitted — reclaim not allowed
-    chain.seed(utxo);
-
+  it("refuses a Submitted escrow (only Open and Claimed can be reclaimed)", async () => {
+    const submitted = buildSubmittedEscrowUtxo();
     await expect(
-      buildReclaimTx({ chain, buyerKey: buyer, escrowRef: utxo.ref }),
-    ).rejects.toThrow(TxConstructionError);
-  });
-});
-
-// ─── Distribution sanity ─────────────────────────────────────────────────────
-
-describe("buildReclaimTx() — distribution sanity", () => {
-  it("buyer is owed payment + buyer_bond + supplier_bond = 4_000_000 lovelace", () => {
-    expect(PAYMENT_LOVELACE + BUYER_BOND + SUPPLIER_BOND).toBe(4_000_000n);
+      buildReclaimTx({ chain: chainAt(AFTER_DELIVER_BY_MS, submitted), buyerKey: buildBuyerWalletKey(), escrowRef: submitted.ref }),
+    ).rejects.toMatchObject({ name: "TxConstructionError", reason: "wrong state" });
   });
 });

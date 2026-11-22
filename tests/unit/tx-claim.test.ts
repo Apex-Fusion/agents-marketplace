@@ -1,21 +1,13 @@
 /**
- * tx-claim.test.ts — RED phase tests for buildClaimTx() (Open → Claimed)
- *
- * Tests mirror escrow.ak:handle_claim invariants:
- *   - signed by supplier_pkh
- *   - old state = Open
- *   - new datum state = Claimed, all other fields unchanged
- *   - value preserved
- *   - validity upper-bound ≤ deliver_by
- *   - redeemer is Claim (Constr index 0)
- *
- * Uses buyer-side fixture UTxOs for the "existing escrow" input.
+ * Tests buildClaimTx() on the mock chain (Open -> Claimed).
+ * The cases follow escrow.ak handle_claim: the supplier signs, the old state is Open, the tip is before deliver_by,
+ * and the continuing output keeps the value and every datum field except the state.
  */
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect } from "vitest";
 import { MockChainProvider } from "../../packages/shared/src/chain/MockChainProvider.js";
+import type { Utxo } from "../../packages/shared/src/chain/ChainProvider.js";
 import { buildClaimTx } from "../../packages/shared/src/tx/escrow/claim.js";
-import { TxConstructionError } from "../../packages/shared/src/tx/types.js";
 import { decodeEscrowDatum } from "../../packages/shared/src/cbor/EscrowDatum.js";
 import { buildSupplierWalletKey } from "../fixtures/supplier-side/wallet-keys.js";
 import { buildBuyerWalletKey } from "../fixtures/buyer-side/wallet-keys.js";
@@ -26,164 +18,61 @@ import {
   TOTAL_LOCKED,
 } from "../fixtures/buyer-side/sample-escrow-utxos.js";
 
-// ─── Happy path ───────────────────────────────────────────────────────────────
+const open = buildOpenEscrowUtxo();
+const BEFORE_DELIVER_BY_MS = -100_000;
+const AFTER_DELIVER_BY_MS = 100_000;
 
-describe("buildClaimTx() — happy path", () => {
-  let chain: MockChainProvider;
+/** A mock chain with `escrow` and a tip `fromDeliverByMs` after deliver_by (negative: before it). The mock chain reads slot x 1000 as the time. */
+function chainAt(fromDeliverByMs: number, escrow: Utxo = open): MockChainProvider {
+  const chain = new MockChainProvider();
+  chain.advanceSlot(Math.floor((DELIVER_BY + fromDeliverByMs) / 1000));
+  chain.seed(escrow);
+  return chain;
+}
 
-  beforeEach(() => {
-    chain = new MockChainProvider();
-    // Synthetic tip well before deliver_by
-    chain.advanceSlot(Math.floor((DELIVER_BY - 100_000) / 1000));
-    const utxo = buildOpenEscrowUtxo();
-    chain.seed(utxo);
+/** Claims the Open escrow as its supplier. Returns the chain and the continuing output. */
+async function claimOpen(): Promise<{ chain: MockChainProvider; output: Utxo }> {
+  const chain = chainAt(BEFORE_DELIVER_BY_MS);
+  const result = await buildClaimTx({ chain, supplierKey: buildSupplierWalletKey(), escrowRef: open.ref });
+  const output = await chain.queryUtxo({ txHash: result.expectedTxHash, index: 0 });
+  if (output === null) throw new Error("Claim wrote no continuing output");
+  return { chain, output };
+}
+
+describe("buildClaimTx()", () => {
+  it("writes a continuing output with state Claimed and spends the escrow input", async () => {
+    const { chain, output } = await claimOpen();
+    expect(decodeEscrowDatum(output.datumHex!).state).toBe("Claimed");
+    expect(await chain.queryUtxo(open.ref)).toBeNull();
   });
 
-  it("returns a non-empty txCborHex", async () => {
-    const supplier = buildSupplierWalletKey();
-    const utxo = buildOpenEscrowUtxo();
-    const result = await buildClaimTx({ chain, supplierKey: supplier, escrowRef: utxo.ref });
-    expect(typeof result.txCborHex).toBe("string");
-    expect(result.txCborHex.length).toBeGreaterThan(0);
+  it("keeps the locked value at the escrow address", async () => {
+    const { output } = await claimOpen();
+    expect(output.lovelace).toBe(TOTAL_LOCKED);
+    expect(output.address).toBe(open.address);
   });
 
-  it("continuing output datum has state = Claimed", async () => {
-    const supplier = buildSupplierWalletKey();
-    const utxo = buildOpenEscrowUtxo();
-    const result = await buildClaimTx({ chain, supplierKey: supplier, escrowRef: utxo.ref });
-    // After claim, chain has the new UTxO at same address with Claimed state
-    const txHash = result.expectedTxHash;
-    const newUtxo = await chain.queryUtxo({ txHash, index: 0 });
-    const datum = decodeEscrowDatum(newUtxo!.datumHex!);
-    expect(datum.state).toBe("Claimed");
+  it("keeps every datum field except the state", async () => {
+    const { output } = await claimOpen();
+    expect(decodeEscrowDatum(output.datumHex!)).toEqual({ ...decodeEscrowDatum(open.datumHex!), state: "Claimed" });
   });
 
-  it("continuing output value equals locked value (preserved)", async () => {
-    const supplier = buildSupplierWalletKey();
-    const utxo = buildOpenEscrowUtxo();
-    const result = await buildClaimTx({ chain, supplierKey: supplier, escrowRef: utxo.ref });
-    const txHash = result.expectedTxHash;
-    const newUtxo = await chain.queryUtxo({ txHash, index: 0 });
-    expect(newUtxo!.lovelace).toBe(TOTAL_LOCKED);
-  });
-
-  it("continuing output datum fields other than state are unchanged", async () => {
-    const supplier = buildSupplierWalletKey();
-    const openUtxo = buildOpenEscrowUtxo();
-    const oldDatum = decodeEscrowDatum(openUtxo.datumHex!);
-    const result = await buildClaimTx({ chain, supplierKey: supplier, escrowRef: openUtxo.ref });
-    const txHash = result.expectedTxHash;
-    const newUtxo = await chain.queryUtxo({ txHash, index: 0 });
-    const newDatum = decodeEscrowDatum(newUtxo!.datumHex!);
-    // All fields except state must be identical
-    expect(newDatum.buyer_pkh).toBe(oldDatum.buyer_pkh);
-    expect(newDatum.supplier_pkh).toBe(oldDatum.supplier_pkh);
-    expect(newDatum.advert_ref.txHash).toBe(oldDatum.advert_ref.txHash);
-    expect(newDatum.prompt_hash).toBe(oldDatum.prompt_hash);
-    expect(newDatum.payment_lovelace).toBe(oldDatum.payment_lovelace);
-    expect(newDatum.deliver_by).toBe(oldDatum.deliver_by);
-    expect(newDatum.submitted_at).toBeNull();
-    expect(newDatum.result_receipt_hash).toBeNull();
-  });
-
-  it("validity upper-bound is ≤ deliver_by", async () => {
-    const supplier = buildSupplierWalletKey();
-    const utxo = buildOpenEscrowUtxo();
-    const result = await buildClaimTx({ chain, supplierKey: supplier, escrowRef: utxo.ref });
-    // The tx CBOR must encode a validity interval with upper bound ≤ deliver_by
-    // We verify indirectly via the produced tx non-emptiness + no throw
-    expect(result.txCborHex.length).toBeGreaterThan(0);
-  });
-
-  it("escrow UTxO is the only spending input", async () => {
-    const supplier = buildSupplierWalletKey();
-    const utxo = buildOpenEscrowUtxo();
-    await buildClaimTx({ chain, supplierKey: supplier, escrowRef: utxo.ref });
-    // Original UTxO should be spent (removed)
-    const spent = await chain.queryUtxo(utxo.ref);
-    expect(spent).toBeNull();
-  });
-});
-
-// ─── Rejection: signed by non-supplier ───────────────────────────────────────
-
-describe("buildClaimTx() — rejects non-supplier signer", () => {
-  it("throws TxConstructionError when signed by buyer (not supplier)", async () => {
-    const buyer = buildBuyerWalletKey();
-    const chain = new MockChainProvider();
-    chain.advanceSlot(Math.floor((DELIVER_BY - 100_000) / 1000));
-    const utxo = buildOpenEscrowUtxo();
-    chain.seed(utxo);
-
+  it("refuses a signer that is not the supplier", async () => {
     await expect(
-      buildClaimTx({ chain, supplierKey: buyer, escrowRef: utxo.ref }),
-    ).rejects.toThrow(TxConstructionError);
+      buildClaimTx({ chain: chainAt(BEFORE_DELIVER_BY_MS), supplierKey: buildBuyerWalletKey(), escrowRef: open.ref }),
+    ).rejects.toMatchObject({ name: "TxConstructionError", reason: "supplier signature mismatch" });
   });
 
-  it("TxConstructionError.reason is 'supplier signature mismatch'", async () => {
-    const buyer = buildBuyerWalletKey();
-    const chain = new MockChainProvider();
-    chain.advanceSlot(Math.floor((DELIVER_BY - 100_000) / 1000));
-    const utxo = buildOpenEscrowUtxo();
-    chain.seed(utxo);
-
-    let caught: unknown;
-    try {
-      await buildClaimTx({ chain, supplierKey: buyer, escrowRef: utxo.ref });
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toBeInstanceOf(TxConstructionError);
-    expect((caught as TxConstructionError).reason).toBe("supplier signature mismatch");
-  });
-});
-
-// ─── Rejection: claim after deliver_by ───────────────────────────────────────
-
-describe("buildClaimTx() — rejects claim after deliver_by", () => {
-  it("throws TxConstructionError when chain tip is past deliver_by", async () => {
-    const supplier = buildSupplierWalletKey();
-    const chain = new MockChainProvider();
-    // Tip is past deliver_by
-    chain.advanceSlot(Math.floor((DELIVER_BY + 100_000) / 1000));
-    const utxo = buildOpenEscrowUtxo();
-    chain.seed(utxo);
-
+  it("refuses a tip past deliver_by", async () => {
     await expect(
-      buildClaimTx({ chain, supplierKey: supplier, escrowRef: utxo.ref }),
-    ).rejects.toThrow(TxConstructionError);
+      buildClaimTx({ chain: chainAt(AFTER_DELIVER_BY_MS), supplierKey: buildSupplierWalletKey(), escrowRef: open.ref }),
+    ).rejects.toMatchObject({ name: "TxConstructionError", reason: "claim after deliver_by" });
   });
 
-  it("TxConstructionError.reason is 'claim after deliver_by'", async () => {
-    const supplier = buildSupplierWalletKey();
-    const chain = new MockChainProvider();
-    chain.advanceSlot(Math.floor((DELIVER_BY + 100_000) / 1000));
-    const utxo = buildOpenEscrowUtxo();
-    chain.seed(utxo);
-
-    let caught: unknown;
-    try {
-      await buildClaimTx({ chain, supplierKey: supplier, escrowRef: utxo.ref });
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toBeInstanceOf(TxConstructionError);
-    expect((caught as TxConstructionError).reason).toBe("claim after deliver_by");
-  });
-});
-
-// ─── Rejection: wrong state ───────────────────────────────────────────────────
-
-describe("buildClaimTx() — rejects wrong state", () => {
-  it("throws TxConstructionError when escrow is already Claimed", async () => {
-    const supplier = buildSupplierWalletKey();
-    const chain = new MockChainProvider();
-    chain.advanceSlot(Math.floor((DELIVER_BY - 100_000) / 1000));
-    const utxo = buildClaimedEscrowUtxo();   // already Claimed
-    chain.seed(utxo);
-
+  it("refuses an escrow that is already Claimed", async () => {
+    const claimed = buildClaimedEscrowUtxo();
     await expect(
-      buildClaimTx({ chain, supplierKey: supplier, escrowRef: utxo.ref }),
-    ).rejects.toThrow(TxConstructionError);
+      buildClaimTx({ chain: chainAt(BEFORE_DELIVER_BY_MS, claimed), supplierKey: buildSupplierWalletKey(), escrowRef: claimed.ref }),
+    ).rejects.toMatchObject({ name: "TxConstructionError", reason: "wrong state" });
   });
 });
