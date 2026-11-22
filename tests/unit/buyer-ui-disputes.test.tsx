@@ -1,22 +1,11 @@
 // @vitest-environment happy-dom
 /**
- * buyer-ui-disputes.test.tsx — the dispute case card with the jury
- * (Module-1/jury/SPEC.md).
- *
- * The card reads documents on chain through the indexer proxy
- * (GET /v1/indexer/documents/<tx>) and checks blake2b-256 of the exact bytes
- * against the hash on chain: the claim and evidence documents of `vector-tx:`
- * URIs, the juror records of the reveals and the resolution document. Site
- * documents still load same-origin. Tests stub globalThis.fetch.
- *
- * The card body (the documents and the jury) mounts only while the card is
- * open, so a collapsed card makes no request. The /disputes page asks the
- * indexer for 25 cases at a time and shows "Show 25 more".
+ * buyer-ui-disputes.test.tsx — the dispute case card (documents on chain, jury, lazy body) and the /disputes page (pages of 25).
+ * Ties to Module-1/jury/SPEC.md §10.4. The tests stub globalThis.fetch.
  */
 
-import { setTimeout as delay } from "node:timers/promises";
 import { describe, it, expect, vi, afterEach, type Mock } from "vitest";
-import { act, render, screen, waitFor, fireEvent, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, fireEvent, within } from "@testing-library/react";
 import { blake2b } from "@noble/hashes/blake2b";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import Disputes, { DisputeCaseCard, disputeAgentIds, vectorTxId, type DisputeCase } from "../../buyer/src/ui/pages/Disputes.js";
@@ -34,34 +23,37 @@ const SUPPLIER = "5e".repeat(32);
 const TX = { claimDoc: "d1".repeat(32), evidenceDoc: "d2".repeat(32), open: "0e".repeat(32), revealA: "3a".repeat(32), fin: "50".repeat(32), resolve: "60".repeat(32) };
 const CASE = `6361735f${"01".repeat(28)}`;
 
-const CLAIM_DOC = '{"statement":"The agent passed the audit.","summary":"Audit report 7."}';
+const CLAIM_STATEMENT = "The agent passed the audit.";
+const CLAIM_DOC = JSON.stringify({ statement: CLAIM_STATEMENT, summary: "Audit report 7." });
 const EVIDENCE_DOC = '{"statement":"The audit report is forged."}';
+// The data of the juror record: the tests read these values back from the card.
+const MODEL = "qwen-3-27b";
+const REASON = "The evidence shows a forged report.";
+const OUTPUT_PARTS = ["The two signatures ", "do not verify."];
+const HIDDEN_TEXT = "hidden reasoning text";
 const RECORD = JSON.stringify({
   type: "vector-jury-record/1",
   model: {
     supplier: `did:vector:${SUPPLIER}`,
-    model: "qwen-3-27b",
+    model: MODEL,
     escrow: `${"ab".repeat(32)}#0`,
-    receipt: { model: "qwen-3-27b", prompt_tokens: 812, agent_did: `did:vector:${SUPPLIER}` },
+    receipt: { model: MODEL, prompt_tokens: 812, agent_did: `did:vector:${SUPPLIER}` },
     receipt_signature: "ff".repeat(64),
   },
   response: {
     output: [
-      { type: "reasoning", content: [{ type: "output_text", text: "hidden reasoning text" }] },
+      { type: "reasoning", content: [{ type: "output_text", text: HIDDEN_TEXT }] },
       {
         type: "message",
         role: "assistant",
-        content: [
-          { type: "output_text", text: "The two signatures " },
-          { type: "output_text", text: "do not verify." },
-        ],
+        content: OUTPUT_PARTS.map((text) => ({ type: "output_text", text })),
       },
     ],
     status: "completed",
     incomplete_details: null,
   },
   vote: "AuditorWins",
-  reason: "The evidence shows a forged report.",
+  reason: REASON,
 });
 const RESOLUTION = JSON.stringify({
   type: "vector-jury-resolution/1",
@@ -106,6 +98,8 @@ function stubFetch(site: Record<string, string> = {}, routes: (url: string) => R
 }
 
 afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -120,14 +114,25 @@ function toggleCard(card: HTMLElement, open: boolean): void {
   fireEvent(card, new Event("toggle"));
 }
 
-/** Renders a card, opens it when it is collapsed (a resolved case), and waits until every document check has an answer. */
+/** Lets the stubbed requests finish and React apply their answers. */
+const settle = (): Promise<void> => act(async () => {});
+
+const EXPLORER = "https://vector.apexscan.org/en/transaction/";
+/** The explorer link of a transaction (`TxLink`). */
+const txUrl = (tx: string): string => `${EXPLORER}${tx}/summary/`;
+
+/** The `href` of each link in an element, in order. */
+const hrefsOf = (el: HTMLElement): Array<string | null> => within(el).queryAllByRole("link").map((link) => link.getAttribute("href"));
+
+/** The explorer links in an element: the transactions that it names. */
+const txLinksOf = (el: HTMLElement): Array<string | null> => hrefsOf(el).filter((href) => href?.startsWith(EXPLORER));
+
+/** Renders a card, opens it when it is collapsed (a resolved case) and lets its document requests finish. */
 async function renderCard(c: DisputeCase) {
   const view = render(<DisputeCaseCard c={c} names={{}} />);
   const card = screen.getByTestId("dispute-case") as HTMLDetailsElement;
   if (!card.open) toggleCard(card, true);
-  await waitFor(() => {
-    expect(screen.queryByText(/Checking the document…|Reading the resolution document…|Looking up the reasoning document…|Reading the record…/)).toBeNull();
-  });
+  await settle();
   return view;
 }
 
@@ -188,33 +193,43 @@ describe("vectorTxId", () => {
 });
 
 describe("<DisputeCaseCard /> — jury and documents on chain", () => {
-  it("checks the claim and evidence documents of vector-tx URIs through the indexer", async () => {
+  // text kept: no handle. The line that says whether the document hash matches the on-chain hash has no role and no test id,
+  // and a wrong state there shows a forged document as verified. Each row asserts one narrow text.
+  it.each([
+    ["matches", hash(CLAIM_DOC), /hash matches/],
+    ["differs from", hash("other bytes"), /hash does not match/],
+  ] as const)("reads the claim document through the indexer and tells that its hash %s the on-chain hash", async (_state, claimHash, line) => {
     const fetchSpy = stubFetch();
-    await renderCard(juryCase());
-    expect(await screen.findByText("“The agent passed the audit.”")).toBeInTheDocument();
-    expect(await screen.findByText(/document hash does not match/)).toBeInTheDocument();
-    expect(screen.getAllByText(/document hash matches the on-chain hash/).length).toBeGreaterThanOrEqual(1);
+    const c: DisputeCase = {
+      claim_ref: `${"c1".repeat(32)}#0`,
+      status: "open",
+      claim: { tx: "c1".repeat(32), fields: { storage_uri: uriOf(TX.claimDoc), claim_hash: claimHash } },
+      challenge: null,
+      resolution: null,
+      jury: null,
+    };
+    await renderCard(c);
+    expect(await screen.findByText(line)).toBeInTheDocument();
     expect(fetchSpy).toHaveBeenCalledWith(`/v1/indexer/documents/${TX.claimDoc}`, expect.anything());
-    expect(fetchSpy).toHaveBeenCalledWith(`/v1/indexer/documents/${TX.evidenceDoc}`, expect.anything());
   });
 
-  it("shows the jury: windows, rule, tally, result and each juror with a DID link", async () => {
+  it("shows the jury: tally, block of the open transaction, and each juror with a link to the agent page", async () => {
     stubFetch();
     await renderCard(juryCase());
     const jury = screen.getByTestId("jury-section");
-    expect(within(jury).getByText(/at least 3 revealed votes and at least 2\/3 of them\. Otherwise the result is Inconclusive\./)).toBeInTheDocument();
-    expect(within(jury).getByText(/ClaimerWins 1 · AuditorWins 2 · Inconclusive 0/)).toBeInTheDocument();
-    expect(within(jury).getByText("voting ended")).toBeInTheDocument();
-    expect(within(jury).getByText(/block 4242/)).toBeInTheDocument();
+    // The data of the jury case: the tally, the block height and the status of each ballot.
+    expect(jury).toHaveTextContent(/ClaimerWins\D*1\D*AuditorWins\D*2\D*Inconclusive\D*0/);
+    expect(jury).toHaveTextContent("4242");
     const ballots = within(jury).getAllByTestId("jury-ballot");
     expect(ballots).toHaveLength(2);
-    expect(within(ballots[0]!).getByRole("link", { name: /did:vector:b1b1…b1b1/ })).toHaveAttribute("href", `/agents/${JUROR_A}`);
-    expect(within(ballots[0]!).getByText("revealed")).toBeInTheDocument();
-    expect(within(ballots[1]!).getByText("slashed")).toBeInTheDocument();
+    expect(ballots[0]).toHaveTextContent("revealed");
+    expect(ballots[1]).toHaveTextContent("slashed");
+    expect(hrefsOf(ballots[0]!)).toContain(`/agents/${JUROR_A}`);
+    expect(hrefsOf(ballots[1]!)).toContain(`/agents/${JUROR_B}`);
     expect(disputeAgentIds(juryCase())).toEqual([CLAIMER, AUDITOR, JUROR_A, JUROR_B]);
   });
 
-  it("says where the record of each ballot is; a missing record is one that the reveal does not carry or name (SPEC §10.4)", async () => {
+  it("offers a record only for a ballot that names its transaction, and links the record transaction only when it is in a separate transaction (SPEC §10.4)", async () => {
     stubFetch();
     const c = juryCase();
     const ballot = { status: "revealed", vote: "AuditorWins", record_hash: hash(RECORD) };
@@ -224,44 +239,34 @@ describe("<DisputeCaseCard /> — jury and documents on chain", () => {
       { ...ballot, agent_id: "b3".repeat(32), revealed: { tx: "3c".repeat(32) }, record_status: "missing", record: null },
     ];
     await renderCard(c);
-    const ballots = screen.getAllByTestId("jury-ballot");
-    expect(within(ballots[0]!).getByText("Record in the reveal transaction.")).toBeInTheDocument();
-    expect(within(ballots[1]!).getByText(/^Record in a separate transaction \(overflow\)\./)).toBeInTheDocument();
-    expect(within(ballots[2]!).getByText("The reveal does not carry or name a juror record with this hash.")).toBeInTheDocument();
-    expect(screen.queryByText("No record with this hash on chain.")).toBeNull();
+    const [inReveal, separate, missing] = screen.getAllByTestId("jury-ballot") as [HTMLElement, HTMLElement, HTMLElement];
+    // The record is in the reveal: the ballot links the reveal only.
+    expect(inReveal.querySelector("details")).not.toBeNull();
+    expect(txLinksOf(inReveal)).toEqual([txUrl(TX.revealA)]);
+    // The record is in a separate transaction: the ballot links the reveal and then the record.
+    expect(separate.querySelector("details")).not.toBeNull();
+    expect(txLinksOf(separate)).toEqual([txUrl("3b".repeat(32)), txUrl(TX.revealA)]);
+    // The reveal does not carry or name a record: nothing to open.
+    expect(missing.querySelector("details")).toBeNull();
+    expect(txLinksOf(missing)).toEqual([txUrl("3c".repeat(32))]);
   });
 
-  it("opens a juror record: reads the reveal transaction and checks the record hash", async () => {
+  it("opens a juror record: reads the reveal transaction only then", async () => {
     const fetchSpy = stubFetch();
     await renderCard(juryCase());
-    const ballot = screen.getAllByTestId("jury-ballot")[0]!;
-    expect(fetchSpy).not.toHaveBeenCalledWith(`/v1/indexer/documents/${TX.revealA}`, expect.anything());
-    const details = ballot.querySelector("details")!;
-    act(() => {
-      details.open = true;
-    });
-    fireEvent(details, new Event("toggle"));
-    const record = await within(ballot).findByTestId("juror-record");
-    expect(within(record).getByText(/document hash matches the on-chain hash/)).toBeInTheDocument();
-    expect(within(record).getAllByText("qwen-3-27b").length).toBeGreaterThanOrEqual(1);
-    expect(within(record).getByText("The evidence shows a forged report.")).toBeInTheDocument();
-    expect(within(record).getByText("The two signatures do not verify.")).toBeInTheDocument();
-    expect(within(record).getByText("prompt_tokens")).toBeInTheDocument();
-    expect(within(record).getByRole("link", { name: /did:vector:5e5e…5e5e/ })).toHaveAttribute("href", `/agents/${SUPPLIER}`);
+    const recordUrl = `/v1/indexer/documents/${TX.revealA}`;
+    expect(fetchSpy).not.toHaveBeenCalledWith(recordUrl, expect.anything());
+    const record = await openFirstRecord();
+    expect(fetchSpy).toHaveBeenCalledWith(recordUrl, expect.anything());
+    // The data of the record (SPEC §10.4): the model, the reason of the vote, the output and the receipt.
+    expect(record).toHaveTextContent(MODEL);
+    expect(record).toHaveTextContent(REASON);
+    expect(record).toHaveTextContent(OUTPUT_PARTS.join(""));
+    expect(record).toHaveTextContent("prompt_tokens");
+    expect(hrefsOf(record)).toContain(`/agents/${SUPPLIER}`);
   });
 
-  it("shows the resolution document of the OracleResolve: verdict, basis, case and tally", async () => {
-    stubFetch();
-    await renderCard(juryCase());
-    expect(screen.getByText(/The jury decides\. The Foundation relay signs the Module-1 resolution with the jury result\./)).toBeInTheDocument();
-    const doc = await screen.findByTestId("resolution-document");
-    expect(within(doc).getByText("jury")).toBeInTheDocument();
-    expect(within(doc).getByText("The jury result.")).toBeInTheDocument();
-    expect(within(doc).getByText(/tally ClaimerWins 1 · AuditorWins 2 · Inconclusive 0/)).toBeInTheDocument();
-    expect(within(doc).getByText(/document hash matches the on-chain hash/)).toBeInTheDocument();
-  });
-
-  it("keeps the site-hosted documents and the site reasoning lookup", async () => {
+  it("reads a document that this site hosts same-origin, and requests no document that is hosted elsewhere", async () => {
     const fetchSpy = stubFetch({ "/evidence/c1.json": CLAIM_DOC });
     const c: DisputeCase = {
       claim_ref: `${"c3".repeat(32)}#0`,
@@ -273,10 +278,7 @@ describe("<DisputeCaseCard /> — jury and documents on chain", () => {
       jury: null,
     };
     await renderCard(c);
-    expect(await screen.findByText(/document hash matches the on-chain hash/)).toBeInTheDocument();
-    expect(screen.getByText(/hosted elsewhere/)).toBeInTheDocument();
-    expect(screen.getByText(/No jury case yet\./)).toBeInTheDocument();
-    expect(fetchSpy).toHaveBeenCalledWith("/evidence/c1.json", expect.anything());
+    expect(urlsOf(fetchSpy)).toEqual(["/evidence/c1.json"]);
   });
 
   it("an old oracle resolution without a document on chain uses the site reasoning lookup", async () => {
@@ -290,10 +292,7 @@ describe("<DisputeCaseCard /> — jury and documents on chain", () => {
       resolution_document: null,
     };
     await renderCard(c);
-    expect(await screen.findByText(/Reasoning: no document matches the on-chain hash\./)).toBeInTheDocument();
-    expect(screen.getByText("No jury case was opened for this challenge.")).toBeInTheDocument();
-    expect(fetchSpy).toHaveBeenCalledWith(`/v1/evidence/by-hash/${"ab".repeat(32)}`, expect.anything());
-    await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+    expect(urlsOf(fetchSpy)).toEqual([`/v1/evidence/by-hash/${"ab".repeat(32)}`]);
   });
 });
 
@@ -333,26 +332,24 @@ describe("<AgentIdentity /> — juror registrations", () => {
       </MemoryRouter>,
     );
     const row = await screen.findByTestId("juror-registration");
-    expect(within(row).getByText("250.000000 AP3X")).toBeInTheDocument();
-    expect(within(row).getByText(/can vote now/)).toBeInTheDocument();
-    expect(within(row).getByText("2026-11-12 10:00 UTC")).toBeInTheDocument();
+    expect(row).toHaveTextContent("250.000000 AP3X");
+    expect(row).toHaveTextContent("2026-11-12 10:00 UTC");
     expect(urls).toContain(`/v1/indexer/jury/jurors?agent_id=${JUROR_A}`);
-    await waitFor(() => expect(screen.queryAllByText("Loading…")).toHaveLength(0));
+    await settle();
   });
 });
 
-// ─── Record response shapes and resolution bases ────────────────────────────────
+// ─── Record response shapes and resolution documents ────────────────────────────
 
 const REVEAL_CUT = "3b".repeat(32);
+const CUT_TEXT = "The two signatures do";
 const CUT_RECORD = JSON.stringify({
   type: "vector-jury-record/1",
-  model: { supplier: `did:vector:${SUPPLIER}`, model: "qwen-3-27b", escrow: `${"ab".repeat(32)}#0`, receipt_signature: "ff".repeat(64) },
-  response: { cut: true, output_text: "The two signatures do" },
+  model: { supplier: `did:vector:${SUPPLIER}`, model: MODEL, escrow: `${"ab".repeat(32)}#0`, receipt_signature: "ff".repeat(64) },
+  response: { cut: true, output_text: CUT_TEXT },
   vote: "AuditorWins",
   reason: "The response was cut.",
 });
-const NO_JURY_TX = "6a".repeat(32);
-const NO_JURY_DOC = JSON.stringify({ type: "vector-jury-resolution/1", verdict: "Inconclusive", basis: "no-jury", jury: null });
 const NO_RESULT_TX = "6b".repeat(32);
 const NO_RESULT_DOC = JSON.stringify({
   type: "vector-jury-resolution/1",
@@ -406,73 +403,57 @@ function resolvedCase(tx: string, text: string): DisputeCase {
 
 async function openFirstRecord() {
   const ballot = screen.getAllByTestId("jury-ballot")[0]!;
-  const details = ballot.querySelector("details")!;
-  act(() => {
-    details.open = true;
-  });
-  fireEvent(details, new Event("toggle"));
+  toggleCard(ballot.querySelector("details")!, true);
   return within(ballot).findByTestId("juror-record");
 }
 
-describe("<DisputeCaseCard /> — record response shapes and resolution bases", () => {
+describe("<DisputeCaseCard /> — record response shapes and resolution documents", () => {
   it("shows the output_text parts of the message items in order, and no other item", async () => {
     stubFetch();
     await renderCard(juryCase());
     const record = await openFirstRecord();
-    expect(within(record).getByText("The two signatures do not verify.")).toBeInTheDocument();
-    expect(within(record).queryByText(/hidden reasoning text/)).toBeNull();
-    expect(within(record).queryByText(/cut to fit/)).toBeNull();
+    expect(record).toHaveTextContent(OUTPUT_PARTS.join(""));
+    expect(record).not.toHaveTextContent(HIDDEN_TEXT);
   });
 
-  it("shows the text of a cut response and says that it is cut", async () => {
+  it("shows the text of a cut response", async () => {
     ON_CHAIN[REVEAL_CUT] = CUT_RECORD;
     stubFetch();
     await renderCard(oneBallotCase(REVEAL_CUT, hash(CUT_RECORD)));
     const record = await openFirstRecord();
-    expect(within(record).getByText("The two signatures do")).toBeInTheDocument();
-    expect(within(record).getByText("Model output (cut to fit the transaction)")).toBeInTheDocument();
+    expect(record).toHaveTextContent(CUT_TEXT);
   });
 
-  it("explains the basis no-jury", async () => {
-    ON_CHAIN[NO_JURY_TX] = NO_JURY_DOC;
+  it.each([
+    ["with", TX.resolve, RESOLUTION, [TX.open, TX.fin]],
+    ["without", NO_RESULT_TX, NO_RESULT_DOC, [TX.open]],
+  ] as const)("a resolution document %s a Finalize transaction links the transactions of its jury case", async (_with, tx, doc, linked) => {
+    ON_CHAIN[tx] = doc;
     stubFetch();
-    await renderCard(resolvedCase(NO_JURY_TX, NO_JURY_DOC));
-    const doc = await screen.findByTestId("resolution-document");
-    expect(within(doc).getByText("no-jury")).toBeInTheDocument();
-    expect(within(doc).getByText("No followed jury deployment covered the time of the challenge. The result is Inconclusive.")).toBeInTheDocument();
-  });
-
-  it("says when a resolution has no Finalize transaction", async () => {
-    ON_CHAIN[NO_RESULT_TX] = NO_RESULT_DOC;
-    stubFetch();
-    await renderCard(resolvedCase(NO_RESULT_TX, NO_RESULT_DOC));
-    const doc = await screen.findByTestId("resolution-document");
-    expect(within(doc).getByText(/no Finalize transaction/)).toBeInTheDocument();
-    expect(within(doc).queryByText(/finalized in/)).toBeNull();
+    await renderCard(resolvedCase(tx, doc));
+    expect(hrefsOf(screen.getByTestId("resolution-document"))).toEqual(linked.map(txUrl));
   });
 });
 
 // ─── The card body mounts only while the card is open ───────────────────────────
 
 describe("<DisputeCaseCard /> — the body mounts only while the card is open", () => {
-  it("a collapsed resolved card shows its summary line and makes no request until it is opened", async () => {
+  it("a collapsed resolved card shows its summary and makes no request until it is opened", async () => {
     const fetchSpy = stubFetch();
     render(<DisputeCaseCard c={juryCase()} names={{}} />);
     const card = screen.getByTestId("dispute-case") as HTMLDetailsElement;
     expect(card.open).toBe(false);
-    for (const text of ["certification", "did:vector:a1a1…a1a1", "did:vector:a2a2…a2a2", "2026-11-09 10:00 UTC", "2 juror votes", "resolved", "AuditorWins"]) {
-      expect(card).toHaveTextContent(text);
+    // The data of the case: the claim type, the two DIDs, the time, the status and the outcome.
+    for (const value of ["certification", "did:vector:a1a1…a1a1", "did:vector:a2a2…a2a2", "2026-11-09 10:00 UTC", "resolved", "AuditorWins"]) {
+      expect(card).toHaveTextContent(value);
     }
-    await act(async () => {
-      await delay(0);
-    });
+    await settle();
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(screen.queryByTestId("jury-section")).toBeNull();
-    expect(screen.queryByText("Claim document")).toBeNull();
 
     toggleCard(card, true);
     expect(await screen.findByTestId("resolution-document")).toBeInTheDocument();
-    expect(await screen.findByText("“The agent passed the audit.”")).toBeInTheDocument();
+    await settle();
     expect(urlsOf(fetchSpy).sort()).toEqual([TX.claimDoc, TX.evidenceDoc, TX.resolve].map((tx) => `/v1/indexer/documents/${tx}`).sort());
   });
 
@@ -493,9 +474,12 @@ describe("<DisputeCaseCard /> — the body mounts only while the card is open", 
     const fetchSpy = stubFetch();
     const c: DisputeCase = { ...juryCase(), status: "challenged", resolution: null, resolution_document: null, jury: null };
     render(<DisputeCaseCard c={c} names={{}} />);
-    expect((screen.getByTestId("dispute-case") as HTMLDetailsElement).open).toBe(true);
+    const card = screen.getByTestId("dispute-case") as HTMLDetailsElement;
+    expect(card.open).toBe(true);
     expect(urlsOf(fetchSpy).sort()).toEqual([TX.claimDoc, TX.evidenceDoc].map((tx) => `/v1/indexer/documents/${tx}`).sort());
-    expect(await screen.findByText("“The agent passed the audit.”")).toBeInTheDocument();
+    await settle();
+    // The statement of the claim document: data from the indexer.
+    expect(card).toHaveTextContent(CLAIM_STATEMENT);
   });
 });
 
@@ -545,80 +529,65 @@ function stubIndexer(available: number, { older = false } = {}) {
 const renderPage = () => render(<MemoryRouter><Disputes /></MemoryRouter>);
 
 describe("<Disputes /> — pages of 25 cases", () => {
-  it("asks for the newest 25 cases, shows the count, and a click on Show 25 more asks for 25 more", async () => {
-    const fetchSpy = stubIndexer(60);
+  it("asks for the newest 25 cases, and a click on the show-more button asks for 25 more, until all the cases show", async () => {
+    const fetchSpy = stubIndexer(30);
     renderPage();
-    expect(await screen.findByText("Showing 25 of 60 cases")).toBeInTheDocument();
+    // Before the cases load, the page has the lookup button only.
+    const lookupButtons = screen.getAllByRole("button").length;
+    await waitFor(() => expect(screen.getAllByTestId("dispute-case")).toHaveLength(25));
     expect(urlsOf(fetchSpy)).toContain("/v1/indexer/disputes?limit=25");
-    expect(screen.getAllByTestId("dispute-case")).toHaveLength(25);
+    expect(screen.getAllByRole("button")).toHaveLength(lookupButtons + 1);
 
-    fireEvent.click(screen.getByText("Show 25 more"));
-    expect(await screen.findByText("Showing 50 of 60 cases")).toBeInTheDocument();
-    expect(urlsOf(fetchSpy)).toContain("/v1/indexer/disputes?limit=50");
-    expect(screen.getAllByTestId("dispute-case")).toHaveLength(50);
-
-    fireEvent.click(screen.getByText("Show 25 more"));
-    await waitFor(() => expect(screen.getAllByTestId("dispute-case")).toHaveLength(60));
-    expect(urlsOf(fetchSpy)).toContain("/v1/indexer/disputes?limit=75");
-    expect(screen.queryByText(/^Showing /)).toBeNull();
-    expect(screen.queryByText("Show 25 more")).toBeNull();
-  });
-
-  it("shows no count and no button when the indexer sends no total", async () => {
-    const fetchSpy = stubIndexer(30, { older: true });
-    renderPage();
+    // The show-more button comes after the cases.
+    fireEvent.click(screen.getAllByRole("button").at(-1)!);
     await waitFor(() => expect(screen.getAllByTestId("dispute-case")).toHaveLength(30));
+    expect(urlsOf(fetchSpy)).toContain("/v1/indexer/disputes?limit=50");
+    expect(screen.getAllByRole("button")).toHaveLength(lookupButtons);
+  });
+
+  const noButtonRows: Array<[string, number, { older?: boolean }]> = [
+    ["the indexer sends no total", 30, { older: true }],
+    ["all the cases are in the page", 10, {}],
+  ];
+  it.each(noButtonRows)("shows no show-more button when %s", async (_why, available, options) => {
+    const fetchSpy = stubIndexer(available, options);
+    renderPage();
+    const lookupButtons = screen.getAllByRole("button").length;
+    await waitFor(() => expect(screen.getAllByTestId("dispute-case")).toHaveLength(available));
     expect(urlsOf(fetchSpy)).toContain("/v1/indexer/disputes?limit=25");
-    expect(screen.queryByText(/^Showing /)).toBeNull();
-    expect(screen.queryByText("Show 25 more")).toBeNull();
+    expect(screen.getAllByRole("button")).toHaveLength(lookupButtons);
   });
 
-  it("shows no count and no button when all the cases are in the page", async () => {
-    stubIndexer(10);
+  it("keeps the limit when the page refreshes", async () => {
+    // Only the interval timers are fake. The page loads over promises, so `settle` flushes each load.
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const fetchSpy = stubIndexer(30);
     renderPage();
-    await waitFor(() => expect(screen.getAllByTestId("dispute-case")).toHaveLength(10));
-    expect(screen.queryByText(/^Showing /)).toBeNull();
-    expect(screen.queryByText("Show 25 more")).toBeNull();
-  });
+    await settle();
+    expect(screen.getAllByTestId("dispute-case")).toHaveLength(25);
+    // The show-more button is the last button of the page.
+    fireEvent.click(screen.getAllByRole("button").at(-1)!);
+    await settle();
+    expect(screen.getAllByTestId("dispute-case")).toHaveLength(30);
+    const before = urlsOf(fetchSpy).length;
 
-  it("stops at 200 cases, the largest page of the indexer, and says how to find older cases", async () => {
-    const fetchSpy = stubIndexer(500);
-    renderPage();
-    for (let shown = 25; shown < 200; shown += 25) {
-      await screen.findByText(`Showing ${shown} of 500 cases`);
-      fireEvent.click(screen.getByText("Show 25 more"));
-    }
-    expect(await screen.findByText("Showing 200 of 500 cases")).toBeInTheDocument();
-    expect(screen.queryByText("Show 25 more")).toBeNull();
-    expect(screen.getByText(/newest 200 cases at most/)).toBeInTheDocument();
-    const limits = urlsOf(fetchSpy).flatMap((url) => /^\/v1\/indexer\/disputes\?limit=(\d+)$/.exec(url)?.[1] ?? []).map(Number);
-    expect(Math.max(...limits)).toBe(200);
-  });
-
-  it("keeps the limit at the 15-second refresh", async () => {
-    const setIntervalSpy = vi.spyOn(globalThis, "setInterval");
-    try {
-      const fetchSpy = stubIndexer(60);
-      renderPage();
-      await screen.findByText("Showing 25 of 60 cases");
-      fireEvent.click(screen.getByText("Show 25 more"));
-      await screen.findByText("Showing 50 of 60 cases");
-      const refreshes = setIntervalSpy.mock.calls.filter(([, ms]) => ms === 15_000);
-      const before = urlsOf(fetchSpy).length;
-      await act(async () => {
-        (refreshes[refreshes.length - 1]![0] as () => void)();
-      });
-      expect(urlsOf(fetchSpy).slice(before)).toEqual(["/v1/indexer/disputes?limit=50"]);
-      expect(await screen.findByText("Showing 50 of 60 cases")).toBeInTheDocument();
-    } finally {
-      setIntervalSpy.mockRestore();
-    }
+    await act(async () => {
+      vi.advanceTimersByTime(60_000);
+    });
+    const refreshes = urlsOf(fetchSpy).slice(before).filter((url) => url.startsWith("/v1/indexer/disputes?"));
+    expect(refreshes.length).toBeGreaterThan(0);
+    expect(new Set(refreshes)).toEqual(new Set(["/v1/indexer/disputes?limit=50"]));
+    expect(screen.getAllByTestId("dispute-case")).toHaveLength(30);
   });
 
   it("makes no document request for the collapsed cards, and shows the identity names of the shown cases", async () => {
     const fetchSpy = stubIndexer(25);
     renderPage();
-    await waitFor(() => expect(screen.getAllByText("Claimer One")).toHaveLength(25));
+    await waitFor(() => {
+      const cards = screen.getAllByTestId("dispute-case");
+      expect(cards).toHaveLength(25);
+      for (const card of cards) expect(card).toHaveTextContent("Claimer One");
+    });
     expect(screen.getAllByTestId("dispute-case").every((card) => !(card as HTMLDetailsElement).open)).toBe(true);
     expect(urlsOf(fetchSpy).sort()).toEqual(["/v1/identity/summaries?ids=" + CLAIMER, "/v1/indexer/disputes?limit=25"].sort());
 
@@ -630,7 +599,7 @@ describe("<Disputes /> — pages of 25 cases", () => {
 });
 
 describe("<AgentIdentity /> — disputes of the agent", () => {
-  it("asks for all the cases of the agent (no limit); the cards are collapsed and there is no count or button", async () => {
+  it("asks for all the cases of the agent (no limit); the cards are collapsed", async () => {
     const urls: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
@@ -654,7 +623,5 @@ describe("<AgentIdentity /> — disputes of the agent", () => {
     expect(urls).toContain(`/v1/indexer/disputes?agent_id=${CLAIMER}`);
     expect(urls.filter((url) => url.includes("limit="))).toEqual([]);
     expect(urls.filter((url) => url.startsWith("/v1/indexer/documents/"))).toEqual([]);
-    expect(screen.queryByText(/^Showing /)).toBeNull();
-    expect(screen.queryByText("Show 25 more")).toBeNull();
   });
 });

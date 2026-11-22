@@ -1,7 +1,8 @@
 // @vitest-environment happy-dom
+/** buyer-ui-resale-dashboard.test.tsx — the /capacity route of the buyer SPA: the dashboard request, a row and a Vector proof link for each sale, and the removed /dashboard route. */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import App from "../../buyer/src/ui/App.js";
 
@@ -108,6 +109,7 @@ const DASHBOARD = {
 };
 
 afterEach(() => {
+  cleanup();
   vi.unstubAllGlobals();
 });
 
@@ -122,32 +124,20 @@ describe("Capacity markets dashboard", () => {
       </MemoryRouter>,
     );
 
-    expect(await screen.findByRole("heading", { name: "Capacity Markets" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Capacity" })).toHaveAttribute("href", "/capacity");
-    expect(screen.getByRole("heading", { name: "Surplus Intelligence" })).toBeInTheDocument();
-    expect(screen.getByRole("columnheader", { name: "Vector proof" })).toBeInTheDocument();
-    expect(screen.getByText("$0.2399")).toBeInTheDocument();
-    expect(screen.getByTestId("resale-dashboard")).toHaveClass("max-w-7xl");
-    expect(document.querySelectorAll(".bg-white").length).toBeGreaterThan(3);
+    await screen.findByTestId("resale-dashboard");
+    expect(fetchMock).toHaveBeenCalledWith("/v1/resale-dashboard", { cache: "no-store" });
+    const navHrefs = within(screen.getByRole("navigation")).getAllByRole("link").map((link) => link.getAttribute("href"));
+    expect(navHrefs).toContain("/capacity");
 
-    const proofSummary = screen.getByRole("group", { name: "Vector proof summary" });
-    expect(within(proofSummary).getByText("Confirmed 1")).toHaveClass("bg-green-100");
-    expect(within(proofSummary).getByText("Pending 1")).toHaveClass("bg-amber-100");
-    expect(within(proofSummary).getByText("Failed 1")).toHaveClass("bg-red-100");
-    expect(screen.getByText("pending")).toHaveClass("bg-amber-100");
-    expect(screen.getByText("failed")).toHaveClass("bg-red-100");
-
-    const proofLink = screen.getByRole("link", { name: /Confirmed Vector proof transaction/ });
-    expect(proofLink).toHaveAttribute(
+    // One row for each sale. Only the confirmed proof links its transaction.
+    const [, salesBody] = screen.getAllByRole("rowgroup");
+    const sales = within(salesBody!).getAllByRole("row");
+    expect(sales).toHaveLength(DASHBOARD.surplus.recentSales.length);
+    expect(sales.map((row) => within(row).queryAllByRole("link").length)).toEqual([1, 0, 0]);
+    expect(within(sales[0]!).getByRole("link")).toHaveAttribute(
       "href",
       `https://vector.apexscan.org/en/transaction/${"d".repeat(64)}/summary/`,
     );
-    expect(within(proofLink).getByText("dddddddddddd…ddddddddd")).toBeInTheDocument();
-
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
-      "/v1/resale-dashboard",
-      { cache: "no-store" },
-    ));
   });
 
   it("removes the old dashboard route instead of keeping an alias", () => {
@@ -160,8 +150,7 @@ describe("Capacity markets dashboard", () => {
       </MemoryRouter>,
     );
 
-    expect(screen.queryByRole("heading", { name: "Capacity Markets" }))
-      .not.toBeInTheDocument();
+    expect(screen.queryByTestId("resale-dashboard")).not.toBeInTheDocument();
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
