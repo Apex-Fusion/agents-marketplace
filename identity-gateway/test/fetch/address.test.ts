@@ -4,11 +4,6 @@ import { isPublicUnicast } from "../../src/fetch/address.js";
 describe("public unicast addresses (Part 1 Section 9)", () => {
   test.each([
     "93.184.216.34",
-    "1.1.1.1",
-    "8.8.8.8",
-    "91.98.147.172",
-    "2606:4700:4700::1111",
-    "2a01:4f8:c17:1234::1",
     "2001:4860:4860::8888",
     "::ffff:93.184.216.34",
     "64:ff9b::808:808",

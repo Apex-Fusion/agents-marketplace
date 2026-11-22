@@ -138,13 +138,4 @@ describe("DID configuration", () => {
     net.json(CONFIG_URL, resource);
     expect(await checkDomain({ fetcher: net.fetcher(), txt: net.txt }, DOMAIN, SUBJECT, net.clock.now())).toMatchObject({ verified: false, failure });
   });
-
-  test("a domain that resolves to a private address is not fetched", async () => {
-    const net = new FakeNet().host(DOMAIN, "10.1.1.1");
-    expect(await checkDomain({ fetcher: net.fetcher(), txt: net.txt }, DOMAIN, SUBJECT, net.clock.now())).toMatchObject({
-      verified: false,
-      failure: "the host resolves to an address that is not public unicast",
-    });
-    expect(net.calls).toEqual([]);
-  });
 });

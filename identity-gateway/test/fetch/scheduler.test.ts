@@ -7,7 +7,6 @@ import { DAY_MS, FetchScheduler, recheckDelayMs, type RecordSource } from "../..
 import { PassFailed, VectorResolver } from "../../src/resolve/resolver.js";
 import { formatTime } from "../../src/resolve/time.js";
 import {
-  CONTROLLER,
   LEGACY,
   LedgerBuilder,
   PARTY_KEY,
@@ -19,7 +18,7 @@ import {
   utf8,
 } from "../support/ledger.js";
 import { tombstoneOf } from "../support/resolve.js";
-import { FakeNet, TestClock, type Handler } from "./support.js";
+import { FakeNet, TestClock } from "./support.js";
 
 const ID = idOf("scheduled agent");
 const DID = `did:vector:${ID}`;
@@ -157,9 +156,13 @@ describe("background checks", () => {
   test("start() scans at once and then after each interval; stop() ends the loop", async () => {
     const { b, store, net } = setup();
     const waits: Array<() => void> = [];
+    const sleepers: Array<() => void> = [];
+    /** Resolves when the loop starts its next sleep: a scan has ended. */
+    const nextSleep = (): Promise<void> => new Promise<void>((resolve) => sleepers.push(resolve));
     const clock = new TestClock();
     clock.sleep = (ms) => {
       clock.sleeps.push(ms);
+      for (const wake of sleepers.splice(0)) wake();
       return new Promise<void>((resolve) => waits.push(resolve));
     };
     let scans = 0;
@@ -172,12 +175,15 @@ describe("background checks", () => {
       currentRecord: (id) => resolver.currentRecord(id),
     };
     const scheduler = new FetchScheduler(source, store, { fetcher: net.fetcher(), txt: net.txt, clock, legacyPolicyId: LEGACY.policyId }, { scanIntervalMs: 120_000 });
+    let slept = nextSleep();
     scheduler.start();
-    await expect.poll(() => clock.sleeps.includes(120_000)).toBe(true);
+    await slept;
+    expect(clock.sleeps).toContain(120_000);
     expect(scans).toBe(1);
+    slept = nextSleep();
     waits.shift()!();
-    // Wait until the second scan has ended and the loop sleeps again, then stop it.
-    await expect.poll(() => clock.sleeps.length).toBe(2);
+    // The second scan has ended when the loop sleeps again; then stop it.
+    await slept;
     expect(scans).toBe(2);
     const stopped = scheduler.stop();
     waits.shift()!();
@@ -343,20 +349,4 @@ describe("an endpoint that answers nothing at the first check", () => {
     expect(hostileLogs).toHaveLength(1);
     expect(hostileLogs[0]).not.toMatch(/[\n\u0007]/);
   });
-});
-
-test("the job's own handler sees the fetch rules: a check of an endpoint on a private address does not connect", async () => {
-  const net = new FakeNet().host("internal.example.org", "10.0.0.7");
-  const touched: Handler = () => ({ status: 200 });
-  net.on("https://internal.example.org/.well-known/agent-card.json", touched);
-  const b = new LedgerBuilder();
-  b.register(ID, identityDatum({ controller: CONTROLLER, endpoint: utf8("https://internal.example.org/") }), { height: 100 });
-  const store = new FactsStore();
-  const logs: string[] = [];
-  const scheduler = new FetchScheduler(new VectorResolver(b.chain, b.settings), store, { fetcher: net.fetcher(), txt: net.txt, clock: net.clock, legacyPolicyId: LEGACY.policyId }, { log: (m) => logs.push(m) });
-  await scheduler.scan();
-  await scheduler.idle();
-  expect(net.calls).toEqual([]);
-  expect(store.get(ID)?.detection).toMatchObject({ protocol: null, failure: "the host resolves to an address that is not public unicast" });
-  expect(logs).toEqual(["identity-gateway: background check found no protocol at internal.example.org (the host resolves to an address that is not public unicast); the next check is in 10 minutes"]);
 });

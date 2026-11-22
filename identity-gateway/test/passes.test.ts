@@ -92,19 +92,24 @@ describe("passes", () => {
     const gate = new Promise<void>((resolve) => {
       open = resolve;
     });
+    // Two reads of OTHER wait at the gate: the test goes on when both have started.
+    let bothWait: () => void = () => undefined;
+    const started = new Promise<void>((resolve) => {
+      bothWait = resolve;
+    });
     let held = true;
     let waiting = 0;
     const assetTxHashes = b.chain.assetTxHashes.bind(b.chain);
     b.chain.assetTxHashes = async (policyId, assetName) => {
       const hashes = await assetTxHashes(policyId, assetName);
       if (held) {
-        waiting++;
+        if (++waiting === 2) bothWait();
         await gate;
       }
       return hashes;
     };
     const earlyStatus = resolver.currentStatus(OTHER, early);
-    await expect.poll(() => waiting).toBe(2);
+    await started;
     held = false;
 
     // OTHER is revoked; a second pass reads its tip after that, while the early read still waits.
