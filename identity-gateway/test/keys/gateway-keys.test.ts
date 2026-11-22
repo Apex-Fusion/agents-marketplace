@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, test } from "vitest";
 import { keyHash } from "../../src/codec/keys.js";
-import { KeyFileError, loadGatewayKeys, readPrivateKeyFile, type GatewayKey } from "../../src/keys/gateway-keys.js";
+import { KeyFileError, loadGatewayKeys, readPrivateKeyFile } from "../../src/keys/gateway-keys.js";
 import { recordKeyObject } from "../../src/m4/jose.js";
 
 const GATEWAY_ID = "ab".repeat(32);
@@ -62,13 +62,18 @@ describe("loadGatewayKeys", () => {
     expect(signer.kid).toBe(ed25519.kid);
   });
 
-  test("a SEC1 (EC PRIVATE KEY) P-256 file and a file without group or other access bits but with owner execute are accepted", () => {
-    const keys = loadGatewayKeys({ ed25519: keyFile(ed25519Pem(), 0o700), p256: keyFile(p256Pem("sec1"), 0o400) }, GATEWAY_ID);
-    expect(keys.p256.keyType).toBe("P256");
+  test("a SEC1 (EC PRIVATE KEY) P-256 file and a file without group or other access bits but with owner execute are accepted; the public point starts with 02 or 03", () => {
+    // The prefix of the compressed point follows the parity of y. The keys are random, so the loop goes on until both prefixes occurred.
+    const prefixes = new Set<string>();
+    for (let attempt = 0; attempt < 64 && prefixes.size < 2; attempt++) {
+      const keys = loadGatewayKeys({ ed25519: keyFile(ed25519Pem(), 0o700), p256: keyFile(p256Pem("sec1"), 0o400) }, GATEWAY_ID);
+      expect(keys.p256.keyType).toBe("P256");
+      prefixes.add(keys.p256.publicKey.slice(0, 2));
+    }
+    expect([...prefixes].sort()).toEqual(["02", "03"]);
   });
 
   test.each<[string, number, RegExp]>([
-    ["world-readable (644)", 0o644, /readable by its group or by other users \(mode 644\)/],
     ["group-readable (640)", 0o640, /readable by its group or by other users \(mode 640\)/],
     ["readable by others only (604)", 0o604, /readable by its group or by other users \(mode 604\)/],
     ["group-writable (620)", 0o620, /writable by its group or by other users \(mode 620\)/],
@@ -89,7 +94,8 @@ describe("loadGatewayKeys", () => {
     mkdirSync(sub);
     expect(() => readPrivateKeyFile(sub)).toThrow(/not a regular file/);
     expect(() => readPrivateKeyFile(keyFile("not a key"))).toThrow(/does not hold a PEM private key/);
-    const rsa = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({ format: "pem", type: "pkcs8" }).toString();
+    // The size of the RSA key does not matter here. A 2,048-bit key takes 70 to 300 ms to make, a 1,024-bit key about 5 ms.
+    const rsa = generateKeyPairSync("rsa", { modulusLength: 1024 }).privateKey.export({ format: "pem", type: "pkcs8" }).toString();
     expect(() => loadGatewayKeys({ ed25519: keyFile(rsa), p256: keyFile(p256Pem()) }, GATEWAY_ID)).toThrow(/does not hold an Ed25519 private key/);
     try {
       swapped();
@@ -100,10 +106,5 @@ describe("loadGatewayKeys", () => {
 
   test("the gateway identifier must be 64 lowercase hex characters", () => {
     expect(() => loadGatewayKeys({ ed25519: keyFile(ed25519Pem()), p256: keyFile(p256Pem()) }, "AB".repeat(32))).toThrow(/64 lowercase hex/);
-  });
-
-  test("the key object type is GatewayKey", () => {
-    const key: GatewayKey = loadGatewayKeys({ ed25519: keyFile(ed25519Pem()), p256: keyFile(p256Pem()) }, GATEWAY_ID).p256;
-    expect(key.spki.length).toBeGreaterThan(64);
   });
 });

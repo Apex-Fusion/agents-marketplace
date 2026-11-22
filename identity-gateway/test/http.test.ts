@@ -69,17 +69,7 @@ describe("GET /1.0/identifiers/{did}", () => {
 
   test.each([
     ["application/did", "application/did"],
-    ["application/did+json", "application/did"],
-    ["application/did+ld+json", "application/did"],
-    ["application/ld+json", "application/did"],
-    ["application/json", "application/did"],
     ["*/*", "application/did-resolution"],
-    ["application/did-resolution", "application/did-resolution"],
-    ['application/ld+json;profile="https://w3id.org/did-resolution"', "application/did-resolution"],
-    ["text/html;q=0.9, application/did;q=0.5", "application/did"],
-    ["application/did;q=0.8, application/did-resolution;q=0.9", "application/did-resolution"],
-    ["application/did-resolution;q=0.5, application/did;q=0.6", "application/did"],
-    ["application/did;q=0.5, */*;q=0.5", "application/did-resolution"],
   ])("Accept %s gives %s", async (accept, contentType) => {
     const base = await start(record());
     const res = await get(base, `/1.0/identifiers/${DID}`, accept);
@@ -161,6 +151,9 @@ describe("negotiate (RFC 9110 Accept)", () => {
     ['application/ld+json;profile="https://w3id.org/did-resolution https://www.w3.org/ns/did/v1.1"', "result"],
     ['application/ld+json;profile="https://example.org/other"', null],
     ["application/ld+json", "document"],
+    ["application/did+json", "document"],
+    ["application/did+ld+json", "document"],
+    ["application/json", "document"],
     ["APPLICATION/DID", "document"],
     ["application/did;q=1.0", "document"],
     ["application/did;q=0.001", "document"],
