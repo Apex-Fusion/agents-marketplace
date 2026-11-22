@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 /**
- * scripts/ci/tsc-report.mjs: type-check test files in report-only mode.
+ * scripts/ci/tsc-report.mjs: type-check the test files and report the errors.
  *
  *   node scripts/ci/tsc-report.mjs <tsconfig>...
  *
  * It needs Node 20. It runs `pnpm exec tsc --noEmit -p <tsconfig>` for each config from the repository root (the configs run at the
  * same time), counts the errors, prints the first errors and writes one table to the job summary ($GITHUB_STEP_SUMMARY). The exit status is 1 when any config
- * has an error or cannot run. The job `typecheck` of .github/workflows/ci.yml sets `continue-on-error: true` on this step until
- * phase 4 of docs/TEST-REVISION.md fixed the errors. Then the step becomes blocking.
+ * has an error or cannot run. The type check of the test files is blocking: the job `typecheck` of .github/workflows/ci.yml and the
+ * job `typecheck-tests` of .github/workflows/nightly.yml fail on that status.
  */
 import { spawn } from "node:child_process";
 import { appendFileSync } from "node:fs";
@@ -37,13 +37,13 @@ export function describe(errors) {
 
 export function summaryText(rows) {
   const out = [
-    "### Type check of test files (report only)",
+    "### Type check of the test files",
     "",
     "| Config | Errors | Files with errors | Most frequent |",
     "|---|---:|---:|---|",
     ...rows.map((row) => `| \`${row.config}\` | ${row.failed ? "tsc did not run" : row.count} | ${row.failed ? "" : row.files} | ${row.top.join(", ")} |`),
     "",
-    "The errors do not fail the job yet. Phase 4 of docs/TEST-REVISION.md fixes them and makes this step blocking.",
+    "An error in any config fails the job.",
   ];
   return `${out.join("\n")}\n`;
 }
