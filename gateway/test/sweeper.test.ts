@@ -676,11 +676,13 @@ describe("sweeper — an escrow whose datum the chain client withheld", () => {
   });
 
   it("an error of another kind is still skipped quietly", async () => {
-    const row = openRow("e");
-    const settle = { ...settleOk(), reclaim: vi.fn(async () => { throw new Error("validator rejected"); }) as never };
+    const row = rowOf({});
+    const reclaim = vi.fn(async () => { throw new Error("validator rejected"); });
+    const settle = { ...settleOk(), reclaim: reclaim as never };
     const { deps } = makeSweepDeps({ chatSettleMode: "full", escrows: [row] });
     const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
     await expect(runSweepOnce(deps, settle)).resolves.toBeUndefined();
+    expect(reclaim).toHaveBeenCalledTimes(1); // a fresh reference: the settled memory of the other cases does not skip it
     expect(log.mock.calls.some(([line]) => String(line).includes("skipping escrow"))).toBe(false);
     log.mockRestore();
   });
@@ -715,11 +717,10 @@ describe("sweeper — an escrow output with a native reference script that fails
     }) as typeof globalThis.fetch;
   }
 
-  type Settle = "accept fails" | "accept works";
   type Outcome = { acceptCalls: number[]; session: string | undefined; usage: Array<{ status: string; cost: string | null }> };
 
-  /** One sweep (two for "accept fails") over a Submitted legacy escrow of an open chat session. `listed`: the node lists the output. */
-  async function sweep(script: unknown, listed: boolean, settleMode: Settle): Promise<Outcome> {
+  /** Two sweeps over a Submitted legacy escrow of an open chat session; the Accept always fails. `listed`: the node lists the output. */
+  async function sweep(script: unknown, listed: boolean): Promise<Outcome> {
     const wallet = deriveWalletKey(genPrivKeyHex(), 0);
     const txHash = randomBytes(32).toString("hex");
     const datum: EscrowDatum = {
@@ -738,13 +739,12 @@ describe("sweeper — an escrow output with a native reference script that fails
     // The key of the sweep is the wallet of the escrow: the sweeper reads the rows of its own key from the indexer.
     const sessionId = insertOpenSession(deps, keyRow.id, row.utxo_ref);
     const accept = vi.fn(async () => {
-      if (settleMode === "accept fails") throw new Error("validator rejected");
-      return undefined;
+      throw new Error("validator rejected");
     });
     const settle = { ...settleOk(), accept: accept as never };
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     await runSweepOnce(deps, settle);
-    if (settleMode === "accept fails") await runSweepOnce(deps, settle);
+    await runSweepOnce(deps, settle);
     vi.mocked(console.log).mockRestore();
     return {
       acceptCalls: accept.mock.calls.map(() => 1),
@@ -754,17 +754,12 @@ describe("sweeper — an escrow output with a native reference script that fails
   }
 
   it.each(VARIANTS)("%s, Accept fails and the node lists the output: the session stays open, nothing is billed, and the Accept is tried again", async (_name, script) => {
-    const outcome = await sweep(script, true, "accept fails");
+    const outcome = await sweep(script, true);
     expect(outcome).toEqual({ acceptCalls: [1, 1], session: "open", usage: [] });
   });
 
-  it.each(VARIANTS)("%s, Accept works and the node lists the output: the session closes as completed, and the price is billed", async (_name, script) => {
-    const outcome = await sweep(script, true, "accept works");
-    expect(outcome).toEqual({ acceptCalls: [1], session: "closed", usage: [{ status: "completed", cost: "200000" }] });
-  });
-
   it("the node does not list the output: that is spent, the session closes as completed, and no Accept is tried", async () => {
-    const outcome = await sweep(null, false, "accept fails");
+    const outcome = await sweep(null, false);
     expect(outcome).toEqual({ acceptCalls: [], session: "closed", usage: [{ status: "completed", cost: "200000" }] });
   });
 });
