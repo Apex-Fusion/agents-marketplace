@@ -1,5 +1,5 @@
 /**
- * Supplier-side wallet key fixtures — M1-B RED phase
+ * Supplier-side wallet key fixtures (M1-B)
  *
  * Constructs a deterministic test key pair for the SUPPLIER role.
  * Derived INDEPENDENTLY from the spec using a fixed seed.

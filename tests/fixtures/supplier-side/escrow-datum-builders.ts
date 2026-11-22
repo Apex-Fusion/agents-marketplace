@@ -1,5 +1,5 @@
 /**
- * Supplier-side EscrowDatum fixture builder — M0-B RED phase
+ * Supplier-side EscrowDatum fixture builder (M0-B)
  *
  * Constructs EscrowDatum INDEPENDENTLY from the spec (ARCHITECTURE.md §4.2).
  * MUST NOT import from buyer-side builders or any shared fixture helper.
