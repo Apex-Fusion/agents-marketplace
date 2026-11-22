@@ -103,9 +103,12 @@ describe("Surplus Vector sale projection", () => {
   });
 
   it("rejects sales that cannot produce an immutable canonical leaf", () => {
-    expect(() => canonicalizeSurplusSale(sale("sale-1", { offerId: null })))
+    // The types forbid a null offer id and a null creation time. The test passes them on purpose: the canonical form must refuse them.
+    const nullOfferId = { offerId: null } as unknown as Partial<SurplusSaleProofInput>;
+    const nullCreatedAt = { createdAt: null } as unknown as Partial<SurplusSaleProofInput>;
+    expect(() => canonicalizeSurplusSale(sale("sale-1", nullOfferId)))
       .toThrow("offer id");
-    expect(() => canonicalizeSurplusSale(sale("sale-1", { createdAt: null })))
+    expect(() => canonicalizeSurplusSale(sale("sale-1", nullCreatedAt)))
       .toThrow("no creation time");
     expect(() => canonicalizeSurplusSale(sale("sale-1", { inputTokens: -1 })))
       .toThrow("non-negative safe integer");

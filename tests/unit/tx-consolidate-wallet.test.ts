@@ -28,7 +28,7 @@ describe("planConsolidate", () => {
       u(1_679_301n),
       u(1_679_301n),
     ];
-    const total = utxos.reduce((s, x) => s + x.assets.lovelace, 0n);
+    const total = utxos.reduce((s, x) => s + (x.assets.lovelace ?? 0n), 0n);
 
     const plan = planConsolidate(utxos);
 

@@ -57,7 +57,7 @@ import { testIdentityBlueprint } from "../fixtures/identity-builders/blueprint.j
 import {
   advertUtxo, AGENT_ID, agentRecord, AP3X, FakeOgmios, outputOf, recordUtxo, testWallet, VECTOR_MAINNET_ZERO_TIME_MS,
 } from "../fixtures/identity-builders/world.js";
-import { buildSampleConfig } from "../fixtures/supplier-side/sample-config.js";
+import { NO_DRAIN_MARKER, buildSampleConfig } from "../fixtures/supplier-side/sample-config.js";
 
 const NOW_MS = Date.UTC(2026, 10, 2, 12, 0, 0, 500);
 const INDEXER_URL = "https://indexer.test";
@@ -271,6 +271,7 @@ async function world(): Promise<World> {
   const identity = supplierIdentity(chain, 1, { blueprint });
   const runtime = await Paper2AgentRuntime.create({
     chain, state, supplierKey, networkId: 1, advertRef: ADVERT_REF, config, sessionFactory: toolSession, identity, agentId: AGENT_ID,
+    drainMarkerPath: NO_DRAIN_MARKER,
   });
   cleanups.push(() => runtime.close());
   server.on("request", createApp({

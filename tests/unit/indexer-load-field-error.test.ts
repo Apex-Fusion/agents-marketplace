@@ -30,7 +30,10 @@ function output(index: number, changes: Record<string, unknown> = {}): Record<st
 }
 
 function cacheAndChain(answer: unknown[]) {
-  const cache = { insertUtxoIfAbsent: vi.fn(() => true), transaction: vi.fn((work: () => void) => { work(); }) };
+  // Methods with spies, not `vi.fn`: a mock loses the type parameter of `transaction`, so it would not match the real cache.
+  const cache = { insertUtxoIfAbsent: () => true, transaction<T>(work: () => T): T { return work(); } };
+  vi.spyOn(cache, "insertUtxoIfAbsent");
+  vi.spyOn(cache, "transaction");
   const fetch = (async () => new Response(JSON.stringify({ jsonrpc: "2.0", result: answer }), { headers: { "content-type": "application/json" } })) as typeof globalThis.fetch;
   return { cache, chain: new ReadOnlyOgmiosProvider({ ogmiosUrl: "http://ogmios.test", fetch }) };
 }

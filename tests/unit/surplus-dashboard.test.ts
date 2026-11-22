@@ -7,6 +7,7 @@ import {
 } from "../../supplier/src/surplus/dashboard.js";
 import { createSurplusServer } from "../../supplier/src/cli/surplus-seller.js";
 import type { SurplusControllerStatus } from "../../supplier/src/surplus/controller.js";
+import { buildSampleSurplusConfig } from "../fixtures/supplier-side/sample-surplus-config.js";
 
 const STATUS: SurplusControllerStatus = {
   ok: true,
@@ -27,29 +28,13 @@ const STATUS: SurplusControllerStatus = {
 };
 
 function config(): SurplusManagerConfig {
-  return {
-    live: true,
-    apiBaseUrl: "https://api.surplusintelligence.ai",
+  // The two keys are fake secrets: the test shows that the snapshot does not hold them.
+  return buildSampleSurplusConfig({
     sellerApiKey: "si_seller_test_secret",
     providerApiKey: "sk-or-v1-test-secret",
-    providerBaseUrl: "https://openrouter.ai/api/v1",
-    capacityBaseUrl: "https://openrouter.ai/api",
-    perOfferCapUsd: "0.05",
-    aggregateCapUsd: "0.05",
-    sellerWallet: "0x1111111111111111111111111111111111111111",
-    payoutAddress: "0x1111111111111111111111111111111111111111",
-    maxCandidateOrderBooks: 10,
-    reserveUsd: "1.00",
-    maxProviderLimitUsd: "20.00",
-    recoveryBps: 490,
-    undercutBps: 10,
-    pollIntervalMs: 300_000,
-    requestTimeoutMs: 120_000,
     stopAfterTrades: 0,
-    settledStatuses: ["confirmed"],
     statePath: "/tmp/surplus-dashboard-test.json",
-    port: 8080,
-  };
+  });
 }
 
 function snapshot(): SurplusDashboardSnapshot {
@@ -149,6 +134,7 @@ describe("SurplusDashboardService", () => {
         offerId: "offer-1",
         settlementStatus: "confirmed",
         createdAt: "2026-08-28T11:00:00.000Z",
+        createdAtMs: Date.parse("2026-08-28T11:00:00.000Z"),
         sellerCostMicroUsd: 83,
         inputTokens: 10,
         outputTokens: 2,

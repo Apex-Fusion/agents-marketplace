@@ -73,12 +73,17 @@ function makeDeps(rows: Array<Record<string, unknown>>, opts?: { queryUtxo?: (re
   } as never;
 }
 
+/** The part of the body of GET /account that these tests read. */
+interface AccountBody {
+  balance: { locked_in_escrow_lovelace: string };
+}
+
 /**
  * asyncHandler returns a fire-and-forget (req, res) => void wrapper, so the
  * test must await the res.json() call itself, not the handler invocation.
  * Errors also surface through json() (sendError maps them to a JSON body).
  */
-async function callAccount(deps: never): Promise<Record<string, never>> {
+async function callAccount(deps: never): Promise<AccountBody> {
   const handler = makeAccountHandler(deps);
   const req = { gatewayKey: fakeKeyRow() } as unknown as Request;
   const body = await new Promise<unknown>((resolveBody, rejectBody) => {
@@ -96,7 +101,7 @@ async function callAccount(deps: never): Promise<Record<string, never>> {
   if ((body as { error?: unknown }).error) {
     throw new Error(`handler returned error body: ${JSON.stringify(body)}`);
   }
-  return body as Record<string, never>;
+  return body as AccountBody;
 }
 
 describe("GET /account — locked_in_escrow_lovelace", () => {

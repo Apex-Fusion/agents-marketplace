@@ -19,8 +19,8 @@ import { genPrivKeyHex, deriveWalletKey } from "../src/wallet.js";
 import { seal } from "../src/crypto/seal.js";
 import { hashApiKey } from "../src/middleware/apiKeyAuth.js";
 import { venueAttribution } from "../src/ocr/extract.js";
-import type { GatewayConfig } from "../src/config.js";
 import type { GatewayDeps } from "../src/deps.js";
+import { buildSampleGatewayConfig } from "../../tests/fixtures/gateway-side/sample-config.js";
 import { SupplierError } from "@marketplace/buyer/sdk";
 
 // The one-shot settle step (resolveSubmittedRef → acceptAndConfirm) talks to
@@ -64,28 +64,7 @@ const OCR_SUPPLIER = {
 function makeDeps(fetchFn?: typeof globalThis.fetch, overrides?: { chain?: GatewayDeps["chain"] }): GatewayDeps {
   const dbDir = join(tmpdir(), `gw-ocr-test-${randomUUID()}`);
   const store = new GatewayStore(dbDir);
-  const config: GatewayConfig = {
-    masterKeyHex: MASTER,
-    indexerUrl: "http://ix",
-    ogmiosUrl: "http://og",
-    networkId: 0,
-    liveChain: true,
-    port: 0,
-    dbDir,
-    signupRate: { max: 1000, windowMs: 60_000 },
-    keyRate: { max: 1000, windowMs: 60_000 },
-    demoIpRate: { max: 1000, windowMs: 60_000 },
-    sweeperIntervalMs: 60_000,
-    demoSessionIdleMs: 180_000,
-    chatSettleMode: "full",
-    walletHealthIntervalMs: 600_000,
-    sdkRegistryMax: 100,
-    oneShotConcurrency: 4, oneShotMaxOutstanding: 64, oneShotQueueTimeoutMs: 60_000,
-    ocrCapabilityId: "ocr.page.extract.chandra-ocr-2.v1",
-    corsOrigins: [],
-    identityPolicyId: null,
-    switchSlot: null,
-  };
+  const config = buildSampleGatewayConfig({ masterKeyHex: MASTER, dbDir });
   const chain = overrides?.chain ?? ({ queryUtxosByAddress: async () => [] } as unknown as GatewayDeps["chain"]);
   const registry = new SdkRegistry({
     chain,
