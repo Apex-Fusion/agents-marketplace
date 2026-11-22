@@ -1,6 +1,7 @@
 /**
  * tests/unit/indexer-intersection.test.ts — intersection points, recovery after
- * a rollback during a disconnect, a lost intersection, and honest health.
+ * a rollback during a disconnect, a lost intersection, honest health, and a
+ * spend that comes over the wire.
  *
  * The follower (OgmiosSource + ChainSyncWorker + SqliteCache) runs against
  * FakeOgmiosServer: Ogmios v6 chain-sync over a local WebSocket. Each block
@@ -22,8 +23,11 @@ import { FakeOgmiosServer, type FakeBlock } from "./__helpers__/FakeOgmiosServer
 import {
   ADVERT_SCRIPT_ADDRESS,
   ESCROW_SCRIPT_ADDRESS,
+  buildEscrowDatumHex,
   buildPostAdvertTx,
+  escrowRedeemerHex,
 } from "../fixtures/indexer-side/sample-blocks.js";
+import { ogmiosRedeemer } from "../fixtures/indexer-side/identity-blocks.js";
 
 const ADDRESSES = { advertAddress: ADVERT_SCRIPT_ADDRESS, escrowAddress: ESCROW_SCRIPT_ADDRESS };
 
@@ -184,7 +188,7 @@ async function lostIntersection(): Promise<{ server: FakeOgmiosServer; f: Follow
 }
 
 describe("no intersection", () => {
-  it("gives ok:false and one error naming RESYNC_FROM_*, keeps the data, and never falls back to the origin", async () => {
+  it("gives ok:false and one error naming RESYNC_FROM_*, keeps the data and the funds, and never falls back to the origin", async () => {
     const { server, f, main, fork, switchedAt } = await lostIntersection();
     const app = createApp({ cache: f.cache, worker: f.worker });
 
@@ -211,6 +215,7 @@ describe("no intersection", () => {
 
     expect(f.cache.getCursor()).toEqual(savedPointOf(main.at(-1)!));
     expect(f.cache.listEventsAfterSlot(0).map((e) => e.utxo_ref)).toEqual(main.map(advertRefOf));
+    expect(f.cache.getUnspentUtxos(ADVERT_SCRIPT_ADDRESS).map((u) => u.ref).sort()).toEqual(main.map(advertRefOf).sort());
   });
 
   it("RESYNC_FROM_* at a block of the current chain recovers the follower", async () => {
@@ -258,5 +263,44 @@ describe("health lag", () => {
       lag_slots: 610,
       max_sync_lag_slots: 600,
     });
+  });
+});
+
+// ─── A spend over the wire ────────────────────────────────────────────────────
+
+describe("an Ogmios v6 block with a spend", () => {
+  it("decodes its redeemers: a Release spend is recorded as ReleaseEscrow", async () => {
+    const escrowTx = "e".repeat(64);
+    const escrowRef = `${escrowTx}#0`;
+    const spendTx = "f".repeat(64);
+    // The follower resumes from a saved checkpoint (slot 100); the escrow output of slot 90 is in its UTxO set.
+    const checkpoint: FakeBlock = { type: "praos", era: "conway", id: "c".repeat(64), ancestor: "genesis", height: 9, slot: 100, transactions: [] };
+    // An Ogmios v6 Block<Praos> with one transaction (docs/static/cardano.json, v6.14.0).
+    const block = {
+      type: "praos", era: "conway", id: "b".repeat(64), ancestor: checkpoint.id, height: 10, size: { bytes: 900 },
+      slot: 500, protocol: { version: { major: 10, minor: 0, patch: 0 } }, issuer: {},
+      transactions: [{
+        id: spendTx,
+        spends: "inputs",
+        // Ledger order: 1…#3 (index 0), e…#0 (index 1).
+        inputs: [{ transaction: { id: escrowTx }, index: 0 }, { transaction: { id: "1".repeat(64) }, index: 3 }],
+        outputs: [{ address: "addr_test1vsupplier", value: { ada: { lovelace: 4_000_000 } } }],
+        redeemers: [ogmiosRedeemer("spend", 1, escrowRedeemerHex("Release"))],
+        signatories: [],
+      }],
+    } as unknown as FakeBlock;
+    const server = await startServer([checkpoint, block]);
+    const cache = new SqliteCache(":memory:");
+    cache.saveCursor(checkpoint.slot, checkpoint.id);
+    cache.insertUtxo(escrowRef, ESCROW_SCRIPT_ADDRESS, buildEscrowDatumHex({ state: "Submitted" }), 90, escrowTx);
+    const f = follower(server, cache);
+    const event = new Promise<{ type: string; ref: string }>((resolve) => f.worker.once("chain-event", resolve));
+
+    await f.worker.start();
+
+    expect(await event).toMatchObject({ type: "ReleaseEscrow", ref: escrowRef });
+    expect(cache.listEventsAfterSlot(0).map((row) => [row.type, row.tx_hash])).toEqual([["ReleaseEscrow", spendTx]]);
+    expect(cache.getUnspentUtxos(ESCROW_SCRIPT_ADDRESS)).toEqual([]);
+    expect(cache.getCursor()).toEqual({ slot: 500, blockHash: block.id });
   });
 });
