@@ -119,13 +119,12 @@ describe("POST /v1/audio/synthesize — header + body validation", () => {
     }
   });
 
-  it("doesn't reach chain on validation failure (escrow_not_found is what'd come next)", async () => {
-    // With valid body + ref, the next step is chain.queryUtxo → null → 404
-    // escrow_not_found. Confirms the validation path is the early gate.
+  it("passes validation for a valid body and stops at the missing advert", async () => {
+    // Validation is the early gate. The first step after it reads the advert UTxO,
+    // and the empty chain has none.
     const res = await request(makeApp("tts")).post("/v1/audio/synthesize")
       .set("X-Escrow-Ref", ESCROW_REF_HEADER).send(validBody());
-    // We don't seed the chain → query returns null. This is a chain-side
-    // 503 (advert_unavailable) since the advert UTxO is also unseeded.
-    expect([403, 404, 503]).toContain(res.status);
+    expect(res.status).toBe(503);
+    expect(res.body.reason).toBe("advert_unavailable");
   });
 });

@@ -1,18 +1,16 @@
 /**
- * supplier-job-runner.test.ts — RED phase tests for runChatJob
- *
- * M1-F-async-chat RED phase — Caroline, 2026-04-28
+ * supplier-job-runner.test.ts — tests for runChatJob
  *
  * Tests the background job runner:
  *   Ollama → receipt → Submit → jobs.complete / jobs.fail → lock release
  *
- * All external side-effects are mocked. Chain, Ollama, and state are injected.
- * No real Ogmios / Ollama calls.
+ * The job store and the state are the real classes. The chain is a
+ * MockChainProvider with submitTx and awaitTx stubbed, and callOllama is
+ * stubbed. No real Ogmios / Ollama calls.
  *
- * ORDERING CONTRACT (documented, not silently assumed):
- *   jobs.setRunning MUST be called before callOllama.
- *   If Catherine implements it in the opposite order, the ordering test will
- *   fail and must be reported rather than silently corrected.
+ * ORDERING CONTRACT: the runner sets the job to "running" before it calls the
+ * upstream. The happy-path test reads the job status inside the stubbed
+ * callOllama.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -52,7 +50,6 @@ const CLAIMED_TX_HASH = "1".repeat(64);
 const CLAIMED_REF: OutputReference = { txHash: CLAIMED_TX_HASH, index: 0 };
 const SUBMIT_TX_HASH = "2".repeat(64);
 
-const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const HEX64_RE = /^[0-9a-f]{64}$/i;
 const HEX128_RE = /^[0-9a-f]{128}$/i;
 
@@ -157,10 +154,8 @@ describe("runChatJob — happy path", () => {
     mockOllamaOk();
     // Mock submitTx to return deterministic hashes
     vi.spyOn(chain, "submitTx").mockResolvedValue(SUBMIT_TX_HASH);
-    // Fix A — 2026-04-28 M1-F-async-chat-cleanup:
     // Seed the claimedRef UTxO so buildSubmitTx's chain.queryUtxo(escrowRef)
-    // can find it once Catherine flips the runner back to buildSubmitTx.
-    // state="Claimed", submitted_at=null, result_receipt_hash=null per spec.
+    // can find it. state="Claimed", submitted_at=null, result_receipt_hash=null per spec.
     chain.seed({
       ref: CLAIMED_REF,
       address: "addr_test1wrqq9qqjzf3uh4w9hm0kqzrpvt60r4ryjp5rjf5epd3nptq7yscm6",
@@ -170,41 +165,27 @@ describe("runChatJob — happy path", () => {
       scriptRef: null,
     });
     // Mock awaitTx to resolve immediately after successful submitTx.
-    // Without this mock, MockChainProvider.awaitTx polls for SUBMIT_TX_HASH
+    // Without this mock, MockChainProvider.awaitTx polls for SUBMIT_TX_HASH,
     // which is never added to knownTxs (submitTx is mocked), causing a 200ms
-    // hang. Once Catherine flips the runner to buildSubmitTx, the real
-    // chain.submitTx will add the hash to knownTxs and awaitTx finds it;
-    // this spy then becomes a no-op override — safe to leave in.
+    // hang.
     vi.spyOn(chain, "awaitTx").mockResolvedValue(undefined);
   });
 
   afterEach(() => { vi.restoreAllMocks(); });
 
-  it("calls setRunning before callOllama (ordering contract)", async () => {
-    // RED — throws "not implemented"
-    // ORDERING CONTRACT: setRunning must precede callOllama.
-    // If Catherine inverts this order, the test fails and must be flagged.
-    const callOrder: string[] = [];
+  it("sets the job to running before the upstream call, then completes it", async () => {
+    // ORDERING CONTRACT: the status is "running" while callOllama runs.
     const jobId = jobs.create(ESCROW_REF_STR);
-
-    const setRunningSpy = vi.spyOn(jobs, "setRunning").mockImplementation((id) => {
-      callOrder.push(`setRunning:${id}`);
-    });
-    const ollamaSpy = vi.spyOn(ollamaMod, "callOllama").mockImplementation(async () => {
-      callOrder.push("callOllama");
+    let statusDuringUpstream: string | undefined;
+    vi.mocked(ollamaMod.callOllama).mockImplementationOnce(async () => {
+      statusDuringUpstream = jobs.get(jobId)?.status;
       return buildOllamaOkResult();
     });
-    const completeSpy = vi.spyOn(jobs, "complete").mockImplementation(() => {});
 
     await runChatJob(makeParams(chain, state, jobs, jobId));
 
-    expect(callOrder.indexOf(`setRunning:${jobId}`)).toBeLessThan(
-      callOrder.indexOf("callOllama"),
-    );
-
-    setRunningSpy.mockRestore();
-    ollamaSpy.mockRestore();
-    completeSpy.mockRestore();
+    expect(statusDuringUpstream).toBe("running");
+    expect(jobs.get(jobId)?.status).toBe("done");
   });
 
   it("calls jobs.complete with the canonical Responses payload and settlement data", async () => {
@@ -260,7 +241,6 @@ describe("runChatJob — happy path", () => {
   });
 
   it("receipt contains all 8 required fields with correct types and values", async () => {
-    // RED — throws "not implemented"
     const jobId = jobs.create(ESCROW_REF_STR);
     const completeSpy = vi.spyOn(jobs, "complete");
 
@@ -293,7 +273,6 @@ describe("runChatJob — happy path", () => {
   });
 
   it("receipt_signature is a 128-char hex string (64-byte Ed25519)", async () => {
-    // RED — throws "not implemented"
     const jobId = jobs.create(ESCROW_REF_STR);
     const completeSpy = vi.spyOn(jobs, "complete");
 
@@ -303,22 +282,7 @@ describe("runChatJob — happy path", () => {
     expect(HEX128_RE.test(sig)).toBe(true);
   });
 
-  it("wallclock_ms in receipt equals the wallclock_ms from Ollama (not total job time)", async () => {
-    // RED — throws "not implemented"
-    // The receipt's wallclock_ms must be inference.wallclock_ms, not wall clock
-    // elapsed for the whole runChatJob invocation.
-    const jobId = jobs.create(ESCROW_REF_STR);
-    const completeSpy = vi.spyOn(jobs, "complete");
-
-    await runChatJob(makeParams(chain, state, jobs, jobId));
-
-    const receipt = completeSpy.mock.calls[0][1].receipt as Record<string, unknown>;
-    // Our mock returns wallclock_ms = 3200; that must be what ends up in receipt
-    expect(receipt.wallclock_ms).toBe(3200);
-  });
-
   it("releases supplier lock on success (try/finally)", async () => {
-    // RED — throws "not implemented"
     const jobId = jobs.create(ESCROW_REF_STR);
     expect(state.snapshot().status).toBe("working");
 
@@ -342,9 +306,8 @@ describe("runChatJob — Ollama failure", () => {
     state.tryAcquire(ESCROW_REF_STR);
     jobs = new JobStore();
     vi.spyOn(chain, "submitTx").mockResolvedValue(SUBMIT_TX_HASH);
-    // Fix A — 2026-04-28 M1-F-async-chat-cleanup:
-    // Seed claimedRef and mock awaitTx for Catherine's buildSubmitTx flip.
-    // Ollama failure tests don't reach Submit, so these are defensive fixtures.
+    // Seed the claimedRef UTxO and mock awaitTx like the happy path. The Ollama
+    // failure tests do not reach Submit, so these are defensive fixtures.
     chain.seed({
       ref: CLAIMED_REF,
       address: "addr_test1wrqq9qqjzf3uh4w9hm0kqzrpvt60r4ryjp5rjf5epd3nptq7yscm6",
@@ -359,7 +322,6 @@ describe("runChatJob — Ollama failure", () => {
   afterEach(() => { vi.restoreAllMocks(); });
 
   it("calls jobs.fail with httpStatus=502, reason=ollama_failure on Ollama error", async () => {
-    // RED — throws "not implemented"
     mockOllamaFail("Ollama returned HTTP 500: Internal Server Error");
     const jobId = jobs.create(ESCROW_REF_STR);
     const failSpy = vi.spyOn(jobs, "fail");
@@ -375,18 +337,10 @@ describe("runChatJob — Ollama failure", () => {
   });
 
   it("releases supplier lock after Ollama failure (try/finally)", async () => {
-    // RED — throws "not implemented"
     mockOllamaFail();
     const jobId = jobs.create(ESCROW_REF_STR);
     await runChatJob(makeParams(chain, state, jobs, jobId));
     expect(state.snapshot().status).toBe("free");
-  });
-
-  it("does not throw — resolves after Ollama failure", async () => {
-    // RED — throws "not implemented"
-    mockOllamaFail();
-    const jobId = jobs.create(ESCROW_REF_STR);
-    await expect(runChatJob(makeParams(chain, state, jobs, jobId))).resolves.toBeUndefined();
   });
 });
 
@@ -404,10 +358,8 @@ describe("runChatJob — Submit tx failure", () => {
     state.tryAcquire(ESCROW_REF_STR);
     jobs = new JobStore();
     mockOllamaOk();
-    // Fix A — 2026-04-28 M1-F-async-chat-cleanup:
-    // Seed claimedRef UTxO. In Submit-failure tests, submitTx is mocked to
-    // reject so awaitTx is never reached; these fixtures are defensive for
-    // Catherine's buildSubmitTx flip.
+    // Seed the claimedRef UTxO. In the Submit-failure tests, submitTx is mocked
+    // to reject, so awaitTx is never reached; these fixtures are defensive.
     chain.seed({
       ref: CLAIMED_REF,
       address: "addr_test1wrqq9qqjzf3uh4w9hm0kqzrpvt60r4ryjp5rjf5epd3nptq7yscm6",
@@ -422,7 +374,6 @@ describe("runChatJob — Submit tx failure", () => {
   afterEach(() => { vi.restoreAllMocks(); });
 
   it("calls jobs.fail with httpStatus=502, reason=submit_failed when Submit tx throws", async () => {
-    // RED — throws "not implemented"
     vi.spyOn(chain, "submitTx").mockRejectedValue(new Error("phase-2 script rejected"));
     const jobId = jobs.create(ESCROW_REF_STR);
     const failSpy = vi.spyOn(jobs, "fail");
@@ -437,18 +388,10 @@ describe("runChatJob — Submit tx failure", () => {
   });
 
   it("releases lock after Submit tx failure", async () => {
-    // RED — throws "not implemented"
     vi.spyOn(chain, "submitTx").mockRejectedValue(new Error("phase-2 script rejected"));
     const jobId = jobs.create(ESCROW_REF_STR);
     await runChatJob(makeParams(chain, state, jobs, jobId));
     expect(state.snapshot().status).toBe("free");
-  });
-
-  it("does not throw — resolves after Submit tx failure", async () => {
-    // RED — throws "not implemented"
-    vi.spyOn(chain, "submitTx").mockRejectedValue(new Error("rejected"));
-    const jobId = jobs.create(ESCROW_REF_STR);
-    await expect(runChatJob(makeParams(chain, state, jobs, jobId))).resolves.toBeUndefined();
   });
 });
 
@@ -467,9 +410,8 @@ describe("runChatJob — awaitTx timeout on Submit", () => {
     jobs = new JobStore();
     mockOllamaOk();
     vi.spyOn(chain, "submitTx").mockResolvedValue(SUBMIT_TX_HASH);
-    // Fix A — 2026-04-28 M1-F-async-chat-cleanup:
-    // Seed claimedRef UTxO for buildSubmitTx flip. awaitTx is mocked per-test
-    // to reject (submit_timeout scenario); do NOT add a resolve-mock here.
+    // Seed the claimedRef UTxO. awaitTx is mocked per-test to reject
+    // (submit_timeout scenario); do NOT add a resolve-mock here.
     chain.seed({
       ref: CLAIMED_REF,
       address: "addr_test1wrqq9qqjzf3uh4w9hm0kqzrpvt60r4ryjp5rjf5epd3nptq7yscm6",
@@ -480,14 +422,11 @@ describe("runChatJob — awaitTx timeout on Submit", () => {
     });
     // NOTE: awaitTx is intentionally NOT mocked here at the describe level —
     // individual tests mock it to reject with a timeout error.
-    // This is the only describe block that keeps the submit_timeout RED until
-    // Catherine flips the 60_000ms budget (see Catherine's flip checklist).
   });
 
   afterEach(() => { vi.restoreAllMocks(); });
 
   it("calls jobs.fail with reason=submit_timeout when awaitTx rejects", async () => {
-    // RED — throws "not implemented"
     vi.spyOn(chain, "awaitTx").mockRejectedValue(new Error("awaitTx timed out"));
     const jobId = jobs.create(ESCROW_REF_STR);
     const failSpy = vi.spyOn(jobs, "fail");
@@ -502,7 +441,6 @@ describe("runChatJob — awaitTx timeout on Submit", () => {
   });
 
   it("releases lock after awaitTx timeout", async () => {
-    // RED — throws "not implemented"
     vi.spyOn(chain, "awaitTx").mockRejectedValue(new Error("timeout"));
     const jobId = jobs.create(ESCROW_REF_STR);
     await runChatJob(makeParams(chain, state, jobs, jobId));

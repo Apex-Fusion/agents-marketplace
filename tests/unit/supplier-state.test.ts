@@ -5,211 +5,143 @@
  * wallet mutex:
  *   - tryAcquire(escrowRef): boolean — slot admission (default capacity 1)
  *   - release(escrowRef) — frees exactly that ref's slot
- *   - markOffline()
- *   - snapshot(): { status, currentEscrowRef?, activeSessions, maxSessions, ... }
+ *   - markOffline() — clears every slot and refuses new acquires
+ *   - snapshot(): { status, currentEscrowRef?, activeEscrowRefs, activeSessions, maxSessions, lastSeenIso }
  *   - walletMutex.run — strict serialization of wallet chain ops
+ *
+ * The one-slot tests run on a fake clock. Each test walks one transition and
+ * asserts the whole snapshot. So the exact lastSeenIso shows which calls touch
+ * it: the constructor, an acquire, a release of a held ref and markOffline.
+ * A refused acquire does not touch it.
  */
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { SupplierState } from "../../supplier/src/state.js";
 
 const ESCROW_REF_A = `${"f".repeat(64)}#0`;
 const ESCROW_REF_B = `${"e".repeat(64)}#1`;
 const ESCROW_REF_C = `${"d".repeat(64)}#2`;
 
-describe("SupplierState — initial state", () => {
-  it("starts in free state", () => {
-    const state = new SupplierState();
-    expect(state.snapshot().status).toBe("free");
-  });
+// Fake-clock times. A touch stores the time of the call, so each step has its own value.
+const T0 = "2026-11-22T08:00:00.000Z";
+const T1 = "2026-11-22T08:00:01.000Z";
+const T2 = "2026-11-22T08:00:02.000Z";
+const T3 = "2026-11-22T08:00:03.000Z";
 
-  it("initial snapshot has no currentEscrowRef", () => {
-    const state = new SupplierState();
-    expect(state.snapshot().currentEscrowRef).toBeUndefined();
-  });
-
-  it("initial snapshot has a valid ISO timestamp in lastSeenIso", () => {
-    const state = new SupplierState();
-    const { lastSeenIso } = state.snapshot();
-    expect(lastSeenIso).toBeTruthy();
-    expect(new Date(lastSeenIso).getTime()).not.toBeNaN();
-  });
-});
-
-describe("SupplierState.tryAcquire()", () => {
+describe("SupplierState — one slot", () => {
   let state: SupplierState;
 
   beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(T0);
     state = new SupplierState();
   });
 
-  it("returns true when free", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("starts free with no ref held", () => {
+    expect(state.snapshot()).toStrictEqual({
+      status: "free",
+      activeEscrowRefs: [],
+      activeSessions: 0,
+      maxSessions: 1,
+      lastSeenIso: T0,
+    });
+  });
+
+  it("acquire takes the slot: free → working, and the ref is the current one", () => {
+    vi.setSystemTime(T1);
     expect(state.tryAcquire(ESCROW_REF_A)).toBe(true);
+    expect(state.snapshot()).toStrictEqual({
+      status: "working",
+      currentEscrowRef: ESCROW_REF_A,
+      activeEscrowRefs: [ESCROW_REF_A],
+      activeSessions: 1,
+      maxSessions: 1,
+      lastSeenIso: T1,
+    });
   });
 
-  it("transitions to working after acquire", () => {
+  it("a second acquire is refused and changes nothing", () => {
+    vi.setSystemTime(T1);
     state.tryAcquire(ESCROW_REF_A);
-    expect(state.snapshot().status).toBe("working");
-  });
+    const held = state.snapshot();
 
-  it("sets currentEscrowRef after acquire", () => {
-    state.tryAcquire(ESCROW_REF_A);
-    expect(state.snapshot().currentEscrowRef).toBe(ESCROW_REF_A);
-  });
-
-  it("returns false when already working", () => {
-    state.tryAcquire(ESCROW_REF_A);
+    vi.setSystemTime(T2);
     expect(state.tryAcquire(ESCROW_REF_B)).toBe(false);
+    expect(state.snapshot()).toStrictEqual(held);
   });
 
-  it("status remains working after second tryAcquire fails", () => {
+  it("release frees the slot: working → free, and the slot can be taken again", () => {
+    vi.setSystemTime(T1);
     state.tryAcquire(ESCROW_REF_A);
-    state.tryAcquire(ESCROW_REF_B);
-    expect(state.snapshot().status).toBe("working");
-  });
 
-  it("currentEscrowRef remains the FIRST ref after second tryAcquire fails", () => {
-    state.tryAcquire(ESCROW_REF_A);
-    state.tryAcquire(ESCROW_REF_B);
-    expect(state.snapshot().currentEscrowRef).toBe(ESCROW_REF_A);
-  });
-
-  it("returns false when offline", () => {
-    state.markOffline();
-    expect(state.tryAcquire(ESCROW_REF_A)).toBe(false);
-  });
-
-  it("status remains offline after tryAcquire fails", () => {
-    state.markOffline();
-    state.tryAcquire(ESCROW_REF_A);
-    expect(state.snapshot().status).toBe("offline");
-  });
-
-  it("updates lastSeenIso on successful acquire", () => {
-    const before = state.snapshot().lastSeenIso;
-    // Small sleep to ensure timestamp changes
-    state.tryAcquire(ESCROW_REF_A);
-    const after = state.snapshot().lastSeenIso;
-    // lastSeenIso must be a valid ISO string; may be equal if clock resolution is coarse
-    expect(new Date(after).getTime()).not.toBeNaN();
-    expect(after >= before).toBe(true);
-  });
-});
-
-describe("SupplierState.release()", () => {
-  let state: SupplierState;
-
-  beforeEach(() => {
-    state = new SupplierState();
-  });
-
-  it("transitions working → free", () => {
-    state.tryAcquire(ESCROW_REF_A);
+    vi.setSystemTime(T2);
     state.release(ESCROW_REF_A);
-    expect(state.snapshot().status).toBe("free");
-  });
+    expect(state.snapshot()).toStrictEqual({
+      status: "free",
+      activeEscrowRefs: [],
+      activeSessions: 0,
+      maxSessions: 1,
+      lastSeenIso: T2,
+    });
 
-  it("clears currentEscrowRef on release", () => {
-    state.tryAcquire(ESCROW_REF_A);
-    state.release(ESCROW_REF_A);
-    expect(state.snapshot().currentEscrowRef).toBeUndefined();
-  });
-
-  it("allows re-acquire after release", () => {
-    state.tryAcquire(ESCROW_REF_A);
-    state.release(ESCROW_REF_A);
+    vi.setSystemTime(T3);
     expect(state.tryAcquire(ESCROW_REF_B)).toBe(true);
+    expect(state.snapshot()).toStrictEqual({
+      status: "working",
+      currentEscrowRef: ESCROW_REF_B,
+      activeEscrowRefs: [ESCROW_REF_B],
+      activeSessions: 1,
+      maxSessions: 1,
+      lastSeenIso: T3,
+    });
   });
 
-  it("re-acquire after release sets new currentEscrowRef", () => {
+  it("markOffline from free: offline, refuses every acquire, and is idempotent", () => {
+    vi.setSystemTime(T1);
+    state.markOffline();
+    const offline = {
+      status: "offline",
+      activeEscrowRefs: [],
+      activeSessions: 0,
+      maxSessions: 1,
+      lastSeenIso: T1,
+    };
+    expect(state.snapshot()).toStrictEqual(offline);
+
+    expect(state.tryAcquire(ESCROW_REF_A)).toBe(false);
+    state.markOffline();
+    expect(state.snapshot()).toStrictEqual(offline);
+  });
+
+  it("markOffline from working drops the held ref", () => {
+    vi.setSystemTime(T1);
     state.tryAcquire(ESCROW_REF_A);
-    state.release(ESCROW_REF_A);
-    state.tryAcquire(ESCROW_REF_B);
-    expect(state.snapshot().currentEscrowRef).toBe(ESCROW_REF_B);
+
+    vi.setSystemTime(T2);
+    state.markOffline();
+    expect(state.snapshot()).toStrictEqual({
+      status: "offline",
+      activeEscrowRefs: [],
+      activeSessions: 0,
+      maxSessions: 1,
+      lastSeenIso: T2,
+    });
   });
 
-  it("updates lastSeenIso on release", () => {
+  it("snapshot is a copy — changing it does not change the state", () => {
     state.tryAcquire(ESCROW_REF_A);
-    const beforeRelease = state.snapshot().lastSeenIso;
-    state.release(ESCROW_REF_A);
-    const afterRelease = state.snapshot().lastSeenIso;
-    expect(new Date(afterRelease).getTime()).not.toBeNaN();
-    expect(afterRelease >= beforeRelease).toBe(true);
-  });
-});
+    const before = state.snapshot();
 
-describe("SupplierState.markOffline()", () => {
-  let state: SupplierState;
-
-  beforeEach(() => {
-    state = new SupplierState();
-  });
-
-  it("transitions free → offline", () => {
-    state.markOffline();
-    expect(state.snapshot().status).toBe("offline");
-  });
-
-  it("transitions working → offline", () => {
-    state.tryAcquire(ESCROW_REF_A);
-    state.markOffline();
-    expect(state.snapshot().status).toBe("offline");
-  });
-
-  it("is idempotent (offline → offline)", () => {
-    state.markOffline();
-    state.markOffline();
-    expect(state.snapshot().status).toBe("offline");
-  });
-
-  it("clears currentEscrowRef when going offline from working", () => {
-    state.tryAcquire(ESCROW_REF_A);
-    state.markOffline();
-    expect(state.snapshot().currentEscrowRef).toBeUndefined();
-  });
-
-  it("updates lastSeenIso when going offline", () => {
-    const before = state.snapshot().lastSeenIso;
-    state.markOffline();
-    const after = state.snapshot().lastSeenIso;
-    expect(new Date(after).getTime()).not.toBeNaN();
-    expect(after >= before).toBe(true);
-  });
-});
-
-describe("SupplierState.snapshot()", () => {
-  it("returns status, lastSeenIso but no currentEscrowRef when free", () => {
-    const state = new SupplierState();
+    // Change the returned snapshot: the value field and the ref array.
     const snap = state.snapshot();
-    expect(snap.status).toBe("free");
-    expect("currentEscrowRef" in snap).toBe(false);
-    expect(snap.lastSeenIso).toBeTruthy();
-  });
+    snap.status = "free";
+    snap.activeEscrowRefs.push(ESCROW_REF_B);
 
-  it("returns currentEscrowRef only when working", () => {
-    const state = new SupplierState();
-    state.tryAcquire(ESCROW_REF_A);
-    const snap = state.snapshot();
-    expect(snap.currentEscrowRef).toBe(ESCROW_REF_A);
-  });
-
-  it("snapshot is a copy — mutating it does not affect state", () => {
-    const state = new SupplierState();
-    state.tryAcquire(ESCROW_REF_A);
-    const snap = state.snapshot();
-    // Mutate the returned snapshot
-    (snap as Record<string, unknown>).status = "free";
-    // State must remain working
-    expect(state.snapshot().status).toBe("working");
-  });
-
-  it("reports active/max session counts", () => {
-    const state = new SupplierState();
-    expect(state.snapshot().activeSessions).toBe(0);
-    expect(state.snapshot().maxSessions).toBe(1);
-    state.tryAcquire(ESCROW_REF_A);
-    expect(state.snapshot().activeSessions).toBe(1);
-    expect(state.snapshot().activeEscrowRefs).toEqual([ESCROW_REF_A]);
+    expect(state.snapshot()).toStrictEqual(before);
   });
 });
 
@@ -272,24 +204,51 @@ describe("SupplierState — capacity > 1", () => {
 });
 
 describe("SupplierState.walletMutex", () => {
-  it("serializes runs in submission order and survives rejection", async () => {
-    const state = new SupplierState(4);
-    const order: number[] = [];
-    const p1 = state.walletMutex.run(async () => {
-      await new Promise((r) => setTimeout(r, 20));
-      order.push(1);
+  /**
+   * A promise that the test resolves by hand. It makes the order of the runs exact, with no timer.
+   * Node 20 has no Promise.withResolvers.
+   */
+  function deferred() {
+    let resolve!: () => void;
+    const promise = new Promise<void>((r) => {
+      resolve = r;
     });
-    const p2 = state.walletMutex.run(async () => {
-      order.push(2);
-    });
-    await Promise.all([p1, p2]);
-    expect(order).toEqual([1, 2]);
+    return { promise, resolve };
+  }
 
-    await state.walletMutex
-      .run(async () => {
+  it("runs one job at a time, in submission order", async () => {
+    const { walletMutex } = new SupplierState();
+    const events: string[] = [];
+    const started = deferred();
+    const gate = deferred();
+
+    const first = walletMutex.run(async () => {
+      events.push("first:start");
+      started.resolve();
+      await gate.promise;
+      events.push("first:end");
+    });
+    const second = walletMutex.run(async () => {
+      events.push("second:start");
+    });
+
+    // While the first job holds the lock, the second job has not started.
+    await started.promise;
+    expect(events).toEqual(["first:start"]);
+
+    gate.resolve();
+    await Promise.all([first, second]);
+    expect(events).toEqual(["first:start", "first:end", "second:start"]);
+  });
+
+  it("a rejected job reaches its caller and does not block the next job", async () => {
+    const { walletMutex } = new SupplierState();
+
+    await expect(
+      walletMutex.run(async () => {
         throw new Error("boom");
-      })
-      .catch(() => undefined);
-    expect(await state.walletMutex.run(async () => 42)).toBe(42);
+      }),
+    ).rejects.toThrow("boom");
+    await expect(walletMutex.run(async () => 42)).resolves.toBe(42);
   });
 });

@@ -8,6 +8,7 @@
  * scenario.
  */
 
+import { once } from "node:events";
 import { createServer } from "node:net";
 import { afterEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import type { DecoderHealthOptions } from "../../packages/shared/src/tx/server.js";
@@ -16,16 +17,18 @@ import { DECODER_STOP_LIMIT_MS, main } from "../../supplier/src/index.js";
 import { buildSampleEnv } from "../fixtures/supplier-side/sample-config.js";
 
 async function freePort(): Promise<number> {
-  return await new Promise<number>((resolve, reject) => {
-    const probe = createServer();
-    probe.once("error", reject);
-    probe.listen(0, "127.0.0.1", () => {
-      const address = probe.address();
-      const port = typeof address === "object" && address !== null ? address.port : 0;
-      probe.close(() => resolve(port));
-    });
-  });
+  const probe = createServer();
+  probe.listen(0, "127.0.0.1");
+  await once(probe, "listening");
+  const address = probe.address();
+  const port = typeof address === "object" && address !== null ? address.port : 0;
+  probe.close();
+  await once(probe, "close");
+  return port;
 }
+
+/** The options of `vi.waitFor`: the boot and the shutdown end in a few ms, so the check runs every 5 ms (the default is 50 ms). */
+const POLL = { interval: 5 };
 
 let exit: MockInstance<typeof process.exit>;
 let on: MockInstance<typeof process.on>;
@@ -55,7 +58,7 @@ async function boot(): Promise<{ options: DecoderHealthOptions; sigterm: () => v
   });
   await main(started);
   expect(started).toHaveBeenCalledTimes(1);
-  await vi.waitFor(() => expect(options!.server.listening).toBe(true));
+  await vi.waitFor(() => expect(options!.server.listening).toBe(true), POLL);
   const handler = on.mock.calls.find(([signal]) => signal === "SIGTERM")?.[1] as (() => void) | undefined;
   expect(handler).toBeTypeOf("function");
   return { options: options!, sigterm: handler! };
@@ -70,7 +73,7 @@ describe("supplier: the check of the decoder library", () => {
     expect(options.stopLimitMs).toBe(DECODER_STOP_LIMIT_MS);
     if (trigger === "a SIGTERM") sigterm();
     else expect(options.stop(1)).toBe(true);
-    await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(code));
+    await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(code), POLL);
     expect(options.server.listening).toBe(false);
     expect(offline).toHaveBeenCalledTimes(1);
     expect(exit).toHaveBeenCalledTimes(1);
@@ -83,7 +86,7 @@ describe("supplier: the check of the decoder library", () => {
     const { options, sigterm } = await boot();
     sigterm();
     expect(options.stop(1)).toBe(false);
-    await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(0));
+    await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(0), POLL);
     expect(offline).toHaveBeenCalledTimes(1);
     expect(log.mock.calls.filter(([line]) => String(line).endsWith("shutting down"))).toHaveLength(1);
   });

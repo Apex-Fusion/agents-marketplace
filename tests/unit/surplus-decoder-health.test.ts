@@ -12,6 +12,9 @@ import { afterEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import type { DecoderHealthOptions } from "../../packages/shared/src/tx/server.js";
 import { DECODER_STOP_LIMIT_MS, installShutdown } from "../../supplier/src/cli/surplus-seller.js";
 
+/** The options of `vi.waitFor`: the shutdown ends in a few ms, so the check runs every 5 ms (the default is 50 ms). */
+const POLL = { interval: 5 };
+
 let on: MockInstance<typeof process.on>;
 let log: MockInstance<typeof console.log>;
 let exitCode: typeof process.exitCode;
@@ -53,7 +56,7 @@ describe("surplus seller: the check of the decoder library", () => {
     expect(handler).toBeTypeOf("function");
     if (trigger === "a SIGTERM") handler();
     else expect(options.stop(1)).toBe(true);
-    await vi.waitFor(() => expect(server.listening).toBe(false));
+    await vi.waitFor(() => expect(server.listening).toBe(false), POLL);
     expect(order).toEqual(["publisher", "controller"]);
     expect(log.mock.calls.map(([line]) => String(line))).toEqual([
       `Surplus seller controller shutting down (${trigger === "a SIGTERM" ? "SIGTERM" : "the decoder check"})`,
@@ -65,7 +68,7 @@ describe("surplus seller: the check of the decoder library", () => {
     const { server, order, options, handler } = await boot();
     handler();
     expect(options.stop(1)).toBe(false);
-    await vi.waitFor(() => expect(server.listening).toBe(false));
+    await vi.waitFor(() => expect(server.listening).toBe(false), POLL);
     expect(order).toEqual(["publisher", "controller"]);
     expect(log).toHaveBeenCalledTimes(1);
     expect(process.exitCode).toBe(exitCode);
@@ -85,7 +88,7 @@ describe("surplus seller: the check of the decoder library", () => {
       return { check: () => undefined, close: () => undefined, watchesStackPointer: true };
     });
     expect(options!.stop(1)).toBe(true);
-    await vi.waitFor(() => expect(server.listening).toBe(false));
+    await vi.waitFor(() => expect(server.listening).toBe(false), POLL);
     expect(stopped).toBe(true);
   });
 });

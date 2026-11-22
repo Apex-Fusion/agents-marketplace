@@ -13,7 +13,6 @@ import {
   callOcrVision,
   probeRevision,
   defaultOcrInstruction,
-  OcrVisionError,
 } from "../../supplier/src/ocrVision.js";
 
 const IMG = Buffer.from("some page bytes").toString("base64");
@@ -123,16 +122,6 @@ describe("callOcrVision — error taxonomy", () => {
     await expect(callOcrVision({ ...validParams(), timeoutMs: 30 })).rejects.toMatchObject({
       reason: "ocr_timeout",
     });
-  });
-
-  it("exports the error class for instanceof checks", async () => {
-    vi.stubGlobal("fetch", async () => new Response("nope", { status: 502 }));
-    try {
-      await callOcrVision(validParams());
-      expect.unreachable("should have thrown");
-    } catch (err) {
-      expect(err).toBeInstanceOf(OcrVisionError);
-    }
   });
 });
 

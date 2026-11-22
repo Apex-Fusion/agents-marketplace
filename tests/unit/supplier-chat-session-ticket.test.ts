@@ -159,6 +159,17 @@ describe("chat-session ticket mode — /v1/chat/start", () => {
     expect(h.state.snapshot().activeSessions).toBe(1);
   });
 
+  it("ends the session when the idle timer fires, and frees the slot", async () => {
+    const h = makeHarness({ chatIdleTimeoutMs: 5 });
+    const ref = h.seedEscrow("e");
+    const res = await request(h.app).post("/v1/chat/start").set("X-Escrow-Ref", ref).send({ session_nonce: NONCE });
+    expect(res.status).toBe(200);
+
+    // Nobody calls /v1/chat/end: the idle timer ends the session.
+    await vi.waitFor(() => expect(h.chatSessions.get(ref)?.status).toBe("ended"), { interval: 5 });
+    expect(h.state.snapshot().activeSessions).toBe(0);
+  });
+
   it("still rejects a foreign-supplier escrow", async () => {
     const h = makeHarness();
     const txHash = "c".repeat(64);

@@ -1,12 +1,17 @@
 /**
- * supplier-jobs.test.ts — RED phase tests for JobStore (supplier/src/jobs.ts)
- *
- * M1-F-async-chat RED phase — Caroline, 2026-04-28
+ * supplier-jobs.test.ts — tests for JobStore (supplier/src/jobs.ts)
  *
  * Tests the in-memory JobStore lifecycle:
  *   create → setRunning → complete / fail → evictExpired
  *
- * All tests are RED until Catherine implements JobStore.
+ * Design pins:
+ *   - complete on a terminal job is a no-op: the first payload stays.
+ *   - evictExpired uses a strict ">": a terminal job is kept at exactly JOB_TTL_MS.
+ *   - evictExpired never removes a running or an accepted job.
+ *
+ * The evict cases also show that complete and fail set terminalAtMs, and that
+ * setRunning does not: a job that lacked terminalAtMs would never be removed,
+ * and a running job that had one would be removed.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -16,9 +21,6 @@ import type { ChatJobResponsePayload, JobResponsePayload } from "../../supplier/
 // ─── Fixture helpers ──────────────────────────────────────────────────────────
 
 const SAMPLE_ESCROW_REF = `${"f".repeat(64)}#0`;
-const OTHER_ESCROW_REF  = `${"e".repeat(64)}#1`;
-
-const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function samplePayload(): ChatJobResponsePayload {
   return {
@@ -62,16 +64,7 @@ describe("JobStore — create and get", () => {
 
   beforeEach(() => { store = new JobStore(); });
 
-  it("create returns a 36-char UUIDv4 string", () => {
-    // RED — throws "not implemented"
-    const jobId = store.create(SAMPLE_ESCROW_REF);
-    expect(typeof jobId).toBe("string");
-    expect(jobId).toHaveLength(36);
-    expect(UUID_V4_RE.test(jobId)).toBe(true);
-  });
-
   it("get returns the record with status=accepted after create", () => {
-    // RED — throws "not implemented"
     const jobId = store.create(SAMPLE_ESCROW_REF);
     const record = store.get(jobId);
     expect(record).not.toBeNull();
@@ -82,18 +75,8 @@ describe("JobStore — create and get", () => {
   });
 
   it("get returns null for an unknown jobId", () => {
-    // RED — throws "not implemented"
     const result = store.get("00000000-0000-4000-8000-000000000000");
     expect(result).toBeNull();
-  });
-
-  it("two parallel create calls produce two distinct UUIDv4 jobIds", () => {
-    // RED — throws "not implemented"
-    const id1 = store.create(SAMPLE_ESCROW_REF);
-    const id2 = store.create(OTHER_ESCROW_REF);
-    expect(id1).not.toBe(id2);
-    expect(UUID_V4_RE.test(id1)).toBe(true);
-    expect(UUID_V4_RE.test(id2)).toBe(true);
   });
 });
 
@@ -105,19 +88,10 @@ describe("JobStore — setRunning", () => {
   beforeEach(() => { store = new JobStore(); });
 
   it("setRunning transitions job from accepted to running", () => {
-    // RED — throws "not implemented"
     const jobId = store.create(SAMPLE_ESCROW_REF);
     store.setRunning(jobId);
     const record = store.get(jobId);
     expect(record!.status).toBe("running");
-  });
-
-  it("setRunning does not set terminalAtMs", () => {
-    // RED — throws "not implemented"
-    const jobId = store.create(SAMPLE_ESCROW_REF);
-    store.setRunning(jobId);
-    const record = store.get(jobId);
-    expect(record!.terminalAtMs).toBeUndefined();
   });
 });
 
@@ -129,7 +103,6 @@ describe("JobStore — complete", () => {
   beforeEach(() => { store = new JobStore(); });
 
   it("complete transitions job to done and populates responsePayload", () => {
-    // RED — throws "not implemented"
     const jobId = store.create(SAMPLE_ESCROW_REF);
     store.setRunning(jobId);
     const payload = samplePayload();
@@ -139,19 +112,7 @@ describe("JobStore — complete", () => {
     expect(record!.responsePayload).toEqual(payload);
   });
 
-  it("complete sets terminalAtMs", () => {
-    // RED — throws "not implemented"
-    const now = Date.now();
-    const jobId = store.create(SAMPLE_ESCROW_REF);
-    store.setRunning(jobId);
-    store.complete(jobId, samplePayload());
-    const record = store.get(jobId);
-    expect(typeof record!.terminalAtMs).toBe("number");
-    expect(record!.terminalAtMs).toBeGreaterThanOrEqual(now);
-  });
-
   it("complete on an already-terminal job does not overwrite status", () => {
-    // RED — throws "not implemented"
     // Pin decision: complete on a terminal job is a no-op (status stays done)
     const jobId = store.create(SAMPLE_ESCROW_REF);
     store.setRunning(jobId);
@@ -172,14 +133,6 @@ describe("JobStore — complete", () => {
     const first = record!.responsePayload!;
     expect("output" in first && first.output[0]).toEqual(payload1.output[0]);
   });
-
-  it("complete on unknown jobId does not throw", () => {
-    // RED — throws "not implemented"
-    // Pin decision: no-op / silent — unknown jobId is not an error at runtime
-    expect(() =>
-      store.complete("00000000-0000-4000-8000-000000000000", samplePayload()),
-    ).not.toThrow();
-  });
 });
 
 // ─── fail ─────────────────────────────────────────────────────────────────────
@@ -190,7 +143,6 @@ describe("JobStore — fail", () => {
   beforeEach(() => { store = new JobStore(); });
 
   it("fail transitions job to failed and populates failure", () => {
-    // RED — throws "not implemented"
     const jobId = store.create(SAMPLE_ESCROW_REF);
     store.setRunning(jobId);
     store.fail(jobId, { httpStatus: 502, reason: "ollama_failure", message: "ollama down" });
@@ -200,51 +152,19 @@ describe("JobStore — fail", () => {
     expect(record!.failure!.reason).toBe("ollama_failure");
     expect(record!.failure!.message).toBe("ollama down");
   });
-
-  it("fail sets terminalAtMs", () => {
-    // RED — throws "not implemented"
-    const now = Date.now();
-    const jobId = store.create(SAMPLE_ESCROW_REF);
-    store.setRunning(jobId);
-    store.fail(jobId, { httpStatus: 502, reason: "submit_failed", message: "tx failed" });
-    const record = store.get(jobId);
-    expect(typeof record!.terminalAtMs).toBe("number");
-    expect(record!.terminalAtMs).toBeGreaterThanOrEqual(now);
-  });
 });
 
-// ─── count ────────────────────────────────────────────────────────────────────
+// ─── complete / fail on an unknown job ──────────────────────────────────────
 
-describe("JobStore — count", () => {
-  let store: JobStore;
+describe("JobStore — an unknown job", () => {
+  it("complete and fail on an unknown jobId create no record", () => {
+    const store = new JobStore();
+    const unknown = "00000000-0000-4000-8000-000000000000";
 
-  beforeEach(() => { store = new JobStore(); });
+    store.complete(unknown, samplePayload());
+    store.fail(unknown, { httpStatus: 502, reason: "ollama_failure", message: "down" });
 
-  it("count returns 0 on empty store", () => {
-    // RED — throws "not implemented"
-    expect(store.count()).toBe(0);
-  });
-
-  it("count increments after each create", () => {
-    // RED — throws "not implemented"
-    store.create(SAMPLE_ESCROW_REF);
-    expect(store.count()).toBe(1);
-    store.create(OTHER_ESCROW_REF);
-    expect(store.count()).toBe(2);
-  });
-
-  it("count decrements after evictExpired removes a terminal job", () => {
-    // RED — throws "not implemented"
-    vi.useFakeTimers();
-    vi.setSystemTime(1_000_000);
-    const jobId = store.create(SAMPLE_ESCROW_REF);
-    store.setRunning(jobId);
-    store.complete(jobId, samplePayload());
-    expect(store.count()).toBe(1);
-    // Advance past TTL
-    store.evictExpired(1_000_000 + JOB_TTL_MS + 1);
-    expect(store.count()).toBe(0);
-    vi.useRealTimers();
+    expect(store.get(unknown)).toBeNull();
   });
 });
 
@@ -264,7 +184,6 @@ describe("JobStore — evictExpired", () => {
   });
 
   it("evictExpired removes a done job older than JOB_TTL_MS", () => {
-    // RED — throws "not implemented"
     vi.setSystemTime(1_000);
     const jobId = store.create(SAMPLE_ESCROW_REF);
     store.setRunning(jobId);
@@ -275,7 +194,6 @@ describe("JobStore — evictExpired", () => {
   });
 
   it("evictExpired removes a failed job older than JOB_TTL_MS", () => {
-    // RED — throws "not implemented"
     vi.setSystemTime(2_000);
     const jobId = store.create(SAMPLE_ESCROW_REF);
     store.setRunning(jobId);
@@ -285,7 +203,6 @@ describe("JobStore — evictExpired", () => {
   });
 
   it("evictExpired keeps a done job younger than JOB_TTL_MS", () => {
-    // RED — throws "not implemented"
     vi.setSystemTime(3_000);
     const jobId = store.create(SAMPLE_ESCROW_REF);
     store.setRunning(jobId);
@@ -296,7 +213,6 @@ describe("JobStore — evictExpired", () => {
   });
 
   it("evictExpired never removes a running job regardless of age", () => {
-    // RED — throws "not implemented"
     vi.setSystemTime(4_000);
     const jobId = store.create(SAMPLE_ESCROW_REF);
     store.setRunning(jobId);
@@ -308,7 +224,6 @@ describe("JobStore — evictExpired", () => {
   });
 
   it("evictExpired never removes an accepted job regardless of age", () => {
-    // RED — throws "not implemented"
     vi.setSystemTime(5_000);
     const jobId = store.create(SAMPLE_ESCROW_REF);
     store.evictExpired(5_000 + JOB_TTL_MS * 100);

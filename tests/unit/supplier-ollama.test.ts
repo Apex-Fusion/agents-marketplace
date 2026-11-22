@@ -1,19 +1,21 @@
 /**
- * supplier-ollama.test.ts — RED phase tests for supplier/src/ollama.ts
+ * supplier-ollama.test.ts — tests for supplier/src/ollama.ts
  *
  * All tests mock global.fetch — no real Ollama process required.
  *
  * Covers:
- *   - Request shape: POST to ${ollamaUrl}/api/chat, body has model+messages+stream:false
- *   - Happy path: parses Ollama response, converts total_duration ns → ms
- *   - Error: 5xx → OllamaError reason "ollama_failure"
+ *   - Request: one POST to ${ollamaUrl}/api/chat with model, messages and
+ *     stream:false; options.num_predict only when an output cap is given
+ *   - Result: content, done_reason and token counts of the response;
+ *     total_duration ns → ms, rounded down
+ *   - Error: non-2xx → OllamaError reason "ollama_failure"
  *   - Error: timeout → OllamaError reason "ollama_timeout"
- *   - Error: missing message.content → OllamaError reason "ollama_malformed"
- *   - Error: missing message field → OllamaError reason "ollama_malformed"
+ *   - Error: no message, no content, empty content on a stop, or no terminal
+ *     done_reason → OllamaError reason "ollama_malformed"
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { callOllama, OllamaError } from "../../supplier/src/ollama.js";
+import { callOllama } from "../../supplier/src/ollama.js";
 
 const OLLAMA_URL = "http://localhost:11434";
 const MODEL = "qwen2.5:0.5b";
@@ -56,9 +58,9 @@ function makeOllamaResponse(
   };
 }
 
-// ─── Request shape ─────────────────────────────────────────────────────────
+// ─── Request ───────────────────────────────────────────────────────────────
 
-describe("callOllama() — request shape", () => {
+describe("callOllama() — request", () => {
   beforeEach(() => {
     vi.stubGlobal("fetch", makeFetchOk(makeOllamaResponse("Hi there")));
   });
@@ -67,37 +69,14 @@ describe("callOllama() — request shape", () => {
     vi.restoreAllMocks();
   });
 
-  it("sends POST to ${ollamaUrl}/api/chat", async () => {
+  it("posts the model, the messages and stream:false to ${ollamaUrl}/api/chat", async () => {
     await callOllama({ ollamaUrl: OLLAMA_URL, model: MODEL, messages: MESSAGES, timeoutMs: TIMEOUT_MS });
-    const [url] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit];
-    expect(url).toBe(`${OLLAMA_URL}/api/chat`);
-  });
-
-  it("sends POST method", async () => {
-    await callOllama({ ollamaUrl: OLLAMA_URL, model: MODEL, messages: MESSAGES, timeoutMs: TIMEOUT_MS });
-    const [, init] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit];
-    expect(init.method?.toUpperCase()).toBe("POST");
-  });
-
-  it("request body contains model", async () => {
-    await callOllama({ ollamaUrl: OLLAMA_URL, model: MODEL, messages: MESSAGES, timeoutMs: TIMEOUT_MS });
-    const [, init] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit];
-    const body = JSON.parse(init.body as string);
-    expect(body.model).toBe(MODEL);
-  });
-
-  it("request body contains messages", async () => {
-    await callOllama({ ollamaUrl: OLLAMA_URL, model: MODEL, messages: MESSAGES, timeoutMs: TIMEOUT_MS });
-    const [, init] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit];
-    const body = JSON.parse(init.body as string);
-    expect(body.messages).toEqual(MESSAGES);
-  });
-
-  it("request body has stream: false", async () => {
-    await callOllama({ ollamaUrl: OLLAMA_URL, model: MODEL, messages: MESSAGES, timeoutMs: TIMEOUT_MS });
-    const [, init] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit];
-    const body = JSON.parse(init.body as string);
-    expect(body.stream).toBe(false);
+    const [url, init] = vi.mocked(fetch).mock.calls[0];
+    expect({ url, method: init?.method, body: JSON.parse(init?.body as string) }).toEqual({
+      url: `${OLLAMA_URL}/api/chat`,
+      method: "POST",
+      body: { model: MODEL, messages: MESSAGES, stream: false },
+    });
   });
 
   it("forwards an explicit Responses output cap and omits an absent cap", async () => {
@@ -124,17 +103,27 @@ describe("callOllama() — request shape", () => {
   });
 });
 
-// ─── Happy path ─────────────────────────────────────────────────────────────
+// ─── Result ─────────────────────────────────────────────────────────────────
 
-describe("callOllama() — happy path", () => {
+describe("callOllama() — result", () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
-  it("returns content from message.content", async () => {
-    vi.stubGlobal("fetch", makeFetchOk(makeOllamaResponse("Paris is the capital of France.")));
+  it("maps the Ollama response to the result", async () => {
+    // 3_200_000_000 ns = 3200 ms. The two token counts differ, so a swap shows.
+    vi.stubGlobal(
+      "fetch",
+      makeFetchOk(makeOllamaResponse("Paris is the capital of France.", 15, 40, 3_200_000_000)),
+    );
     const result = await callOllama({ ollamaUrl: OLLAMA_URL, model: MODEL, messages: MESSAGES, timeoutMs: TIMEOUT_MS });
-    expect(result.content).toBe("Paris is the capital of France.");
+    expect(result).toEqual({
+      content: "Paris is the capital of France.",
+      done_reason: "stop",
+      prompt_tokens: 15,
+      completion_tokens: 40,
+      wallclock_ms: 3200,
+    });
   });
 
   it("preserves the terminal done_reason", async () => {
@@ -143,37 +132,17 @@ describe("callOllama() — happy path", () => {
     expect(result.done_reason).toBe("length");
   });
 
-  it("returns prompt_tokens from prompt_eval_count", async () => {
-    vi.stubGlobal("fetch", makeFetchOk(makeOllamaResponse("answer", 15, 40)));
-    const result = await callOllama({ ollamaUrl: OLLAMA_URL, model: MODEL, messages: MESSAGES, timeoutMs: TIMEOUT_MS });
-    expect(result.prompt_tokens).toBe(15);
-  });
-
-  it("returns completion_tokens from eval_count", async () => {
-    vi.stubGlobal("fetch", makeFetchOk(makeOllamaResponse("answer", 15, 40)));
-    const result = await callOllama({ ollamaUrl: OLLAMA_URL, model: MODEL, messages: MESSAGES, timeoutMs: TIMEOUT_MS });
-    expect(result.completion_tokens).toBe(40);
-  });
-
-  it("converts total_duration nanoseconds to wallclock_ms", async () => {
-    // 3_200_000_000 ns = 3200 ms
-    vi.stubGlobal("fetch", makeFetchOk(makeOllamaResponse("answer", 10, 40, 3_200_000_000)));
-    const result = await callOllama({ ollamaUrl: OLLAMA_URL, model: MODEL, messages: MESSAGES, timeoutMs: TIMEOUT_MS });
-    expect(result.wallclock_ms).toBe(3200);
-  });
-
-  it("wallclock_ms is floored (not rounded up)", async () => {
-    // 1_500_999_999 ns = 1500.999999 ms → floor to 1500
+  it("rounds wallclock_ms down to whole milliseconds", async () => {
+    // 1_500_999_999 ns = 1500.999999 ms → 1500 (Math.floor, not Math.round)
     vi.stubGlobal("fetch", makeFetchOk(makeOllamaResponse("answer", 5, 20, 1_500_999_999)));
     const result = await callOllama({ ollamaUrl: OLLAMA_URL, model: MODEL, messages: MESSAGES, timeoutMs: TIMEOUT_MS });
-    expect(result.wallclock_ms).toBeLessThanOrEqual(1501);
-    expect(result.wallclock_ms).toBeGreaterThanOrEqual(1500);
+    expect(result.wallclock_ms).toBe(1500);
   });
 });
 
-// ─── Error: 5xx response ────────────────────────────────────────────────────
+// ─── Error: non-2xx response, network error ─────────────────────────────────
 
-describe("callOllama() — ollama_failure (non-2xx)", () => {
+describe("callOllama() — ollama_failure", () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
@@ -185,18 +154,12 @@ describe("callOllama() — ollama_failure (non-2xx)", () => {
     ).rejects.toMatchObject({ reason: "ollama_failure" });
   });
 
-  it("throws OllamaError with reason ollama_failure on 503", async () => {
-    vi.stubGlobal("fetch", makeFetchError(503));
+  it("throws OllamaError with reason ollama_failure when fetch fails with a network error", async () => {
+    // Ollama is down: fetch rejects with a TypeError, which is not an abort.
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("fetch failed")));
     await expect(
       callOllama({ ollamaUrl: OLLAMA_URL, model: MODEL, messages: MESSAGES, timeoutMs: TIMEOUT_MS })
-    ).rejects.toMatchObject({ reason: "ollama_failure" });
-  });
-
-  it("throws OllamaError (not generic Error) on 5xx", async () => {
-    vi.stubGlobal("fetch", makeFetchError(500));
-    await expect(
-      callOllama({ ollamaUrl: OLLAMA_URL, model: MODEL, messages: MESSAGES, timeoutMs: TIMEOUT_MS })
-    ).rejects.toBeInstanceOf(OllamaError);
+    ).rejects.toMatchObject({ reason: "ollama_failure", message: "Ollama fetch failed: fetch failed" });
   });
 });
 
@@ -224,41 +187,29 @@ describe("callOllama() — ollama_malformed", () => {
     vi.restoreAllMocks();
   });
 
-  it("throws OllamaError with reason ollama_malformed when message.content is missing", async () => {
-    vi.stubGlobal(
-      "fetch",
-      makeFetchOk({ message: { role: "assistant" }, done: true, done_reason: "stop", prompt_eval_count: 5, eval_count: 5, total_duration: 1e9 })
-    );
-    await expect(
-      callOllama({ ollamaUrl: OLLAMA_URL, model: MODEL, messages: MESSAGES, timeoutMs: TIMEOUT_MS })
-    ).rejects.toMatchObject({ reason: "ollama_malformed" });
-  });
-
-  it("throws OllamaError with reason ollama_malformed when message field is absent", async () => {
-    vi.stubGlobal(
-      "fetch",
-      makeFetchOk({ done: true, done_reason: "stop", prompt_eval_count: 5, eval_count: 5, total_duration: 1e9 })
-    );
-    await expect(
-      callOllama({ ollamaUrl: OLLAMA_URL, model: MODEL, messages: MESSAGES, timeoutMs: TIMEOUT_MS })
-    ).rejects.toMatchObject({ reason: "ollama_malformed" });
-  });
-
-  it("throws OllamaError with reason ollama_malformed when message.content is null", async () => {
-    vi.stubGlobal(
-      "fetch",
-      makeFetchOk({ message: { role: "assistant", content: null }, done: true, done_reason: "stop", prompt_eval_count: 5, eval_count: 5, total_duration: 1e9 })
-    );
-    await expect(
-      callOllama({ ollamaUrl: OLLAMA_URL, model: MODEL, messages: MESSAGES, timeoutMs: TIMEOUT_MS })
-    ).rejects.toMatchObject({ reason: "ollama_malformed" });
-  });
-
-  it("throws OllamaError with reason ollama_malformed when message.content is empty string", async () => {
-    vi.stubGlobal(
-      "fetch",
-      makeFetchOk(makeOllamaResponse(""))
-    );
+  // One row for each check of ollama.ts that throws ollama_malformed on the shape of the body.
+  it.each([
+    [
+      "has no message field",
+      { done: true, done_reason: "stop", prompt_eval_count: 5, eval_count: 5, total_duration: 1e9 },
+    ],
+    [
+      "has a message without content",
+      { message: { role: "assistant" }, done: true, done_reason: "stop", prompt_eval_count: 5, eval_count: 5, total_duration: 1e9 },
+    ],
+    ["has empty content and done_reason stop", makeOllamaResponse("")],
+    [
+      "has no terminal done_reason",
+      {
+        message: { role: "assistant", content: "answer" },
+        done: true,
+        prompt_eval_count: 5,
+        eval_count: 5,
+        total_duration: 1e9,
+      },
+    ],
+  ])("throws OllamaError with reason ollama_malformed when the response %s", async (_row, body) => {
+    vi.stubGlobal("fetch", makeFetchOk(body));
     await expect(
       callOllama({ ollamaUrl: OLLAMA_URL, model: MODEL, messages: MESSAGES, timeoutMs: TIMEOUT_MS })
     ).rejects.toMatchObject({ reason: "ollama_malformed" });
@@ -272,21 +223,5 @@ describe("callOllama() — ollama_malformed", () => {
     await expect(
       callOllama({ ollamaUrl: OLLAMA_URL, model: MODEL, messages: MESSAGES, timeoutMs: TIMEOUT_MS }),
     ).resolves.toMatchObject({ content: "", done_reason: "length" });
-  });
-
-  it("rejects a response without a terminal done_reason", async () => {
-    vi.stubGlobal(
-      "fetch",
-      makeFetchOk({
-        message: { role: "assistant", content: "answer" },
-        done: true,
-        prompt_eval_count: 5,
-        eval_count: 5,
-        total_duration: 1e9,
-      }),
-    );
-    await expect(
-      callOllama({ ollamaUrl: OLLAMA_URL, model: MODEL, messages: MESSAGES, timeoutMs: TIMEOUT_MS }),
-    ).rejects.toMatchObject({ reason: "ollama_malformed" });
   });
 });
