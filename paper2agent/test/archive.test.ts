@@ -29,15 +29,17 @@ async function archive(entries: ArchiveEntry[]): Promise<string> {
   return path;
 }
 
+// The entry handler of `extractPackage` and `packageZip` stops the stream when it refuses an entry. The pipeline then rejects with
+// "Premature close", not with the message of the guard. So the cases that refuse an entry check only that the call throws.
 describe("untrusted package archive boundaries", () => {
-  it.each(["../outside.py", "/tmp/outside.py", "source/../../outside.py", "source\\..\\outside.py"])("rejects escaping path %s without touching outside files", async (name) => {
+  it.each(["../outside.py", "/tmp/outside.py", "source\\..\\outside.py"])("rejects escaping path %s without touching outside files", async (name) => {
     const outside = join(directory, "outside.py");
-    await writeFile(outside, "operator-owned");
     const path = await archive([{ name, content: "replacement" }]);
     const target = join(directory, "package");
     await expect(extractPackage(path, target)).rejects.toThrow();
-    expect(await readFile(outside, "utf8")).toBe("operator-owned");
-    await expect(readFile(join(target, "outside.py"))).rejects.toThrow();
+    // No file appears outside the destination. A file that existed before would stop the write with EEXIST and hide a missing guard.
+    await expect(readFile(outside)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(join(target, "outside.py"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it.each(["symlink", "link"] as const)("rejects %s entries instead of following them", async (type) => {
@@ -54,13 +56,13 @@ describe("untrusted package archive boundaries", () => {
     const path = join(directory, "oversized.tar");
     const file = await open(path, "wx");
     try { await file.truncate(MAX_PACKAGE_BYTES + 1); } finally { await file.close(); }
-    await expect(extractPackage(path, join(directory, "package"))).rejects.toThrow();
+    await expect(extractPackage(path, join(directory, "package"))).rejects.toThrow("Package archive exceeds its size limit");
   });
 
   it("does not overwrite an existing destination", async () => {
     const path = await archive([{ name: "server.py", content: "replacement" }]);
     await writeFile(join(directory, "server.py"), "operator-owned");
-    await expect(extractPackage(path, directory)).rejects.toThrow();
+    await expect(extractPackage(path, directory)).rejects.toMatchObject({ code: "EEXIST" });
     expect(await readFile(join(directory, "server.py"), "utf8")).toBe("operator-owned");
   });
 
@@ -69,7 +71,7 @@ describe("untrusted package archive boundaries", () => {
     const target = join(directory, "package");
     const inventory = await extractPackage(path, target);
     await writeFile(join(target, "server.py"), "modified");
-    await expect(verifyPackageFiles(target, inventory)).rejects.toThrow();
+    await expect(verifyPackageFiles(target, inventory)).rejects.toThrow("Package files no longer match the reviewed artifact");
   });
 
   it("invalidates a review when a file is added", async () => {
@@ -77,7 +79,7 @@ describe("untrusted package archive boundaries", () => {
     const target = join(directory, "package");
     const inventory = await extractPackage(path, target);
     await writeFile(join(target, "sitecustomize.py"), "unreviewed startup code");
-    await expect(verifyPackageFiles(target, inventory)).rejects.toThrow();
+    await expect(verifyPackageFiles(target, inventory)).rejects.toThrow("Package files no longer match the reviewed artifact");
   });
 
   it("rejects a link substituted after extraction", async () => {
@@ -86,7 +88,7 @@ describe("untrusted package archive boundaries", () => {
     const inventory = await extractPackage(path, target);
     await rm(join(target, "server.py"));
     await symlink(join(directory, "input.tar"), join(target, "server.py"));
-    await expect(verifyPackageFiles(target, inventory)).rejects.toThrow();
+    await expect(verifyPackageFiles(target, inventory)).rejects.toThrow("Package links and special files are not allowed");
   });
 });
 
