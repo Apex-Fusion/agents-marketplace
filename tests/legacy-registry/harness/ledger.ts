@@ -45,12 +45,6 @@ export const VECTOR_MAINNET_TIME = {
   slotLengthMs: 1_000n,
 } as const;
 
-/** The POSIX time (ms) that a script sees for a validity bound at `slot`. */
-export function slotToPosixMs(slot: bigint): bigint {
-  const { zeroTimeMs, zeroSlot, slotLengthMs } = VECTOR_MAINNET_TIME;
-  return zeroTimeMs + (slot - zeroSlot) * slotLengthMs;
-}
-
 /** The slot that contains the POSIX time `ms`. */
 export function posixMsToSlot(ms: bigint): bigint {
   const { zeroTimeMs, zeroSlot, slotLengthMs } = VECTOR_MAINNET_TIME;
