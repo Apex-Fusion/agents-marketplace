@@ -7,7 +7,7 @@ The rules for agents are in `AGENTS.md`. The reasons for each choice are in `doc
 
 | Tier | When | What |
 |---|---|---|
-| Agent loop | During the work | `scripts/test-changed`: the tests that the changed files reach, the typecheck of the changed packages and `aiken check` of the changed Aiken area, on a build host through `rx`. One thread for `aiken check`. Never the full suite. |
+| Agent loop | During the work | `scripts/test-changed`: the tests that the changed files reach, the typecheck of the source of the changed packages (not of the test files: CI checks them, by the owner's decision) and `aiken check` of the changed Aiken area, on a build host through `rx`. One thread for `aiken check`. Never the full suite. |
 | Pull request gate | Each pull request | The workflow `CI` (`.github/workflows/ci.yml`). The job `changes` chooses the jobs. The job `gate` is the only required check. |
 | Push on `main` | Each merge | The same jobs and the same path rule as the pull request. Then `deploy-mainnet.yml` deploys. |
 | Nightly | 02:30 UTC | `.github/workflows/nightly.yml`: everything, with `TEST_DEPTH=nightly`, on the compiler of the deployed contracts. |
@@ -28,7 +28,7 @@ All commands that load the CPU run on a build host through `rx` (`rx --help`).
 | The deep variants of a test file | `rx TEST_DEPTH=nightly pnpm exec vitest run <file>` (section "Test depth") |
 | The typecheck of one package | `rx pnpm --filter ./<package folder> typecheck` |
 | The typecheck of all source | `rx pnpm -r typecheck` |
-| The typecheck of the test files (report only) | `rx node scripts/ci/tsc-report.mjs tests/tsconfig.json gateway/tsconfig.test.json paper2agent/tsconfig.test.json` |
+| The typecheck of the test files (blocking in CI) | `rx node scripts/ci/tsc-report.mjs tests/tsconfig.json gateway/tsconfig.test.json paper2agent/tsconfig.test.json tests/legacy-registry/tsconfig.json tests/identity-builders/tsconfig.json tests/identity-vectors/tsconfig.json` |
 | One Aiken area | `rx mise exec github:aiken-lang/aiken@1.1.24 node@20 -- scripts/aiken-check --modules identity_marketplace/escrow` |
 | One Aiken shard | `rx mise exec github:aiken-lang/aiken@1.1.24 node@20 -- scripts/aiken-check --shard 1 --of 4 --seed 358316146` |
 | The legacy contract | `rx mise exec github:aiken-lang/aiken@1.1.24 node@20 -- scripts/aiken-check --project contracts/marketplace --all` |
@@ -90,7 +90,7 @@ The workflow `CI` has the same triggers as before: a push on `main`, and each pu
 | Job | Runs when | What it does |
 |---|---|---|
 | `changes` | Always | Lists the changed files (the pull request from the merge base to the head, a push from `before` to the new commit; every file when `before` is missing). Runs `scripts/ci/changes.mjs`. Tests the CI scripts first. |
-| `typecheck` | The change is not docs only | `pnpm -r typecheck` (blocking). Then the type check of the test files in report mode: `tests/tsconfig.json`, `gateway/tsconfig.test.json`, `paper2agent/tsconfig.test.json` and three folder configs. The error count of each config is in the job summary. |
+| `typecheck` | The change is not docs only | `pnpm -r typecheck` (blocking). Then the type check of the test files (blocking too): `tests/tsconfig.json`, `gateway/tsconfig.test.json`, `paper2agent/tsconfig.test.json` and three folder configs. An error in any config fails the job. The error count of each config is in the job summary. Section "The type check of the test files". |
 | `vitest` | The selection is not empty | The projects `unit` and `ui`: the selected test files, or every file of the two projects when the selection is `all`. Fails when it runs no file. The 10 slowest test files are in the job summary. |
 | `aiken-eval` | `contracts/identity-marketplace/` changed, or a file that the tests of the project `aiken-eval` reach | `aiken build` with the blueprint diff, the project `aiken-eval` (the 4 folders, one run, the 10 slowest files in the job summary), `tsc -p tests/identity-deploy/tsconfig.json`, and `fixtures/generate.mjs --check`. Aiken v1.1.21. |
 | `aiken-check` | The identity contract changed, the Aiken tool changed, or a map `contracts/identity-marketplace/tests/*.md` changed | The map check (`scripts/aiken-check-maps`), then 4 shards of `scripts/aiken-check`, aiken v1.1.24, one fixed seed. |
@@ -150,6 +150,16 @@ Other jobs, same rule: `aiken-eval` also runs when a file that the tests of the 
 - Each run prints the decision and the selected files in the summary of the job `changes`.
 - A red `gate` names the job that failed. Open that job, repair, and push again.
 
+### The type check of the test files
+
+A test file with a type error fails the job `typecheck`, and so it fails the gate. The agent loop does not type-check the test files: `scripts/test-changed` checks the source of the changed packages only, by the owner's decision (`docs/TEST-REVISION.md`, section 12). When the job is red, run the command of section 2 for the config that the job summary names, repair the file, and push again.
+
+- The configs: `tests/tsconfig.json` (`tests/unit`, `tests/fixtures`, `tests/setup.ts`, `tests/depth.ts`), `gateway/tsconfig.test.json`, `paper2agent/tsconfig.test.json`, and the configs of `tests/legacy-registry`, `tests/identity-builders` and `tests/identity-vectors`. `tests/identity-deploy/tsconfig.json` is checked in the job `aiken-eval`. The tests of `identity-gateway` and `packages/shared` are part of the `pnpm -r typecheck` of their packages.
+- Repair the type, not the check. Build a config from the shared sample builder: `buildSampleConfig` (`tests/fixtures/supplier-side/sample-config.ts`), `buildSampleSurplusConfig` (`tests/fixtures/supplier-side/sample-surplus-config.ts`) or `buildSampleGatewayConfig` (`tests/fixtures/gateway-side/sample-config.ts`). A new field of the config then breaks one file, not ten.
+- Use `satisfies`, a typed helper or a type annotation. Never `as any`, never `// @ts-ignore`.
+- A deliberate wrong input (a `null` where the type forbids it) takes a cast through `unknown` and one comment that says why.
+- When only a change of the product code can fix the error, keep the test and put a narrow `// @ts-expect-error <reason>` on that line. The compiler then fails when the error goes away.
+
 ## 4. Aiken
 
 | Use | Compiler | Where |
@@ -200,7 +210,7 @@ it, and puts it in the issue. To repeat a night: run the same shard with that se
 The job `plan` skips the run when the head of the branch already has a successful nightly run, and draws the seed. The jobs:
 
 - `vitest`: `pnpm test` (the three projects `unit`, `ui` and `aiken-eval`), with `TEST_DEPTH=nightly` (the deep variants of "Test depth");
-- `typecheck-tests`: the type check of the test files, report only;
+- `typecheck-tests`: the type check of the test files (blocking: an error fails the job). It runs the six configs of the gate and `tests/identity-deploy/tsconfig.json`;
 - `aiken-check`: the map check, then 4 shards on aiken v1.1.21, one thread, the seed of the night, `--max-success 100`;
 - `legacy-contract`: the legacy contract on v1.1.21;
 - `blueprints`: the blueprint diff of the identity contract and `fixtures/generate.mjs --check`;

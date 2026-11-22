@@ -93,11 +93,10 @@ jobs:
       - name: Typecheck (all workspaces)
         run: pnpm -r typecheck
 
-      # Report only until phase 4 of docs/TEST-REVISION.md fixed the type errors of the test files. Then remove continue-on-error.
-      # tests/identity-deploy/tsconfig.json is blocking already (job aiken-eval).
+      # Blocking: an error in one of these configs makes tsc-report.mjs exit 1, so the step, the job and the gate fail.
+      # tests/identity-deploy/tsconfig.json is checked in the job aiken-eval.
       # The tsc matcher of setup-node would turn each error line into an annotation: remove it. The job summary has the counts.
-      - name: Typecheck of the test files (report only)
-        continue-on-error: true
+      - name: Typecheck of the test files
         run: |
           echo "::remove-matcher owner=tsc::"
           node scripts/ci/tsc-report.mjs \

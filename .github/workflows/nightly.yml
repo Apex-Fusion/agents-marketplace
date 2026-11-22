@@ -1,7 +1,7 @@
 name: Nightly
 
 # The full run at 02:30 UTC from the default branch: the whole vitest suite with TEST_DEPTH=nightly, the type check of the test
-# files (report only), `aiken check` of both contracts on aiken v1.1.21 (the compiler of the deployed contracts) in 4 shards with
+# files, `aiken check` of both contracts on aiken v1.1.21 (the compiler of the deployed contracts) in 4 shards with
 # one thread each, a new random seed and 100 property iterations, the blueprint diffs, and the check of the CBOR fixtures.
 #
 # The job `plan` skips everything when the head of the branch already has a successful nightly run, and draws the seed.
@@ -87,7 +87,7 @@ jobs:
         run: node scripts/ci/vitest-run.mjs
 
   typecheck-tests:
-    name: type check of the test files (report only)
+    name: type check of the test files
     needs: plan
     if: needs.plan.outputs.skip != 'true'
     runs-on: self-hosted
@@ -110,10 +110,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # Report only until phase 4 of docs/TEST-REVISION.md fixed the type errors of the test files. Then remove continue-on-error.
-      # The tsc matcher of setup-node would turn each error line into an annotation: remove it. The job summary has the counts.
-      - name: Typecheck of the test files (report only)
-        continue-on-error: true
+      # Blocking: an error in one of these configs makes tsc-report.mjs exit 1, so the step and the job fail, and the job `report` opens
+      # the issue. The tsc matcher of setup-node would turn each error line into an annotation: remove it. The job summary has the counts.
+      - name: Typecheck of the test files
         run: |
           echo "::remove-matcher owner=tsc::"
           node scripts/ci/tsc-report.mjs \
