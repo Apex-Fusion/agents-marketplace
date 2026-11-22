@@ -1,14 +1,17 @@
 #!/usr/bin/env node
-// scripts/coverage-diff: compare the line and branch coverage of a base commit and the head.
+// scripts/coverage-diff: compare the coverage of a base commit and the head, by location.
 //
 // The head is the current worktree, with the uncommitted changes. The base is a temporary git
 // worktree of the base commit. Each side runs the default test suite (the vitest projects `unit`
-// and `ui`) with the v8 coverage provider on a build host (`rx`) and writes one
-// coverage-summary.json. The script compares the two summaries file by file and prints a markdown
-// table for the text of a pull request.
+// and `ui`) with the v8 coverage provider on a build host (`rx`) and writes two reports:
+// coverage-summary.json (the percentages) and coverage-final.json (the statements and branches
+// with their positions and counts). The script prints a markdown table of the percentages of
+// each file for the text of a pull request. The table is information.
 //
 // A guarded file is a source file of tests/coverage-guard.json (money, signature, key and
-// chain decoding code). When a guarded file loses line or branch coverage, the script exits 1.
+// chain decoding code). The script exits 1 when a guarded file has a statement or a branch that
+// the base run covers (count above 0) and the head run does not (count 0). It matches the two
+// runs by source position (line and column), because the keys of the v8 data shift between runs.
 // Run `scripts/coverage-diff --help` for the options and the exit status.
 //
 // Facts that the code relies on:
@@ -46,7 +49,7 @@ const WORK_DIR = ".vitest-cache/coverage-diff";
 const COVERAGE_INCLUDE = ["*/src/**", "packages/shared/src/**"];
 const COVERAGE_COMMAND = [
   "pnpm", "exec", "vitest", "run", "--project", "unit", "--project", "ui",
-  "--coverage", "--coverage.provider=v8", "--coverage.reporter=json-summary",
+  "--coverage", "--coverage.provider=v8", "--coverage.reporter=json-summary", "--coverage.reporter=json",
   ...COVERAGE_INCLUDE.map((pattern) => `--coverage.include=${pattern}`),
 ];
 const INCLUDED_PATH = /^(?:[^/]+|packages\/shared)\/src\/./;
@@ -54,7 +57,7 @@ const INCLUDED_PATH = /^(?:[^/]+|packages\/shared)\/src\/./;
 const HELP = `Usage: scripts/coverage-diff [options]
 
 Run the default test suite (the vitest projects unit and ui) with line and branch coverage on a base commit and on the head.
-Compare the two results file by file. Print a markdown table for the text of a pull request.
+Compare the two results by source location. Print a markdown table for the text of a pull request.
 
 The head is the current worktree, with the uncommitted changes. The base is a temporary
 worktree of the base commit. Both runs use "rx" on the build hosts.
@@ -64,28 +67,36 @@ Options:
   --guard FILE       The list of guarded files. Default: ${DEFAULT_GUARD} in the repository root.
   --host NAME        The rx host for both runs. Default: two different hosts at the same time,
                      when two hosts answer. With one host, the runs go one after the other.
-  --base-summary F   Do not run the base. Read this coverage-summary.json.
-  --head-summary F   Do not run the head. Read this coverage-summary.json.
+  --base-summary F   Do not run the base. Read this coverage-summary.json and the
+                     coverage-final.json in the same folder.
+  --head-summary F   Do not run the head. Read this coverage-summary.json and the
+                     coverage-final.json in the same folder.
   --json-out FILE    Write the comparison as JSON.
   --md-out FILE      Write the markdown table to FILE too.
-  --epsilon X        A fall of less than X percentage points is not a drop. Default: ${DEFAULT_EPSILON}.
+  --epsilon X        A fall of the percentage of less than X points is not shown as "fell".
+                     Default: ${DEFAULT_EPSILON}.
   -h, --help         Show this text.
 
 Exit status:
-  0  No guarded file lost line or branch coverage.
-  1  A guarded file lost coverage, or a guarded file is missing at the head,
+  0  No guarded file lost a covered location.
+  1  A guarded file lost a covered location, or a guarded file is missing at the head,
      or the guard list names a file that no summary holds.
   2  Usage error.
-  3  A run failed: rx exit status 125, a failed test run, or no summary.
+  3  A run failed: rx exit status 125, a failed test run, or no report.
 
 Rule:
-  A file lost coverage when, for the lines or for the branches, two things are true. The
-  percentage fell by more than the epsilon, and the file has more uncovered items than before.
-  The v8 provider changes the number of branches of a file by a few between two runs of the same
-  code. So a fall of a percentage with no new uncovered item is not a drop.
+  A guarded file lost coverage when it has a location that the base run covers (count above 0)
+  and the head run does not cover (count 0). A location is a statement (a line, in v8 data) or a
+  branch (a block range). The script matches the two runs by source position (line and column),
+  because the keys of the v8 data shift between runs: v8 adds and moves items with count 0, and
+  the number of branches of a file changes by a few between two runs of the same code. A base
+  location with no head location at the same position is not compared: the source changed there,
+  or v8 reports no range for it.
+  The percentages are information. A fall of a percentage with no lost location is not a drop.
 
 Files:
-  .vitest-cache/coverage-diff/<head|base>/coverage-summary.json  The summary of each run.
+  .vitest-cache/coverage-diff/<head|base>/coverage-summary.json  The percentages of each run.
+  .vitest-cache/coverage-diff/<head|base>/coverage-final.json    The statements and branches of each run.
   .vitest-cache/coverage-diff/<head|base>.log                    The output of each run.
 `;
 
@@ -128,8 +139,11 @@ function parseCli(argv) {
     throw new UsageError("The option --epsilon needs a number that is 0 or more.");
   }
   for (const name of ["base-summary", "head-summary"]) {
-    if (parsed[name] !== undefined && !existsSync(parsed[name])) {
-      throw new UsageError(`The file ${parsed[name]} of --${name} does not exist.`);
+    const summary = parsed[name];
+    if (summary === undefined) continue;
+    if (!existsSync(summary)) throw new UsageError(`The file ${summary} of --${name} does not exist.`);
+    if (!existsSync(finalFileOf(summary))) {
+      throw new UsageError(`The file ${finalFileOf(summary)} does not exist. --${name} needs the coverage-final.json (the reporter json) in the same folder.`);
     }
   }
   return { ...parsed, epsilon };
@@ -296,8 +310,8 @@ function tailOf(file, count) {
   }
 }
 
-// Run the coverage of one side in the worktree `side.dir`. `rx` copies the summary file back.
-// Set `side.summary`, `side.seconds` and `side.host`.
+// Run the coverage of one side in the worktree `side.dir`. `rx` copies the two reports back.
+// Set `side.summary` (the file coverage-final.json is in the same folder), `side.seconds` and `side.host`.
 async function runSide(side, host, logFile) {
   const report = `${WORK_DIR}/${side.name}`;
   rmSync(join(side.dir, report), { recursive: true, force: true });
@@ -313,13 +327,15 @@ async function runSide(side, host, logFile) {
     note(`The last lines of ${logFile}:`);
     process.stderr.write(`${tailOf(logFile, 40)}\n`);
     const cause = result.status === 125 ? "rx failed, and the command did not run or its result is not known" : `the command ended with status ${result.status ?? result.signal}`;
-    // A failed test run makes no coverage report. Some tests have a time limit (for example
-    // packages/shared/src/cbor-depth.test.ts), and they fail when the build host is busy.
-    const hint = result.status === 1 ? " A test with a time limit can fail on a busy build host. Run the command again." : "";
+    // A failed test run makes no coverage report. The default suite has no wall-clock limit since #53: the limit of
+    // packages/shared/src/cbor-depth.test.ts applies only in the night run (TEST_DEPTH=nightly). A test can still fail on a busy host.
+    const hint = result.status === 1 ? " A test can fail on a busy build host. Run the command again." : "";
     throw new RunError(`The ${side.name} run failed: ${cause}. The output is in ${logFile}.${hint}`);
   }
   const summary = join(side.dir, report, "coverage-summary.json");
-  if (!existsSync(summary)) throw new RunError(`The ${side.name} run made no ${summary}. The output is in ${logFile}.`);
+  for (const file of [summary, finalFileOf(summary)]) {
+    if (!existsSync(file)) throw new RunError(`The ${side.name} run made no ${file}. The output is in ${logFile}.`);
+  }
   side.summary = summary;
   note(`${side.name}: the coverage run ended after ${side.seconds.toFixed(1)} s${side.host ? ` on ${side.host}` : ""}.`);
 }
@@ -374,12 +390,11 @@ function readSummary(file) {
   return entries;
 }
 
-// Change the absolute keys of a summary to paths relative to the repository root.
-// The root of the summary is unknown: it is the folder of the build host. For each key, the
+// The root of a coverage report is unknown: its keys are absolute paths in the folder of the build host. For each key, the
 // longest suffix that is a tracked file gives a candidate root. The most frequent candidate wins.
-function relativeKeys(entries, tracked, file) {
+function rootPrefix(keys, tracked) {
   const votes = new Map();
-  for (const key of entries.keys()) {
+  for (const key of keys) {
     if (!key.startsWith("/")) continue;
     for (let at = key.indexOf("/"); at !== -1; at = key.indexOf("/", at + 1)) {
       if (tracked.has(key.slice(at + 1))) {
@@ -397,6 +412,11 @@ function relativeKeys(entries, tracked, file) {
       best = count;
     }
   }
+  return prefix;
+}
+
+// Change the absolute keys of a summary to paths relative to the repository root.
+function relativeKeys(entries, prefix, file) {
   const relative = new Map();
   let outside = 0;
   for (const [key, value] of entries) {
@@ -407,6 +427,88 @@ function relativeKeys(entries, tracked, file) {
   if (relative.size === 0) throw new RunError(`${file}: no file of the summary is a tracked file of this repository.`);
   if (outside > 0) note(`${file}: ${outside} file(s) are outside the root ${prefix || "(unknown)"} and are left out.`);
   return relative;
+}
+
+// ---- Locations -------------------------------------------------------------------------------
+
+// coverage-final.json holds, for each file, the statements (statementMap, with the counts in `s`) and the branches
+// (branchMap, with one count for each arm in `b`). In v8 data a statement is a line and a branch is a block range with one
+// arm. The keys of both maps are numbers in the order of the v8 ranges: they shift between two runs of the same code, because
+// v8 adds and moves items with count 0. The source position does not shift, so it is the key here.
+function finalFileOf(summaryFile) {
+  return join(dirname(summaryFile), "coverage-final.json");
+}
+
+function addCount(map, key, count, info) {
+  const known = map.get(key);
+  if (known) known.count += count;
+  else map.set(key, { count, ...info });
+}
+
+// The statements and the branches of one file, by position. Entries with the same position share one count.
+function locationsOf(entry, file, path) {
+  if (!entry?.statementMap || !entry.s || !entry.branchMap || !entry.b) {
+    throw new RunError(`${file}: the entry of ${path} has no statement or branch data.`);
+  }
+  const statements = new Map();
+  for (const [id, location] of Object.entries(entry.statementMap)) {
+    const { line, column } = location.start;
+    addCount(statements, `${line}:${column}`, entry.s[id] ?? 0, { line, column });
+  }
+  const branches = new Map();
+  for (const [id, branch] of Object.entries(entry.branchMap)) {
+    const arms = branch.locations?.length > 0 ? branch.locations : [branch.loc];
+    arms.forEach((arm, index) => {
+      const { start, end } = arm;
+      const key = `${start.line}:${start.column}-${end.line}:${end.column}#${index}`;
+      addCount(branches, key, entry.b[id]?.[index] ?? 0, { line: start.line, column: start.column, endLine: end.line, endColumn: end.column, arm: index });
+    });
+  }
+  return { statements, branches };
+}
+
+// The locations of the wanted files (the guarded files) of one coverage-final.json. `prefix` is the root of its summary.
+function readLocations(file, prefix, wanted) {
+  let data;
+  try {
+    data = JSON.parse(readFileSync(file, "utf8"));
+  } catch (error) {
+    throw new RunError(`Cannot read the coverage data ${file}: ${error.message}`);
+  }
+  if (!data || typeof data !== "object" || Array.isArray(data)) throw new RunError(`${file} is not a coverage data file.`);
+  const files = new Map();
+  for (const [key, entry] of Object.entries(data)) {
+    const path = !key.startsWith("/") ? key : prefix !== "" && key.startsWith(prefix) ? key.slice(prefix.length) : null;
+    if (path !== null && wanted.has(path)) files.set(path, locationsOf(entry, file, path));
+  }
+  return files;
+}
+
+// The summary and the locations of one side. The locations are only those of the guarded files.
+function loadSide(summaryFile, tracked, wanted) {
+  const summary = readSummary(summaryFile);
+  const prefix = rootPrefix(summary.keys(), tracked);
+  return { entries: relativeKeys(summary, prefix, summaryFile), locations: readLocations(finalFileOf(summaryFile), prefix, wanted) };
+}
+
+// The locations that the base run covers (count above 0) and the head run does not (count 0), matched by position. A base
+// location with no head location at the same position is not compared: `unmatched` counts these.
+function lostLocations(base, head) {
+  const lost = [];
+  let unmatched = 0;
+  for (const [kind, name] of [["statement", "statements"], ["branch", "branches"]]) {
+    for (const [key, before] of base[name]) {
+      if (before.count === 0) continue;
+      const after = head[name].get(key);
+      if (after === undefined) unmatched += 1;
+      else if (after.count === 0) {
+        const { count, ...position } = before;
+        lost.push({ kind, ...position });
+      }
+    }
+  }
+  lost.sort((a, b) => a.line - b.line || a.column - b.column || (a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0));
+  return { lost, unmatched };
 }
 
 // ---- Comparison ------------------------------------------------------------------------------
@@ -426,32 +528,46 @@ function sameCounts(a, b) {
     a.branches.covered === b.branches.covered && a.branches.total === b.branches.total;
 }
 
-// A file lost coverage in one metric (lines or branches) when two things are true:
+// A metric (lines or branches) of a file fell when two things are true:
 //   1. The percentage fell by more than epsilon.
 //   2. The file has more uncovered items than before.
-// The second condition ignores a noise of the v8 provider. The number of branches of a file
-// changes by a few between two runs of the same code, and the percentage then moves with no new
-// uncovered branch. When a test no longer covers an item and the source is the same, the file has
-// one more uncovered item. So a lost test still shows.
-function lost(before, after, epsilon) {
+// This is information only. The v8 provider changes the number of branches of a file by a few between two runs of the same
+// code, and the percentage then moves with no lost test. The result of the script comes from the lost locations of the guarded
+// files (`lostLocations`), not from this rule.
+function fell(before, after, epsilon) {
   return before.pct - after.pct > epsilon && after.total - after.covered > before.total - before.covered;
 }
 
-function compare(base, head, guard, epsilon) {
+// `locations` holds the statements and the branches of the guarded files of each side: { base, head }, each a Map by path.
+function compare(base, head, guard, epsilon, locations) {
   const rows = [];
   for (const path of new Set([...base.keys(), ...head.keys()])) {
     const before = base.get(path) ?? null;
     const after = head.get(path) ?? null;
     const guarded = guard.has(path);
-    const row = { path, guarded, area: guard.get(path)?.area ?? null, base: before, head: after, delta: null, fall: 0, changed: true, flag: "" };
+    const row = { path, guarded, area: guard.get(path)?.area ?? null, base: before, head: after, delta: null, fall: 0, changed: true, lost: [], unmatched: 0, flag: "" };
     if (before && after) {
       row.delta = { lines: after.lines.pct - before.lines.pct, branches: after.branches.pct - before.branches.pct };
-      const linesLost = lost(before.lines, after.lines, epsilon);
-      const branchesLost = lost(before.branches, after.branches, epsilon);
-      row.fall = Math.max(linesLost ? -row.delta.lines : 0, branchesLost ? -row.delta.branches : 0);
+      const linesFell = fell(before.lines, after.lines, epsilon);
+      const branchesFell = fell(before.branches, after.branches, epsilon);
+      row.fall = Math.max(linesFell ? -row.delta.lines : 0, branchesFell ? -row.delta.branches : 0);
       row.changed = !sameCounts(before, after);
-      if (linesLost || branchesLost) row.flag = guarded ? "DROP" : "drop";
-      else if (row.changed) row.flag = "ok";
+      if (guarded) {
+        const baseLocations = locations.base.get(path);
+        const headLocations = locations.head.get(path);
+        if (!baseLocations || !headLocations) {
+          throw new RunError(`The coverage summary of the ${baseLocations ? "head" : "base"} run holds ${path}, but its coverage-final.json does not.`);
+        }
+        ({ lost: row.lost, unmatched: row.unmatched } = lostLocations(baseLocations, headLocations));
+      }
+      if (row.lost.length > 0) {
+        row.flag = "LOST";
+        row.changed = true;
+      } else if (linesFell || branchesFell) {
+        row.flag = "fell";
+      } else if (row.changed) {
+        row.flag = "ok";
+      }
     } else if (!before) {
       row.flag = "new";
     } else {
@@ -488,6 +604,10 @@ function tableRow(row) {
   return `| \`${row.path}\` | ${pct(row.base?.lines)} | ${pct(row.head?.lines)} | ${lines} | ${pct(row.base?.branches)} | ${pct(row.head?.branches)} | ${branches} | ${row.flag} |`;
 }
 
+function plural(number, one, many) {
+  return `${number} ${number === 1 ? one : many}`;
+}
+
 // The numbers behind a flagged file, so that a reader can tell a lost test from a run noise.
 function detail(row) {
   if (!row.head) return `- \`${row.path}\`: the head has no coverage data for this file.`;
@@ -497,7 +617,30 @@ function detail(row) {
     const more = after.total - after.covered - (before.total - before.covered);
     return `${name} ${before.covered} of ${before.total} covered at the base, ${after.covered} of ${after.total} at the head, uncovered ${more > 0 ? "+" : ""}${more}`;
   };
-  return `- \`${row.path}\`: ${text("lines")}; ${text("branches")}.`;
+  const statements = row.lost.filter((item) => item.kind === "statement").length;
+  const lost = `${plural(statements, "statement", "statements")} and ${plural(row.lost.length - statements, "branch", "branches")} lost`;
+  return `- \`${row.path}\`: ${lost}; ${text("lines")}; ${text("branches")}.`;
+}
+
+const MAX_LOST_ROWS = 100;
+
+// The table rows of the lost locations of one file. A run of consecutive lost lines is one row.
+function lostRows(row) {
+  const runs = [];
+  for (const item of row.lost) {
+    if (item.kind !== "statement") continue;
+    const run = runs[runs.length - 1];
+    if (run && item.line === run.last + 1) run.last = item.line;
+    else runs.push({ first: item.line, last: item.line });
+  }
+  const rows = runs.map((run) => {
+    const size = run.last - run.first + 1;
+    return size === 1 ? `| \`${row.path}\` | ${run.first} | statement |` : `| \`${row.path}\` | ${run.first}-${run.last} | ${size} statements |`;
+  });
+  for (const item of row.lost) {
+    if (item.kind === "branch") rows.push(`| \`${row.path}\` | ${item.line} | branch ${item.line}:${item.column}-${item.endLine}:${item.endColumn} |`);
+  }
+  return rows;
 }
 
 const TABLE_HEAD = [
@@ -512,9 +655,10 @@ function totalCell(entry) {
 function render({ baseLabel, headLabel, epsilon, totals, rows, missing, failures }) {
   const guardedRows = rows.filter((row) => row.guarded);
   const changedGuarded = guardedRows.filter((row) => row.changed);
+  const lostFiles = guardedRows.filter((row) => row.lost.length > 0);
   const drops = failures.length;
   const others = rows
-    .filter((row) => !row.guarded && row.flag === "drop")
+    .filter((row) => !row.guarded && row.flag === "fell")
     .sort((a, b) => b.fall - a.fall || (a.path < b.path ? -1 : 1));
   const added = rows.filter((row) => !row.guarded && row.flag === "new").length;
   const removed = rows.filter((row) => !row.guarded && row.flag === "removed").length;
@@ -522,9 +666,9 @@ function render({ baseLabel, headLabel, epsilon, totals, rows, missing, failures
   out.push("## Coverage change", "");
   out.push(`Base: ${baseLabel}. Head: ${headLabel}.`);
   out.push("Both sides ran the default test suite with the v8 coverage provider.");
-  out.push(`A file lost coverage when its percentage of lines or branches fell by more than ${epsilon} points, and it has more uncovered lines or branches than before.`);
-  out.push("A fall with no new uncovered item is not a drop. The v8 provider changes the number of branches of a file by a few between two runs.");
-  out.push("Flags: DROP, a guarded file lost coverage. REMOVED, a guarded file has no data at the head. drop, another file lost coverage. new, the file has no data at the base. ok, the numbers changed and the file lost nothing.", "");
+  out.push("A guarded file lost coverage when a statement or a branch that the base run covers (count above 0) has count 0 in the head run. The script matches the two runs by source position (line and column), because the keys of the v8 data shift between runs.");
+  out.push(`The percentages are information. A percentage fell when it fell by more than ${epsilon} points and the file has more uncovered lines or branches than before. The v8 provider changes the number of branches of a file by a few between two runs, so a fall with no lost location is not a drop.`);
+  out.push("Flags: LOST, a guarded file lost a covered location. REMOVED, a guarded file has no data at the head. fell, a percentage fell (information only). new, the file has no data at the base. ok, the numbers changed and the file lost nothing.", "");
   out.push("| metric | base | head | delta |", "|---|---:|---:|---:|");
   for (const [title, name] of [["Lines", "lines"], ["Branches", "branches"]]) {
     out.push(`| ${title} | ${totalCell(totals.base[name])} | ${totalCell(totals.head[name])} | ${signed(shownDelta(totals.base[name], totals.head[name]))} |`);
@@ -535,12 +679,22 @@ function render({ baseLabel, headLabel, epsilon, totals, rows, missing, failures
   } else {
     out.push(`${changedGuarded.length} of ${guardedRows.length} guarded files changed. ${guardedRows.length - changedGuarded.length} did not change.`, "");
     out.push(...TABLE_HEAD);
-    const order = (row) => (row.flag === "DROP" || row.flag === "REMOVED" ? 0 : 1);
+    const order = (row) => (row.flag === "LOST" || row.flag === "REMOVED" ? 0 : 1);
     for (const row of [...changedGuarded].sort((a, b) => order(a) - order(b) || b.fall - a.fall || (a.path < b.path ? -1 : 1))) {
       out.push(tableRow(row));
     }
   }
-  const flagged = guardedRows.filter((row) => row.flag === "DROP" || row.flag === "REMOVED");
+  out.push("", "### Lost locations of guarded files", "");
+  if (lostFiles.length === 0) {
+    out.push("No guarded file has a statement or a branch that the base run covers and the head run does not.");
+  } else {
+    const table = lostFiles.flatMap(lostRows);
+    const locations = lostFiles.reduce((total, row) => total + row.lost.length, 0);
+    out.push(`${plural(locations, "location", "locations")} in ${plural(lostFiles.length, "guarded file", "guarded files")}. The base run covers them and the head run does not.`, "");
+    out.push("| file | line | kind |", "|---|---:|---|", ...table.slice(0, MAX_LOST_ROWS));
+    if (table.length > MAX_LOST_ROWS) out.push("", `The table shows ${MAX_LOST_ROWS} of ${table.length} rows. The option --json-out writes every location.`);
+  }
+  const flagged = guardedRows.filter((row) => row.flag === "LOST" || row.flag === "REMOVED");
   if (flagged.length > 0) {
     out.push("", "Numbers of the guarded files that lost coverage:", "");
     for (const row of flagged) out.push(detail(row));
@@ -550,11 +704,11 @@ function render({ baseLabel, headLabel, epsilon, totals, rows, missing, failures
     out.push("No coverage summary holds these guarded files. Fix the guard list.", "");
     for (const path of missing) out.push(`- \`${path}\``);
   }
-  out.push("", "### Other files with the largest drop", "");
+  out.push("", "### Other files with the largest fall (information)", "");
   if (others.length === 0) {
-    out.push("No other file lost coverage.");
+    out.push("The percentages of no other file fell.");
   } else {
-    out.push(`${others.length} other file(s) lost coverage.${others.length > TOP_DROPS ? ` The table shows the ${TOP_DROPS} largest drops.` : ""}`, "");
+    out.push(`The percentages of ${others.length} other file(s) fell.${others.length > TOP_DROPS ? ` The table shows the ${TOP_DROPS} largest falls.` : ""}`, "");
     out.push(...TABLE_HEAD);
     for (const row of others.slice(0, TOP_DROPS)) out.push(tableRow(row));
   }
@@ -625,10 +779,11 @@ async function main() {
     const baseJob = async () => {
       try {
         await runSide(sides.base, hosts.base, join(workDir, "base.log"));
-        // Keep a copy of the summary: the base worktree goes away at the end of the run.
+        // Keep a copy of the two reports: the base worktree goes away at the end of the run.
         const saved = join(workDir, "base", "coverage-summary.json");
         mkdirSync(dirname(saved), { recursive: true });
         copyFileSync(sides.base.summary, saved);
+        copyFileSync(finalFileOf(sides.base.summary), finalFileOf(saved));
         sides.base.summary = saved;
       } finally {
         cleanup = removeRemoteCopy(baseTree, sides.base.host ?? hosts.base, join(workDir, "cleanup.log"));
@@ -651,11 +806,14 @@ async function main() {
     if (errors.length > 0) throw errors[0];
 
     const tracked = new Set([...headFiles, ...baseFiles]);
-    const baseEntries = relativeKeys(readSummary(sides.base.summary), tracked, sides.base.summary);
-    const headEntries = relativeKeys(readSummary(sides.head.summary), tracked, sides.head.summary);
-    const rows = compare(baseEntries, headEntries, guard, cli.epsilon);
+    const wanted = new Set(guard.keys());
+    const baseSide = loadSide(sides.base.summary, tracked, wanted);
+    const headSide = loadSide(sides.head.summary, tracked, wanted);
+    const baseEntries = baseSide.entries;
+    const headEntries = headSide.entries;
+    const rows = compare(baseEntries, headEntries, guard, cli.epsilon, { base: baseSide.locations, head: headSide.locations });
     const missing = [...guard.keys()].filter((path) => !baseEntries.has(path) && !headEntries.has(path));
-    const failed = rows.filter((row) => row.guarded && (row.flag === "DROP" || row.flag === "REMOVED"));
+    const failed = rows.filter((row) => row.guarded && (row.flag === "LOST" || row.flag === "REMOVED"));
     const totals = {
       base: { lines: sum(baseEntries, "lines"), branches: sum(baseEntries, "branches") },
       head: { lines: sum(headEntries, "lines"), branches: sum(headEntries, "branches") },
@@ -669,7 +827,7 @@ async function main() {
     if (cli["md-out"] !== undefined) writeOutput(cli["md-out"], `${markdown}\n`);
     const exit = failed.length > 0 || missing.length > 0 ? EXIT_DROP : EXIT_OK;
     if (cli["json-out"] !== undefined) {
-      const side = (info, commit) => ({ commit, summary: info.summary, host: info.host, seconds: info.seconds, ran: info.seconds !== null });
+      const side = (info, commit) => ({ commit, summary: info.summary, final: finalFileOf(info.summary), host: info.host, seconds: info.seconds, ran: info.seconds !== null });
       const json = {
         base: side(sides.base, base.commit),
         head: { ...side(sides.head, headCommit), uncommitted_changes: dirty },
@@ -680,9 +838,10 @@ async function main() {
           files: guard.size,
           changed: rows.filter((row) => row.guarded && row.changed).length,
           dropped: failed.map((row) => row.path),
+          lost_locations: rows.filter((row) => row.guarded && row.lost.length > 0).map((row) => ({ path: row.path, locations: row.lost, unmatched: row.unmatched })),
           missing_in_both_summaries: missing,
         },
-        files: rows.map((row) => ({ path: row.path, guarded: row.guarded, area: row.area, flag: row.flag, changed: row.changed, base: row.base, head: row.head, delta: row.delta })),
+        files: rows.map((row) => ({ path: row.path, guarded: row.guarded, area: row.area, flag: row.flag, changed: row.changed, base: row.base, head: row.head, delta: row.delta, lost: row.lost.length, unmatched: row.unmatched })),
         exit,
       };
       writeOutput(cli["json-out"], `${JSON.stringify(json, null, 2)}\n`);
