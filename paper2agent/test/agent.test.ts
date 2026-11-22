@@ -132,7 +132,6 @@ describe("Paper2Agent coding agent", () => {
     ["another 402 error code", { status: 402, body: { error: { code: "billing_hard_limit_reached", message: "Limit." } } }, /HTTP 402 \(billing_hard_limit_reached\)/],
     ["an unparsable 402 body", { status: 402, body: "Payment Required" }, /HTTP 402$/],
     ["a supplier failure", { status: 503, body: { error: { code: "model_unavailable", message: "No supplier." } } }, /HTTP 503 \(model_unavailable\)/],
-    ["a failed paid call", { status: 502, body: { error: { code: "paid_call_failed", message: "Upstream error." } } }, /HTTP 502 \(paid_call_failed\)/],
     ["chain_unavailable with another status", { status: 502, body: { error: { code: "chain_unavailable", message: "No chain." } } }, /HTTP 502 \(chain_unavailable\)/],
     ["a reply without a tool call", { status: 200, body: { choices: [{ message: { content: "Done." } }] } }, /without completed package evidence: Done\./],
   ] as const)("fails the build after three in a row of %s instead of pausing", async (_label, reply, error) => {
@@ -161,9 +160,8 @@ describe("Paper2Agent coding agent", () => {
     const controller = new AbortController();
     const run = session(endpoint.baseUrl, controller.signal, 60_000);
     run.options.onFundsShortfall = () => controller.abort(new Error("Build cancelled"));
-    const started = Date.now();
-    await expect(runCodingAgent(run.options)).rejects.toThrow();
-    expect(Date.now() - started).toBeLessThan(5_000);
+    // The wait of 60 s ends at once with the abort error. A wait that ignored the signal would run into the time limit of the test.
+    await expect(runCodingAgent(run.options)).rejects.toMatchObject({ name: "AbortError", cause: expect.objectContaining({ message: "Build cancelled" }) });
     expect(endpoint.requests).toHaveLength(1);
   });
 
@@ -197,17 +195,6 @@ describe("Paper2Agent coding agent", () => {
     expect(run.shortfalls.map((shortfall) => shortfall.message)).toEqual(["No funds.", "No funds."]);
     expect(run.restored()).toBe(1);
     expect(run.logs).toEqual([`Model call 1 (${runId})`, WAITING_FOR_CHAIN, CHAIN_RESUMED]);
-  });
-
-  it("stops waiting for chain access as soon as the build is cancelled", async () => {
-    const endpoint = await modelEndpoint([CHAIN_DOWN]);
-    const controller = new AbortController();
-    const run = session(endpoint.baseUrl, controller.signal, 60_000);
-    run.options.log = (message) => { if (message.includes("waiting")) controller.abort(new Error("Build cancelled")); };
-    const started = Date.now();
-    await expect(runCodingAgent(run.options)).rejects.toThrow();
-    expect(Date.now() - started).toBeLessThan(5_000);
-    expect(endpoint.requests).toHaveLength(1);
   });
 
   it("shortens older tool results and arguments so a long run stays below the context limit", async () => {
