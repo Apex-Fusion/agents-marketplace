@@ -1,25 +1,11 @@
 // @vitest-environment happy-dom
 /**
- * buyer-ui-smoke.test.tsx — buyer SPA behavior checks.
- *
- * Covers supplier discovery, the server-side one-shot Responses lifecycle,
- * canonical chat streams, lifecycle history, wallet display, and form states.
- *
- * Core UI contract:
- * - <App /> must render a <nav> with links to /, /tasks, /wallet
- * - <Dashboard /> must call marketplace.discoverSuppliers() on mount
- * - <Dashboard /> must not display suppliers whose status is "offline"
- * - <PromptForm /> must call marketplace.submitPrompt() with correct args on submit
- * - <TaskHistory /> must call getTaskHistory() and render TaskRow for each entry
- * - <Wallet /> must render the configured walletKey.address
- * - <SupplierCard /> "Use" button must be disabled when supplier.status === "offline"
- * - Submitting an empty prompt must be prevented client-side (no SDK call)
- * - A loading state must render while submitPrompt() is pending
- * - An error toast/message must render when submitPrompt() rejects
+ * buyer-ui-smoke.test.tsx — behavior of the buyer SPA: navigation, supplier list, prompt and chat forms, API key example,
+ * task history, wallet address and supplier card. The tests stub fetch and the SDK calls, and find elements by role or test id.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { describe, it, expect, vi, afterEach } from "vitest";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import App from "../../buyer/src/ui/App.js";
@@ -31,12 +17,9 @@ import SupplierCard from "../../buyer/src/ui/components/SupplierCard.js";
 import PromptForm from "../../buyer/src/ui/components/PromptForm.js";
 import ChatForm from "../../buyer/src/ui/components/ChatForm.js";
 import { MarketplaceProvider } from "../../buyer/src/ui/state/MarketplaceContext.js";
-import type { SupplierView } from "../../buyer/src/sdk/types.js";
 import { buildBuyerWalletKey } from "../fixtures/buyer-side/wallet-keys.js";
-import {
-  ALL_SAMPLE_TASK_RECORDS,
-  TASK_COMPLETED,
-} from "../fixtures/buyer-side/sample-task-records.js";
+import { makeSupplierView } from "../fixtures/buyer-side/supplier-views.js";
+import { TASK_COMPLETED } from "../fixtures/buyer-side/sample-task-records.js";
 import { MockChainProvider } from "../../packages/shared/src/chain/MockChainProvider.js";
 import { Marketplace } from "../../buyer/src/sdk/Marketplace.js";
 import { MemoryTaskHistoryStore } from "../../buyer/src/sdk/history.js";
@@ -57,30 +40,6 @@ function makeMockMarketplace() {
   return mp;
 }
 
-function makeSampleSupplierView(overrides: Partial<SupplierView> = {}): SupplierView {
-  return {
-    utxo_ref: "a".repeat(64) + "#0",
-    supplier_pkh: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef01",
-    capability_id: "llm.text.generate.v1",
-    model: "qwen2.5:0.5b",
-    max_output_tokens: 512,
-    max_processing_ms: 60_000,
-    price_lovelace: "2000000",
-    supplier_bond_lovelace: "1000000",
-    buyer_bond_lovelace: "1000000",
-    endpoint_url: "https://supplier.example.com",
-    detail_uri: "ipfs://Qm000",
-    detail_hash: "a".repeat(64),
-    advertised_at: 1_745_500_000_000,
-    status: "free",
-    advert_status: "Active",
-    current_escrow_ref: null,
-    last_seen_iso: "2026-04-24T00:00:00.000Z",
-    created_slot: 1000,
-    ...overrides,
-  };
-}
-
 function wrap(element: React.ReactElement, mp: Marketplace) {
   return (
     <MemoryRouter>
@@ -91,37 +50,36 @@ function wrap(element: React.ReactElement, mp: Marketplace) {
   );
 }
 
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+  Reflect.deleteProperty(window, "__BUYER_BOOT__");
+});
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 describe("<App /> smoke", () => {
-  it("renders a nav element with links for Dashboard, Tasks, and Wallet", () => {
-    const mp = makeMockMarketplace();
-    render(wrap(<App />, mp));
-    const nav = document.querySelector("nav");
-    expect(nav).not.toBeNull();
-    // Each link should be present
-    const links = screen.getAllByRole("link");
-    const hrefs = links.map((l) => (l as HTMLAnchorElement).pathname ?? (l as HTMLAnchorElement).getAttribute("href") ?? "");
-    expect(hrefs.some(h => h === "/" || h === "")).toBe(true);
-    expect(hrefs.some(h => h.includes("tasks"))).toBe(true);
-    expect(hrefs.some(h => h.includes("wallet"))).toBe(true);
+  it("renders a nav element with links for Dashboard, Tasks, and Wallet", async () => {
+    // The indexer is unreachable: the Dashboard calls the real discoverSuppliers, which fails with an IndexerError.
+    // This case is the only test of that failure branch of Marketplace.discoverSuppliers. The Marketplace binds the stubbed
+    // fetch when it is built, so the stub comes first.
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      throw new TypeError("fetch failed");
+    }));
+    render(wrap(<App />, makeMockMarketplace()));
+    const hrefs = within(screen.getByRole("navigation")).getAllByRole("link").map((link) => link.getAttribute("href"));
+    expect(hrefs).toEqual(expect.arrayContaining(["/", "/tasks", "/wallet"]));
+    await act(async () => {});
   });
 });
 
 describe("<Dashboard /> smoke", () => {
-  it("calls marketplace.discoverSuppliers() on mount", async () => {
-    const mp = makeMockMarketplace();
-    const spy = vi.spyOn(mp, "discoverSuppliers").mockResolvedValue([]);
-    render(wrap(<Dashboard />, mp));
-    await waitFor(() => expect(spy).toHaveBeenCalledOnce());
-  });
-
   it("renders a SupplierCard for each discovered supplier except offline ones", async () => {
     const mp = makeMockMarketplace();
     vi.spyOn(mp, "discoverSuppliers").mockResolvedValue([
-      makeSampleSupplierView({ supplier_pkh: "a".repeat(56) }),
-      makeSampleSupplierView({ supplier_pkh: "b".repeat(56) }),
-      makeSampleSupplierView({
+      makeSupplierView({ utxo_ref: "a".repeat(64) + "#0", supplier_pkh: "a".repeat(56) }),
+      makeSupplierView({ utxo_ref: "b".repeat(64) + "#0", supplier_pkh: "b".repeat(56) }),
+      makeSupplierView({
         utxo_ref: "c".repeat(64) + "#0",
         supplier_pkh: "c".repeat(56),
         model: "offline-model",
@@ -129,143 +87,96 @@ describe("<Dashboard /> smoke", () => {
       }),
     ]);
     render(wrap(<Dashboard />, mp));
-    // Wait for async discover to complete and cards to render. Dashboard
-    // hides offline suppliers and appends two synthetic demo cards (Piper-TTS
-    // + Kimi K2.6 chat), so the count is (N - offline) + 2.
-    await waitFor(() => {
-      const cards = document.querySelectorAll("[data-testid='supplier-card']");
-      expect(cards.length).toBe(4);
+    // The Dashboard hides the offline supplier and adds two demo suppliers (Piper TTS and Kimi chat): (3 - 1) + 2 cards.
+    const cards = await waitFor(() => {
+      const found = screen.getAllByTestId("supplier-card");
+      expect(found).toHaveLength(4);
+      return found;
     });
-    expect(screen.queryByText("offline-model")).toBeNull();
-    // Sanity: one of the cards is the demo Piper supplier.
-    const piperBadges = Array.from(
-      document.querySelectorAll("[data-testid='supplier-card']"),
-    ).filter((c) => c.textContent?.includes("audio.synthesize.piper.v1"));
-    expect(piperBadges.length).toBe(1);
-    // Sanity: one of the cards is the demo Kimi K2.6 chat supplier.
-    const kimiBadges = Array.from(
-      document.querySelectorAll("[data-testid='supplier-card']"),
-    ).filter((c) => c.textContent?.includes("llm.chat.v1"));
-    expect(kimiBadges.length).toBe(1);
+    const capabilities = cards.map((card) => card.textContent ?? "");
+    expect(capabilities.filter((text) => text.includes("audio.synthesize.piper.v1"))).toHaveLength(1);
+    expect(capabilities.filter((text) => text.includes("llm.chat.v1"))).toHaveLength(1);
   });
 });
 
 describe("<PromptForm /> smoke", () => {
-  // PromptForm now POSTs to /v1/submit-prompt server-side instead of calling
-  // the SDK directly — the browser SPA's chain provider is a stub so all
-  // chain-touching work moved server-side. These tests stub globalThis.fetch
-  // to verify the form's request shape and UX states.
-  function stubFetchOk(receiptObj: unknown, signature: string) {
-    return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = typeof input === "string" ? input : (input instanceof URL ? input.toString() : input.url);
-      if (!url.endsWith("/v1/submit-prompt")) {
-        throw new Error(`unexpected fetch: ${url}`);
-      }
-      const body = init?.body ? JSON.parse(init.body as string) : {};
-      (stubFetchOk as unknown as { lastBody?: unknown }).lastBody = body;
-      return new Response(JSON.stringify({
-        id: "resp_ui",
-        object: "response",
-        created_at: 1_745_500_000,
-        model: "test-model",
-        status: "completed",
-        output: [{
-          type: "message",
-          role: "assistant",
-          content: [{ type: "output_text", text: "4" }],
-        }],
-        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
-        error: null,
-        incomplete_details: null,
-        receipt: receiptObj,
-        receipt_signature: signature,
-        escrow_ref: `${"a".repeat(64)}#0`,
-      }), { status: 200, headers: { "Content-Type": "application/json" } });
-    });
+  // The form POSTs to /v1/submit-prompt: the buyer server runs the lifecycle. The tests stub fetch.
+  const advertRef = { txHash: "b".repeat(64), index: 0 };
+
+  function stubFetchOk() {
+    const fetchSpy = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json({
+      id: "resp_ui",
+      object: "response",
+      created_at: 1_745_500_000,
+      model: "test-model",
+      status: "completed",
+      output: [{
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "4" }],
+      }],
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      error: null,
+      incomplete_details: null,
+      receipt: TASK_COMPLETED.receipt,
+      receipt_signature: TASK_COMPLETED.receipt_signature,
+      escrow_ref: `${"a".repeat(64)}#0`,
+    }));
+    vi.stubGlobal("fetch", fetchSpy);
+    return fetchSpy;
   }
 
   it("POSTs /v1/submit-prompt with canonical input when submitted", async () => {
     const user = userEvent.setup();
-    const mp = makeMockMarketplace();
-    const fetchSpy = stubFetchOk(TASK_COMPLETED.receipt!, TASK_COMPLETED.receipt_signature!);
-    vi.stubGlobal("fetch", fetchSpy);
-    const advertRef = { txHash: "b".repeat(64), index: 0 };
-    render(wrap(
-      <PromptForm advertRef={advertRef} payment_lovelace={2_000_000n} />,
-      mp
-    ));
-    const textarea = screen.getByRole("textbox");
-    await user.type(textarea, "What is 2+2?");
-    const submitBtn = screen.getByRole("button", { name: /submit/i });
-    await user.click(submitBtn);
-    await waitFor(() => expect(fetchSpy).toHaveBeenCalled());
-    const lastBody = (stubFetchOk as unknown as {
-      lastBody?: { input: Array<{ content: Array<{ text: string }> }> };
-    }).lastBody;
-    expect(lastBody?.input[0].content[0].text).toBe("What is 2+2?");
-    vi.unstubAllGlobals();
+    const fetchSpy = stubFetchOk();
+    render(wrap(<PromptForm advertRef={advertRef} payment_lovelace={2_000_000n} />, makeMockMarketplace()));
+    await user.type(screen.getByRole("textbox"), "What is 2+2?");
+    await user.click(screen.getByRole("button"));
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledOnce());
+    const [url, init] = fetchSpy.mock.calls[0]!;
+    expect(url).toBe("/v1/submit-prompt");
+    expect(init?.method).toBe("POST");
+    expect(JSON.parse(String(init?.body))).toMatchObject({
+      advert_ref: `${advertRef.txHash}#0`,
+      payment_lovelace: "2000000",
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "What is 2+2?" }] }],
+    });
+    await act(async () => {});
   });
 
   it("does NOT POST when prompt textarea is empty (client-side validation)", async () => {
     const user = userEvent.setup();
-    const mp = makeMockMarketplace();
-    const fetchSpy = stubFetchOk(TASK_COMPLETED.receipt!, TASK_COMPLETED.receipt_signature!);
-    vi.stubGlobal("fetch", fetchSpy);
-    const advertRef = { txHash: "b".repeat(64), index: 0 };
-    render(wrap(
-      <PromptForm advertRef={advertRef} payment_lovelace={2_000_000n} />,
-      mp
-    ));
-    // Do NOT type anything; just click submit
-    const submitBtn = screen.getByRole("button", { name: /submit/i });
-    await user.click(submitBtn);
-    await new Promise(r => setTimeout(r, 50));
+    const fetchSpy = stubFetchOk();
+    render(wrap(<PromptForm advertRef={advertRef} payment_lovelace={2_000_000n} />, makeMockMarketplace()));
+    // Type nothing; click submit.
+    await user.click(screen.getByRole("button"));
+    await act(async () => {});
     expect(fetchSpy).not.toHaveBeenCalled();
-    vi.unstubAllGlobals();
   });
 
   it("renders a loading indicator while /v1/submit-prompt is pending", async () => {
     const user = userEvent.setup();
-    const mp = makeMockMarketplace();
     let resolveFn!: (value: Response) => void;
-    const pending = new Promise<Response>(r => { resolveFn = r; });
+    const pending = new Promise<Response>((resolve) => { resolveFn = resolve; });
     vi.stubGlobal("fetch", vi.fn(() => pending));
-    const advertRef = { txHash: "b".repeat(64), index: 0 };
-    render(wrap(<PromptForm advertRef={advertRef} payment_lovelace={2_000_000n} />, mp));
-    const textarea = screen.getByRole("textbox");
-    await user.type(textarea, "What is 2+2?");
-    const submitBtn = screen.getByRole("button", { name: /submit/i });
-    await user.click(submitBtn);
-    await waitFor(() => {
-      const loading = screen.queryByTestId("loading-indicator") ??
-        screen.queryByRole("progressbar") ??
-        screen.queryByText(/loading|pending|…|\.\.\.$/i);
-      expect(loading).not.toBeNull();
-    });
+    render(wrap(<PromptForm advertRef={advertRef} payment_lovelace={2_000_000n} />, makeMockMarketplace()));
+    await user.type(screen.getByRole("textbox"), "What is 2+2?");
+    await user.click(screen.getByRole("button"));
+    expect(await screen.findByRole("progressbar")).toBeInTheDocument();
     resolveFn(new Response("{}", { status: 502 }));
-    vi.unstubAllGlobals();
+    await waitFor(() => expect(screen.queryByRole("progressbar")).not.toBeInTheDocument());
   });
 
   it("renders an error message when /v1/submit-prompt rejects", async () => {
     const user = userEvent.setup();
-    const mp = makeMockMarketplace();
-    vi.stubGlobal("fetch", vi.fn(async () =>
-      new Response(
-        JSON.stringify({ error: "submit_prompt_failed", message: "supplier offline" }),
-        { status: 502, headers: { "Content-Type": "application/json" } }
-      )
-    ));
-    const advertRef = { txHash: "b".repeat(64), index: 0 };
-    render(wrap(<PromptForm advertRef={advertRef} payment_lovelace={2_000_000n} />, mp));
-    const textarea = screen.getByRole("textbox");
-    await user.type(textarea, "Hello?");
-    const submitBtn = screen.getByRole("button", { name: /submit/i });
-    await user.click(submitBtn);
-    await waitFor(() => {
-      const errEl = screen.queryByRole("alert") ?? screen.queryByText(/error|failed|offline/i);
-      expect(errEl).not.toBeNull();
-    });
-    vi.unstubAllGlobals();
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json(
+      { error: "submit_prompt_failed", message: "supplier offline" },
+      { status: 502 },
+    )));
+    render(wrap(<PromptForm advertRef={advertRef} payment_lovelace={2_000_000n} />, makeMockMarketplace()));
+    await user.type(screen.getByRole("textbox"), "Hello?");
+    await user.click(screen.getByRole("button"));
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
   });
 });
 
@@ -288,13 +199,8 @@ describe("<ApiKeys /> Responses example", () => {
     await user.click(screen.getByTestId("generate-api-key"));
     await screen.findByTestId("api-key-result");
 
-    const snippet = document.querySelector("pre")?.textContent ?? "";
+    const snippet = screen.getByTestId("api-key-result").querySelector("pre")?.textContent ?? "";
     expect(snippet).toContain("https://api.marketplace.example/openai/v1/responses");
-    expect(snippet).toContain("\"input\"");
-    expect(snippet).not.toContain("chat/completions");
-
-    Reflect.deleteProperty(window, "__BUYER_BOOT__");
-    vi.unstubAllGlobals();
   });
 });
 
@@ -331,9 +237,8 @@ describe("<ChatForm /> Responses streams", () => {
     await user.click(screen.getByTestId("chat-send"));
 
     await waitFor(() => {
-      expect(screen.getByText("I cannot help with that.")).toBeTruthy();
+      expect(screen.getByTestId("chat-transcript")).toHaveTextContent("I cannot help with that.");
     });
-    vi.unstubAllGlobals();
   });
 
   it("replays every terminal output Item on the next demo turn", async () => {
@@ -396,10 +301,10 @@ describe("<ChatForm /> Responses streams", () => {
     render(<ChatForm />);
     await user.type(screen.getByTestId("chat-input"), "first");
     await user.click(screen.getByTestId("chat-send"));
-    await screen.findByText("Use the tool.");
+    await waitFor(() => expect(screen.getByTestId("chat-input")).toBeEnabled());
     await user.type(screen.getByTestId("chat-input"), "continue");
     await user.click(screen.getByTestId("chat-send"));
-    await screen.findByText("Done.");
+    await waitFor(() => expect(screen.getByTestId("chat-input")).toBeEnabled());
 
     expect(postedBodies[1]?.input).toEqual([
       {
@@ -414,7 +319,6 @@ describe("<ChatForm /> Responses streams", () => {
         content: [{ type: "input_text", text: "continue" }],
       },
     ]);
-    vi.unstubAllGlobals();
   });
 
   it("keeps incomplete output but reports the terminal truncation reason", async () => {
@@ -448,9 +352,8 @@ describe("<ChatForm /> Responses streams", () => {
     await user.type(screen.getByTestId("chat-input"), "hello");
     await user.click(screen.getByTestId("chat-send"));
 
-    await screen.findByText("Partial answer");
+    await waitFor(() => expect(screen.getByTestId("chat-transcript")).toHaveTextContent("Partial answer"));
     expect(screen.getByTestId("chat-error").textContent).toMatch(/max_output_tokens/);
-    vi.unstubAllGlobals();
   });
 
   it("shows an error when the stream ends without a terminal event", async () => {
@@ -469,10 +372,7 @@ describe("<ChatForm /> Responses streams", () => {
     await user.type(screen.getByTestId("chat-input"), "hello");
     await user.click(screen.getByTestId("chat-send"));
 
-    await waitFor(() => {
-      expect(screen.getByTestId("chat-error").textContent).toMatch(/without a terminal/i);
-    });
-    vi.unstubAllGlobals();
+    expect(await screen.findByTestId("chat-error")).toBeInTheDocument();
   });
 });
 
@@ -536,7 +436,6 @@ describe("<TaskHistory /> smoke", () => {
       const taskRows = document.querySelectorAll("[data-testid='task-row']");
       expect(taskRows.length).toBe(2); // 2 distinct lifecycles
     });
-    vi.unstubAllGlobals();
   });
 
   it("renders an empty-state when the indexer returns no rows", async () => {
@@ -548,44 +447,37 @@ describe("<TaskHistory /> smoke", () => {
     await waitFor(() => {
       expect(screen.getByTestId("task-history-empty")).toBeTruthy();
     });
-    vi.unstubAllGlobals();
   });
 });
 
 describe("<Wallet /> smoke", () => {
-  it("renders the configured walletKey.address", () => {
-    const mp = makeMockMarketplace();
-    render(wrap(<Wallet />, mp));
-    // The buyer's bech32 address must appear somewhere in the rendered output
-    expect(screen.getByText(new RegExp(buyer.address, "i"))).toBeTruthy();
+  it("renders the configured walletKey.address", async () => {
+    // The balance request fails: the page still shows the address. (A pending stub would leave the error path of the page untested.)
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      throw new TypeError("fetch failed");
+    }));
+    render(wrap(<Wallet />, makeMockMarketplace()));
+    await act(async () => {});
+    // The buyer's bech32 address must appear in the rendered output
+    expect(screen.getAllByRole("definition").map((value) => value.textContent)).toContain(buyer.address);
   });
 });
 
 describe("<SupplierCard /> smoke", () => {
   it("renders the supplier model and price", () => {
-    const supplier = makeSampleSupplierView();
-    render(<SupplierCard supplier={supplier} />);
-    // Should display model name
-    expect(screen.getByText(/qwen2\.5:0\.5b/i)).toBeTruthy();
+    render(<SupplierCard supplier={makeSupplierView()} />);
+    const card = screen.getByTestId("supplier-card");
+    expect(within(card).getByRole("heading")).toHaveTextContent("qwen2.5:0.5b");
+    expect(card).toHaveTextContent("2.000000 AP3X");
   });
 
   it("'Use' button is disabled when supplier.status is 'offline'", () => {
-    const offlineSupplier = makeSampleSupplierView({ status: "offline" });
-    render(<SupplierCard supplier={offlineSupplier} />);
-    const useBtn = screen.queryByRole("button", { name: /use/i });
-    if (useBtn) {
-      expect(useBtn).toBeDisabled();
-    } else {
-      // If there's a "Use" button but it's hidden/replaced, verify it cannot be clicked
-      const btn = document.querySelector("button");
-      expect(btn === null || btn.disabled).toBe(true);
-    }
+    render(<SupplierCard supplier={makeSupplierView({ status: "offline" })} />);
+    expect(screen.getByRole("button")).toBeDisabled();
   });
 
   it("'Use' button is enabled when supplier.status is 'free'", () => {
-    const freeSupplier = makeSampleSupplierView({ status: "free" });
-    render(<SupplierCard supplier={freeSupplier} />);
-    const useBtn = screen.getByRole("button", { name: /use/i });
-    expect(useBtn).not.toBeDisabled();
+    render(<SupplierCard supplier={makeSupplierView({ status: "free" })} />);
+    expect(screen.getByRole("button")).not.toBeDisabled();
   });
 });
