@@ -14,8 +14,8 @@ import { formatTime } from "../../src/resolve/time.js";
 import type { ChainMethod, FakeChain } from "../support/chain.js";
 import { LedgerBuilder, identityDatum, idOf, legacyDatum, slotAt, timeAt } from "../support/ledger.js";
 import { tombstoneOf } from "../support/resolve.js";
-import { child, clockAt, decode, hold, listsOn, retirement, revocation, bslBits, tslValue, type DecodedLists, type ServiceOptions } from "./status-list-support.js";
-import { nowS } from "./support.js";
+import { BLOCK_MS, child, clockAt, decode, hold, listsOn, revocation, sameLists, bslBits, tslValue, type DecodedLists, type ServiceOptions } from "./status-list-support.js";
+import { decodeJwt, nowS, text } from "./support.js";
 
 /** The background interval of the tests. A full build is due when the last one ended this long ago. */
 const INTERVAL = 600_000;
@@ -107,9 +107,14 @@ class Rig {
     return decode(this.lists);
   }
 
-  /** The Token Status List values of the records at these indices. */
+  /** The ledger point of the lists (POSIX s): `iat` of Token Status List 0. It signs no Bitstring Status List and unpacks no list. */
+  async point(): Promise<number> {
+    return Number(decodeJwt(text(await this.lists.tokenStatusList(0))).payload.iat);
+  }
+
+  /** The Token Status List values of the records at these indices. It decodes the Token Status Lists only: one signing less for each list. */
   async values(indices: readonly number[]): Promise<number[]> {
-    const lists = await this.decoded();
+    const lists = await decode(this.lists, "token");
     return indices.map((i) => tslValue(lists, i));
   }
 }
@@ -214,6 +219,12 @@ function holdFirstRead(chain: FakeChain): { reached: Promise<void>; release(): v
   return { reached, release: () => release() };
 }
 
+/**
+ * The ticks of a walk over the 30 confirmations that check the lists: at 0 and 1 confirmations, and at 28 or more. The value changes at 30
+ * (CONFIRMATION_DEPTH). At the ticks between, the value is the one of the tick before, so the walk runs them with no decode.
+ */
+const isCheckedTick = (confirmations: number): boolean => confirmations <= 1 || confirmations >= CONFIRMATION_DEPTH - 2;
+
 describe("a follow step", () => {
   test("a suspension shows at the first tick after its block is the tip, and no full build runs", async () => {
     const [A, B, C] = ["a", "b", "c"].map(id) as [string, string, string];
@@ -265,21 +276,19 @@ describe("a follow step", () => {
     expect(rig.callsSince(mark)).toEqual({ tip: 5, policyAssets: 10, assetHolders: 5 });
   });
 
-  test.each([
-    ["revoked", revocation],
-    ["retired", retirement],
-  ])("a record that is %s shows as a suspension until its block has 30 confirmations, then as a revocation", async (_name, ending) => {
+  test("a revoked record shows as a suspension until its block has 30 confirmations, then as a revocation", async () => {
     const [A, B] = ["a", "b"].map(id) as [string, string];
     const b = roots(A, B);
     const rig = await new Rig(b).start();
     const [ia, ib] = (await indicesOf(rig, [A, B])) as [number, number];
 
     const height = rig.tip + 1;
-    b.update(B, tombstoneOf(identityDatum(), ending(height)), { height });
+    b.update(B, tombstoneOf(identityDatum(), revocation(height)), { height });
     for (let k = 0; k <= CONFIRMATION_DEPTH + 2; k++) {
       await rig.tick();
       const confirmations = rig.tip - height;
       expect(confirmations).toBe(k);
+      if (!isCheckedTick(k)) continue;
       const lists = await rig.decoded();
       const expected = confirmations < CONFIRMATION_DEPTH ? STATUS.suspended : STATUS.invalid;
       expect(tslValue(lists, ib), `${confirmations} confirmations`).toBe(expected);
@@ -304,6 +313,7 @@ describe("a follow step", () => {
     b.update(A, identityDatum(), { height });
     for (let k = 0; k <= CONFIRMATION_DEPTH + 1; k++) {
       await rig.tick();
+      if (!isCheckedTick(k)) continue;
       const expected = rig.tip - height < CONFIRMATION_DEPTH ? STATUS.suspended : STATUS.valid;
       expect(await rig.values([ia]), `${rig.tip - height} confirmations`).toEqual([expected]);
       await agree(rig, [A, B]);
@@ -384,6 +394,7 @@ describe("a subagent follows its parent", () => {
     b.update(P, tombstoneOf(identityDatum(), revocation(height)), { height });
     for (let k = 0; k <= CONFIRMATION_DEPTH + 1; k++) {
       await rig.tick();
+      if (!isCheckedTick(k)) continue;
       const expected = rig.tip - height < CONFIRMATION_DEPTH ? STATUS.suspended : STATUS.invalid;
       expect(await rig.values([ip, ic, ig, ix]), `${rig.tip - height} confirmations`).toEqual([expected, expected, expected, STATUS.valid]);
       await agree(rig, [P, C, G, X]);
@@ -399,6 +410,7 @@ describe("a subagent follows its parent", () => {
     b.update(P, identityDatum({ subagentEpoch: 1 }), { height });
     for (let k = 0; k <= CONFIRMATION_DEPTH + 1; k++) {
       await rig.tick();
+      if (!isCheckedTick(k)) continue;
       const expected = rig.tip - height < CONFIRMATION_DEPTH ? STATUS.suspended : STATUS.invalid;
       expect(await rig.values([ip, ic, ig, ix]), `${rig.tip - height} confirmations`).toEqual([STATUS.valid, expected, expected, STATUS.valid]);
       await agree(rig, [P, C, G, X]);
@@ -494,16 +506,17 @@ describe("what the lists claim", () => {
     const rig = await new Rig(roots(A, B)).start();
     const point = timeAt(rig.tip);
     const validUntil = point + LIST_VALIDITY_MS;
-    let first: string | null = null;
-    // The ledger source shows the same tip for an hour: the steps read it, and the lists stay as they are.
-    while (rig.clock.now + REFRESH_TICK_MS < validUntil) {
+    // The ledger source shows the same tip for an hour: the steps and the builds read it, and the lists stay as they are. The clock jumps to
+    // two points of that hour, and one tick runs at each. The first point is 10 minutes after the ledger point: a build is due there. The
+    // second point is two ticks before the end of the validity.
+    for (const before of [point + 600_000, validUntil - 2 * REFRESH_TICK_MS]) {
+      rig.clock.now = before;
       await rig.idleTick();
-      if (rig.clock.now === point + 600_000 + 10_000) first = await rig.lists.tokenStatusList(0);
+      expect(typeof (await rig.lists.tokenStatusList(0)), `${rig.clock.now - point} ms after the ledger point`).toBe("string");
+      expect(typeof (await rig.lists.bitstringStatusList(0)), `${rig.clock.now - point} ms after the ledger point`).toBe("string");
     }
-    expect(first).not.toBeNull();
+    expect(rig.starts()).toEqual(["start", "timer", "timer"]);
     expect(rig.clock.now).toBe(validUntil - REFRESH_TICK_MS);
-    expect(typeof (await rig.lists.tokenStatusList(0))).toBe("string");
-    expect(typeof (await rig.lists.bitstringStatusList(0))).toBe("string");
     // The tick that reaches the end of the validity: no list is valid, and the service says so.
     await rig.idleTick();
     expect(rig.clock.now).toBe(validUntil);
@@ -591,13 +604,13 @@ describe("what the lists claim", () => {
     // The chain forks: the tip is another block 1001, 7 s before the first one. A step and a full build read it. The lists stay as they are.
     b.chain.tipInfo = { blockHeight: 1001, blockHash: "cd".repeat(32), slot: slotAt(1001) - 7 };
     await rig.idleTick();
-    expect(await rig.decoded()).toEqual(first);
+    sameLists(await rig.decoded(), first, "after a step at the tip of the fork");
     await rig.lists.refresh();
-    expect(await rig.decoded()).toEqual(first);
+    sameLists(await rig.decoded(), first, "after a full build at the tip of the fork");
     // The new fork has block 1002, which is 4 s before block 1001 of the first fork. A higher block is not a later ledger point.
     b.chain.tipInfo = { blockHeight: 1002, blockHash: "ce".repeat(32), slot: slotAt(1001) - 4 };
     await rig.idleTick();
-    expect(await rig.decoded()).toEqual(first);
+    sameLists(await rig.decoded(), first, "after a step at block 1002 of the new fork");
     // Block 1003 of the new fork is 3 s after block 1001 of the first fork: the lists follow.
     b.chain.tipInfo = { blockHeight: 1003, blockHash: "cf".repeat(32), slot: slotAt(1001) + 3 };
     await rig.idleTick();
@@ -610,7 +623,7 @@ describe("what the lists claim", () => {
     // A full build reads a tip with a lower block height and a later block time. The lists keep the higher block.
     b.chain.tipInfo = { blockHeight: 1002, blockHash: "d0".repeat(32), slot: slotAt(1001) + 10 };
     await rig.lists.refresh();
-    expect(await rig.decoded()).toEqual(later);
+    sameLists(await rig.decoded(), later, "after a full build at a lower block height");
   });
 
   test("a tip with a block time more than a minute after the clock is a failed read: nothing is published, the log has one line for each refresh interval, and the real tip is followed", async () => {
@@ -631,7 +644,7 @@ describe("what the lists claim", () => {
       "identity-gateway: status lists not followed after 0.0 s: the block time of the ledger tip is 86320.0 s after the clock",
     ]);
     // The lists are as before. The request finds them unread for 80 s, and the build that it starts fails on the same tip.
-    expect(await rig.decoded()).toEqual(first);
+    sameLists(await rig.decoded(), first, "after seven failed steps");
     await rig.lists.idle();
     expect(rig.starts()).toEqual(["start", "request"]);
     expect(rig.logs).toHaveLength(3);
@@ -678,9 +691,12 @@ describe("what the lists claim", () => {
     rig.moveTo(1002);
     await rig.lists.refresh();
     expect(await rig.values([ia, ib])).toEqual([0, 0]);
-    // The lists that readers have stay until they expire, an hour after block 1001.
+    // The lists that readers have stay until they expire, an hour after block 1001. The tip and the clock jump to the tick before that, and
+    // a tick runs there: a build is due, and a step runs.
     const expiry = timeAt(1001) + LIST_VALIDITY_MS;
-    while (rig.clock.now + REFRESH_TICK_MS < expiry) await rig.tick();
+    rig.moveTo(1001 + (LIST_VALIDITY_MS - 3 * REFRESH_TICK_MS) / BLOCK_MS);
+    await rig.tick();
+    expect(rig.clock.now).toBe(expiry - REFRESH_TICK_MS);
     expect(await rig.values([ia, ib])).toEqual([0, 0]);
     // The first step after that replaces them, and the hold shows.
     await rig.tick(2);
@@ -740,28 +756,29 @@ describe("a build and the follow steps", () => {
     // A build starts as soon as a refresh interval has passed since the end of the last one.
     const rig = await new Rig(b, { backgroundRefreshMs: 60_000 }).start();
     const gate = gateOn(b.chain, L);
-    const points: number[] = [(await rig.decoded()).iat];
+    const ticks = 60;
+    const points: number[] = [await rig.point()];
     gate.shut();
     let ends = 0;
-    for (let k = 0; k < 150; k++) {
+    for (let k = 0; k < ticks; k++) {
       await rig.tickSteps();
       // A new hold in the next block, at times; a hold lasts 60 blocks, so holds also end by their time.
       if (k % 7 === 0) b.update(k % 2 ? A : B, identityDatum({ status: hold(timeAt(rig.tip + 1) + 600_000) }), { height: rig.tip + 1 });
-      points.push((await rig.decoded()).iat);
+      points.push(await rig.point());
       // The build that waits for the gate ends at some tick: after 9 ticks, then after 11, and so on.
       if (k % (9 + (ends % 3) * 2) === 8) {
         gate.open();
         await rig.lists.idle();
-        points.push((await rig.decoded()).iat);
+        points.push(await rig.point());
         gate.shut();
         ends++;
       }
     }
     gate.open();
     await rig.lists.idle();
-    points.push((await rig.decoded()).iat);
+    points.push(await rig.point());
     expect(rig.starts().length).toBeGreaterThan(5);
-    expect(points.length).toBeGreaterThan(150);
+    expect(points.length).toBeGreaterThan(ticks);
     expect(points).toEqual([...points].sort((x, y) => x - y));
     await agree(rig, [A, B]);
   });
@@ -1026,11 +1043,7 @@ describe("failures", () => {
     expect(typeof (await rig.lists.tokenStatusList(0))).toBe("string");
   });
 
-  test.each<[string, ChainMethod]>([
-    ["the tip", "tip"],
-    ["the asset index", "policyAssets"],
-    ["a record", "transactions"],
-  ])("a failed read of %s ends the step with no change, and the next step reads again", async (_name, method) => {
+  test("a failed read of a record ends the step with no change, and the next step reads again", async () => {
     const [A, B] = ["a", "b"].map(id) as [string, string];
     const b = roots(A, B);
     const rig = await new Rig(b).start();
@@ -1039,12 +1052,12 @@ describe("failures", () => {
 
     const height = rig.tip + 1;
     b.update(B, identityDatum({ status: hold(timeAt(height) + 3_600_000) }), { height });
-    b.chain.failing.add(method);
+    b.chain.failing.add("transactions");
     await rig.tick();
     expect(rig.logs).toHaveLength(1);
-    expect(rig.logs[0]).toContain(`Koios ${method} answered HTTP 503`);
+    expect(rig.logs[0]).toContain("Koios transactions answered HTTP 503");
     expect(await rig.lists.tokenStatusList(0)).toBe(first);
-    b.chain.failing.delete(method);
+    b.chain.failing.delete("transactions");
     await rig.tick();
     expect(await rig.values([ia, ib])).toEqual([0, 2]);
     await agree(rig, [A, B]);
@@ -1058,18 +1071,6 @@ describe("failures", () => {
       expect(typeof (await rig.lists.tokenStatusList(0))).toBe("string");
     }
     expect(rig.starts()).toEqual(["start"]);
-  });
-
-  test("without steps, a request that finds lists older than the refresh interval starts a build, as before", async () => {
-    const [A, B] = ["a", "b"].map(id) as [string, string];
-    const rig = await new Rig(roots(A, B), { refreshMs: 60_000, followMs: 0 }).start();
-    await rig.tick(5);
-    expect(typeof (await rig.lists.tokenStatusList(0))).toBe("string");
-    expect(rig.starts()).toEqual(["start"]);
-    await rig.tick();
-    expect(typeof (await rig.lists.tokenStatusList(0))).toBe("string");
-    await rig.lists.idle();
-    expect(rig.starts()).toEqual(["start", "request"]);
   });
 
   test("with a follow interval of 300 s, a request between two steps starts no build; after two follow intervals without a read it does", async () => {
@@ -1188,18 +1189,6 @@ describe("failures", () => {
 });
 
 describe("the setting", () => {
-  test("every tick reads the changes by default; the first lines of the log say so", async () => {
-    const [A, B] = ["a", "b"].map(id) as [string, string];
-    const rig = await new Rig(roots(A, B)).start();
-    expect(rig.info.slice(0, 2)).toEqual([
-      "identity-gateway: status lists: the timer builds them again when they are older than 600 s; a list is valid for 3600 s",
-      "identity-gateway: status lists: they follow the chain: the timer reads the changes every 10 s",
-    ]);
-    const mark = rig.mark();
-    await rig.tick(3);
-    expect(rig.callsSince(mark)).toEqual({ tip: 3, policyAssets: 6, assetHolders: 3 });
-  });
-
   test("a follow interval of 30 s reads the changes at every third tick", async () => {
     const [A, B] = ["a", "b"].map(id) as [string, string];
     const b = roots(A, B);

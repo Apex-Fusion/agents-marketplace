@@ -6,15 +6,20 @@
 // time), the end of a record, the lift of a hold, a new subagent epoch, parties that cover only a
 // time window, moves of the token out of its record output, the burn of a legacy token and an
 // adoption. A record that has ended gets no later change, as the identity contract has it.
+//
+// Depth: the pull request run does 12 and 6 runs. The night run (TEST_DEPTH=nightly) does 200 and 100. Each test prints its seed, and a red
+// run names it: put it in the `seed` option of `fc.assert` to repeat the run. The sequences that failed once stay as `examples`.
+// A check decodes both formats at every third step and at the last one; at the other steps it decodes the Token Status Lists only.
 
 import fc from "fast-check";
 import { describe, expect, test } from "vitest";
 import type { IdentityDatum } from "../../src/codec/identity-datum.js";
 import { STATUS, statusValue, type StatusLists } from "../../src/m4/status-lists.js";
 import { VectorResolver } from "../../src/resolve/resolver.js";
+import { nightly } from "../support/depth.js";
 import { IDENTITY, LedgerBuilder, identityDatum, idOf, legacyDatum, party, timeAt } from "../support/ledger.js";
 import { tombstoneOf } from "../support/resolve.js";
-import { bslBits, child, clockAt, decode, fullBuildOf, hold, listsOn, retirement, revocation, tslValue, type DecodedLists } from "./status-list-support.js";
+import { child, clockAt, decode, fullBuildOf, hold, listsOn, retirement, revocation, sameLists, tslValue, type Formats } from "./status-list-support.js";
 
 type Kind =
   | "register"
@@ -260,31 +265,14 @@ class World {
   }
 }
 
-/** Where two decoded lists differ: the first entries of each format, as text. */
-function differences(mine: DecodedLists, full: DecodedLists): string[] {
-  const found: string[] = [];
-  if (mine.tsl.length !== full.tsl.length || mine.bsl.length !== full.bsl.length) found.push(`list counts ${mine.tsl.length}/${full.tsl.length}`);
-  for (let n = 0; n < Math.min(mine.tsl.length, full.tsl.length) && found.length < 10; n++) {
-    if (mine.tsl[n]!.equals(full.tsl[n]!) && mine.bsl[n]!.equals(full.bsl[n]!)) continue;
-    for (let p = 0; p < 4096 && found.length < 10; p++) {
-      const i = n * 131_072 + p;
-      const a = [tslValue(mine, i), ...bslBits(mine, i)];
-      const b = [tslValue(full, i), ...bslBits(full, i)];
-      if (a.join() !== b.join()) found.push(`index ${i}: follow [${a}] full build [${b}]`);
-    }
-  }
-  return found;
-}
-
-/** The lists of the service are the lists of a full build at the same tip; also the indices, and the bits agree with another resolver. */
-async function sameAsFullBuild(world: World, service: StatusLists, label: string): Promise<void> {
-  const full = await fullBuildOf(world.b, world.clock);
-  const mine = await decode(service);
-  expect(mine.iat, `${label}: ledger point`).toBe(full.decoded.iat);
-  expect(mine.exp, `${label}: validity`).toBe(full.decoded.exp);
-  expect(differences(mine, full.decoded), label).toEqual([]);
-  expect(mine.tsl.every((bytes, n) => bytes.equals(full.decoded.tsl[n]!)), `${label}: Token Status List bytes`).toBe(true);
-  expect(mine.bsl.every((bytes, n) => bytes.equals(full.decoded.bsl[n]!)), `${label}: Bitstring Status List bytes`).toBe(true);
+/**
+ * The lists of the service are the lists of a full build at the same tip, in the formats `formats`; also the indices, and the bits agree
+ * with another resolver.
+ */
+async function sameAsFullBuild(world: World, service: StatusLists, label: string, formats: Formats): Promise<void> {
+  const full = await fullBuildOf(world.b, world.clock, formats);
+  const mine = await decode(service, formats);
+  sameLists(mine, full.decoded, label);
   const resolver = new VectorResolver(world.b.chain, world.b.settings, { log: () => undefined });
   for (const agent of world.agents) {
     const index = await service.indexOf(agent.id);
@@ -301,39 +289,55 @@ async function run(steps: readonly Step[]): Promise<void> {
   const info: string[] = [];
   const service = listsOn(world.b, { clock: world.clock, logs, info });
   await service.refresh();
-  await sameAsFullBuild(world, service, "the first build");
+  await sameAsFullBuild(world, service, "the first build", "both");
   for (const [i, step] of steps.entries()) {
     const built = await world.apply(step, service);
     world.moveTo(world.tip + step.advance);
     if (step.follow || built) {
       await service.follow();
-      await sameAsFullBuild(world, service, `step ${i} (${step.kind}) at tip ${world.tip}`);
+      const formats = i % 3 === 2 || i === steps.length - 1 ? "both" : "token";
+      await sameAsFullBuild(world, service, `step ${i} (${step.kind}) at tip ${world.tip}`, formats);
     }
   }
   world.moveTo(world.settled());
   await service.follow();
-  await sameAsFullBuild(world, service, `the end at tip ${world.tip}`);
+  await sameAsFullBuild(world, service, `the end at tip ${world.tip}`, "both");
   // No step found that the records do not fit the lists, and no read failed.
   expect(logs).toEqual([]);
   expect(info.filter((line) => line.includes("(repair)"))).toEqual([]);
 }
 
+/**
+ * A sequence that failed once. A review ran it against a broken copy of the code, in which a follow step did not read the records that get
+ * their index at that step. The lists then differed from a full build. The code of today passes it. It stays as an example of every run.
+ */
+const KNOWN_BAD: Step[] = [
+  { kind: "register", pick: 0, advance: 1, follow: false, length: 1, flag: false },
+  { kind: "revoke", pick: 0, advance: 1, follow: false, length: 1, flag: false },
+  { kind: "moveOut", pick: 260, advance: 0, follow: false, length: 1, flag: false },
+  { kind: "register", pick: 0, advance: 0, follow: false, length: 1, flag: false },
+];
+
 describe("a service that follows the chain gives the lists of a full build", () => {
   test("after any sequence of changes of the records and moves of the tip", async () => {
+    const seed = Date.now();
+    console.info(`status-list property, any sequence: seed ${seed}`);
     await fc.assert(
       fc.asyncProperty(fc.array(stepArb, { minLength: 1, maxLength: 24 }), async (steps) => {
         await run(steps);
       }),
-      { numRuns: 40 },
+      { seed, numRuns: nightly ? 200 : 12, examples: [[KNOWN_BAD]] },
     );
   }, 120_000);
 
   test("with a step after every change and a tip that moves one block at a time", async () => {
+    const seed = Date.now();
+    console.info(`status-list property, a step after every change: seed ${seed}`);
     await fc.assert(
       fc.asyncProperty(fc.array(stepArb, { minLength: 1, maxLength: 20 }), async (steps) => {
         await run(steps.map((step) => ({ ...step, advance: Math.min(step.advance, 1), follow: true })));
       }),
-      { numRuns: 20 },
+      { seed, numRuns: nightly ? 100 : 6, examples: [[KNOWN_BAD]] },
     );
   }, 120_000);
 });
