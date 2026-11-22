@@ -39,12 +39,6 @@ const AGENT_B = "b2".repeat(32);
 const AP3X = 1_000_000n;
 
 describe("config — identity registry values", () => {
-  it("reads the identity policy ID and the switch slot", () => {
-    const config = loadConfig({ ...BASE_ENV, IDENTITY_POLICY_ID: "ab".repeat(28), SWITCH_SLOT: "123456" });
-    expect(config.identityPolicyId).toBe("ab".repeat(28));
-    expect(config.switchSlot).toBe(123456);
-  });
-
   it("leaves both unset before the identity deployment", () => {
     for (const env of [BASE_ENV, { ...BASE_ENV, IDENTITY_POLICY_ID: "", SWITCH_SLOT: "" }]) {
       const config = loadConfig(env);
@@ -54,16 +48,18 @@ describe("config — identity registry values", () => {
     expect(loadConfig({ ...BASE_ENV, SWITCH_SLOT: "0" }).switchSlot).toBe(0);
   });
 
-  it("refuses a policy ID that the blueprint loader would refuse", () => {
+  it("refuses a policy ID that the blueprint loader would refuse, and reads a valid one", () => {
     for (const value of ["AB".repeat(28), "ab".repeat(27), `${"ab".repeat(28)} `, "zz".repeat(28)]) {
       expect(() => loadConfig({ ...BASE_ENV, IDENTITY_POLICY_ID: value })).toThrow(/IDENTITY_POLICY_ID/);
     }
+    expect(loadConfig({ ...BASE_ENV, IDENTITY_POLICY_ID: "ab".repeat(28) }).identityPolicyId).toBe("ab".repeat(28));
   });
 
-  it("refuses a switch slot that is not a non-negative integer", () => {
+  it("refuses a switch slot that is not a non-negative integer, and reads a valid one", () => {
     for (const value of ["-1", "1.5", "01", "abc", "9007199254740993"]) {
       expect(() => loadConfig({ ...BASE_ENV, SWITCH_SLOT: value })).toThrow(/SWITCH_SLOT/);
     }
+    expect(loadConfig({ ...BASE_ENV, SWITCH_SLOT: "123456" }).switchSlot).toBe(123456);
   });
 });
 
