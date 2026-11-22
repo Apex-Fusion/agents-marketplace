@@ -12,8 +12,14 @@ import { formatTime } from "../../identity-gateway/src/resolve/time.js";
 import { LedgerBuilder, idOf, identityDatum, keySigner, party, timeAt } from "../../identity-gateway/test/support/ledger.js";
 import { ed25519Key, p256Key } from "../../identity-gateway/test/support/keys.js";
 import { didOf, resolverFor, tombstoneOf } from "../../identity-gateway/test/support/resolve.js";
+import { nightly } from "../depth.js";
 
-const RUNS = { numRuns: 100 };
+/** The options of fc.assert for one property: a new seed, printed so that a red run can repeat it (docs/TESTING.md, "Test depth"), and more runs at night. */
+function runs(): { seed: number; numRuns: number } {
+  const seed = Date.now();
+  console.info(`seed ${seed}`);
+  return { seed, numRuns: nightly ? 1_000 : 100 };
+}
 
 // ─── Earliest "invalid from" time ────────────────────────────────────────
 
@@ -76,7 +82,7 @@ describe("resolver: a subagent has the earliest invalid-from time of its ancesto
           }
         }
       }),
-      RUNS,
+      runs(),
     );
   });
 });
@@ -266,7 +272,7 @@ describe("resolver: datum → DID document → read back", () => {
           ]),
         );
       }),
-      RUNS,
+      runs(),
     );
   });
 });
