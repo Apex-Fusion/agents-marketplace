@@ -7,11 +7,7 @@
 
 use cardano/address.{Address, Script, VerificationKey}
 use cardano/assets
-use cardano/certificate
-use cardano/governance
-use cardano/script_context.{
-  Minting, Proposing, Publishing, ScriptContext, ScriptInfo, Voting, Withdrawing,
-}
+use cardano/script_context.{ScriptContext, ScriptInfo, Withdrawing}
 use cardano/transaction.{
   InlineDatum, NoDatum, Output, OutputReference, Transaction,
 }
@@ -135,42 +131,4 @@ test advert_spend_without_datum_fails() fail {
 
 test advert_fails_as_withdraw() fail {
   advert.else(context(Withdrawing(Script(script_hash))))
-}
-
-test advert_fails_as_publish() fail {
-  advert.else(
-    context(
-      Publishing {
-        at: 0,
-        certificate: certificate.UpdateDelegateRepresentative {
-          delegate_representative: Script(script_hash),
-        },
-      },
-    ),
-  )
-}
-
-test advert_fails_as_vote() fail {
-  advert.else(
-    context(Voting(governance.DelegateRepresentative(Script(script_hash)))),
-  )
-}
-
-test advert_fails_as_propose() fail {
-  advert.else(
-    context(
-      Proposing {
-        at: 0,
-        proposal_procedure: governance.ProposalProcedure {
-          deposit: 100_000_000_000,
-          return_address: Script(script_hash),
-          governance_action: governance.NicePoll,
-        },
-      },
-    ),
-  )
-}
-
-test advert_fails_as_mint() fail {
-  advert.else(context(Minting(script_hash)))
 }

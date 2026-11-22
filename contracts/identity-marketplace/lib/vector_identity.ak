@@ -938,11 +938,11 @@ test controller_signed_with_key_hash() {
 }
 
 test controller_signed_not_signed() {
-  !controller_signed(root_record(Active), tx_signed_by([test_other_hash]))
-}
-
-test controller_signed_needs_hash() {
-  !controller_signed(root_record(Active), tx_signed_by([test_controller]))
+  and {
+    !controller_signed(root_record(Active), tx_signed_by([test_other_hash])),
+    // The key itself is not a signer: only its hash counts.
+    !controller_signed(root_record(Active), tx_signed_by([test_controller])),
+  }
 }
 
 // ### Constants

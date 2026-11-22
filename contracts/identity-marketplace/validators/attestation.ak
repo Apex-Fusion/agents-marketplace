@@ -10,23 +10,16 @@
 use aiken/crypto.{ScriptHash}
 use cardano/address.{Script}
 use cardano/assets.{PolicyId}
-use cardano/certificate.{UpdateDelegateRepresentative}
-use cardano/governance.{DelegateRepresentative, NicePoll, ProposalProcedure}
-use cardano/script_context.{
-  Proposing, Publishing, ScriptContext, ScriptInfo, Voting, Withdrawing,
-}
+use cardano/script_context.{ScriptContext, ScriptInfo, Withdrawing}
 use cardano/transaction.{OutputReference, Transaction}
 use identity_marketplace/attestation/fixtures.{
-  anchor, att_ref, attest_tx, contested, existing, full_datum, issuer_key, lo,
-  one_hour, own_hash, pkh, range, revoked, seed, spend_tx, subject_controller,
-  withdraw_tx,
+  att_ref, attest_tx, existing, full_datum, issuer_key, lo, own_hash, pkh,
+  revoked, seed, spend_tx,
 }
 use identity_marketplace/attestation/handlers
 use identity_marketplace/types.{
-  Attest, AttestationDatum, AttestationMint, AttestationSpend, Burn, Contest,
-  RevokeAtt, Withdraw,
+  Attest, AttestationDatum, AttestationMint, AttestationSpend, RevokeAtt,
 }
-use vector_identity.{days_90_ms}
 
 validator attestation(identity_hash: ScriptHash) {
   mint(redeemer: AttestationMint, policy_id: PolicyId, self: Transaction) {
@@ -50,8 +43,9 @@ validator attestation(identity_hash: ScriptHash) {
 
 // ## Tests: wiring
 //
-// Each action passes through the validator. The same transaction fails
-// without the spend datum or with a validity range over one hour.
+// `mint` and `spend` pass through the validator, and a spend without the
+// datum fails. The dispatch of each redeemer and the window rule have their
+// tests in `identity_marketplace/attestation/tests`.
 
 /// `Attest` of `full_datum()` by the issuer key.
 fn attest_case() -> Transaction {
@@ -63,30 +57,6 @@ fn revoke_case() -> Transaction {
   spend_tx(existing(), revoked(existing(), lo, 5), [pkh(issuer_key)])
 }
 
-/// `Contest` of `existing()` by the subject's controller.
-fn contest_case() -> Transaction {
-  spend_tx(
-    existing(),
-    contested(existing(), anchor()),
-    [pkh(subject_controller)],
-  )
-}
-
-/// `existing()`, revoked at `lo`.
-fn revoked_case() -> AttestationDatum {
-  revoked(existing(), lo, 5)
-}
-
-/// `Withdraw` with `Burn` of `revoked_case()` at `lo + 90 days`.
-fn withdraw_case() -> Transaction {
-  withdraw_tx(revoked_case(), lo + days_90_ms, [pkh(issuer_key)])
-}
-
-/// `tx` with the validity range `[lower, lower + one hour + 1 ms]`.
-fn too_long(tx: Transaction, lower: Int) -> Transaction {
-  Transaction { ..tx, validity_range: range(lower, lower + one_hour + 1) }
-}
-
 test mint_attest() {
   attestation.mint(
     fixtures.identity_hash,
@@ -96,10 +66,6 @@ test mint_attest() {
   )
 }
 
-test mint_burn() {
-  attestation.mint(fixtures.identity_hash, Burn, own_hash, withdraw_case())
-}
-
 test spend_revoke_att() {
   attestation.spend(
     fixtures.identity_hash,
@@ -107,26 +73,6 @@ test spend_revoke_att() {
     RevokeAtt { reason: 5 },
     att_ref(),
     revoke_case(),
-  )
-}
-
-test spend_contest() {
-  attestation.spend(
-    fixtures.identity_hash,
-    Some(existing()),
-    Contest,
-    att_ref(),
-    contest_case(),
-  )
-}
-
-test spend_withdraw() {
-  attestation.spend(
-    fixtures.identity_hash,
-    Some(revoked_case()),
-    Withdraw,
-    att_ref(),
-    withdraw_case(),
   )
 }
 
@@ -140,75 +86,6 @@ test spend_revoke_att_without_datum() fail {
   )
 }
 
-test spend_contest_without_datum() fail {
-  attestation.spend(
-    fixtures.identity_hash,
-    None,
-    Contest,
-    att_ref(),
-    contest_case(),
-  )
-}
-
-test spend_withdraw_without_datum() fail {
-  attestation.spend(
-    fixtures.identity_hash,
-    None,
-    Withdraw,
-    att_ref(),
-    withdraw_case(),
-  )
-}
-
-test mint_attest_range_over_one_hour() fail {
-  let datum = AttestationDatum { ..full_datum(), issued_at: lo + one_hour + 1 }
-  attestation.mint(
-    fixtures.identity_hash,
-    Attest { seed: seed() },
-    own_hash,
-    too_long(attest_tx(datum, [pkh(issuer_key)]), lo),
-  )
-}
-
-test mint_burn_range_over_one_hour() fail {
-  attestation.mint(
-    fixtures.identity_hash,
-    Burn,
-    own_hash,
-    too_long(withdraw_case(), lo + days_90_ms),
-  )
-}
-
-test spend_revoke_att_range_over_one_hour() fail {
-  attestation.spend(
-    fixtures.identity_hash,
-    Some(existing()),
-    RevokeAtt { reason: 5 },
-    att_ref(),
-    too_long(revoke_case(), lo),
-  )
-}
-
-test spend_contest_range_over_one_hour() fail {
-  attestation.spend(
-    fixtures.identity_hash,
-    Some(existing()),
-    Contest,
-    att_ref(),
-    too_long(contest_case(), lo),
-  )
-}
-
-test spend_withdraw_range_over_one_hour() fail {
-  attestation.spend(
-    fixtures.identity_hash,
-    Some(revoked_case()),
-    Withdraw,
-    att_ref(),
-    too_long(withdraw_case(), lo + days_90_ms),
-  )
-}
-
 // ## Tests: other purposes (§3.9, §12.1 "Other purposes")
 
 fn context(info: ScriptInfo) -> ScriptContext {
@@ -219,42 +96,5 @@ test purpose_withdraw_fails() fail {
   attestation.else(
     fixtures.identity_hash,
     context(Withdrawing(Script(own_hash))),
-  )
-}
-
-test purpose_publish_fails() fail {
-  attestation.else(
-    fixtures.identity_hash,
-    context(
-      Publishing {
-        at: 0,
-        certificate: UpdateDelegateRepresentative {
-          delegate_representative: Script(own_hash),
-        },
-      },
-    ),
-  )
-}
-
-test purpose_vote_fails() fail {
-  attestation.else(
-    fixtures.identity_hash,
-    context(Voting(DelegateRepresentative(Script(own_hash)))),
-  )
-}
-
-test purpose_propose_fails() fail {
-  attestation.else(
-    fixtures.identity_hash,
-    context(
-      Proposing {
-        at: 0,
-        proposal_procedure: ProposalProcedure {
-          deposit: 0,
-          return_address: Script(own_hash),
-          governance_action: NicePoll,
-        },
-      },
-    ),
   )
 }

@@ -129,12 +129,13 @@ test datum_p256_pop_length() {
   )
 }
 
-test datum_p256_transaction_purpose() {
-  !valid(with_keys([p256(1, 8)])) && !valid(with_keys([p256(1, 9)]))
-}
-
-test datum_p256_delegation_purpose() {
-  !valid(with_keys([p256(1, 16)])) && !valid(with_keys([p256(1, 19)]))
+test datum_p256_transaction_or_delegation_purpose() {
+  and {
+    !valid(with_keys([p256(1, 8)])),
+    !valid(with_keys([p256(1, 9)])),
+    !valid(with_keys([p256(1, 16)])),
+    !valid(with_keys([p256(1, 19)])),
+  }
 }
 
 test datum_purpose_value_4() {

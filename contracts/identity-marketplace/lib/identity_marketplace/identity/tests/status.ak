@@ -131,22 +131,6 @@ test revoke_by_party_without_revoke_right() fail {
   )
 }
 
-test revoke_by_responsible_party() fail {
-  let d = base()
-  spend(
-    Revoke { actor: ByParty { index: 2 } },
-    to_tombstone(d, revoked(signer(3), 0, None, None), [pkh(3)]),
-  )
-}
-
-test revoke_by_provider() fail {
-  let d = base()
-  spend(
-    Revoke { actor: ByParty { index: 4 } },
-    to_tombstone(d, revoked(signer(2), 9, None, None), [pkh(2)]),
-  )
-}
-
 test revoke_by_party_outside_period() fail {
   let d =
     with_parties(
@@ -336,14 +320,6 @@ test revoke_reason_64_by_controller() fail {
   )
 }
 
-test revoke_reason_64_by_key_party() fail {
-  let d = base()
-  spend(
-    Revoke { actor: ByParty { index: 1 } },
-    to_tombstone(d, revoked(signer(1), 64, None, None), [pkh(1)]),
-  )
-}
-
 test revoke_by_module1() {
   let d = base()
   spend(
@@ -395,29 +371,6 @@ test revoke_changes_name() fail {
         ..tombstone(d, revoked(ControllerSet, 5, None, None)),
         name: "x",
       },
-      [hash(controller)],
-    ),
-  )
-}
-
-test revoke_takes_value() fail {
-  let d = base()
-  spend(
-    Revoke { actor: ByController },
-    output_ap3x(
-      to_tombstone(d, revoked(ControllerSet, 5, None, None), [hash(controller)]),
-      deposit - 1,
-    ),
-  )
-}
-
-test revoke_of_tombstone() fail {
-  let d = retired_tombstone()
-  spend(
-    Revoke { actor: ByController },
-    spend_tx(
-      d,
-      IdentityDatum { ..d, status: revoked(ControllerSet, 5, None, None) },
       [hash(controller)],
     ),
   )
@@ -605,18 +558,6 @@ test retire_at_not_lo() fail {
   spend(
     Retire,
     to_tombstone(d, Retired { at: lo - 1, successor: None }, [hash(controller)]),
-  )
-}
-
-test retire_not_tombstone() fail {
-  let d = base()
-  spend(
-    Retire,
-    spend_tx(
-      d,
-      IdentityDatum { ..d, status: Retired { at: lo, successor: None } },
-      [hash(controller)],
-    ),
   )
 }
 

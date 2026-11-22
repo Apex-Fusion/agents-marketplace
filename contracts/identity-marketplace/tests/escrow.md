@@ -9,11 +9,11 @@ Run: `cd contracts/identity-marketplace && aiken check -D`.
 | `lib/identity_marketplace/escrow/rules.ak` | The escrow rules. The validator calls `spend`. | 0 |
 | `lib/identity_marketplace/escrow/fixtures.ak` | Test data. A `Case` is a datum, a redeemer and a transaction that pass. | 0 |
 | `lib/identity_marketplace/escrow/ported_tests.ak` | The 17 legacy escrow tests, ported. | 17 |
-| `lib/identity_marketplace/escrow/rule_tests.ak` | Positive controls and the §12.1 escrow attacks. | 118 |
+| `lib/identity_marketplace/escrow/rule_tests.ak` | Positive controls and the §12.1 escrow attacks. | 108 |
 | `lib/identity_marketplace/escrow/cut_tests.ak` | A payment from a vault when a delegation or an identity ends: the sequence with no delegation, the time edges, the return to the vault. | 12 |
-| `validators/escrow.ak` | Validator wiring, other purposes, §12.4 benchmark. | 10 |
+| `validators/escrow.ak` | Validator wiring, other purposes, §12.4 benchmark. | 5 |
 | `lib/identity_marketplace/advert/rules.ak` | The advert rules, the 9 legacy advert tests (ported) and 7 new tests. | 16 |
-| `validators/advert.ak` | Validator wiring and other purposes. | 7 |
+| `validators/advert.ak` | Validator wiring and other purposes. | 3 |
 
 Each attack test changes one part of a passing case. A test that asserts `!run(...)` (or `!update(...)`, `!retire(...)`) passes only when the rules return `False`. A `fail` test is used only where the rule stops the script: the validity window, a missing datum, the advert's continuing output, and the `else` handlers. For each `fail` test, the trace shows the intended `expect` (for example `hi - lo <= max_range_ms`).
 
@@ -25,7 +25,7 @@ Each attack test changes one part of a passing case. A test that asserts `!run(.
 | A legacy escrow input | `legacy_escrow_input_rejected` (every redeemer) |
 | Any second script input | `second_script_input_rejected` (every redeemer; the identity script, and another script with a stake credential) |
 | A mint, withdrawal or certificate | `mint_rejected`, `withdrawal_rejected`, `certificate_rejected`; rule 2 also: `vote_rejected`, `proposal_rejected` (every redeemer) |
-| Claim with an unlisted key | `claim_rejects_unlisted_key` |
+| Claim with an unlisted key | `claim_and_submit_reject_unlisted_key` (also Submit) |
 | Claim with a key without the transaction purpose | `claim_rejects_key_without_transaction_purpose` |
 | Claim with a controller-only key | `claim_rejects_controller_only_key` (control: `claim_with_listed_controller_key`) |
 | Claim with no capability | `claim_rejects_missing_capability` |
@@ -33,16 +33,16 @@ Each attack test changes one part of a passing case. A test that asserts `!run(.
 | Claim by a suspended or unaccountable agent | `claim_rejects_suspended_agent`, `claim_rejects_unaccountable_agent` (no Accountable Party; a party that ends before `hi`; a party that starts after `lo`); also `claim_rejects_revoked_or_retired_agent` (control: `claim_with_ended_hold`) |
 | Claim with a record at a wrong address | `claim_rejects_record_at_wrong_address` (identity script with a stake credential, another script, a key address) |
 | Claim with a record with a fake token | `claim_rejects_record_with_fake_token` (a token of another policy, no token) |
-| Claim with the record of another agent | `claim_rejects_record_of_another_agent`; also `claim_rejects_missing_record` |
+| Claim with the record of another agent | `claim_rejects_record_of_another_agent`; also `claim_submit_and_refund_revoked_reject_missing_record` |
 | Claim above the cap | `claim_rejects_value_above_cap`, `claim_rejects_input_above_cap`, `claim_rejects_negative_amount` (control: `claim_at_value_cap`) |
 | Claim or Submit with a range over one hour | `claim_rejects_range_over_one_hour`, `submit_rejects_range_over_one_hour`; rule 3 for the other redeemers: `accept_rejects_range_over_one_hour`, `reclaim_rejects_range_over_one_hour`, `reclaim_with_refund_rejects_range_over_one_hour`, `release_rejects_range_over_one_hour`, `refund_revoked_rejects_range_over_one_hour`; unbounded ranges: `claim_rejects_unbounded_lower_bound`, `submit_rejects_unbounded_upper_bound`, `reclaim_rejects_unbounded_upper_bound` (control: `claim_with_one_hour_range`) |
 | A continuing escrow output with a stake credential | `claim_rejects_continuing_output_with_stake_credential`, `submit_rejects_continuing_output_with_stake_credential`; also `claim_rejects_two_continuing_outputs`, `claim_rejects_missing_continuing_output`, `claim_rejects_changed_value`, `claim_rejects_continuing_datum_not_inline`, `claim_rejects_continuing_output_with_reference_script` |
-| Submit after key removal, suspension or revocation | `submit_rejects_after_key_removal`, `submit_rejects_after_suspension`, `submit_rejects_after_revocation`; also `submit_rejects_after_retirement`, `submit_rejects_unaccountable_agent`, `submit_rejects_key_without_transaction_purpose`, `submit_rejects_subagent`, `submit_rejects_missing_record` |
+| Submit after key removal, suspension or revocation | `claim_and_submit_reject_unlisted_key` (Submit with a key that the record no longer lists), `submit_rejects_after_suspension`, `submit_rejects_after_revocation_or_retirement`; also `submit_rejects_unaccountable_agent`, `submit_rejects_key_without_transaction_purpose`, `submit_rejects_subagent`, `claim_submit_and_refund_revoked_reject_missing_record` |
 | A changed `agent_id` or `refund` | `claim_rejects_changed_agent_id`, `claim_rejects_changed_refund`, `submit_rejects_changed_agent_id`, `submit_rejects_changed_refund`; also `claim_rejects_other_field_change`, `submit_rejects_submitted_at_other_than_hi`, `submit_rejects_receipt_other_than_redeemer` |
 | A buyer payout to a wrong refund address or with a wrong datum | `accept_with_refund_rejects_payout_to_buyer_key`, `accept_with_refund_rejects_wrong_datum`, `accept_with_buyer_refund_rejects_datum_or_stake`, `reclaim_with_refund_rejects_wrong_address`, `reclaim_with_refund_rejects_wrong_datum`, `refund_revoked_rejects_wrong_refund_address_or_datum` |
 | Reclaim with a refund address and less than a full refund | `reclaim_with_refund_rejects_less_than_full_refund` (the escrow input holds 1.5 AP3X above payment + bonds) |
-| RefundRevoked against a live agent | `refund_revoked_rejects_active_agent`, `refund_revoked_rejects_suspended_agent` (a hold in force; no Accountable Party); also `refund_revoked_rejects_missing_record`, `refund_revoked_rejects_record_of_another_agent`, `refund_revoked_rejects_record_at_wrong_address`, `refund_revoked_rejects_terminal_states` |
-| RefundRevoked of a Submitted escrow without an "invalid from" time at or before `submitted_at` | `refund_revoked_submitted_rejects_no_invalid_from`, `refund_revoked_submitted_rejects_invalid_from_after_submission`, `refund_revoked_submitted_rejects_retired_agent` (control: `refund_revoked_submitted_invalid_from_at_submission`) |
+| RefundRevoked against a live agent | `refund_revoked_rejects_active_agent`, `refund_revoked_rejects_suspended_agent` (a hold in force; no Accountable Party); also `claim_submit_and_refund_revoked_reject_missing_record`, `refund_revoked_rejects_record_of_another_agent`, `refund_revoked_rejects_record_at_wrong_address`, `refund_revoked_rejects_terminal_states` |
+| RefundRevoked of a Submitted escrow without an "invalid from" time at or before `submitted_at` | `refund_revoked_submitted_rejects_no_invalid_from_or_retired_agent`, `refund_revoked_submitted_rejects_invalid_from_after_submission` (control: `refund_revoked_submitted_invalid_from_at_or_before_submission`) |
 | RefundRevoked with less than a full refund or to a buyer address with a stake credential | `refund_revoked_rejects_less_than_full_refund`, `refund_revoked_rejects_staked_buyer_address` |
 | Each payout below its due amount | Accept: `accept_rejects_supplier_shorted`, `accept_rejects_buyer_shorted` (ported), `accept_with_refund_rejects_buyer_shorted`. Reclaim: `reclaim_rejects_buyer_shorted`, `reclaim_with_refund_rejects_less_than_full_refund`. Release: `release_rejects_supplier_shorted`. RefundRevoked: `refund_revoked_rejects_less_than_full_refund` |
 | A third party takes a non-AP3X asset of the escrow input in a path that anybody can submit (decision 10) | Reclaim with refund: `reclaim_with_refund_rejects_token_to_other_output`, `reclaim_with_refund_rejects_token_without_refund_datum`. RefundRevoked: `refund_revoked_rejects_token_to_other_output`, `refund_revoked_with_refund_rejects_token_to_other_output`, `refund_revoked_rejects_part_of_token_quantity` |
@@ -53,20 +53,20 @@ Rule checks that are kept from the legacy escrow have the ported tests (signers,
 
 | Script | Tests (each must fail) |
 |---|---|
-| `escrow` | `escrow_fails_as_withdraw`, `escrow_fails_as_publish`, `escrow_fails_as_vote`, `escrow_fails_as_propose`, `escrow_fails_as_mint` |
-| `advert` | `advert_fails_as_withdraw`, `advert_fails_as_publish`, `advert_fails_as_vote`, `advert_fails_as_propose`, `advert_fails_as_mint` |
+| `escrow` | `escrow_fails_as_withdraw` (the other four purposes reach the same `else` handler) |
+| `advert` | `advert_fails_as_withdraw` (the other four purposes reach the same `else` handler) |
 
 ## Positive controls
 
 | Redeemer | Tests |
 |---|---|
-| All | `every_case_passes` (one case for each redeemer, and Reclaim with a refund address), `escrow_spend_runs_the_rules`, `escrow_spend_reads_records_of_the_parameter` |
-| Claim | `claim_happy_path`, `claim_with_one_hour_range`, `claim_at_value_cap`, `claim_keeps_refund`, `claim_with_listed_controller_key`, `claim_with_ended_hold`, `claim_with_largest_record`, `bench_claim_largest_record` |
-| Submit | `submit_happy_path`, `submit_keeps_refund`, `submit_skips_capability_and_value_checks`, `submit_with_largest_record`, `bench_submit_largest_record` |
+| All | `every_case_passes` (one case for each redeemer, and Reclaim with a refund address), `escrow_spend_runs_the_rules` (the validator accepts a Claim, refuses it without the supplier signature, and finds no record under another identity hash) |
+| Claim | `claim_happy_path`, `claim_with_one_hour_range`, `claim_at_value_cap`, `claim_keeps_refund`, `claim_with_listed_controller_key`, `claim_with_ended_hold`, `bench_claim_largest_record` |
+| Submit | `submit_happy_path`, `submit_keeps_refund`, `submit_skips_capability_and_value_checks`, `bench_submit_largest_record` |
 | Accept | `accept_happy_path`, `accept_with_buyer_refund_address`, `accept_with_vault_refund` |
 | Reclaim | `reclaim_from_open_happy_path`, `reclaim_from_claimed_happy_path`, `reclaim_without_refund_keeps_legacy_amount`, `reclaim_with_refund_without_any_signature`, `reclaim_with_refund_returns_input_ap3x`, `reclaim_with_refund_returns_token`, `reclaim_with_refund_token_in_second_refund_output`, `reclaim_without_refund_counts_ap3x_only` |
 | Release | `release_happy_path`, `release_with_refund_set`, `release_does_not_read_registry` |
-| RefundRevoked | `refund_revoked_open_escrow_of_revoked_agent`, `refund_revoked_open_escrow_of_retired_agent`, `refund_revoked_claimed_escrow_of_revoked_agent`, `refund_revoked_claimed_escrow_of_retired_agent`, `refund_revoked_submitted_invalid_from_at_submission`, `refund_revoked_submitted_invalid_from_before_submission`, `refund_revoked_after_deliver_by`, `refund_revoked_to_vault_refund`, `refund_revoked_to_buyer_refund_address`, `refund_revoked_returns_token`, `refund_revoked_with_refund_returns_token`, `refund_allowed_by_state_and_status` |
+| RefundRevoked | `refund_revoked_open_escrow_of_revoked_or_retired_agent`, `refund_revoked_claimed_escrow_of_revoked_or_retired_agent`, `refund_revoked_submitted_invalid_from_at_or_before_submission`, `refund_revoked_after_deliver_by`, `refund_revoked_to_vault_refund`, `refund_revoked_to_buyer_refund_address`, `refund_revoked_returns_token`, `refund_revoked_with_refund_returns_token`, `refund_allowed_by_state_and_status` |
 | UpdateAdvert | `update_advert_happy_path`, `update_advert_active_to_retired_allowed`, `update_advert_keeps_agent_id_with_other_changes`, `advert_spend_runs_the_rules` |
 | RetireAdvert | `retire_advert_happy_path`, `advert_spend_runs_the_rules` |
 
@@ -90,8 +90,8 @@ A vault Pay writes the escrow with the delegate key as `buyer_pkh`. It also writ
 | The last Accept is at `deliver_by + 600,000` ms. The Release can start at that time. | `accept_ends_600_000_ms_after_deliver_by_at_the_latest` |
 | Anybody can Reclaim an Open or Claimed escrow from `deliver_by`, and not before. The whole value goes to the vault. | `reclaim_of_vault_paid_escrow_waits_for_deliver_by`; also `reclaim_with_refund_without_any_signature`, `reclaim_with_refund_returns_input_ap3x`, `reclaim_with_refund_rejects_less_than_full_refund` |
 | Nobody can Reclaim a Submitted escrow. | `reclaim_rejects_submitted_vault_paid_escrow` (with the vault refund); `reclaim_rejects_submitted_escrow` (without a refund) |
-| RefundRevoked returns an Open or Claimed escrow of a revoked supplier to the vault. | `refund_revoked_to_vault_refund`, `refund_revoked_open_escrow_of_revoked_agent`, `refund_revoked_claimed_escrow_of_revoked_agent`, `refund_revoked_rejects_wrong_refund_address_or_datum` |
-| RefundRevoked returns a Submitted escrow only when the record of the supplier is revoked with an "invalid from" time at or before the Submit. | `refund_revoked_returns_submitted_vault_paid_escrow_to_the_vault`; also `refund_revoked_submitted_invalid_from_at_submission`, `refund_revoked_submitted_invalid_from_before_submission`, `refund_revoked_submitted_rejects_no_invalid_from`, `refund_revoked_submitted_rejects_invalid_from_after_submission`, `refund_revoked_submitted_rejects_retired_agent`, `refund_allowed_by_state_and_status` |
+| RefundRevoked returns an Open or Claimed escrow of a revoked supplier to the vault. | `refund_revoked_to_vault_refund`, `refund_revoked_open_escrow_of_revoked_or_retired_agent`, `refund_revoked_claimed_escrow_of_revoked_or_retired_agent`, `refund_revoked_rejects_wrong_refund_address_or_datum` |
+| RefundRevoked returns a Submitted escrow only when the record of the supplier is revoked with an "invalid from" time at or before the Submit. | `refund_revoked_returns_submitted_vault_paid_escrow_to_the_vault`; also `refund_revoked_submitted_invalid_from_at_or_before_submission`, `refund_revoked_submitted_rejects_no_invalid_from_or_retired_agent`, `refund_revoked_submitted_rejects_invalid_from_after_submission`, `refund_allowed_by_state_and_status` |
 
 The vault and the delegation decide the other parts. Their tests are in other modules:
 

@@ -542,16 +542,15 @@ test attest_valid_until_over_366_days() {
   )
 }
 
-test attest_software_without_valid_until() {
-  content_rejected(
-    AttestationDatum { ..full_datum(), att_type: 2, valid_until: None },
-  )
-}
-
-test attest_environment_without_valid_until() {
-  content_rejected(
-    AttestationDatum { ..full_datum(), att_type: 3, valid_until: None },
-  )
+test attest_types_2_and_3_need_valid_until() {
+  and {
+    content_rejected(
+      AttestationDatum { ..full_datum(), att_type: 2, valid_until: None },
+    ),
+    content_rejected(
+      AttestationDatum { ..full_datum(), att_type: 3, valid_until: None },
+    ),
+  }
 }
 
 test attest_valid_from_after_valid_until() {

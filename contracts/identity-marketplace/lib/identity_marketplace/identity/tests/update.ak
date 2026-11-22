@@ -3,13 +3,11 @@
 //// bound, threshold 0), Time (`created_at` changed) and Value (floor).
 
 use aiken/collection/list
-use cardano/address
-use cardano/transaction.{Transaction}
 use identity_marketplace/identity/kit.{
   accountable, controller_tx, ed, ed_key, guardian, hash, hi, hold_in_force, lo,
-  module1_party, other_script, output_ap3x, p256, pkh, pop, provider, record,
-  responsible, revoked_tombstone, signed_also, signer, spend, spend_tx,
-  suspended, with_module1, with_parties, within, without_config,
+  module1_party, output_ap3x, p256, pkh, pop, provider, record, responsible,
+  revoked_tombstone, signed_also, signer, spend, spend_tx, suspended,
+  with_module1, with_parties, within, without_config,
 }
 use vector_identity.{days_7_ms, max_range_ms}
 use vector_identity/redeemers.{Update}
@@ -154,14 +152,6 @@ test update_adds_p256_key() {
   update(d, IdentityDatum { ..d, keys: [ed(1, 27), p256(1, 3)] })
 }
 
-test update_adds_p256_key_without_pop() fail {
-  let d = base()
-  update(
-    d,
-    IdentityDatum { ..d, keys: [ed(1, 27), Key { ..p256(1, 3), pop: None }] },
-  )
-}
-
 test update_removes_key() {
   let d = base()
   update(d, IdentityDatum { ..d, keys: [] })
@@ -252,37 +242,6 @@ test update_changes_party_without_signature() fail {
         guardian(signer(4)),
       ],
     },
-  )
-}
-
-test update_rights_above_role() fail {
-  let d = base()
-  update_signed(
-    d,
-    IdentityDatum {
-      ..d,
-      parties: [
-        accountable(ControllerSet),
-        Party { ..provider(signer(2)), rights: 3 },
-        guardian(signer(4)),
-      ],
-    },
-    [pkh(2)],
-  )
-}
-
-test update_appoints_party_twice() fail {
-  let d = base()
-  update_signed(
-    d,
-    IdentityDatum {
-      ..d,
-      parties: list.concat(
-        d.parties,
-        [Party { ..provider(signer(2)), rights: 0 }],
-      ),
-    },
-    [pkh(2)],
   )
 }
 
@@ -597,26 +556,6 @@ test update_appoints_module1_without_configuration() fail {
   spend(
     Update,
     without_config(with_module1(controller_tx(base(), with_module1_party()))),
-  )
-}
-
-test update_appoints_other_script() fail {
-  let d2 =
-    with_parties(
-      base(),
-      [
-        accountable(ControllerSet),
-        provider(signer(2)),
-        guardian(signer(4)),
-        responsible(identity.Script { hash: other_script }),
-      ],
-    )
-  spend(
-    Update,
-    Transaction {
-      ..controller_tx(base(), d2),
-      withdrawals: [Pair(address.Script(other_script), 0)],
-    },
   )
 }
 

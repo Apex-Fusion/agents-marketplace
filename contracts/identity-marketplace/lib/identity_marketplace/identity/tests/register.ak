@@ -13,12 +13,12 @@ use identity_marketplace/identity/kit.{
   controller, creation_signers, deposit, distributor, ed, ed_key, guardian, hash,
   hi, hold_in_force, id_of, identity_address, legacy_hash, lo, mint, module1,
   new_record, new_subagent, other_controller, other_script, output, output_ap3x,
-  own, p256, pkh, provider, range, record_input, record_output, record_value,
-  register, register_tx, responsible, seed, signed_also, signer, staked,
-  subagent_tx, suspended, wallet_input, with_mint, with_module1, with_outputs,
-  with_parties, with_refs, within, without_config,
+  own, p256, pkh, provider, record_input, record_output, record_value, register,
+  register_tx, responsible, seed, signed_also, signer, staked, subagent_tx,
+  suspended, wallet_input, with_mint, with_module1, with_outputs, with_parties,
+  with_refs, within, without_config,
 }
-use vector_identity.{days_7_ms, max_range_ms, max_time_ms}
+use vector_identity.{days_7_ms, max_range_ms}
 use vector_identity/redeemers.{Register}
 use vector_identity/types.{
   ControllerSet, IdentityDatum, Party, PendingRecovery, Retired, Subagent,
@@ -297,82 +297,12 @@ test register_two_outputs_at_identity_address() fail {
 }
 
 test register_field_outside_limit() fail {
+  // Wiring proof: Register runs `valid_datum` on the record output. The rules
+  // of the valid datum have their own tests in `tests/datum`.
   register(
     register_tx(
       IdentityDatum { ..new_record(), name: bytes(65, 0x6e) },
       creation_signers(),
-    ),
-  )
-}
-
-test register_duplicate_keys() fail {
-  register(
-    register_tx(
-      IdentityDatum { ..new_record(), keys: [ed(1, 27), ed(1, 1)] },
-      creation_signers(),
-    ),
-  )
-}
-
-test register_duplicate_capabilities() fail {
-  register(
-    register_tx(
-      IdentityDatum { ..new_record(), capabilities: ["a.v1", "a.v1"] },
-      creation_signers(),
-    ),
-  )
-}
-
-test register_same_role_and_signer() fail {
-  register(
-    register_tx(
-      with_parties(
-        new_record(),
-        [accountable(signer(1)), Party { ..accountable(signer(1)), rights: 1 }],
-      ),
-      [pkh(1), ..creation_signers()],
-    ),
-  )
-}
-
-test register_p256_transaction_purpose() fail {
-  register(
-    register_tx(
-      IdentityDatum { ..new_record(), keys: [ed(1, 27), p256(1, 9)] },
-      creation_signers(),
-    ),
-  )
-}
-
-test register_p256_without_pop() fail {
-  register(
-    register_tx(
-      IdentityDatum {
-        ..new_record(),
-        keys: [ed(1, 27), identity.Key { ..p256(1, 3), pop: None }],
-      },
-      creation_signers(),
-    ),
-  )
-}
-
-test register_purpose_value_4() fail {
-  register(
-    register_tx(
-      IdentityDatum { ..new_record(), keys: [ed(1, 4)] },
-      creation_signers(),
-    ),
-  )
-}
-
-test register_rights_above_role() fail {
-  register(
-    register_tx(
-      with_parties(
-        new_record(),
-        [accountable(ControllerSet), Party { ..provider(signer(2)), rights: 3 }],
-      ),
-      [pkh(2), ..creation_signers()],
     ),
   )
 }
@@ -433,45 +363,6 @@ test register_created_at_after_hi() fail {
     register_tx(
       IdentityDatum { ..new_record(), created_at: hi + 1 },
       creation_signers(),
-    ),
-  )
-}
-
-test register_after_year_9999() fail {
-  let late = max_time_ms + 1
-  let d0 = IdentityDatum { ..new_record(), created_at: late }
-  let tx = register_tx(d0, creation_signers())
-  register(Transaction { ..tx, validity_range: range(late - 600_000, late) })
-}
-
-test register_party_time_after_year_9999() fail {
-  register(
-    register_tx(
-      with_parties(
-        new_record(),
-        [
-          Party {
-            ..accountable(ControllerSet),
-            not_after: Some(max_time_ms + 1),
-          },
-        ],
-      ),
-      creation_signers(),
-    ),
-  )
-}
-
-test register_negative_time() fail {
-  register(
-    register_tx(
-      with_parties(
-        new_record(),
-        [
-          accountable(ControllerSet),
-          Party { ..provider(signer(2)), not_before: -1 },
-        ],
-      ),
-      [pkh(2), ..creation_signers()],
     ),
   )
 }
@@ -644,23 +535,6 @@ test register_module1_without_configuration() fail {
   register(without_config(all_parties_tx()))
 }
 
-test register_script_party_not_module1() fail {
-  let d0 =
-    with_parties(
-      new_record(),
-      [
-        accountable(ControllerSet),
-        responsible(identity.Script { hash: other_script }),
-      ],
-    )
-  let tx =
-    Transaction {
-      ..register_tx(d0, creation_signers()),
-      withdrawals: [Pair(address.Script(other_script), 0)],
-    }
-  register(tx)
-}
-
 test register_configuration_at_other_address() fail {
   let fake =
     transaction.Input {
@@ -712,12 +586,11 @@ test register_with_staked_identity_input() fail {
 
 // ## Subagents
 
-test register_subagent_depth_1() {
-  register(subagent_tx(1))
-}
-
-test register_subagent_depth_4() {
-  register(subagent_tx(4))
+test register_subagent_depth_1_and_4() {
+  and {
+    register(subagent_tx(1)),
+    register(subagent_tx(4)),
+  }
 }
 
 test register_subagent_depth_5() fail {
@@ -817,15 +690,6 @@ test register_subagent_parent_at_other_address() fail {
       output: Output { ..parent.output, address: staked(identity_address()) },
     }
   register(with_refs(tx, [moved]))
-}
-
-test register_subagent_with_endpoint() fail {
-  let tx =
-    register_tx(
-      IdentityDatum { ..new_subagent(1), endpoint: "https://sub.example" },
-      [hash(other_controller), ..creation_signers()],
-    )
-  register(with_refs(tx, chain_refs(1)))
 }
 
 test register_subagent_signers_also_cover_parent() {

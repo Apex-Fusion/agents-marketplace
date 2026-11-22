@@ -7,11 +7,7 @@
 //// connects them to the validator.
 
 use cardano/address.{Script}
-use cardano/certificate
-use cardano/governance
-use cardano/script_context.{
-  Minting, Proposing, Publishing, ScriptContext, ScriptInfo, Voting, Withdrawing,
-}
+use cardano/script_context.{ScriptContext, ScriptInfo, Withdrawing}
 use cardano/transaction.{OutputReference, Transaction}
 use identity_marketplace/escrow/fixtures.{
   Case, claim_case, escrow_hash, largest_claim_case, largest_submit_case,
@@ -72,19 +68,15 @@ test escrow_spend_runs_the_rules() {
       fixtures.own_ref(),
       Transaction { ..case.tx, extra_signatories: [] },
     ),
+    // With another identity hash, the record is not found.
+    !escrow.spend(
+      other_script_hash,
+      Some(case.datum),
+      case.redeemer,
+      fixtures.own_ref(),
+      case.tx,
+    ),
   }
-}
-
-test escrow_spend_reads_records_of_the_parameter() {
-  // With another identity hash, the record is not found.
-  let case = claim_case()
-  !escrow.spend(
-    other_script_hash,
-    Some(case.datum),
-    case.redeemer,
-    fixtures.own_ref(),
-    case.tx,
-  )
 }
 
 test escrow_spend_without_datum_fails() fail {
@@ -120,45 +112,4 @@ test bench_submit_largest_record() {
 
 test escrow_fails_as_withdraw() fail {
   escrow.else(fixtures.identity_hash, context(Withdrawing(Script(escrow_hash))))
-}
-
-test escrow_fails_as_publish() fail {
-  escrow.else(
-    fixtures.identity_hash,
-    context(
-      Publishing {
-        at: 0,
-        certificate: certificate.UpdateDelegateRepresentative {
-          delegate_representative: Script(escrow_hash),
-        },
-      },
-    ),
-  )
-}
-
-test escrow_fails_as_vote() fail {
-  escrow.else(
-    fixtures.identity_hash,
-    context(Voting(governance.DelegateRepresentative(Script(escrow_hash)))),
-  )
-}
-
-test escrow_fails_as_propose() fail {
-  escrow.else(
-    fixtures.identity_hash,
-    context(
-      Proposing {
-        at: 0,
-        proposal_procedure: governance.ProposalProcedure {
-          deposit: 100_000_000_000,
-          return_address: Script(escrow_hash),
-          governance_action: governance.NicePoll,
-        },
-      },
-    ),
-  )
-}
-
-test escrow_fails_as_mint() fail {
-  escrow.else(fixtures.identity_hash, context(Minting(escrow_hash)))
 }

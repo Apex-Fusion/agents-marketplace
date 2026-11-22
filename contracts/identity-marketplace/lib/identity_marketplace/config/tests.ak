@@ -191,12 +191,17 @@ test seal_datum_not_bytes() fail {
   seal(with_outputs(seal_tx(), [holder_output(InlineDatum(28))]))
 }
 
-test seal_datum_wrong_length() fail {
-  seal(with_outputs(seal_tx(), [holder_output(InlineDatum(bytes(27, 0x31)))]))
-}
-
-test seal_datum_too_long() fail {
-  seal(with_outputs(seal_tx(), [holder_output(InlineDatum(bytes(32, 0x31)))]))
+test seal_datum_wrong_length() {
+  // The rule returns False (it does not stop the script) for a datum that is
+  // shorter or longer than 28 bytes.
+  and {
+    !seal(
+      with_outputs(seal_tx(), [holder_output(InlineDatum(bytes(27, 0x31)))]),
+    ),
+    !seal(
+      with_outputs(seal_tx(), [holder_output(InlineDatum(bytes(32, 0x31)))]),
+    ),
+  }
 }
 
 // ## M1 lookup

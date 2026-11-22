@@ -19,14 +19,14 @@ use identity_marketplace/escrow/fixtures.{
   buyer_refund, capability, claim_case, claim_of, claim_range, claimed_datum,
   controller_key, deliver_by_ms, escrow_address, escrow_hash, escrow_input,
   escrow_input_with, escrow_output, every_case, hold, identity_hash, key_address,
-  largest_claim_case, largest_submit_case, legacy_escrow_hash, locked_ap3x,
-  locked_value, open_datum, other_agent_id, other_key, other_script_hash,
-  output_at, parent_id, pkh_output, receipt_hash_32, reclaim_case, reclaim_range,
-  reclaim_refund_case, record_input, record_input_with, record_value,
-  refund_revoked_case, refund_revoked_case_with, release_case, retired, revoked,
-  run, script_input, stranger_pkh, submit_case, submit_of, submit_range,
-  submitted_at_ms, submitted_datum, supplier_key, supplier_key_entry,
-  supplier_pkh, supplier_record, tombstone, validity_between, vault_refund,
+  legacy_escrow_hash, locked_ap3x, locked_value, open_datum, other_agent_id,
+  other_key, other_script_hash, output_at, parent_id, pkh_output,
+  receipt_hash_32, reclaim_case, reclaim_range, reclaim_refund_case,
+  record_input, record_input_with, record_value, refund_revoked_case,
+  refund_revoked_case_with, release_case, retired, revoked, run, script_input,
+  stranger_pkh, submit_case, submit_of, submit_range, submitted_at_ms,
+  submitted_datum, supplier_key, supplier_key_entry, supplier_pkh,
+  supplier_record, tombstone, validity_between, vault_refund,
   vault_returned_datum, wallet_input, widened, with_outputs, with_range,
   with_record, with_refs, with_refund, with_signers, with_tx,
 }
@@ -187,14 +187,6 @@ test claim_with_ended_hold() {
   run(claim_with_record(suspended_record(claim_lo)))
 }
 
-test claim_with_largest_record() {
-  run(largest_claim_case())
-}
-
-test submit_with_largest_record() {
-  run(largest_submit_case())
-}
-
 test submit_skips_capability_and_value_checks() {
   let record = IdentityDatum { ..supplier_record(), capabilities: [] }
   let above_cap =
@@ -284,28 +276,25 @@ test release_does_not_read_registry() {
   )
 }
 
-test refund_revoked_open_escrow_of_revoked_agent() {
-  run(refund_revoked_case())
+test refund_revoked_open_escrow_of_revoked_or_retired_agent() {
+  and {
+    run(refund_revoked_case()),
+    run(refund_revoked_case_with(open_datum(), tombstone(retired()))),
+  }
 }
 
-test refund_revoked_open_escrow_of_retired_agent() {
-  run(refund_revoked_case_with(open_datum(), tombstone(retired())))
+test refund_revoked_claimed_escrow_of_revoked_or_retired_agent() {
+  and {
+    run(refund_revoked_case_with(claimed_datum(), tombstone(revoked(None)))),
+    run(refund_revoked_case_with(claimed_datum(), tombstone(retired()))),
+  }
 }
 
-test refund_revoked_claimed_escrow_of_revoked_agent() {
-  run(refund_revoked_case_with(claimed_datum(), tombstone(revoked(None))))
-}
-
-test refund_revoked_claimed_escrow_of_retired_agent() {
-  run(refund_revoked_case_with(claimed_datum(), tombstone(retired())))
-}
-
-test refund_revoked_submitted_invalid_from_at_submission() {
-  run(refund_submitted(tombstone(revoked(Some(submitted_at_ms)))))
-}
-
-test refund_revoked_submitted_invalid_from_before_submission() {
-  run(refund_submitted(tombstone(revoked(Some(4_100_000_000)))))
+test refund_revoked_submitted_invalid_from_at_or_before_submission() {
+  and {
+    run(refund_submitted(tombstone(revoked(Some(submitted_at_ms))))),
+    run(refund_submitted(tombstone(revoked(Some(4_100_000_000))))),
+  }
 }
 
 test refund_revoked_after_deliver_by() {
@@ -549,13 +538,16 @@ test reclaim_rejects_unbounded_upper_bound() fail {
 
 // ## Claim: identity checks
 
-test claim_rejects_unlisted_key() {
+test claim_and_submit_reject_unlisted_key() {
   let record =
     IdentityDatum {
       ..supplier_record(),
       keys: [Key { key_type: Ed25519, key: other_key, purposes: 11, pop: None }],
     }
-  !run(claim_with_record(record))
+  and {
+    !run(claim_with_record(record)),
+    !run(submit_with_record(record)),
+  }
 }
 
 test claim_rejects_key_without_transaction_purpose() {
@@ -674,8 +666,12 @@ test claim_rejects_record_of_another_agent() {
   )
 }
 
-test claim_rejects_missing_record() {
-  !run(with_refs(claim_case(), []))
+test claim_submit_and_refund_revoked_reject_missing_record() {
+  and {
+    !run(with_refs(claim_case(), [])),
+    !run(with_refs(submit_case(), [])),
+    !run(with_refs(refund_revoked_case(), [])),
+  }
 }
 
 // ## Claim: value cap
@@ -878,15 +874,6 @@ test submit_rejects_receipt_other_than_redeemer() {
 
 // ## Submit: identity checks
 
-test submit_rejects_after_key_removal() {
-  let record =
-    IdentityDatum {
-      ..supplier_record(),
-      keys: [Key { key_type: Ed25519, key: other_key, purposes: 11, pop: None }],
-    }
-  !run(submit_with_record(record))
-}
-
 test submit_rejects_key_without_transaction_purpose() {
   !run(
     submit_with_record(
@@ -903,15 +890,12 @@ test submit_rejects_unaccountable_agent() {
   !run(submit_with_record(IdentityDatum { ..supplier_record(), parties: [] }))
 }
 
-test submit_rejects_after_revocation() {
+test submit_rejects_after_revocation_or_retirement() {
   and {
     !run(submit_with_record(tombstone(revoked(None)))),
     !run(submit_with_record(tombstone(revoked(Some(submitted_at_ms))))),
+    !run(submit_with_record(tombstone(retired()))),
   }
-}
-
-test submit_rejects_after_retirement() {
-  !run(submit_with_record(tombstone(retired())))
 }
 
 test submit_rejects_subagent() {
@@ -927,10 +911,6 @@ test submit_rejects_subagent() {
       record_input(agent_id, subagent),
     ]
   !run(with_refs(submit_case(), refs))
-}
-
-test submit_rejects_missing_record() {
-  !run(with_refs(submit_case(), []))
 }
 
 // ## Payouts: refund address and datum
@@ -1112,10 +1092,6 @@ test refund_revoked_rejects_suspended_agent() {
   }
 }
 
-test refund_revoked_rejects_missing_record() {
-  !run(with_refs(refund_revoked_case(), []))
-}
-
 test refund_revoked_rejects_record_of_another_agent() {
   !run(
     with_refs(
@@ -1143,16 +1119,15 @@ test refund_revoked_rejects_record_at_wrong_address() {
   )
 }
 
-test refund_revoked_submitted_rejects_no_invalid_from() {
-  !run(refund_submitted(tombstone(revoked(None))))
+test refund_revoked_submitted_rejects_no_invalid_from_or_retired_agent() {
+  and {
+    !run(refund_submitted(tombstone(revoked(None)))),
+    !run(refund_submitted(tombstone(retired()))),
+  }
 }
 
 test refund_revoked_submitted_rejects_invalid_from_after_submission() {
   !run(refund_submitted(tombstone(revoked(Some(submitted_at_ms + 1)))))
-}
-
-test refund_revoked_submitted_rejects_retired_agent() {
-  !run(refund_submitted(tombstone(retired())))
 }
 
 test refund_revoked_rejects_terminal_states() {

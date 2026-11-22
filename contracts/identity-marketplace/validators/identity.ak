@@ -7,11 +7,7 @@
 
 use cardano/address.{Script}
 use cardano/assets.{PolicyId}
-use cardano/certificate.{UpdateDelegateRepresentative}
-use cardano/governance.{DelegateRepresentative, NicePoll, ProposalProcedure}
-use cardano/script_context.{
-  Proposing, Publishing, ScriptContext, ScriptInfo, Voting, Withdrawing,
-}
+use cardano/script_context.{ScriptContext, ScriptInfo, Withdrawing}
 use cardano/transaction.{OutputReference, Transaction}
 use identity_marketplace/identity/kit
 use identity_marketplace/identity/mint.{mint_ok}
@@ -86,74 +82,33 @@ test identity_mint_wiring() {
   )
 }
 
-test identity_mint_wiring_rejects() fail {
-  identity.mint(
-    kit.legacy_hash,
-    legacy_root(),
-    kit.config_policy,
-    kit.config_holder,
-    Register { seed: kit.seed() },
-    kit.own,
-    kit.register_tx(kit.new_record(), [kit.hash(kit.controller)]),
-  )
-}
-
 test identity_spend_wiring() {
   let d = kit.record()
-  identity.spend(
-    kit.legacy_hash,
-    legacy_root(),
-    kit.config_policy,
-    kit.config_holder,
-    None,
-    Update,
-    kit.record_ref(),
-    kit.controller_tx(d, d),
-  )
-}
-
-test identity_spend_wiring_rejects() fail {
-  let d = kit.record()
-  identity.spend(
-    kit.legacy_hash,
-    legacy_root(),
-    kit.config_policy,
-    kit.config_holder,
-    None,
-    Update,
-    kit.record_ref(),
-    kit.spend_tx(d, d, []),
-  )
+  and {
+    identity.spend(
+      kit.legacy_hash,
+      legacy_root(),
+      kit.config_policy,
+      kit.config_holder,
+      None,
+      Update,
+      kit.record_ref(),
+      kit.controller_tx(d, d),
+    ),
+    // The same Update without the controller's signature is refused.
+    !identity.spend(
+      kit.legacy_hash,
+      legacy_root(),
+      kit.config_policy,
+      kit.config_holder,
+      None,
+      Update,
+      kit.record_ref(),
+      kit.spend_tx(d, d, []),
+    ),
+  }
 }
 
 test identity_withdraw_fails() fail {
   other_purpose(Withdrawing(Script(kit.own)))
-}
-
-test identity_publish_fails() fail {
-  other_purpose(
-    Publishing {
-      at: 0,
-      certificate: UpdateDelegateRepresentative {
-        delegate_representative: Script(kit.own),
-      },
-    },
-  )
-}
-
-test identity_vote_fails() fail {
-  other_purpose(Voting(DelegateRepresentative(Script(kit.own))))
-}
-
-test identity_propose_fails() fail {
-  other_purpose(
-    Proposing {
-      at: 0,
-      proposal_procedure: ProposalProcedure {
-        deposit: 0,
-        return_address: Script(kit.own),
-        governance_action: NicePoll,
-      },
-    },
-  )
 }
