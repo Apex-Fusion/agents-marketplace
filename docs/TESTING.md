@@ -233,21 +233,29 @@ of the money, signature and chain-decoding files in `tests/coverage-guard.json` 
 code; no UI, no CLI entry point that no test loads, no config module).
 
 ```
-scripts/coverage-diff                 # the merge base against the head; prints a markdown table; exits 1 when a guarded file lost coverage
+scripts/coverage-diff                 # the merge base against the head; prints a markdown table; exits 1 when a guarded file lost a covered location
 scripts/coverage-diff --base <ref> --md-out table.md --json-out result.json
 ```
 
 Put the table in the text of the pull request. The script needs `rx` and a git worktree. It runs the same v8 coverage of the default
-suite (the projects `unit` and `ui`; the base commit needs `vitest.workspace.ts`) twice: on a temporary worktree of the base commit,
-and on the head (the worktree with its uncommitted changes). With two answering
-build hosts the runs go at the same time; `--host NAME` runs both one after the other on one host. A file lost coverage when, for lines
-or for branches, the percentage fell by more than `--epsilon` (default 0.005 points) AND the file has more uncovered items than
-before: the v8 provider changes the branch count of a file by a few between two runs of the same code, so a fall with no new
-uncovered item is noise. A drop in a guarded file stops the change until a test covers the lines again, or the owner accepts the drop.
-When a guarded source file moves or goes, change `tests/coverage-guard.json` in the same pull request (the script fails on a guard
-path that no summary holds). The wall-clock limit of `packages/shared/src/cbor-depth.test.ts` applies only in the night run
-(`TEST_DEPTH=nightly`) since #53, so the gate has no test that a busy build host can fail on time. A test that failed for another reason
-on a busy host: run the script again.
+suite (the projects `unit` and `ui`; the base commit needs `vitest.workspace.ts`) twice, with the reporters `json-summary` and `json`:
+on a temporary worktree of the base commit, and on the head (the worktree with its uncommitted changes). With two answering build hosts
+the runs go at the same time; `--host NAME` runs both one after the other on one host.
+
+The rule: a guarded file lost coverage when it has a statement or a branch that the base run covers (count above 0) and the head run
+does not cover (count 0). The script reads `coverage-final.json` of both runs and matches the locations by source position (line and
+column; a branch by its start, its end and its arm), not by the key of the v8 data. v8 adds and moves items with count 0 between two
+runs of the same code, so the keys and the number of branches of a file shift. A base location with no head location at the same
+position is not compared (the source changed there, or v8 reports no range for it). The script exits 1 when a guarded file has a lost
+location, and prints each one with its file, line and kind (`statement` or `branch`). A run of consecutive lost lines is one row of the
+table; `--json-out` holds every location.
+
+The percentages in the table are information. The flag `fell` marks a fall of a percentage by more than `--epsilon` (default 0.005
+points) with more uncovered items than before. Without a lost location it is no drop. A drop in a guarded file stops the change until a
+test covers the location again, or the owner accepts the drop. When a guarded source file moves or goes, change
+`tests/coverage-guard.json` in the same pull request (the script fails on a guard path that no summary holds). The wall-clock limit of
+`packages/shared/src/cbor-depth.test.ts` applies only in the night run (`TEST_DEPTH=nightly`) since #53, so the gate has no test that a
+busy build host can fail on time. A test that failed for another reason on a busy host: run the script again.
 
 ## 8. Gaps that deleted tests described
 
