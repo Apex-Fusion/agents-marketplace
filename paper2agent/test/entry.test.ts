@@ -4,42 +4,52 @@
  * The image starts it as `tsx paper2agent/src/index.ts <role>` (the ENTRYPOINT of paper2agent/Dockerfile) from the repository root,
  * and the package scripts start it as `tsx src/index.ts <role>` from the package directory. Both forms must start the role, so the
  * entry has no condition. A role that does not exist gives the usage line and exit code 1.
+ *
+ * The cases run in this process: loading the entry runs `main`, and `main` starts the real role. One child process shows the
+ * exit code of the entry at process level.
  */
 
 import { spawnSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { main } from "../src/run.js";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const TSX = resolve(ROOT, "node_modules/tsx/dist/cli.mjs");
+const USAGE = "Usage: tsx paper2agent/src/index.ts <control|publisher>";
 
-function start(cwd: string, entry: string, ...args: string[]) {
-  return spawnSync(process.execPath, [TSX, entry, ...args], { cwd, encoding: "utf8", timeout: 60_000, env: { ...process.env, NODE_ENV: "test" } });
-}
+const argv = process.argv;
+beforeEach(() => {
+  process.argv = [...argv];
+  // A shell with settings of the roles must not change a case.
+  for (const name of Object.keys(process.env)) if (name.startsWith("PAPER2AGENT_")) vi.stubEnv(name, undefined);
+});
+afterEach(() => {
+  process.argv = argv;
+  vi.unstubAllEnvs();
+});
 
 describe("the entry point of the Paper2Agent process", () => {
+  it("gives the usage line and exit code 1 for a role that does not exist, as the image starts it", () => {
+    const result = spawnSync(process.execPath, [TSX, "paper2agent/src/index.ts", "bogus"],
+      { cwd: ROOT, encoding: "utf8", timeout: 60_000, env: { NODE_ENV: "test" } });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(USAGE);
+  });
+
+  it("runs main when it loads, with no condition: a role that does not exist gives the usage line", async () => {
+    process.argv[2] = "bogus";
+    await expect(import("../src/index.js")).rejects.toThrow(USAGE);
+  });
+
   it.each([
-    ["from the repository root, as the image starts it", ROOT, "paper2agent/src/index.ts"],
-    ["from the package directory, as the package scripts start it", resolve(ROOT, "paper2agent"), "src/index.ts"],
-  ])("gives the usage line and exit code 1 for a role that does not exist, %s", (_name, cwd, entry) => {
-    const result = start(cwd, entry, "bogus");
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain("Usage: tsx paper2agent/src/index.ts <control|publisher>");
-  });
-
-  it("gives the usage line and exit code 1 when no role is given", () => {
-    const result = start(ROOT, "paper2agent/src/index.ts");
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain("Usage: tsx paper2agent/src/index.ts <control|publisher>");
-  });
-
-  it("starts the role: a role with no configuration stops with the error of its configuration, not with the usage line", () => {
-    for (const role of ["control", "publisher"]) {
-      const result = start(ROOT, "paper2agent/src/index.ts", role);
-      expect(result.status).toBe(1);
-      expect(result.stderr).not.toContain("Usage: tsx paper2agent/src/index.ts");
-      expect(result.stderr).toMatch(/PAPER2AGENT_/);
-    }
+    ["control", /loadPaperControlConfig: PAPER2AGENT_CONTROL_TOKEN/],
+    ["publisher", /loadPaperPublisherConfig: PAPER2AGENT_/],
+  ])("starts the role %s: with no configuration it stops with the error of its configuration, not with the usage line", async (role, configError) => {
+    const failure: unknown = await main(role).then(() => undefined, (error: unknown) => error);
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toMatch(configError);
+    expect((failure as Error).message).not.toContain(USAGE);
   });
 });
