@@ -1,7 +1,7 @@
 /**
- * tx-submit.test.ts — RED phase tests for buildSubmitTx() (Claimed → Submitted)
+ * tx-submit.test.ts: buildSubmitTx() (Claimed → Submitted) on the mock chain, and the deadline on a live provider.
  *
- * Tests mirror escrow.ak:handle_submit invariants:
+ * The cases mirror the escrow.ak invariants of handle_submit:
  *   - signed by supplier_pkh
  *   - old state = Claimed
  *   - new datum: state=Submitted, submitted_at=upper_bound, result_receipt_hash=Some(hash)
@@ -11,13 +11,14 @@
  *   - validity upper-bound ≤ deliver_by
  *
  * Note from escrow.ak: "Validity-range upper bound serves as the canonical submission stamp."
+ * The live Submit transaction is built in the lifecycle case of tx-post-escrow-live.test.ts.
  */
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { MockChainProvider } from "../../packages/shared/src/chain/MockChainProvider.js";
 import { buildSubmitTx } from "../../packages/shared/src/tx/escrow/submit.js";
 import { TxConstructionError } from "../../packages/shared/src/tx/types.js";
-import { decodeEscrowDatum } from "../../packages/shared/src/cbor/EscrowDatum.js";
+import { decodeEscrowDatum, encodeEscrowDatum } from "../../packages/shared/src/cbor/EscrowDatum.js";
 import { buildSupplierWalletKey } from "../fixtures/supplier-side/wallet-keys.js";
 import { buildBuyerWalletKey } from "../fixtures/buyer-side/wallet-keys.js";
 import {
@@ -26,8 +27,23 @@ import {
   DELIVER_BY,
   TOTAL_LOCKED,
 } from "../fixtures/buyer-side/sample-escrow-utxos.js";
+import { legacyLive } from "../fixtures/onchain-tx/legacy-live.js";
 
 const VALID_RECEIPT_HASH = "e".repeat(64);  // 32 bytes as hex
+
+/** A mock chain 100 s before deliver_by, with `utxo` on it. */
+function chainWith(utxo = buildClaimedEscrowUtxo()): MockChainProvider {
+  const chain = new MockChainProvider();
+  chain.advanceSlot(Math.floor((DELIVER_BY - 100_000) / 1000));
+  chain.seed(utxo);
+  return chain;
+}
+
+async function refusalOf(promise: Promise<unknown>): Promise<TxConstructionError> {
+  const error = await promise.then(() => null, (e: unknown) => e);
+  expect(error).toBeInstanceOf(TxConstructionError);
+  return error as TxConstructionError;
+}
 
 // ─── Happy path ───────────────────────────────────────────────────────────────
 
@@ -35,17 +51,7 @@ describe("buildSubmitTx() — happy path", () => {
   let chain: MockChainProvider;
 
   beforeEach(() => {
-    chain = new MockChainProvider();
-    chain.advanceSlot(Math.floor((DELIVER_BY - 100_000) / 1000));
-    chain.seed(buildClaimedEscrowUtxo());
-  });
-
-  it("returns a non-empty txCborHex", async () => {
-    const supplier = buildSupplierWalletKey();
-    const utxo = buildClaimedEscrowUtxo();
-    const result = await buildSubmitTx({ chain, supplierKey: supplier, escrowRef: utxo.ref, receiptHash: VALID_RECEIPT_HASH });
-    expect(typeof result.txCborHex).toBe("string");
-    expect(result.txCborHex.length).toBeGreaterThan(0);
+    chain = chainWith();
   });
 
   it("continuing output datum has state = Submitted", async () => {
@@ -104,6 +110,7 @@ describe("buildSubmitTx() — happy path", () => {
     const newUtxo = await chain.queryUtxo({ txHash: result.expectedTxHash, index: 0 });
     expect(newUtxo!.lovelace).toBe(TOTAL_LOCKED);
   });
+
   it("journals signed Submit CBOR before broadcast", async () => {
     const supplier = buildSupplierWalletKey();
     const utxo = buildClaimedEscrowUtxo();
@@ -125,100 +132,51 @@ describe("buildSubmitTx() — happy path", () => {
       await chain.queryUtxo({ txHash: result.expectedTxHash, index: 0 }),
     ).not.toBeNull();
   });
-
 });
 
-// ─── Rejection: double-submit ────────────────────────────────────────────────
+// ─── Rejections ──────────────────────────────────────────────────────────────
 
-describe("buildSubmitTx() — rejects double-submit", () => {
-  it("throws TxConstructionError when escrow is already Submitted", async () => {
-    const supplier = buildSupplierWalletKey();
-    const chain = new MockChainProvider();
-    chain.advanceSlot(Math.floor((DELIVER_BY - 100_000) / 1000));
+describe("buildSubmitTx() — rejections", () => {
+  it("refuses a double submit", async () => {
     const utxo = buildSubmittedEscrowUtxo();  // already Submitted
-    chain.seed(utxo);
-
-    await expect(
-      buildSubmitTx({ chain, supplierKey: supplier, escrowRef: utxo.ref, receiptHash: VALID_RECEIPT_HASH }),
-    ).rejects.toThrow(TxConstructionError);
+    const refusal = await refusalOf(
+      buildSubmitTx({ chain: chainWith(utxo), supplierKey: buildSupplierWalletKey(), escrowRef: utxo.ref, receiptHash: VALID_RECEIPT_HASH }),
+    );
+    expect(refusal.reason).toBe("double submit");
   });
 
-  it("TxConstructionError.reason is 'double submit'", async () => {
-    const supplier = buildSupplierWalletKey();
-    const chain = new MockChainProvider();
-    chain.advanceSlot(Math.floor((DELIVER_BY - 100_000) / 1000));
-    const utxo = buildSubmittedEscrowUtxo();
-    chain.seed(utxo);
+  // escrow.ak requires exactly 32 bytes. The builder checks the hash first, so the chain is empty here: a builder that read the
+  // chain first would refuse with "escrow ref not on chain".
+  it.each([["an empty string", ""], ["4 bytes", "deadbeef"]])("refuses a receipt hash of %s before it reads the chain", async (_name, receiptHash) => {
+    const refusal = await refusalOf(
+      buildSubmitTx({ chain: new MockChainProvider(), supplierKey: buildSupplierWalletKey(), escrowRef: buildClaimedEscrowUtxo().ref, receiptHash }),
+    );
+    expect(refusal.reason).toBe("receipt hash must be 32 bytes");
+  });
 
-    let caught: unknown;
-    try {
-      await buildSubmitTx({ chain, supplierKey: supplier, escrowRef: utxo.ref, receiptHash: VALID_RECEIPT_HASH });
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toBeInstanceOf(TxConstructionError);
-    expect((caught as TxConstructionError).reason).toBe("double submit");
+  it("refuses a signer that is not the supplier", async () => {
+    const utxo = buildClaimedEscrowUtxo();
+    const refusal = await refusalOf(
+      buildSubmitTx({ chain: chainWith(), supplierKey: buildBuyerWalletKey(), escrowRef: utxo.ref, receiptHash: VALID_RECEIPT_HASH }),
+    );
+    expect(refusal.reason).toBe("supplier signature mismatch");
   });
 });
 
-// ─── Rejection: empty receipt hash ───────────────────────────────────────────
+// ─── Live backend: the deadline is read from the clock ───────────────────────
 
-describe("buildSubmitTx() — rejects empty/invalid receipt hash", () => {
-  it("throws TxConstructionError when receiptHash is empty string", async () => {
-    const supplier = buildSupplierWalletKey();
-    const chain = new MockChainProvider();
-    chain.advanceSlot(Math.floor((DELIVER_BY - 100_000) / 1000));
-    chain.seed(buildClaimedEscrowUtxo());
-    const utxo = buildClaimedEscrowUtxo();
+describe("buildSubmitTx() [live]", () => {
+  const live = legacyLive(Date.UTC(2026, 3, 27, 12, 0, 0));
 
-    await expect(
-      buildSubmitTx({ chain, supplierKey: supplier, escrowRef: utxo.ref, receiptHash: "" }),
-    ).rejects.toThrow(TxConstructionError);
-  });
+  it("refuses 'submit after deliver_by' when the clock is past deliver_by, whatever the tip says", async () => {
+    const claimed = buildClaimedEscrowUtxo();
+    const datum = decodeEscrowDatum(claimed.datumHex!);
+    live.ogmios.add({ ...claimed, datumHex: encodeEscrowDatum({ ...datum, deliver_by: Date.now() - 1 }) });
 
-  it("throws TxConstructionError when receiptHash is not 32 bytes (too short)", async () => {
-    const supplier = buildSupplierWalletKey();
-    const chain = new MockChainProvider();
-    chain.advanceSlot(Math.floor((DELIVER_BY - 100_000) / 1000));
-    chain.seed(buildClaimedEscrowUtxo());
-    const utxo = buildClaimedEscrowUtxo();
+    const refusal = await refusalOf(
+      buildSubmitTx({ chain: live.ogmios.chain(), supplierKey: buildSupplierWalletKey(), escrowRef: claimed.ref, receiptHash: VALID_RECEIPT_HASH }),
+    );
 
-    // 4 bytes only — escrow.ak requires exactly 32
-    await expect(
-      buildSubmitTx({ chain, supplierKey: supplier, escrowRef: utxo.ref, receiptHash: "deadbeef" }),
-    ).rejects.toThrow(TxConstructionError);
-  });
-
-  it("TxConstructionError.reason is 'receipt hash must be 32 bytes'", async () => {
-    const supplier = buildSupplierWalletKey();
-    const chain = new MockChainProvider();
-    chain.advanceSlot(Math.floor((DELIVER_BY - 100_000) / 1000));
-    chain.seed(buildClaimedEscrowUtxo());
-    const utxo = buildClaimedEscrowUtxo();
-
-    let caught: unknown;
-    try {
-      await buildSubmitTx({ chain, supplierKey: supplier, escrowRef: utxo.ref, receiptHash: "deadbeef" });
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toBeInstanceOf(TxConstructionError);
-    expect((caught as TxConstructionError).reason).toBe("receipt hash must be 32 bytes");
-  });
-});
-
-// ─── Rejection: non-supplier signer ──────────────────────────────────────────
-
-describe("buildSubmitTx() — rejects non-supplier signer", () => {
-  it("throws TxConstructionError when signed by buyer", async () => {
-    const buyer = buildBuyerWalletKey();
-    const chain = new MockChainProvider();
-    chain.advanceSlot(Math.floor((DELIVER_BY - 100_000) / 1000));
-    chain.seed(buildClaimedEscrowUtxo());
-    const utxo = buildClaimedEscrowUtxo();
-
-    await expect(
-      buildSubmitTx({ chain, supplierKey: buyer, escrowRef: utxo.ref, receiptHash: VALID_RECEIPT_HASH }),
-    ).rejects.toThrow(TxConstructionError);
+    expect(refusal.reason).toBe("submit after deliver_by");
   });
 });

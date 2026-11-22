@@ -1,351 +1,99 @@
 /**
- * tx-accept-live.test.ts — RED phase tests for buildAcceptTx() with LiveOgmiosProvider
- *
- * The live path produces real Cardano CBOR spending the Submitted escrow UTxO.
- * Redeemer = Accept (Constr2, variant 2 of EscrowRedeemer).
- * Outputs distribute: supplier receives payment+supplier_bond; buyer receives buyer_bond.
- * Validity upper bound = submitted_at + ACCEPT_WINDOW_MS.
- *
- * Existing MockChainProvider tests in tx-accept.test.ts are NOT modified.
- *
- * M1-F-4 RED — tests fail until Catherine implements the live CBOR path.
+ * tx-accept-live.test.ts: buildAcceptTx() on a LiveOgmiosProvider, legacy layout. The transaction is real Cardano CBOR from lucid.
+ * The fake Ogmios and the pinned clock are in tests/fixtures/onchain-tx/legacy-live.ts. The mock-chain twin is tx-accept.test.ts.
+ * The live path reads the accept window from the clock, not from the tip slot.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { LiveOgmiosProvider } from "../../packages/shared/src/chain/LiveOgmiosProvider.js";
-import { inspectSignedTransactionFinancials } from "../../packages/shared/src/tx/server.js";
-import { buildAcceptTx, ACCEPT_WINDOW_MS } from "../../packages/shared/src/tx/escrow/accept.js";
-import { TxConstructionError } from "../../packages/shared/src/tx/types.js";
-import { encodeEscrowDatum, decodeEscrowDatum } from "../../packages/shared/src/cbor/EscrowDatum.js";
-import { buildBuyerWalletKey } from "../fixtures/buyer-side/wallet-keys.js";
+import { describe, expect, it } from "vitest";
+import { buildAcceptTx } from "../../packages/shared/src/tx/escrow/accept.js";
+import { TxConstructionError, type WalletKey } from "../../packages/shared/src/tx/types.js";
+import { ACCEPT_WINDOW_MS, MIN_UTXO_LOVELACE } from "../../packages/shared/src/tx/internal/constants.js";
+import { pkhToEnterpriseAddress } from "../../packages/shared/src/tx/internal/pkhAddress.js";
+import { inspectSignedTransaction, inspectSignedTransactionFinancials } from "../../packages/shared/src/tx/internal/signedTransaction.js";
+import { decodeEscrowDatum, encodeEscrowDatum } from "../../packages/shared/src/cbor/EscrowDatum.js";
+import type { EscrowDatum } from "../../packages/shared/src/cbor/types.js";
+import type { Utxo } from "../../packages/shared/src/chain/ChainProvider.js";
+import { buildBuyerWalletKey, BUYER_PKH } from "../fixtures/buyer-side/wallet-keys.js";
 import { buildSupplierWalletKey } from "../fixtures/supplier-side/wallet-keys.js";
 import {
   buildSubmittedEscrowUtxo,
-  SUBMITTED_AT,
+  ESCROW_SUPPLIER_PKH,
   PAYMENT_LOVELACE,
-  BUYER_BOND,
+  SUBMITTED_AT,
   SUPPLIER_BOND,
 } from "../fixtures/buyer-side/sample-escrow-utxos.js";
+import { AP3X, VECTOR_MAINNET_ZERO_TIME_MS } from "../fixtures/identity-builders/world.js";
+import { legacyLive, lucidWallet } from "../fixtures/onchain-tx/legacy-live.js";
 
-// ─── Fixtures ──────────────────────────────────────────────────────────────────
+const ESCROW_REF = buildSubmittedEscrowUtxo().ref;
+const buyer = buildBuyerWalletKey();
+const live = legacyLive(SUBMITTED_AT + 60_000);
 
-const ESCROW_TX_HASH = "f".repeat(64);
-const ESCROW_INDEX = 2;
-// 100 ADA — must cover script-spend fee, collateral, and change min-ADA after the
-// synthetic padding-input shortcut was removed (ARCHITECTURE.md §9 #14).
-const COLLATERAL_LOVELACE = 100_000_000;
-
-const mockFetch = vi.fn();
-
-// Freeze Date.now() inside the fixture's accept window: the live path checks
-// submitted_at + ACCEPT_WINDOW_MS against wall-clock time, and the fixture
-// timestamps are fixed POSIX values that would otherwise expire as real time
-// passes.
-const FAKE_NOW_MS = SUBMITTED_AT + 60_000;
-
-beforeEach(() => {
-  mockFetch.mockReset();
-  vi.useFakeTimers();
-  vi.setSystemTime(FAKE_NOW_MS);
-});
-
-afterEach(() => {
-  vi.useRealTimers();
-});
-
-function rpcOk<T>(result: T) {
-  return { ok: true, json: async () => ({ jsonrpc: "2.0", result }) };
+/** The Submitted escrow of the fixtures with `changes` in its datum, and a buyer wallet with `funds`. Returns the funds. */
+function seedEscrow(changes: Partial<EscrowDatum> = {}, funds: bigint[] = [100n * AP3X]): Utxo[] {
+  const submitted = buildSubmittedEscrowUtxo();
+  live.ogmios.add({ ...submitted, datumHex: encodeEscrowDatum({ ...decodeEscrowDatum(submitted.datumHex!), ...changes }) });
+  return live.ogmios.fund(lucidWallet(buyer), ...funds);
 }
 
-interface OgmiosUtxo {
-  transaction: { id: string };
-  index: number;
-  address: string;
-  value: { ada: { lovelace: number } };
-  datum: string | null;
-  datumHash: null;
-  script: null;
+const accept = (buyerKey: WalletKey = buyer, excludeInputs?: Utxo["ref"][]) =>
+  buildAcceptTx({ chain: live.ogmios.chain(), buyerKey, escrowRef: ESCROW_REF, excludeInputs });
+
+async function reasonOf(promise: Promise<unknown>): Promise<string> {
+  const error = await promise.then(() => null, (e: unknown) => e);
+  expect(error).toBeInstanceOf(TxConstructionError);
+  return (error as TxConstructionError).reason;
 }
 
-function makeOgmiosUtxo(txId: string, index: number, address: string, lovelace: number, datumHex?: string): OgmiosUtxo {
-  return { transaction: { id: txId }, index, address, value: { ada: { lovelace } }, datum: datumHex ?? null, datumHash: null, script: null };
-}
+describe("buildAcceptTx() [live]", () => {
+  it("spends the escrow, pays the supplier the payment and its bond, and pays the buyer its bond", async () => {
+    seedEscrow();
 
-function protocolParamsResponse() {
-  return rpcOk({
-    minFeeCoefficient: 44, minFeeConstant: { ada: { lovelace: 155381 } },
-    maxTransactionSize: { bytes: 16384 }, maxValueSize: { bytes: 5000 },
-    stakeCredentialDeposit: { ada: { lovelace: 2000000 } },
-    stakePoolDeposit: { ada: { lovelace: 500000000 } },
-    prices: { memory: "0.0577", steps: "0.0000721" },
-    maxExecutionUnitsPerTransaction: { memory: 14000000, cpu: 10000000000 },
-    coinsPerUtxoByte: { ada: { lovelace: 4310 } }, collateralPercentage: 150, maxCollateralInputs: 3,
-    plutusCostModels: { "plutus:v1": {}, "plutus:v2": {}, "plutus:v3": {} },
-    monetaryExpansion: "0.003", treasuryExpansion: "0.2",
-    minStakePoolCost: { ada: { lovelace: 340000000 } },
-    minFeeReferenceScripts: { base: 15 },
-    governanceActionDeposit: { ada: { lovelace: 100000000000 } },
-    delegateRepresentativeDeposit: { ada: { lovelace: 500000000 } },
-  });
-}
+    const { txCborHex } = await accept();
 
-function buildLiveChain(): LiveOgmiosProvider {
-  return new LiveOgmiosProvider({ ogmiosUrl: "http://ogmios:1337", fetch: mockFetch });
-}
-
-function setupAcceptHappyPath(escrowDatumHex: string, extraWalletUtxos: OgmiosUtxo[] = []): void {
-  const buyer = buildBuyerWalletKey();
-  const submittedUtxo = buildSubmittedEscrowUtxo();
-  const escrowAddress = submittedUtxo.address;
-  // Tip is within accept window
-  const tipSlot = Math.floor((SUBMITTED_AT + ACCEPT_WINDOW_MS / 2) / 1000);
-
-  mockFetch.mockImplementation(async (_url: string, init?: RequestInit) => {
-    const body = JSON.parse((init?.body as string) ?? "{}");
-    const method: string = body.method ?? "";
-
-    if (method === "queryLedgerState/protocolParameters") return protocolParamsResponse();
-    if (method === "queryLedgerState/utxo") {
-      if ((body.params ?? {}).outputReferences) {
-        return rpcOk([makeOgmiosUtxo(ESCROW_TX_HASH, ESCROW_INDEX, escrowAddress, 4_000_000, escrowDatumHex)]);
-      }
-      return rpcOk([makeOgmiosUtxo("c".repeat(64), 0, buyer.address, COLLATERAL_LOVELACE), ...extraWalletUtxos]);
-    }
-    if (method === "queryNetwork/tip") return rpcOk({ slot: tipSlot, id: "a".repeat(64) });
-    // Like real Ogmios, return the script-spend redeemer with its true index:
-    // the escrow input ("ff…") sorts after the wallet input ("cc…"), so the
-    // spend redeemer index is 1. The provider's index-0 fallback for empty
-    // mock responses makes CML's set_exunits panic ("unreachable").
-    if (method === "evaluateTransaction") {
-      return rpcOk([{ validator: { purpose: "spend", index: 1 }, budget: { memory: 1_000_000, cpu: 500_000_000 } }]);
-    }
-    if (method === "submitTransaction") return rpcOk({ transaction: { id: "d".repeat(64) } });
-    return rpcOk({});
-  });
-}
-
-// ─── A. CBOR shape ─────────────────────────────────────────────────────────────
-
-describe("buildAcceptTx() [live] — CBOR shape", () => {
-  it("returns real Cardano CBOR starting with 83 or 84", async () => {
-    const submittedUtxo = buildSubmittedEscrowUtxo();
-    setupAcceptHappyPath(submittedUtxo.datumHex!);
-    const chain = buildLiveChain();
-    const buyer = buildBuyerWalletKey();
-
-    const result = await buildAcceptTx({
-      chain,
-      buyerKey: buyer,
-      escrowRef: { txHash: ESCROW_TX_HASH, index: ESCROW_INDEX },
-    });
-
-    const firstByte = result.txCborHex.slice(0, 2).toLowerCase();
-    expect(["83", "84"]).toContain(firstByte);
+    const { inputs, outputs } = inspectSignedTransactionFinancials(txCborHex);
+    expect(inputs).toContainEqual(ESCROW_REF);
+    expect(outputs).toContainEqual({ address: pkhToEnterpriseAddress(ESCROW_SUPPLIER_PKH, 1), lovelace: PAYMENT_LOVELACE + SUPPLIER_BOND });
+    // The buyer bond (1 AP3X) is below the output floor, so the builder pays the floor.
+    expect(outputs).toContainEqual({ address: pkhToEnterpriseAddress(BUYER_PKH, 1), lovelace: MIN_UTXO_LOVELACE });
+    expect(outputs.filter((output) => output.datumHex !== undefined)).toEqual([]);
+    // The validity range ends with the accept window: submitted_at + ACCEPT_WINDOW_MS, on the slot clock.
+    expect(inspectSignedTransaction(txCborHex).validUntilSlot).toBe((SUBMITTED_AT + ACCEPT_WINDOW_MS - VECTOR_MAINNET_ZERO_TIME_MS) / 1000);
   });
 
-  it("txCborHex is non-empty lowercase hex string", async () => {
-    const submittedUtxo = buildSubmittedEscrowUtxo();
-    setupAcceptHappyPath(submittedUtxo.datumHex!);
-    const chain = buildLiveChain();
-    const buyer = buildBuyerWalletKey();
-
-    const result = await buildAcceptTx({
-      chain,
-      buyerKey: buyer,
-      escrowRef: { txHash: ESCROW_TX_HASH, index: ESCROW_INDEX },
-    });
-
-    expect(/^[0-9a-f]+$/i.test(result.txCborHex)).toBe(true);
-    expect(result.txCborHex.length).toBeGreaterThan(0);
-  });
-});
-
-describe("buildAcceptTx() [live] — excluded inputs", () => {
   it("never spends a wallet output that a pending transaction spends", async () => {
-    const buyer = buildBuyerWalletKey();
-    const pending = { txHash: "e".repeat(64), index: 0 };
-    setupAcceptHappyPath(buildSubmittedEscrowUtxo().datumHex!,
-      [makeOgmiosUtxo(pending.txHash, pending.index, buyer.address, 2 * COLLATERAL_LOVELACE)]);
+    // Coin selection would fund from the larger output.
+    const [kept, pending] = seedEscrow({}, [100n * AP3X, 200n * AP3X]);
 
-    const result = await buildAcceptTx({
-      chain: buildLiveChain(),
-      buyerKey: buyer,
-      escrowRef: { txHash: ESCROW_TX_HASH, index: ESCROW_INDEX },
-      excludeInputs: [pending],
-    });
+    const { txCborHex } = await accept(buyer, [pending!.ref]);
 
-    expect(inspectSignedTransactionFinancials(result.txCborHex).inputs).not.toContainEqual(pending);
-  });
-});
-
-// ─── B. Value distribution ────────────────────────────────────────────────────
-
-describe("buildAcceptTx() [live] — value distribution", () => {
-  it("supplier receives payment + supplier_bond (terminal tx, no continuing script output)", async () => {
-    const submittedUtxo = buildSubmittedEscrowUtxo();
-    setupAcceptHappyPath(submittedUtxo.datumHex!);
-    const chain = buildLiveChain();
-    const buyer = buildBuyerWalletKey();
-
-    const result = await buildAcceptTx({
-      chain,
-      buyerKey: buyer,
-      escrowRef: { txHash: ESCROW_TX_HASH, index: ESCROW_INDEX },
-    });
-
-    // The tx is valid (CBOR produced); distribution correctness is enforced on-chain
-    expect(result.txCborHex.length).toBeGreaterThan(0);
-  });
-});
-
-// ─── C. Validity range ─────────────────────────────────────────────────────────
-
-describe("buildAcceptTx() [live] — validity range", () => {
-  it("succeeds when tip is within ACCEPT_WINDOW", async () => {
-    const submittedUtxo = buildSubmittedEscrowUtxo();
-    setupAcceptHappyPath(submittedUtxo.datumHex!);
-    const chain = buildLiveChain();
-    const buyer = buildBuyerWalletKey();
-
-    // The mock tip is set to submitted_at + ACCEPT_WINDOW/2 — within window
-    const result = await buildAcceptTx({
-      chain,
-      buyerKey: buyer,
-      escrowRef: { txHash: ESCROW_TX_HASH, index: ESCROW_INDEX },
-    });
-
-    expect(result.txCborHex.length).toBeGreaterThan(0);
-  });
-});
-
-// ─── D. Rejection paths ────────────────────────────────────────────────────────
-
-describe("buildAcceptTx() [live] — rejection paths", () => {
-  it("throws TxConstructionError('buyer signature mismatch') when caller pkh != datum.buyer_pkh", async () => {
-    const submittedUtxo = buildSubmittedEscrowUtxo();
-    setupAcceptHappyPath(submittedUtxo.datumHex!);
-    const chain = buildLiveChain();
-    const supplier = buildSupplierWalletKey(); // wrong key
-
-    await expect(
-      buildAcceptTx({
-        chain,
-        buyerKey: supplier,
-        escrowRef: { txHash: ESCROW_TX_HASH, index: ESCROW_INDEX },
-      }),
-    ).rejects.toMatchObject({ reason: "buyer signature mismatch" });
+    const { inputs } = inspectSignedTransactionFinancials(txCborHex);
+    expect(inputs).not.toContainEqual(pending!.ref);
+    expect(inputs).toContainEqual(kept!.ref);
   });
 
-  it("throws TxConstructionError('wrong state') when escrow.state != Submitted", async () => {
-    const submittedUtxo = buildSubmittedEscrowUtxo();
-    const submittedDatum = decodeEscrowDatum(submittedUtxo.datumHex!);
-    // Revert to Open state
-    const openDatumHex = encodeEscrowDatum({ ...submittedDatum, state: "Open" as const, submitted_at: null, result_receipt_hash: null });
-
-    setupAcceptHappyPath(openDatumHex);
-    const chain = buildLiveChain();
-    const buyer = buildBuyerWalletKey();
-
-    await expect(
-      buildAcceptTx({
-        chain,
-        buyerKey: buyer,
-        escrowRef: { txHash: ESCROW_TX_HASH, index: ESCROW_INDEX },
-      }),
-    ).rejects.toMatchObject({ reason: "wrong state" });
+  it("refuses a key that is not the buyer", async () => {
+    seedEscrow();
+    expect(await reasonOf(accept(buildSupplierWalletKey()))).toBe("buyer signature mismatch");
   });
 
-  it("throws TxConstructionError('accept window expired') when tip > submitted_at + ACCEPT_WINDOW", async () => {
-    // On the live path, tipMs = Date.now(). To trigger 'accept window expired'
-    // we need submitted_at + ACCEPT_WINDOW_MS < Date.now(), so use a submitted_at
-    // that places the window end in the past.
-    const submittedUtxo = buildSubmittedEscrowUtxo();
-    const submittedDatum = decodeEscrowDatum(submittedUtxo.datumHex!);
-    const expiredSubmittedAt = Date.now() - ACCEPT_WINDOW_MS - 1;
-    const expiredDatumHex = encodeEscrowDatum({
-      ...submittedDatum,
-      submitted_at: expiredSubmittedAt,
-      state: "Submitted",
-    });
-    const buyer = buildBuyerWalletKey();
-
-    mockFetch.mockImplementation(async (_url: string, init?: RequestInit) => {
-      const body = JSON.parse((init?.body as string) ?? "{}");
-      const method: string = body.method ?? "";
-      if (method === "queryLedgerState/protocolParameters") return protocolParamsResponse();
-      if (method === "queryLedgerState/utxo") {
-        if ((body.params ?? {}).outputReferences) {
-          return rpcOk([makeOgmiosUtxo(ESCROW_TX_HASH, ESCROW_INDEX, "addr_escrow", 4_000_000, expiredDatumHex)]);
-        }
-        return rpcOk([makeOgmiosUtxo("c".repeat(64), 0, buyer.address, COLLATERAL_LOVELACE)]);
-      }
-      // Tip slot is not used for the live window check (Date.now() is used instead)
-      if (method === "queryNetwork/tip") {
-        return rpcOk({ slot: 100_000, id: "a".repeat(64) });
-      }
-      return rpcOk({});
-    });
-
-    const chain = buildLiveChain();
-
-    await expect(
-      buildAcceptTx({
-        chain,
-        buyerKey: buyer,
-        escrowRef: { txHash: ESCROW_TX_HASH, index: ESCROW_INDEX },
-      }),
-    ).rejects.toMatchObject({ reason: "accept window expired" });
+  it("refuses an escrow that is not Submitted", async () => {
+    seedEscrow({ state: "Open", submitted_at: null, result_receipt_hash: null });
+    expect(await reasonOf(accept())).toBe("wrong state");
   });
 
-  it("throws TxConstructionError('escrow ref not on chain') when escrow UTxO absent", async () => {
-    const buyer = buildBuyerWalletKey();
-
-    mockFetch.mockImplementation(async (_url: string, init?: RequestInit) => {
-      const body = JSON.parse((init?.body as string) ?? "{}");
-      const method: string = body.method ?? "";
-      if (method === "queryLedgerState/protocolParameters") return protocolParamsResponse();
-      return rpcOk([]);
-    });
-
-    const chain = buildLiveChain();
-
-    await expect(
-      buildAcceptTx({
-        chain,
-        buyerKey: buyer,
-        escrowRef: { txHash: ESCROW_TX_HASH, index: ESCROW_INDEX },
-      }),
-    ).rejects.toMatchObject({ reason: "escrow ref not on chain" });
+  it("refuses after the accept window on the clock", async () => {
+    seedEscrow({ submitted_at: Date.now() - ACCEPT_WINDOW_MS - 1 });
+    expect(await reasonOf(accept())).toBe("accept window expired");
   });
 
-  it("throws TxConstructionError containing 'collateral' when buyer wallet is empty", async () => {
-    const submittedUtxo = buildSubmittedEscrowUtxo();
-    const escrowDatumHex = submittedUtxo.datumHex!;
-    const buyer = buildBuyerWalletKey();
-    const tipSlot = Math.floor((SUBMITTED_AT + ACCEPT_WINDOW_MS / 2) / 1000);
+  it("refuses an escrow that is not on chain", async () => {
+    live.ogmios.fund(lucidWallet(buyer), 100n * AP3X);
+    expect(await reasonOf(accept())).toBe("escrow ref not on chain");
+  });
 
-    mockFetch.mockImplementation(async (_url: string, init?: RequestInit) => {
-      const body = JSON.parse((init?.body as string) ?? "{}");
-      const method: string = body.method ?? "";
-      if (method === "queryLedgerState/protocolParameters") return protocolParamsResponse();
-      if (method === "queryLedgerState/utxo") {
-        if ((body.params ?? {}).outputReferences) {
-          return rpcOk([makeOgmiosUtxo(ESCROW_TX_HASH, ESCROW_INDEX, "addr_escrow", 4_000_000, escrowDatumHex)]);
-        }
-        return rpcOk([]); // empty buyer wallet
-      }
-      if (method === "queryNetwork/tip") return rpcOk({ slot: tipSlot, id: "a".repeat(64) });
-      return rpcOk({});
-    });
-
-    const chain = buildLiveChain();
-
-    await expect(
-      buildAcceptTx({
-        chain,
-        buyerKey: buyer,
-        escrowRef: { txHash: ESCROW_TX_HASH, index: ESCROW_INDEX },
-      }),
-    ).rejects.toThrow(TxConstructionError);
+  it("refuses a wallet without a UTxO for the collateral", async () => {
+    seedEscrow({}, []);
+    expect(await reasonOf(accept())).toContain("collateral");
   });
 });

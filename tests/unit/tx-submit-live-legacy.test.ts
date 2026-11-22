@@ -1,9 +1,9 @@
 /**
  * tx-submit-live-legacy.test.ts — buildSubmitTx() with LiveOgmiosProvider, legacy escrow layout.
  *
- * The live Submit builder (buildLiveTxForSubmit) spends the Claimed escrow output with the Submit redeemer and writes the
- * Submitted datum into the continuing output. A failure of the build (here: a failed evaluation by Ogmios) is a TxConstructionError
- * that names the step (liveCbor.ts, rethrowAsTxError).
+ * The live Submit builder (buildLiveTxForSubmit) spends the Claimed escrow output with the Submit redeemer. A failure of the build
+ * (here: a failed evaluation by Ogmios) is a TxConstructionError that names the step (liveCbor.ts, rethrowAsTxError). The success case
+ * (the Submitted datum, the receipt hash, the stamp) is the Submit step of the lifecycle case of tx-post-escrow-live.test.ts.
  *
  * The mock of Ogmios answers evaluateTransaction with the true index of the spend redeemer. The escrow input ("ff…") sorts
  * after the wallet input ("cc…"), so its index is 1. A mock that answers index 0 makes the set_exunits call of CML panic
@@ -13,7 +13,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { LiveOgmiosProvider } from "../../packages/shared/src/chain/LiveOgmiosProvider.js";
 import { buildSubmitTx } from "../../packages/shared/src/tx/escrow/submit.js";
-import { decodeEscrowDatum, encodeEscrowDatum } from "../../packages/shared/src/cbor/EscrowDatum.js";
 import { buildSupplierWalletKey } from "../fixtures/supplier-side/wallet-keys.js";
 import { buildClaimedEscrowUtxo, DELIVER_BY } from "../fixtures/buyer-side/sample-escrow-utxos.js";
 import { makeOgmiosProtocolParams } from "../fixtures/chain-codec/ogmios-protocol-parameters.js";
@@ -79,19 +78,6 @@ async function submitOnFakeOgmios(evaluation: unknown) {
 }
 
 describe("buildSubmitTx() [live] — legacy layout", () => {
-  it("builds a transaction whose continuing output holds the Submitted datum with the receipt hash", async () => {
-    const { claimed, result } = await submitOnFakeOgmios(EVALUATION);
-
-    // The stamp of a Submit is the end of the validity range: 2 minutes past the tip, capped at deliver_by.
-    const submittedDatumHex = encodeEscrowDatum({
-      ...decodeEscrowDatum(claimed.datumHex!),
-      state: "Submitted",
-      submitted_at: DELIVER_BY,
-      result_receipt_hash: RECEIPT_HASH,
-    });
-    expect((await result).txCborHex).toContain(submittedDatumHex);
-  });
-
   it("refuses with a TxConstructionError that names the step when Ogmios fails the evaluation", async () => {
     const { result } = await submitOnFakeOgmios(EVALUATION_FAILS);
 

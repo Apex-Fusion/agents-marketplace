@@ -189,9 +189,9 @@ export class FakeOgmios {
     for (const utxo of utxos) this.utxos.set(refKey(utxo.ref), utxo);
   }
 
-  /** Wallet UTxOs: AP3X only, at the mainnet enterprise address that lucid derives from the key. */
-  fund(wallet: WalletKey, ...amounts: bigint[]): void {
-    amounts.forEach((lovelace, i) => this.add({
+  /** Wallet UTxOs: AP3X only, at the mainnet enterprise address that lucid derives from the key. Returns them. */
+  fund(wallet: WalletKey, ...amounts: bigint[]): Utxo[] {
+    const funds = amounts.map((lovelace, i): Utxo => ({
       ref: { txHash: hex(blake2b(new TextEncoder().encode(`${wallet.pubKeyHash} funds`), { dkLen: 32 })), index: i },
       address: pkhToEnterpriseAddress(wallet.pubKeyHash, 1),
       lovelace,
@@ -199,6 +199,8 @@ export class FakeOgmios {
       datumHex: null,
       scriptRef: null,
     }));
+    this.add(...funds);
+    return funds;
   }
 
   /** Ledger index (sorted inputs) of the first input that this fake holds at a script address. */
