@@ -1,166 +1,110 @@
 /**
- * buyer-sdk-discover-suppliers.test.ts — Marketplace supplier discovery.
- *
- * Covers indexer filters, response mapping, and failure behavior.
+ * buyer-sdk-discover-suppliers.test.ts — Marketplace.discoverSuppliers() (query, list, IndexerError cases) and the
+ * Marketplace lifecycle (no network call at construction; off() and close() detach the progress listeners).
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { setImmediate as nextTurn } from "node:timers/promises";
+import { describe, it, expect, vi, beforeEach, type Mock } from "vitest";
 import { Marketplace } from "../../buyer/src/sdk/Marketplace.js";
-import { IndexerError } from "../../buyer/src/sdk/types.js";
+import { IndexerError, type DiscoverSuppliersOptions, type ProgressEvent } from "../../buyer/src/sdk/types.js";
 import { MockChainProvider } from "../../packages/shared/src/chain/MockChainProvider.js";
 import { buildBuyerWalletKey } from "../fixtures/buyer-side/wallet-keys.js";
+import { makeSupplierView } from "../fixtures/buyer-side/supplier-views.js";
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+const INDEXER = "http://indexer.test";
 
-function makeMarketplace(fetchImpl: typeof globalThis.fetch): Marketplace {
+function makeMarketplace(fetchImpl: typeof fetch): Marketplace {
   return new Marketplace({
     chain: new MockChainProvider(),
-    indexerUrl: "http://indexer.test",
+    indexerUrl: INDEXER,
     walletKey: buildBuyerWalletKey(),
     networkParams: { networkId: 0 },
-    _fetch: fetchImpl as unknown as typeof fetch,
-  } as never);
+    _fetch: fetchImpl,
+  });
 }
-
-function makeSampleSupplier(overrides: Record<string, unknown> = {}) {
-  return {
-    utxo_ref: "a".repeat(64) + "#0",
-    supplier_pkh: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef01",
-    capability_id: "llm.text.generate.v1",
-    model: "qwen2.5:0.5b",
-    max_output_tokens: 512,
-    max_processing_ms: 60_000,
-    price_lovelace: "2000000",
-    supplier_bond_lovelace: "1000000",
-    buyer_bond_lovelace: "1000000",
-    endpoint_url: "https://supplier.example.com",
-    detail_uri: "ipfs://Qm000",
-    detail_hash: "a".repeat(64),
-    advertised_at: 1_745_500_000_000,
-    status: "free",
-    advert_status: "Active",
-    current_escrow_ref: null,
-    last_seen_iso: "2026-04-24T00:00:00.000Z",
-    created_slot: 1000,
-    ...overrides,
-  };
-}
-
-function jsonResponse(body: unknown, status = 200) {
-  return Promise.resolve(
-    new Response(JSON.stringify(body), {
-      status,
-      headers: { "Content-Type": "application/json" },
-    })
-  );
-}
-
-// ─── Tests ────────────────────────────────────────────────────────────────────
 
 describe("Marketplace.discoverSuppliers()", () => {
-  let fetchSpy: ReturnType<typeof vi.fn>;
+  let fetchSpy: Mock;
 
   beforeEach(() => {
     fetchSpy = vi.fn();
   });
 
-  it("calls GET ${indexerUrl}/suppliers with no extra params when called with no options", async () => {
-    fetchSpy.mockReturnValue(jsonResponse([makeSampleSupplier()]));
-    const mp = makeMarketplace(fetchSpy as unknown as typeof fetch);
-    await mp.discoverSuppliers();
+  const QUERIES: Array<[string, DiscoverSuppliersOptions | undefined, string]> = [
+    ["no option", undefined, "/suppliers"],
+    ["capability_id", { capability_id: "llm.text.generate.v1" }, "/suppliers?capability_id=llm.text.generate.v1"],
+    ["sort", { sort: "price" }, "/suppliers?sort=price"],
+    [
+      "capability_id and sort",
+      { capability_id: "llm.text.generate.v1", sort: "price" },
+      "/suppliers?capability_id=llm.text.generate.v1&sort=price",
+    ],
+  ];
+
+  it.each(QUERIES)("asks the indexer with %s", async (_label, options, path) => {
+    fetchSpy.mockImplementation(async () => Response.json([]));
+    await makeMarketplace(fetchSpy).discoverSuppliers(options);
     expect(fetchSpy).toHaveBeenCalledOnce();
-    const url = String((fetchSpy.mock.calls[0] as unknown[])[0]);
-    expect(url).toBe("http://indexer.test/suppliers");
+    expect(String(fetchSpy.mock.calls[0][0])).toBe(`${INDEXER}${path}`);
   });
 
-  it("returns a list shaped as SupplierView[]", async () => {
-    const sample = makeSampleSupplier();
-    fetchSpy.mockReturnValue(jsonResponse([sample]));
-    const mp = makeMarketplace(fetchSpy as unknown as typeof fetch);
-    const result = await mp.discoverSuppliers();
-    expect(result).toHaveLength(1);
-    expect(result[0]).toMatchObject({
-      supplier_pkh: sample.supplier_pkh,
-      capability_id: sample.capability_id,
-      price_lovelace: sample.price_lovelace,
-    });
+  it("returns the suppliers that the indexer lists, in its order, with their fields", async () => {
+    const listed = [
+      makeSupplierView({ supplier_pkh: "a".repeat(56), price_lovelace: "3000000" }),
+      makeSupplierView({ supplier_pkh: "b".repeat(56), price_lovelace: "2000000", status: "working" }),
+    ];
+    fetchSpy.mockImplementation(async () => Response.json(listed));
+    await expect(makeMarketplace(fetchSpy).discoverSuppliers()).resolves.toEqual(listed);
   });
 
-  it("adds ?capability_id=... query param when filtering by capability_id", async () => {
-    fetchSpy.mockReturnValue(jsonResponse([makeSampleSupplier()]));
-    const mp = makeMarketplace(fetchSpy as unknown as typeof fetch);
-    await mp.discoverSuppliers({ capability_id: "llm.text.generate.v1" });
-    const url = String((fetchSpy.mock.calls[0] as unknown[])[0]);
-    expect(url).toContain("capability_id=llm.text.generate.v1");
+  it.each<[number, string]>([
+    [503, JSON.stringify({ error: "internal" })],
+    [500, "server error"],
+  ])("throws an IndexerError with the status when the indexer answers %i", async (status, body) => {
+    fetchSpy.mockImplementation(async () => new Response(body, { status }));
+    const error = await makeMarketplace(fetchSpy).discoverSuppliers().catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(IndexerError);
+    expect((error as IndexerError).status).toBe(status);
   });
 
-  it("adds ?sort=price query param when sort:'price' is requested", async () => {
-    fetchSpy.mockReturnValue(jsonResponse([makeSampleSupplier()]));
-    const mp = makeMarketplace(fetchSpy as unknown as typeof fetch);
-    await mp.discoverSuppliers({ sort: "price" });
-    const url = String((fetchSpy.mock.calls[0] as unknown[])[0]);
-    expect(url).toContain("sort=price");
+  it("throws an IndexerError when the indexer answers 200 with a body that is not JSON", async () => {
+    fetchSpy.mockImplementation(async () => new Response("not json!!", { status: 200 }));
+    const error = await makeMarketplace(fetchSpy).discoverSuppliers().catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(IndexerError);
+    expect((error as IndexerError).reason).toBe("malformed_response");
+  });
+});
+
+describe("Marketplace lifecycle", () => {
+  it("makes no network call at construction", async () => {
+    const injectedFetch = vi.fn();
+    const globalFetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response());
+    try {
+      makeMarketplace(injectedFetch);
+      // A call that the constructor starts later would show after one turn of the event loop.
+      await nextTurn();
+      expect(injectedFetch).not.toHaveBeenCalled();
+      expect(globalFetch).not.toHaveBeenCalled();
+    } finally {
+      globalFetch.mockRestore();
+    }
   });
 
-  it("combines capability_id and sort params correctly", async () => {
-    fetchSpy.mockReturnValue(jsonResponse([makeSampleSupplier()]));
-    const mp = makeMarketplace(fetchSpy as unknown as typeof fetch);
-    await mp.discoverSuppliers({ capability_id: "llm.text.generate.v1", sort: "price" });
-    const url = String((fetchSpy.mock.calls[0] as unknown[])[0]);
-    expect(url).toContain("capability_id=llm.text.generate.v1");
-    expect(url).toContain("sort=price");
-  });
+  it("off() detaches one progress listener and close() detaches all of them", () => {
+    const mp = makeMarketplace(vi.fn());
+    const kept: string[] = [];
+    const detached: string[] = [];
+    const detachedListener = (event: unknown) => detached.push((event as ProgressEvent).type);
+    mp.on("progress", (event) => kept.push((event as ProgressEvent).type));
+    mp.on("progress", detachedListener);
 
-  it("returns [] when the indexer returns an empty list", async () => {
-    fetchSpy.mockReturnValue(jsonResponse([]));
-    const mp = makeMarketplace(fetchSpy as unknown as typeof fetch);
-    const result = await mp.discoverSuppliers();
-    expect(result).toEqual([]);
-  });
+    mp.emitProgress({ type: "supplier_called" });
+    mp.off("progress", detachedListener);
+    mp.emitProgress({ type: "receipt_verified" });
+    mp.close();
+    mp.emitProgress({ type: "escrow_posted" });
 
-  it("throws IndexerError with status code when indexer returns 5xx", async () => {
-    fetchSpy.mockReturnValue(
-      Promise.resolve(new Response(JSON.stringify({ error: "internal" }), { status: 503 }))
-    );
-    const mp = makeMarketplace(fetchSpy as unknown as typeof fetch);
-    await expect(mp.discoverSuppliers()).rejects.toSatisfy(
-      (e: unknown) => e instanceof IndexerError && e.status === 503
-    );
-  });
-
-  it("throws IndexerError when indexer returns 500", async () => {
-    fetchSpy.mockReturnValue(
-      Promise.resolve(new Response("server error", { status: 500 }))
-    );
-    const mp = makeMarketplace(fetchSpy as unknown as typeof fetch);
-    await expect(mp.discoverSuppliers()).rejects.toBeInstanceOf(IndexerError);
-  });
-
-  it("throws IndexerError when indexer returns malformed JSON", async () => {
-    fetchSpy.mockReturnValue(
-      Promise.resolve(new Response("not json!!", { status: 200 }))
-    );
-    const mp = makeMarketplace(fetchSpy as unknown as typeof fetch);
-    await expect(mp.discoverSuppliers()).rejects.toBeInstanceOf(IndexerError);
-  });
-
-  it("returns multiple suppliers when indexer returns multiple entries", async () => {
-    const s1 = makeSampleSupplier({ supplier_pkh: "a".repeat(56) });
-    const s2 = makeSampleSupplier({ supplier_pkh: "b".repeat(56) });
-    fetchSpy.mockReturnValue(jsonResponse([s1, s2]));
-    const mp = makeMarketplace(fetchSpy as unknown as typeof fetch);
-    const result = await mp.discoverSuppliers();
-    expect(result).toHaveLength(2);
-  });
-
-  it("does not make any network calls during Marketplace construction", () => {
-    const mp = new Marketplace({
-      chain: new MockChainProvider(),
-      indexerUrl: "http://indexer.test",
-      walletKey: buildBuyerWalletKey(),
-      networkParams: { networkId: 0 },
-    });
-    expect(fetchSpy).not.toHaveBeenCalled();
-    void mp; // suppress unused
+    expect(kept).toEqual(["supplier_called", "receipt_verified"]);
+    expect(detached).toEqual(["supplier_called"]);
   });
 });

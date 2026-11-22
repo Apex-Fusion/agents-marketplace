@@ -1,15 +1,10 @@
 /**
- * buyer-sdk-accept-reclaim.test.ts — RED phase (M1-E)
- *
- * Category D: Marketplace.acceptResult() / reclaim() (~10 tests)
- *
- * All tests FAIL until M1-E-green.
- *
- * acceptResult() wraps buildAcceptTx; reclaim() wraps buildReclaimTx.
- * Both interact with chain directly (no HTTP to supplier).
+ * buyer-sdk-accept-reclaim.test.ts — what Marketplace.acceptResult() and reclaim() add to the tx builders: the
+ * tx goes to the chain and the progress event names the escrow ref. The builder rules (signer, state, time
+ * window) are tested in tx-accept.test.ts and tx-reclaim.test.ts.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import { MockChainProvider } from "../../packages/shared/src/chain/MockChainProvider.js";
 import { Marketplace } from "../../buyer/src/sdk/Marketplace.js";
 import { TxConstructionError } from "../../packages/shared/src/tx/types.js";
@@ -19,8 +14,6 @@ import { encodeEscrowDatum } from "../../packages/shared/src/cbor/EscrowDatum.js
 import type { EscrowDatum } from "../../packages/shared/src/cbor/types.js";
 import type { Utxo, OutputReference } from "../../packages/shared/src/chain/ChainProvider.js";
 import type { ProgressEvent } from "../../buyer/src/sdk/types.js";
-import { ACCEPT_WINDOW_MS } from "../../packages/shared/src/tx/escrow/accept.js";
-import { mockSlotToWallclockMs } from "../../packages/shared/src/tx/internal/constants.js";
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -29,6 +22,7 @@ const supplier = buildSupplierWalletKey();
 
 const ESCROW_TX = "e".repeat(64);
 const ESCROW_REF: OutputReference = { txHash: ESCROW_TX, index: 0 };
+const ESCROW_REF_STR = `${ESCROW_TX}#0`;
 const ESCROW_SCRIPT_ADDR = "addr_test1wrqq9qqjzf3uh4w9hm0kqzrpvt60r4ryjp5rjf5epd3nptq7yscm6";
 
 const BASE_POSTED_AT = 1_745_500_000_000;
@@ -76,6 +70,12 @@ function makeMarketplace(chain: MockChainProvider): Marketplace {
   });
 }
 
+function recordProgress(mp: Marketplace): ProgressEvent[] {
+  const events: ProgressEvent[] = [];
+  mp.on("progress", (event) => events.push(event as ProgressEvent));
+  return events;
+}
+
 // ─── acceptResult tests ───────────────────────────────────────────────────────
 
 describe("Marketplace.acceptResult()", () => {
@@ -85,54 +85,30 @@ describe("Marketplace.acceptResult()", () => {
     chain = new MockChainProvider();
   });
 
-  it("queries the escrow UTxO from chain before building Accept tx", async () => {
-    // Slot within accept window: submitted_at + 0 < submitted_at + ACCEPT_WINDOW_MS
-    const slotAfterSubmit = Math.floor(SUBMITTED_AT / 1000) + 1;
-    chain.advanceSlot(slotAfterSubmit);
+  it("accepts a Submitted escrow: the escrow output is spent", async () => {
+    // Slot within the accept window.
+    chain.advanceSlot(Math.floor(SUBMITTED_AT / 1000) + 1);
     seedEscrowUtxo(chain, makeEscrowDatum({ state: "Submitted", submitted_at: SUBMITTED_AT }));
-    const querySpy = vi.spyOn(chain, "queryUtxo");
-    const mp = makeMarketplace(chain);
-    await mp.acceptResult({ escrowRef: ESCROW_REF });
-    expect(querySpy).toHaveBeenCalledWith(ESCROW_REF);
+    await makeMarketplace(chain).acceptResult({ escrowRef: ESCROW_REF });
+    await expect(chain.queryUtxo(ESCROW_REF)).resolves.toBeNull();
   });
 
-  it("submits Accept tx via chain.submitTx when state is Submitted", async () => {
-    const slotAfterSubmit = Math.floor(SUBMITTED_AT / 1000) + 1;
-    chain.advanceSlot(slotAfterSubmit);
+  it("emits accept_submitted with the escrow ref after the Accept tx is submitted", async () => {
+    chain.advanceSlot(Math.floor(SUBMITTED_AT / 1000) + 1);
     seedEscrowUtxo(chain, makeEscrowDatum({ state: "Submitted", submitted_at: SUBMITTED_AT }));
-    const submitSpy = vi.spyOn(chain, "submitTx");
     const mp = makeMarketplace(chain);
+    const events = recordProgress(mp);
     await mp.acceptResult({ escrowRef: ESCROW_REF });
-    expect(submitSpy).toHaveBeenCalled();
+    expect(events).toEqual([{ type: "accept_submitted", escrow_ref: ESCROW_REF_STR }]);
   });
 
-  it("emits 'accept_submitted' after Accept tx is submitted", async () => {
-    const slotAfterSubmit = Math.floor(SUBMITTED_AT / 1000) + 1;
-    chain.advanceSlot(slotAfterSubmit);
-    seedEscrowUtxo(chain, makeEscrowDatum({ state: "Submitted", submitted_at: SUBMITTED_AT }));
-    const events: ProgressEvent[] = [];
-    const mp = makeMarketplace(chain);
-    mp.on("progress", (e: ProgressEvent) => events.push(e));
-    await mp.acceptResult({ escrowRef: ESCROW_REF });
-    expect(events.some(e => e.type === "accept_submitted")).toBe(true);
-  });
-
-  it("throws TxConstructionError when escrow state is not Submitted (e.g. already Accepted)", async () => {
+  it("rejects an escrow that is not Submitted and emits no progress event", async () => {
     chain.advanceSlot(1_745_500_000);
     seedEscrowUtxo(chain, makeEscrowDatum({ state: "Accepted", submitted_at: SUBMITTED_AT }));
     const mp = makeMarketplace(chain);
+    const events = recordProgress(mp);
     await expect(mp.acceptResult({ escrowRef: ESCROW_REF })).rejects.toBeInstanceOf(TxConstructionError);
-  });
-
-  it("throws TxConstructionError when buyer_pkh in escrow does not match walletKey", async () => {
-    chain.advanceSlot(1_745_500_000);
-    seedEscrowUtxo(chain, makeEscrowDatum({
-      state: "Submitted",
-      submitted_at: SUBMITTED_AT,
-      buyer_pkh: supplier.pubKeyHash,  // wrong buyer
-    }));
-    const mp = makeMarketplace(chain);
-    await expect(mp.acceptResult({ escrowRef: ESCROW_REF })).rejects.toBeInstanceOf(TxConstructionError);
+    expect(events).toEqual([]);
   });
 });
 
@@ -145,52 +121,16 @@ describe("Marketplace.reclaim()", () => {
     chain = new MockChainProvider();
   });
 
-  it("submits Reclaim tx when state is Open and deliver_by has passed", async () => {
-    // Advance to past deliver_by
-    const pastDeliverBy = Math.ceil(BASE_DELIVER_BY / 1000) + 1;
-    chain.advanceSlot(pastDeliverBy);
-    seedEscrowUtxo(chain, makeEscrowDatum({ state: "Open" }));
-    const submitSpy = vi.spyOn(chain, "submitTx");
-    const mp = makeMarketplace(chain);
-    await mp.reclaim({ escrowRef: ESCROW_REF });
-    expect(submitSpy).toHaveBeenCalled();
-  });
-
-  it("submits Reclaim tx when state is Claimed and deliver_by has passed", async () => {
-    const pastDeliverBy = Math.ceil(BASE_DELIVER_BY / 1000) + 1;
-    chain.advanceSlot(pastDeliverBy);
-    seedEscrowUtxo(chain, makeEscrowDatum({ state: "Claimed" }));
-    const mp = makeMarketplace(chain);
-    await expect(mp.reclaim({ escrowRef: ESCROW_REF })).resolves.toBeUndefined();
-  });
-
-  it("throws TxConstructionError('reclaim before deliver_by') when deliver_by has not passed", async () => {
-    // Set slot BEFORE deliver_by
-    const beforeDeliverBy = Math.floor(BASE_DELIVER_BY / 1000) - 1;
-    chain.advanceSlot(beforeDeliverBy);
-    seedEscrowUtxo(chain, makeEscrowDatum({ state: "Open" }));
-    const mp = makeMarketplace(chain);
-    await expect(mp.reclaim({ escrowRef: ESCROW_REF })).rejects.toSatisfy(
-      (e: unknown) => e instanceof TxConstructionError && e.reason === "reclaim before deliver_by"
-    );
-  });
-
-  it("throws TxConstructionError when state is Submitted (not reclaimable)", async () => {
-    const pastDeliverBy = Math.ceil(BASE_DELIVER_BY / 1000) + 1;
-    chain.advanceSlot(pastDeliverBy);
-    seedEscrowUtxo(chain, makeEscrowDatum({ state: "Submitted", submitted_at: SUBMITTED_AT }));
-    const mp = makeMarketplace(chain);
-    await expect(mp.reclaim({ escrowRef: ESCROW_REF })).rejects.toBeInstanceOf(TxConstructionError);
-  });
-
-  it("throws TxConstructionError when buyer_pkh does not match walletKey on reclaim", async () => {
-    const pastDeliverBy = Math.ceil(BASE_DELIVER_BY / 1000) + 1;
-    chain.advanceSlot(pastDeliverBy);
-    seedEscrowUtxo(chain, makeEscrowDatum({
-      state: "Open",
-      buyer_pkh: supplier.pubKeyHash,  // wrong buyer
-    }));
-    const mp = makeMarketplace(chain);
-    await expect(mp.reclaim({ escrowRef: ESCROW_REF })).rejects.toBeInstanceOf(TxConstructionError);
-  });
+  it.each<EscrowDatum["state"]>(["Open", "Claimed"])(
+    "reclaims a %s escrow after deliver_by: the escrow output is spent and reclaim_submitted names the escrow ref",
+    async (state) => {
+      chain.advanceSlot(Math.ceil(BASE_DELIVER_BY / 1000) + 1);
+      seedEscrowUtxo(chain, makeEscrowDatum({ state }));
+      const mp = makeMarketplace(chain);
+      const events = recordProgress(mp);
+      await expect(mp.reclaim({ escrowRef: ESCROW_REF })).resolves.toBeUndefined();
+      await expect(chain.queryUtxo(ESCROW_REF)).resolves.toBeNull();
+      expect(events).toEqual([{ type: "reclaim_submitted", escrow_ref: ESCROW_REF_STR }]);
+    },
+  );
 });

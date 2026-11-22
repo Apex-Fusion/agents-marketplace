@@ -1,9 +1,6 @@
 /**
- * buyer-sdk-history.test.ts — RED phase (M1-E)
- *
- * Category E: SDK — getTaskHistory() + MemoryTaskHistoryStore (~5 tests)
- *
- * All tests FAIL until M1-E-green.
+ * buyer-sdk-history.test.ts — Marketplace.getTaskHistory() over MemoryTaskHistoryStore: the order, the status
+ * and supplier filters, and get() by escrow ref.
  */
 
 import { describe, it, expect, beforeEach } from "vitest";
@@ -14,10 +11,12 @@ import { buildBuyerWalletKey } from "../fixtures/buyer-side/wallet-keys.js";
 import {
   ALL_SAMPLE_TASK_RECORDS,
   TASK_COMPLETED,
+  TASK_COMPLETED_OTHER_SUPPLIER,
   TASK_FAILED,
   TASK_PENDING,
-  TASK_COMPLETED_OTHER_SUPPLIER,
+  TASK_RECLAIMED,
 } from "../fixtures/buyer-side/sample-task-records.js";
+import type { TaskRecord, TaskStatus } from "../../buyer/src/sdk/types.js";
 
 function makeMarketplaceWithStore(store: MemoryTaskHistoryStore): Marketplace {
   return new Marketplace({
@@ -43,28 +42,20 @@ describe("Marketplace.getTaskHistory() via MemoryTaskHistoryStore", () => {
   });
 
   it("returns all records ordered by posted_at descending", () => {
-    const mp = makeMarketplaceWithStore(store);
-    const history = mp.getTaskHistory();
-    expect(history.length).toBeGreaterThanOrEqual(ALL_SAMPLE_TASK_RECORDS.length);
-    // Verify descending order
-    for (let i = 1; i < history.length; i++) {
-      expect(history[i - 1].posted_at).toBeGreaterThanOrEqual(history[i].posted_at);
-    }
+    const history = makeMarketplaceWithStore(store).getTaskHistory();
+    const newestFirst = [TASK_PENDING, TASK_FAILED, TASK_COMPLETED_OTHER_SUPPLIER, TASK_COMPLETED, TASK_RECLAIMED];
+    expect(history.map(t => t.escrow_ref)).toEqual(newestFirst.map(t => t.escrow_ref));
   });
 
-  it("getTaskHistory({status:'completed'}) returns only completed tasks", () => {
-    const mp = makeMarketplaceWithStore(store);
-    const completed = mp.getTaskHistory({ status: "completed" });
-    expect(completed.every(t => t.status === "completed")).toBe(true);
-    // Should include TASK_COMPLETED and TASK_COMPLETED_OTHER_SUPPLIER
-    expect(completed.length).toBeGreaterThanOrEqual(2);
-  });
+  // The records that each status filter returns, newest posted_at first.
+  const STATUS_FILTERS: Array<[TaskStatus, TaskRecord[]]> = [
+    ["completed", [TASK_COMPLETED_OTHER_SUPPLIER, TASK_COMPLETED]],
+    ["failed", [TASK_FAILED]],
+  ];
 
-  it("getTaskHistory({status:'failed'}) returns only failed tasks", () => {
-    const mp = makeMarketplaceWithStore(store);
-    const failed = mp.getTaskHistory({ status: "failed" });
-    expect(failed.every(t => t.status === "failed")).toBe(true);
-    expect(failed.length).toBeGreaterThanOrEqual(1);
+  it.each(STATUS_FILTERS)("getTaskHistory({status:'%s'}) returns exactly the tasks with that status", (status, expected) => {
+    const history = makeMarketplaceWithStore(store).getTaskHistory({ status });
+    expect(history.map(t => t.escrow_ref)).toEqual(expected.map(t => t.escrow_ref));
   });
 
   it("getTaskHistory({supplier: pkh}) returns only tasks for that supplier", () => {

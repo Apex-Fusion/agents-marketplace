@@ -11,31 +11,13 @@ import {
 } from "../../buyer/src/pdf/supplier-pool.js";
 import { loadPdfCaps } from "../../buyer/src/pdf/caps.js";
 import type { SupplierView } from "../../buyer/src/sdk/types.js";
+import { makeSupplierView } from "../fixtures/buyer-side/supplier-views.js";
 
 const caps = loadPdfCaps({});
 
+/** A supplier of a model that the default caps allow. */
 function view(p: Partial<SupplierView>): SupplierView {
-  return {
-    utxo_ref: `${"a".repeat(64)}#0`,
-    supplier_pkh: "pkh",
-    capability_id: "llm.text.generate.v1",
-    model: "kimi-k2",
-    max_output_tokens: 512,
-    max_processing_ms: 60000,
-    price_lovelace: "2000000",
-    supplier_bond_lovelace: "1000000",
-    buyer_bond_lovelace: "1000000",
-    endpoint_url: "http://supplier",
-    detail_uri: "",
-    detail_hash: "",
-    advertised_at: 0,
-    status: "active",
-    advert_status: "Active",
-    current_escrow_ref: null,
-    last_seen_iso: null,
-    created_slot: 0,
-    ...p,
-  };
+  return makeSupplierView({ model: "kimi-k2", ...p });
 }
 
 describe("isCapableModel", () => {
