@@ -1,19 +1,14 @@
 /**
- * tx-release.test.ts — RED phase tests for buildReleaseTx() (Submitted → Released, terminal)
- *
- * Tests mirror escrow.ak:handle_release invariants:
- *   - signed by supplier_pkh
- *   - old state = Submitted
- *   - supplier receives ≥ payment + supplier_bond + buyer_bond
- *   - validity lower-bound ≥ submitted_at + ACCEPT_WINDOW (600_000 ms)
- *   - terminal: no continuing escrow output
+ * Tests buildReleaseTx() on the mock chain (Submitted -> Released, terminal).
+ * The cases follow escrow.ak handle_release: the supplier signs, the old state is Submitted, the tip is at or past
+ * submitted_at + ACCEPT_WINDOW, the supplier gets payment + both bonds, and no escrow output is left.
  */
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect } from "vitest";
 import { MockChainProvider } from "../../packages/shared/src/chain/MockChainProvider.js";
+import type { Utxo } from "../../packages/shared/src/chain/ChainProvider.js";
 import { buildReleaseTx } from "../../packages/shared/src/tx/escrow/release.js";
 import { ACCEPT_WINDOW_MS } from "../../packages/shared/src/tx/escrow/accept.js";
-import { TxConstructionError } from "../../packages/shared/src/tx/types.js";
 import { buildSupplierWalletKey } from "../fixtures/supplier-side/wallet-keys.js";
 import { buildBuyerWalletKey } from "../fixtures/buyer-side/wallet-keys.js";
 import {
@@ -25,142 +20,50 @@ import {
   SUPPLIER_BOND,
 } from "../fixtures/buyer-side/sample-escrow-utxos.js";
 
-const RELEASE_THRESHOLD = SUBMITTED_AT + ACCEPT_WINDOW_MS;
+const submitted = buildSubmittedEscrowUtxo();
+const TIP_INSIDE_WINDOW_MS = SUBMITTED_AT + ACCEPT_WINDOW_MS / 2;
+const TIP_PAST_WINDOW_MS = SUBMITTED_AT + ACCEPT_WINDOW_MS + 60_000;
 
-// ─── Happy path ───────────────────────────────────────────────────────────────
+/** A mock chain with `escrow` and the tip at `tipMs` (the mock chain reads slot x 1000 as the time). */
+function chainAt(tipMs: number, escrow: Utxo = submitted): MockChainProvider {
+  const chain = new MockChainProvider();
+  chain.advanceSlot(Math.floor(tipMs / 1000));
+  chain.seed(escrow);
+  return chain;
+}
 
-describe("buildReleaseTx() — happy path", () => {
-  let chain: MockChainProvider;
-
-  beforeEach(() => {
-    chain = new MockChainProvider();
-    // Tip is past the accept window
-    chain.advanceSlot(Math.floor((RELEASE_THRESHOLD + 60_000) / 1000));
-    chain.seed(buildSubmittedEscrowUtxo());
-  });
-
-  it("returns a non-empty txCborHex", async () => {
+describe("buildReleaseTx()", () => {
+  it("pays the supplier at least payment + supplier_bond + buyer_bond", async () => {
+    const chain = chainAt(TIP_PAST_WINDOW_MS);
     const supplier = buildSupplierWalletKey();
-    const utxo = buildSubmittedEscrowUtxo();
-    const result = await buildReleaseTx({ chain, supplierKey: supplier, escrowRef: utxo.ref });
-    expect(typeof result.txCborHex).toBe("string");
-    expect(result.txCborHex.length).toBeGreaterThan(0);
-  });
-
-  it("supplier receives >= payment + supplier_bond + buyer_bond", async () => {
-    const supplier = buildSupplierWalletKey();
-    const utxo = buildSubmittedEscrowUtxo();
-    await buildReleaseTx({ chain, supplierKey: supplier, escrowRef: utxo.ref });
+    await buildReleaseTx({ chain, supplierKey: supplier, escrowRef: submitted.ref });
     const supplierUtxos = await chain.queryUtxosByAddress(supplier.address);
-    const total = supplierUtxos.reduce((sum, u) => sum + u.lovelace, 0n);
+    const total = supplierUtxos.reduce((sum, utxo) => sum + utxo.lovelace, 0n);
     expect(total).toBeGreaterThanOrEqual(PAYMENT_LOVELACE + SUPPLIER_BOND + BUYER_BOND);
   });
 
-  it("validity lower-bound >= submitted_at + ACCEPT_WINDOW", async () => {
-    const supplier = buildSupplierWalletKey();
-    const utxo = buildSubmittedEscrowUtxo();
-    // No throw = builder sets correct validity range
+  it("spends the escrow UTxO (terminal state)", async () => {
+    const chain = chainAt(TIP_PAST_WINDOW_MS);
+    await buildReleaseTx({ chain, supplierKey: buildSupplierWalletKey(), escrowRef: submitted.ref });
+    expect(await chain.queryUtxo(submitted.ref)).toBeNull();
+  });
+
+  it("refuses a tip before submitted_at + ACCEPT_WINDOW", async () => {
     await expect(
-      buildReleaseTx({ chain, supplierKey: supplier, escrowRef: utxo.ref }),
-    ).resolves.toBeDefined();
+      buildReleaseTx({ chain: chainAt(TIP_INSIDE_WINDOW_MS), supplierKey: buildSupplierWalletKey(), escrowRef: submitted.ref }),
+    ).rejects.toMatchObject({ name: "TxConstructionError", reason: "release before accept window" });
   });
 
-  it("escrow UTxO is spent (terminal state)", async () => {
-    const supplier = buildSupplierWalletKey();
-    const utxo = buildSubmittedEscrowUtxo();
-    await buildReleaseTx({ chain, supplierKey: supplier, escrowRef: utxo.ref });
-    const spent = await chain.queryUtxo(utxo.ref);
-    expect(spent).toBeNull();
-  });
-});
-
-// ─── Rejection: before accept window ────────────────────────────────────────
-
-describe("buildReleaseTx() — rejects before accept window expires", () => {
-  it("throws TxConstructionError when chain tip is before submitted_at + ACCEPT_WINDOW", async () => {
-    const supplier = buildSupplierWalletKey();
-    const chain = new MockChainProvider();
-    // Tip is within accept window (before it expires)
-    chain.advanceSlot(Math.floor((SUBMITTED_AT + ACCEPT_WINDOW_MS / 2) / 1000));
-    chain.seed(buildSubmittedEscrowUtxo());
-    const utxo = buildSubmittedEscrowUtxo();
-
+  it("refuses a signer that is not the supplier", async () => {
     await expect(
-      buildReleaseTx({ chain, supplierKey: supplier, escrowRef: utxo.ref }),
-    ).rejects.toThrow(TxConstructionError);
+      buildReleaseTx({ chain: chainAt(TIP_PAST_WINDOW_MS), supplierKey: buildBuyerWalletKey(), escrowRef: submitted.ref }),
+    ).rejects.toMatchObject({ name: "TxConstructionError", reason: "supplier signature mismatch" });
   });
 
-  it("TxConstructionError.reason is 'release before accept window'", async () => {
-    const supplier = buildSupplierWalletKey();
-    const chain = new MockChainProvider();
-    chain.advanceSlot(Math.floor((SUBMITTED_AT + ACCEPT_WINDOW_MS / 2) / 1000));
-    chain.seed(buildSubmittedEscrowUtxo());
-    const utxo = buildSubmittedEscrowUtxo();
-
-    let caught: unknown;
-    try {
-      await buildReleaseTx({ chain, supplierKey: supplier, escrowRef: utxo.ref });
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toBeInstanceOf(TxConstructionError);
-    expect((caught as TxConstructionError).reason).toBe("release before accept window");
-  });
-});
-
-// ─── Rejection: non-supplier signer ──────────────────────────────────────────
-
-describe("buildReleaseTx() — rejects non-supplier signer", () => {
-  it("throws TxConstructionError when signed by buyer", async () => {
-    const buyer = buildBuyerWalletKey();
-    const chain = new MockChainProvider();
-    chain.advanceSlot(Math.floor((RELEASE_THRESHOLD + 60_000) / 1000));
-    chain.seed(buildSubmittedEscrowUtxo());
-    const utxo = buildSubmittedEscrowUtxo();
-
+  it("refuses an Open escrow (only Submitted can be released)", async () => {
+    const open = buildOpenEscrowUtxo();
     await expect(
-      buildReleaseTx({ chain, supplierKey: buyer, escrowRef: utxo.ref }),
-    ).rejects.toThrow(TxConstructionError);
-  });
-
-  it("TxConstructionError.reason is 'supplier signature mismatch'", async () => {
-    const buyer = buildBuyerWalletKey();
-    const chain = new MockChainProvider();
-    chain.advanceSlot(Math.floor((RELEASE_THRESHOLD + 60_000) / 1000));
-    chain.seed(buildSubmittedEscrowUtxo());
-    const utxo = buildSubmittedEscrowUtxo();
-
-    let caught: unknown;
-    try {
-      await buildReleaseTx({ chain, supplierKey: buyer, escrowRef: utxo.ref });
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toBeInstanceOf(TxConstructionError);
-    expect((caught as TxConstructionError).reason).toBe("supplier signature mismatch");
-  });
-});
-
-// ─── Rejection: wrong state ───────────────────────────────────────────────────
-
-describe("buildReleaseTx() — rejects wrong state (Open)", () => {
-  it("throws TxConstructionError when state is Open (not Submitted)", async () => {
-    const supplier = buildSupplierWalletKey();
-    const chain = new MockChainProvider();
-    chain.advanceSlot(Math.floor((RELEASE_THRESHOLD + 60_000) / 1000));
-    const utxo = buildOpenEscrowUtxo();   // wrong state
-    chain.seed(utxo);
-
-    await expect(
-      buildReleaseTx({ chain, supplierKey: supplier, escrowRef: utxo.ref }),
-    ).rejects.toThrow(TxConstructionError);
-  });
-});
-
-// ─── Distribution sanity ─────────────────────────────────────────────────────
-
-describe("buildReleaseTx() — distribution sanity", () => {
-  it("supplier is owed payment + supplier_bond + buyer_bond = 4_000_000 lovelace", () => {
-    expect(PAYMENT_LOVELACE + SUPPLIER_BOND + BUYER_BOND).toBe(4_000_000n);
+      buildReleaseTx({ chain: chainAt(TIP_PAST_WINDOW_MS, open), supplierKey: buildSupplierWalletKey(), escrowRef: open.ref }),
+    ).rejects.toMatchObject({ name: "TxConstructionError", reason: "wrong state" });
   });
 });

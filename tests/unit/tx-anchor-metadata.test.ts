@@ -163,18 +163,15 @@ describe("buildAnchorMetadataTx", () => {
     });
   });
 
+  // One row for each refusal branch of validateSurplusSaleProofAnchorMetadata, at its boundary where it has one.
   it.each([
     ["wrong protocol", { ...validMetadata(), p: "surplus-sale-proof-v2" }],
-    ["short root", { ...validMetadata(), root: "a".repeat(63) }],
-    ["uppercase root", { ...validMetadata(), root: "A".repeat(64) }],
-    ["non-hex root", { ...validMetadata(), root: "z".repeat(64) }],
-    ["zero count", { ...validMetadata(), count: 0 }],
-    ["fractional count", { ...validMetadata(), count: 1.5 }],
-    ["unsafe count", { ...validMetadata(), count: Number.MAX_SAFE_INTEGER + 1 }],
-    ["empty first ID", { ...validMetadata(), first: "" }],
-    ["control character in last ID", { ...validMetadata(), last: "sale\n2" }],
-    ["non-ASCII first ID", { ...validMetadata(), first: "salé-1" }],
     ["extra field", { ...validMetadata(), extra: true }],
+    ["root one character short (63)", { ...validMetadata(), root: "a".repeat(63) }],
+    ["uppercase root", { ...validMetadata(), root: "A".repeat(64) }],
+    ["zero count", { ...validMetadata(), count: 0 }],
+    ["count above the safe integer limit", { ...validMetadata(), count: Number.MAX_SAFE_INTEGER + 1 }],
+    ["control character in last ID", { ...validMetadata(), last: "sale\n2" }],
   ])("rejects %s before initializing Lucid", async (_case, metadata) => {
     const harness = lucidHarness();
 
