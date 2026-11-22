@@ -63,7 +63,7 @@ Targets: a pull request with no contract change is green in at most 3 min; a pul
 - One vitest workspace with the projects `unit`, `ui` and `aiken-eval`. [fixed]
 - Deep variants only at night through `TEST_DEPTH=nightly`; each property test prints its seed. [fixed]
 - Cheaper forms of the slow files: fake timers, one fixture for each table, `Buffer.equals`, fewer ticks, an entry test in process. [fixed]
-- Product changes with unchanged production values, one pull request each [owner]: (1) the gateway passes the SDK poll interval from a setting; (2) the gateway wallet confirmation poll, the indexer retry wait and the supplier SIGTERM grace become settings; (3) the status-list decoder skips zero entries; (4) the barrel `packages/shared/src/tx/server.ts` splits into a part with lucid and a part without.
+- Product changes with unchanged production values, one pull request each [owner]: (1) the gateway passes the SDK poll interval from a setting; (2) the gateway wallet confirmation poll, the indexer retry wait and the supplier SIGTERM grace become settings; (3) the status-list decoder skips zero entries; (4) the barrel `packages/shared/src/tx/server.ts` splits into a part with lucid and a part without. The owner dropped (4) after its measurement (section 16).
 - The flat `tests/unit` layout stays. [owner]
 
 ## 8. Rules for agents [owner]
@@ -132,3 +132,28 @@ The rules are in `AGENTS.md`. In short: a new test only for a fixed bug, for new
 ## 15. Evidence
 
 The fact reports and measurements of this design (audit tables, CI logs, build-host measurements) are kept outside the repository.
+
+## 16. Result (2026-11-22)
+
+Measured after phases 1 to 4 (`main` = `4d1fb4a`).
+
+| Item | Before | After |
+|---|---|---|
+| Pull request with no contract change | 15 to 20 min | about 2 to 3 min (one `gate` run) |
+| Pull request with a contract change | 15 to 20 min | about 3 to 4 min (4 Aiken shards of 96 to 116 s each) |
+| Deploy start after a merge | 15 to 20 min | about 3 min |
+| Nightly run | none | about 5 min |
+| TypeScript test files and cases | 280 and 4,984 | 273 and 3,918 (with about 86 new gap tests) |
+| TypeScript test lines | 77,851 | 64,997 (shared fixtures and helpers: 7,958 to 8,772 lines) |
+| Aiken tests | 1,271 | 1,156 |
+| Full vitest run on a quiet build host | 55 s wall, 561 CPU s (5 configs) | 40 s wall, 498 CPU s (one workspace) |
+| Test files that CI type-checks | 47 of 280 | 273 of 273, 0 errors, blocking |
+| Skipped test cases | 10 | 0 |
+| Deploy runs of the test-only pull requests | none | 17 runs, each "no running compose project is affected" |
+
+Changes against the plan:
+
+- The owner dropped product change (4), the split of `packages/shared/src/tx/server.ts`. The split alone did not lower the number of test files that load lucid (80 before, 80 after); a gain needs lazy imports in 7 product files on money paths. Module import is still about half of the CPU of a full run.
+- The status-list decoder is about 5 times faster in the tests. The status-list build on production did not get faster (385 s for 882 records): its cost is elsewhere.
+- The Aiken pruning removed 89 tests and folded 26 into a twin with `and { }`: 115 tests, not 222. Each cluster of similar tests keeps one test, and the must-keep rules keep more.
+- Coverage rule: a drop counts only when a statement or branch that the base run covers is uncovered in the head run (`scripts/coverage-diff`, by line and column). v8 adds and moves uncovered items between runs, so a rule on percentages gave false flags.
