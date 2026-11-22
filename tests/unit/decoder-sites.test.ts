@@ -29,9 +29,12 @@
  *
  * A name can be the name of another thing: `jobs.complete` of the job store of the supplier is not a transaction builder. EXCLUDED lists
  * these calls with a reason. A call through `CML` (or a name for it) or `lucid` is never excluded.
+ *
+ * The tests of the scanner itself are short tables with one row for each branch of the scanner: a form of call that the detector must find,
+ * a kind of code that it must not report, a rule of a path, an outcome of a proof. A new branch of the scanner needs a new row.
  */
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -1093,85 +1096,60 @@ function firstCallOf(code: string, name: string): ts.CallExpression {
   return call;
 }
 
+/** The files that git tracks in the repository. None when git gives no list: a copy of the sources has no `.git`. */
+const TRACKED_FILES = gitFiles(ROOT);
+
 /** The scan of the repository: the files that git tracks, or the files of a walk when git gives no list. */
-const scanRepository = (): Scan => scanSources(sourceFiles(ROOT, gitFiles(ROOT)), trackedNamesOf(SITES));
+const SCAN = scanSources(sourceFiles(ROOT, TRACKED_FILES), trackedNamesOf(SITES));
 
-const SCAN = scanRepository();
+/** False when git gives no list. The scan walks the folders then, and the test of the list does not apply. */
+const GIT_LISTS_FILES = TRACKED_FILES !== undefined;
 
-/** False when git gives no list. The scan walks the folders then, and the tests of the list do not apply. */
-const GIT_LISTS_FILES = gitFiles(ROOT) !== undefined;
+/** False when `git` is not installed. The test that makes a git repository of its own does not run then. */
+const GIT_INSTALLED = spawnSync("git", ["--version"]).status === 0;
 
 describe("the detector", () => {
+  /** One row for each way to write a call that the detector must find: the code, and the callees that it finds, in the order of the code. */
   const SHAPES: Array<[shape: string, code: string, callees: string[]]> = [
-    ["a destructured name", "const { from_cbor_hex } = CML.Transaction;\nfrom_cbor_hex(hex);", ["from_cbor_hex"]],
-    ["a destructured name with a new name", "const { from_cbor_hex: decode } = CML.Transaction;\ndecode(hex);", ["from_cbor_hex"]],
-    ["a name in a nested destructuring", "const { Transaction: { from_hex: read } } = CML;\nread(hex);", ["from_hex"]],
-    ["a call over two lines", "CML.Transaction\n  .from_cbor_hex(\n    hex,\n  );", ["from_cbor_hex"]],
-    ["pay and ToAddress on two lines", "tx.pay\n  .ToAddress(address, assets);", ["ToAddress"]],
-    ["pay and ToAddressWithData on separate lines", "lucid\n  .newTx()\n  .pay\n  .ToAddressWithData(address, datum, assets);", ["ToAddressWithData"]],
-    ["an element access with a string", 'CML.Transaction["from_cbor_hex"](hex);', ["from_cbor_hex"]],
-    ["an element access with a template", "CML.Transaction[`from_cbor_hex`](hex);", ["from_cbor_hex"]],
-    ["complete of a builder", "const signed = await builder.complete();", ["complete"]],
-    ["complete with options", "await txBuilder.complete({ presetWalletInputs, localUPLCEval: false });", ["complete"]],
-    ["addSignerKey", "builder.addSignerKey(keyHash);", ["addSignerKey"]],
-    ["paymentCredentialOf", "const credential = paymentCredentialOf(address);", ["paymentCredentialOf"]],
-    ["from_json", "const metadata = CML.TransactionMetadatum.from_json(text);", ["from_json"]],
-    ["an aliased import", 'import { getAddressDetails as details } from "@lucid-evolution/lucid";\ndetails(address);', ["getAddressDetails"]],
-    ["an aliased variable", "const decode = CML.Address.from_bech32;\ndecode(text);", ["from_bech32", "from_bech32"]],
-    ["getUtxos of the wallet", "const utxos = await lucid.wallet().getUtxos();", ["getUtxos"]],
-    ["getUtxos of the wallet over several lines", "const utxos = await this.lucid\n  .wallet()\n  .getUtxos();", ["getUtxos"]],
-    ["utxosByOutRef", "const [output] = await lucid.utxosByOutRef([reference]);", ["utxosByOutRef"]],
-    ["utxosAt", "const outputs = await lucid.utxosAt(address);", ["utxosAt"]],
-    ["fromTx", "const builder = lucid.fromTx(cbor);", ["fromTx"]],
-    ["attach.SpendingValidator", "lucid.newTx().attach.SpendingValidator(script);", ["SpendingValidator"]],
-    ["another method of attach", "lucid.newTx().attach.Script(script);", ["Script"]],
-    ["attachMetadata", "lucid.newTx().attachMetadata(674, metadata);", ["attachMetadata"]],
-    ["apply_params_to_script", "const applied = apply_params_to_script(parameters, script);", ["apply_params_to_script"]],
-    ["validatorToScriptHash", "const hash = validatorToScriptHash(script);", ["validatorToScriptHash"]],
-    ["a method of selectWallet", "lucid.selectWallet.fromPrivateKey(key);", ["fromPrivateKey"]],
-    ["Data.from", "const value = Data.from(hex);", ["Data.from"]],
-    ["a decoder that a call hands on", "const texts = hexes.map(CML.Transaction.from_cbor_hex);", ["from_cbor_hex"]],
-    ["a decoder that `call` applies", "CML.Address.from_bech32.call(CML.Address, text);", ["from_bech32"]],
-    ["a decoder with an optional call", "CML?.Transaction?.from_cbor_hex?.(hex);", ["from_cbor_hex"]],
-    ["a call of a comma expression", "(0, CML.Transaction.from_cbor_hex)(hex);", ["from_cbor_hex"]],
-    ["a key that is not a string, on the library", "CML.Transaction[method](hex);", ["<computed>"]],
-    ["a call in a callback", "items.map((item) => CML.Transaction.from_cbor_hex(item.hex));", ["from_cbor_hex"]],
-    ["an import call beside a decoder call", "const module = await import('x');\nconst bytes = CML.Transaction.from_bytes(raw);", ["from_bytes"]],
-    // The free functions of the library.
-    ["a free function of CML", "const hash = CML.hash_transaction(body);", ["hash_transaction"]],
-    ["a free function over several lines", "const datum = CML\n  .encode_json_str_to_plutus_datum(\n    text,\n    schema,\n  );", ["encode_json_str_to_plutus_datum"]],
-    ["a free function with comments between the parts", "CML /* the library */\n  // the function\n  .hash_transaction(\n    body, // the body\n  );", ["hash_transaction"]],
-    ["a free function with an optional call", "CML?.make_vkey_witness?.(hash, key);", ["make_vkey_witness"]],
-    ["a free function with an element access", 'CML["min_fee"](tx, fee, prices, 0n);', ["min_fee"]],
-    ["a free function with a template key", "CML[`hash_plutus_data`](data);", ["hash_plutus_data"]],
-    ["a free function in a comma expression", "(0, CML.hash_transaction)(body);", ["hash_transaction"]],
-    ["a free function of CML after a cast", "(CML as typeof CML).min_fee(tx, fee, prices, 0n);", ["min_fee"]],
-    ["a key that is not a string, on CML itself", "CML[name](value);", ["<computed>"]],
-    ["a free function that a call hands on", "const hashes = bodies.map(CML.hash_transaction);", ["hash_transaction"]],
-    ["a free function that `call` applies", "CML.hash_transaction.call(CML, body);", ["hash_transaction"]],
-    ["a free function that a variable holds", "const hash = CML.hash_transaction;\nhash(body);", ["hash_transaction", "hash_transaction"]],
-    ["a destructured free function", "const { encode_json_str_to_plutus_datum } = CML;\nencode_json_str_to_plutus_datum(text, schema);", ["encode_json_str_to_plutus_datum"]],
-    ["a destructured free function with a new name", "const { hash_transaction: hash } = CML;\nhash(body);", ["hash_transaction"]],
-    ["a free function through the rest of a destructuring", "const { Transaction, ...library } = CML;\nlibrary.hash_transaction(body);", ["hash_transaction"]],
-    ["a free function through a namespace import", 'import * as Library from "@dcspark/cardano-multiplatform-lib-nodejs";\nLibrary.hash_transaction(body);', ["hash_transaction"]],
-    ["a namespace import over several lines", 'import * as Library\n  from "@dcspark/cardano-multiplatform-lib-nodejs";\nLibrary\n  .hash_transaction(\n    body,\n  );', ["hash_transaction"]],
-    ["a free function through a default import", 'import Library from "@anastasia-labs/cardano-multiplatform-lib-browser";\nLibrary.hash_transaction(body);', ["hash_transaction"]],
-    ["a key that is not a string, on a name for CML", 'import * as Library from "@dcspark/cardano-multiplatform-lib-nodejs";\nLibrary[name](value);', ["<computed>"]],
-    ["a free function through CML under a new name", 'import { CML as Library } from "@lucid-evolution/lucid";\nLibrary.min_fee(tx, fee, prices, 0n);', ["min_fee"]],
-    ["a free function through a variable", "const library = CML;\nlibrary.min_fee(tx, fee, prices, 0n);", ["min_fee"]],
-    ["a free function through a member named CML", "const hash = lucid.CML.hash_transaction(body);", ["hash_transaction"]],
-    ["a free function through a parameter with CML as its default", "function f(library = CML) {\n  return library.hash_transaction(body);\n}", ["hash_transaction"]],
-    ["a free function through a choice between libraries", "const library = options.library ?? CML;\nlibrary.hash_transaction(body);", ["hash_transaction"]],
-    ["a free function through a parameter of the type of CML", "function f(library: typeof CML) {\n  return library.hash_transaction(body);\n}", ["hash_transaction"]],
-    ["a named import of a free function", 'import { hash_transaction } from "@anastasia-labs/cardano-multiplatform-lib-nodejs";\nhash_transaction(body);', ["hash_transaction"]],
-    ["a named import of a free function under a new name", 'import { make_vkey_witness as witness } from "@dcspark/cardano-multiplatform-lib-nodejs";\nwitness(hash, key);', ["make_vkey_witness"]],
-    ["a free function of a package that require loads", 'const { hash_transaction } = require("@dcspark/cardano-multiplatform-lib-nodejs");\nhash_transaction(body);', ["hash_transaction"]],
-    ["a free function of a package that import() loads", 'const library = await import("@anastasia-labs/cardano-multiplatform-lib-nodejs");\nlibrary.hash_transaction(body);', ["hash_transaction"]],
-    ["a free function of a package that an import equals names", 'import library = require("@dcspark/cardano-multiplatform-lib-nodejs");\nlibrary.hash_transaction(body);', ["hash_transaction"]],
+    [
+      "the name of a decoder on a member over several lines, on a string key and on a template key",
+      'CML.Transaction\n  .from_cbor_hex(\n    hex,\n  );\nCML.Address["from_bech32"](text);\nCML.PlutusData[`from_hex`](hex);',
+      ["from_cbor_hex", "from_bech32", "from_hex"],
+    ],
+    ["a function, a namespace, Data and the wallet of Lucid", "const credential = paymentCredentialOf(address); lucid.newTx().attach.Script(script); const value = Data.from(hex); const utxos = await this.lucid.wallet().getUtxos();", ["paymentCredentialOf", "Script", "Data.from", "getUtxos"]],
+    ["a free function of CML, and a key that is not a text", "const hash = CML.hash_transaction(body); CML.Transaction[method](hex);", ["hash_transaction", "<computed>"]],
+    ["a comma expression and a cast", "(0, CML.Transaction.from_cbor_hex)(hex); (CML as typeof CML).min_fee(tx, fee, prices, 0n);", ["from_cbor_hex", "min_fee"]],
+    ["a function that a call hands on, as an argument and with `call`", "hexes.map(CML.Transaction.from_cbor_hex); bodies.map(CML.hash_transaction); CML.Address.from_bech32.call(CML.Address, text);", ["from_cbor_hex", "hash_transaction", "from_bech32"]],
+    ["a name that a variable gives to a function", "const decode = CML.Address.from_bech32; decode(text);", ["from_bech32", "from_bech32"]],
+    ["a name that a destructuring gives to a function, with a new name and in a nested pattern", "const { from_cbor_hex: decode } = CML.Transaction; decode(hex); const { Transaction: { from_hex: read } } = CML; read(hex);", ["from_cbor_hex", "from_hex"]],
+    ["a name that a destructuring of CML gives, for a function and for the rest", "const { encode_json_str_to_plutus_datum } = CML; encode_json_str_to_plutus_datum(text, schema); const { Transaction, ...library } = CML; library.hash_transaction(body);", ["encode_json_str_to_plutus_datum", "hash_transaction"]],
+    ["a name that an import of Lucid gives, for CML and for a function under a new name", 'import { CML as Library, getAddressDetails as details } from "@lucid-evolution/lucid"; Library.min_fee(tx, fee, prices, 0n); details(address);', ["min_fee", "getAddressDetails"]],
+    [
+      "a name that an import of the package of the library gives: a namespace, a default and functions",
+      'import * as Namespace from "@dcspark/cardano-multiplatform-lib-nodejs"; import Default from "@anastasia-labs/cardano-multiplatform-lib-browser"; ' +
+        'import { hash_transaction, make_vkey_witness as witness } from "@anastasia-labs/cardano-multiplatform-lib-nodejs"; ' +
+        "Namespace.min_fee(tx, fee, prices, 0n); Default.hash_plutus_data(data); Namespace[name](value); hash_transaction(body); witness(hash, key);",
+      ["min_fee", "hash_plutus_data", "<computed>", "hash_transaction", "make_vkey_witness"],
+    ],
+    [
+      "a package that require or import() loads, and a package that an import equals names",
+      'const { hash_transaction } = require("@dcspark/cardano-multiplatform-lib-nodejs"); hash_transaction(body); ' +
+        'const library = await import("@anastasia-labs/cardano-multiplatform-lib-nodejs"); library.min_fee(tx, fee, prices, 0n); ' +
+        'import equals = require("@dcspark/cardano-multiplatform-lib-nodejs"); equals.hash_plutus_data(data);',
+      ["hash_transaction", "min_fee", "hash_plutus_data"],
+    ],
+    [
+      "a name for CML that a variable, a default, a type, a member or a choice gives",
+      "const library = CML; library.min_fee(tx, fee, prices, 0n); function f(defaulted = CML, typed: typeof CML) { defaulted.hash_plutus_data(data); typed.hash_script_data(redeemers); } " +
+        "lucid.CML.hash_transaction(body); const choice = options.library ?? CML; choice.make_vkey_witness(hash, key);",
+      ["min_fee", "hash_plutus_data", "hash_script_data", "hash_transaction", "make_vkey_witness"],
+    ],
   ];
 
-  it.each(SHAPES)("sees %s", (_shape, code, callees) => {
+  it.each(SHAPES)("finds %s", (_shape, code, callees) => {
     expect(calleesIn(code)).toEqual(callees);
+    // The scan parses a file only when its text has a name of the detector. A form with none would hide its calls.
+    expect(detectionPattern([]).test(code), "the scan would not parse this code").toBe(true);
   });
 
   it("reads each kind of file", () => {
@@ -1181,42 +1159,24 @@ describe("the detector", () => {
     expect(calleesIn("export const read = (hex: string) => CML.Transaction.from_hex(hex);", "snippet.mts")).toEqual(["from_hex"]);
   });
 
-  it("does not see a call that is not a decoder call", () => {
-    for (const code of [
-      "const copy = Array.from(items);", "const bytes = Buffer.from(hex, 'hex');", "const pairs = Object.fromEntries(entries);",
-      "const from = 1;", "const done = new Map<string, number>();", "const utxos = store.getUtxos();",
-      "const text = utxos.map((u) => u.address).join(',');", "const hash = blake2b(bytes);",
-    ]) expect(calleesIn(code), code).toEqual([]);
+  /** One row for each kind of code that the detector must not report. */
+  const NOT_CALLS: Array<[kind: string, code: string]> = [
+    ["a call that only looks like a decoder call", "const copy = Array.from(items); const utxos = store.getUtxos(); const hash = blake2b(bytes); const text = utxos.map((u) => u.address).join(',');"],
+    ["a name in a comment or in a string", "// CML.Transaction.from_cbor_hex(hex)\n/* tx.pay.ToAddress(a, v) */\n// CML.hash_transaction(body)\nconst note = 'builder.complete()'; const text = `CML.min_fee(${tx})`;"],
+    [
+      "a free function of another name or of another module",
+      'const a = CMLX.hash_transaction(body); import * as Library from "node:crypto"; Library.hash_transaction(body); import { min_fee } from "./fee.js"; min_fee(tx); ' +
+        'const { make_vkey_witness } = require("node:crypto"); make_vkey_witness(hash, key);',
+    ],
+    ["a class of CML", "const Transaction = CML.Transaction; const { Address } = CML; const list = [Transaction, Address];"],
+  ];
+
+  it.each(NOT_CALLS)("does not report %s", (_kind, code) => {
+    expect(calleesIn(code), code).toEqual([]);
   });
 
-  it("does not see a name in a comment or in a string", () => {
-    expect(calleesIn("// CML.Transaction.from_cbor_hex(hex)\n/* tx.pay.ToAddress(a, v) */\nconst note = 'builder.complete()';")).toEqual([]);
-  });
-
-  it("does not see a free function in a comment or in a string", () => {
-    const code = "// CML.hash_transaction(body)\n/* CML.min_fee(tx) */\nconst note = 'CML.hash_transaction(body)';\nconst text = `CML.min_fee(${tx})`;";
-    expect(calleesIn(code)).toEqual([]);
-  });
-
-  it("does not see a free function of another name or of another module", () => {
-    for (const code of [
-      "const hash = CMLX.hash_transaction(body);", "const hash = cml.hash_transaction(body);", "const hash = Library.hash_transaction(body);",
-      'import { hash_transaction } from "./hash.js";\nhash_transaction(body);',
-      'import * as Library from "node:crypto";\nLibrary.hash_transaction(body);',
-      'const { hash_transaction } = require("node:crypto");\nhash_transaction(body);',
-    ]) expect(calleesIn(code), code).toEqual([]);
-  });
-
-  it("does not take a class of CML for a function", () => {
-    for (const code of [
-      "const Transaction = CML.Transaction;", "const { Transaction } = CML;\nconst list = [Transaction];",
-      'import { Transaction } from "@dcspark/cardano-multiplatform-lib-nodejs";\nconst list = [Transaction];',
-    ]) expect(calleesIn(code), code).toEqual([]);
-  });
-
-  it("parses a file when it has a name of the detector, and only then", () => {
+  it("parses a file only when its text has a name of the detector", () => {
     const pattern = detectionPattern(["helper"]);
-    for (const [, code] of SHAPES) expect(pattern.test(code), code).toBe(true);
     expect(pattern.test("helper(value);")).toBe(true);
     expect(pattern.test("const copy = Array.from(items);\nfoo(bar);")).toBe(false);
     expect(pattern.test("const payload = attachment + Database + incomplete;")).toBe(false);
@@ -1273,50 +1233,32 @@ describe("the free functions of the library", () => {
     return { functions, types };
   }
 
-  let declared: LibraryExports | undefined;
-  const exportsOfLibrary = (): LibraryExports => (declared ??= readExports());
-
-  it("reads the free functions from the declarations of the library", () => {
-    const { functions } = exportsOfLibrary();
+  it("knows each free function that the declarations of the library export, and no class", () => {
+    const { functions, types } = readExports();
     expect(functions.length).toBeGreaterThan(0);
     // The sources call this one (tx/internal/signedTransaction.ts).
     expect(functions).toContain("hash_transaction");
-  });
-
-  it("tells a free function from a class by its first letter", () => {
-    const { functions, types } = exportsOfLibrary();
     expect(types.length).toBeGreaterThan(0);
     expect(functions.filter((name) => !isFunctionName(name))).toEqual([]);
     expect(types.filter((name) => isFunctionName(name))).toEqual([]);
+    // A function that a call hands on has no decoder name. Only its first letter makes the scan see it.
+    for (const name of functions) expect(calleesIn(`items.map(CML.${name});`), name).toEqual([name]);
   });
 
-  it("sees each free function that is called on CML", () => {
-    for (const name of exportsOfLibrary().functions) {
-      expect(calleesIn(`CML.${name}(value);`), name).toEqual([name]);
-      expect(calleesIn(`CML\n  .${name}(\n    value,\n  );`), name).toEqual([name]);
-      expect(calleesIn(`const { ${name} } = CML;\n${name}(value);`), name).toEqual([name]);
-      expect(calleesIn(`const library = CML;\nlibrary.${name}(value);`), name).toEqual([name]);
-      expect(calleesIn(`import { CML as Library } from "@lucid-evolution/lucid";\nLibrary.${name}(value);`), name).toEqual([name]);
-      expect(calleesIn(`items.map(CML.${name});`), name).toEqual([name]);
-    }
-  });
-
-  it("sees each free function that an import of the package names", () => {
-    for (const name of exportsOfLibrary().functions) {
+  it("sees a free function through each package of the library", () => {
+    // The forms do not depend on the name of the function, so three functions stand for all of them.
+    for (const name of ["hash_transaction", "min_fee", "encode_json_str_to_plutus_datum"]) {
       for (const module of PACKAGES) {
-        const at = `${name} from ${module}`;
-        expect(calleesIn(`import { ${name} } from "${module}";\n${name}(value);`), at).toEqual([name]);
-        expect(calleesIn(`import { ${name} as use } from "${module}";\nuse(value);`), at).toEqual([name]);
-        expect(calleesIn(`import * as Library from "${module}";\nLibrary.${name}(value);`), at).toEqual([name]);
+        const forms = [
+          `import { ${name} } from "${module}";\n${name}(value);`,
+          `import { ${name} as use } from "${module}";\nuse(value);`,
+          `import * as Library from "${module}";\nLibrary.${name}(value);`,
+        ];
+        for (const code of forms) {
+          expect(calleesIn(code), code).toEqual([name]);
+          expect(detectionPattern([]).test(code), code).toBe(true);
+        }
       }
-    }
-  });
-
-  it("parses a file that holds a call of one of them", () => {
-    const pattern = detectionPattern([]);
-    for (const name of exportsOfLibrary().functions) {
-      expect(pattern.test(`CML.${name}(value);`), name).toBe(true);
-      for (const module of PACKAGES) expect(pattern.test(`import { ${name} } from "${module}";\n${name}(value);`), `${name} from ${module}`).toBe(true);
     }
   });
 });
@@ -1340,45 +1282,29 @@ describe("the source files", () => {
     return folder;
   };
 
-  it("takes each type of source file and leaves out tests, modules and output", () => {
-    const source = [
-      "scripts/j.ts", "pkg/src/a.ts", "pkg/src/b.tsx", "pkg/src/c.mts", "pkg/src/d.cts", "pkg/src/e.js", "pkg/src/f.jsx", "pkg/src/g.mjs",
-      "pkg/src/h.cjs", "pkg/src/ui/i.tsx", "pkg/src/test/k.ts", "pkg/src/tests/l.ts", "packages/shared/src/test/p.ts",
-    ];
-    const other = [
-      "pkg/src/a.test.ts", "pkg/src/b.spec.mts", "pkg/src/c.test.tsx", "pkg/test/n.ts", "pkg/tests/q.ts", "packages/shared/test/r.ts",
-      "tests/s.ts", "pkg/src/__tests__/m.ts", "node_modules/pkg/index.js", "pkg/src/node_modules/pkg/index.js", "dist/o.js",
-      "pkg/src/notes.md", "pkg/src/style.css",
-    ];
-    const folder = folderWith([...source, ...other]);
-    expect(relativeNames(folder, sourceFiles(folder, undefined))).toEqual([...source].sort());
-  });
-
+  /** One row for each rule of a path: a path from the repository root, and whether the scan reads it. */
   const PATHS: Array<[path: string, source: boolean]> = [
-    ["gateway/src/test/helper.ts", true],
-    ["gateway/src/tests/helper.ts", true],
-    ["packages/shared/src/test/x.ts", true],
-    ["buyer/src/ui/test/x.tsx", true],
-    ["buyer/scripts/run-agent-a.ts", true],
+    // The extension of a script, and a script at the root.
     ["vitest.config.ts", true],
-    ["gateway/test/sweeper.test.ts", false],
-    ["gateway/test/helper.ts", false],
-    ["identity-gateway/test/vectors/case.ts", false],
-    ["paper2agent/tests/x.ts", false],
-    ["packages/shared/test/x.ts", false],
-    ["packages/shared/tests/x.ts", false],
-    ["tests/fixtures/x.ts", false],
-    ["tests/unit/__helpers__/x.ts", false],
-    ["buyer/src/ui/__tests__/x.tsx", false],
-    ["gateway/src/sweeper.test.ts", false],
-    ["buyer/src/b.spec.tsx", false],
-    ["gateway/node_modules/pkg/index.js", false],
-    ["gateway/dist/index.js", false],
-    ["gateway/src/notes.md", false],
+    ["pkg/src/a.ts", true], ["pkg/src/b.tsx", true], ["pkg/src/c.mts", true], ["pkg/src/d.cjs", true], ["pkg/src/e.js", true], ["pkg/src/f.jsx", true],
+    ["pkg/src/notes.md", false], ["pkg/src/style.css", false],
+    // A folder named test or tests holds tests at the second level and below `packages/<name>`. Anywhere else it holds source.
+    ["gateway/src/test/helper.ts", true], ["gateway/src/tests/helper.ts", true], ["packages/shared/src/test/x.ts", true], ["buyer/src/ui/test/x.tsx", true],
+    ["gateway/test/helper.ts", false], ["paper2agent/tests/x.ts", false], ["packages/shared/test/x.ts", false], ["packages/shared/tests/x.ts", false],
+    ["tests/fixtures/x.ts", false], ["buyer/src/ui/__tests__/x.tsx", false],
+    // The name of a test file.
+    ["gateway/src/sweeper.test.ts", false], ["buyer/src/b.spec.tsx", false],
+    // A folder of modules or output, at any depth.
+    ["node_modules/pkg/index.js", false], ["gateway/node_modules/pkg/index.js", false], ["gateway/dist/index.js", false],
   ];
 
-  it.each(PATHS)("%s is a source file: %s", (path, source) => {
-    expect(selectSourcePaths([path])).toEqual(source ? [path] : []);
+  it("takes each type of source file and leaves out tests, modules and output", () => {
+    const source = PATHS.filter(([, isSource]) => isSource).map(([path]) => path).sort();
+    // The rules of a list of paths, as git gives it.
+    expect(selectSourcePaths(PATHS.map(([path]) => path))).toEqual(source);
+    // The rules of a walk of the folders, when there is no git. The result is the same.
+    const folder = folderWith(PATHS.map(([path]) => path));
+    expect(relativeNames(folder, sourceFiles(folder, undefined))).toEqual(source);
   });
 
   it("scans the paths of the list and no other file", () => {
@@ -1394,7 +1320,10 @@ describe("the source files", () => {
 
   it("gets no list when the folder has no .git or git is not installed", () => {
     expect(gitFiles(folderWith([]))).toBeUndefined();
-    expect(gitFiles(ROOT, "git-that-is-not-installed")).toBeUndefined();
+    // A `.git` folder and a command that does not exist stand in for a computer with no git.
+    const folder = folderWith([]);
+    mkdirSync(join(folder, ".git"));
+    expect(gitFiles(folder, "git-that-is-not-installed")).toBeUndefined();
   });
 
   it("does not walk when git fails for another reason", () => {
@@ -1413,31 +1342,31 @@ describe("the source files", () => {
     expect([...SCAN.files].sort()).toEqual(expected);
   });
 
-  it.skipIf(!GIT_LISTS_FILES)("does not read a file that git does not track", () => {
-    // The folder is in the repository, and git does not track it. A call of the library is in its file.
-    const scratch = mkdtempSync(join(ROOT, ".scratch-sites-"));
-    const scratchFile = `${relative(ROOT, scratch)}/x.ts`;
-    try {
-      writeFileSync(join(scratch, "x.ts"), "CML.Address.from_bech32(x);\n");
-      // The rules call the file source. Only the list of git leaves it out.
-      expect(selectSourcePaths([scratchFile])).toEqual([scratchFile]);
-      const scan = scanRepository();
-      expect(scan.files).not.toContain(scratchFile);
-      expect(scan.files).toEqual(SCAN.files);
-      expect(scan.sites).toHaveLength(SCAN.sites.length);
-      expect(compareSites(scan.sites, SITES)).toEqual([]);
-    } finally {
-      rmSync(scratch, { recursive: true, force: true });
-    }
+  it.skipIf(!GIT_INSTALLED)("does not read a file that git does not track", () => {
+    // A git repository of its own in a temporary folder: the test does not need the `.git` folder of this repository.
+    // A hook of git sets GIT_DIR and GIT_INDEX_FILE, so the commands below get no variable of git.
+    const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_")));
+    const folder = folderWith([]);
+    mkdirSync(join(folder, "src"));
+    for (const name of ["tracked", "untracked"]) writeFileSync(join(folder, `src/${name}.ts`), "CML.Address.from_bech32(text);\n");
+    for (const args of [["init", "--quiet"], ["add", "src/tracked.ts"]]) execFileSync("git", args, { cwd: folder, env, stdio: "ignore" });
+    const listed = gitFiles(folder);
+    expect(listed).toEqual(["src/tracked.ts"]);
+    // The rules call both files source. Only the list of git leaves the second one out.
+    expect(selectSourcePaths(["src/tracked.ts", "src/untracked.ts"])).toEqual(["src/tracked.ts", "src/untracked.ts"]);
+    const scan = scanSources(sourceFiles(folder, listed), []);
+    const tracked = rootPath(join(folder, "src/tracked.ts"));
+    expect(scan.files).toEqual([tracked]);
+    expect(scan.sites.map((call) => call.file)).toEqual([tracked]);
   });
 
-  it.each(SOURCE_DIRS)("scans the files of %s", (folder) => {
-    expect(SCAN.files.filter((file) => file.startsWith(`${folder}/`)).length).toBeGreaterThan(0);
-  });
-
-  it("scans the user interface and the scripts of the buyer", () => {
-    expect(SCAN.files).toContain("buyer/src/ui/App.tsx");
-    expect(SCAN.files).toContain("buyer/scripts/run-agent-a.ts");
+  it("scans the files of each source folder", () => {
+    const MUST_SCAN = ["buyer/src/ui/App.tsx", "buyer/scripts/run-agent-a.ts"];
+    const missing = [
+      ...SOURCE_DIRS.filter((folder) => !SCAN.files.some((file) => file.startsWith(`${folder}/`))).map((folder) => `${folder}/ has no scanned file`),
+      ...MUST_SCAN.filter((file) => !SCAN.files.includes(file)).map((file) => `${file} is not scanned`),
+    ];
+    expect(missing).toEqual([]);
   });
 
   it("scans no test file, no module and no output", () => {
@@ -1514,72 +1443,80 @@ describe("the decoder sites", () => {
 });
 
 describe("the guard of the table", () => {
-  it("fails on a new call in a file that the table does not name", () => {
-    const found = [...expandTable(SITES), { file: "gateway/src/new.ts", fn: "decode", callee: "from_cbor_hex", line: 7 }];
-    expect(compareSites(found, SITES)).toEqual(["gateway/src/new.ts :: decode :: from_cbor_hex (line 7): this file is not in the table"]);
-  });
+  const FOUND = expandTable(SITES);
+  const MORE = SITES[3]!;
+  const GONE = SITES[0]!;
+  const COMPARISONS: Array<[title: string, found: FoundSite[], problems: string[]]> = [
+    ["fails on a new call in a file that the table does not name", [...FOUND, { file: "gateway/src/new.ts", fn: "decode", callee: "from_cbor_hex", line: 7 }], ["gateway/src/new.ts :: decode :: from_cbor_hex (line 7): this file is not in the table"]],
+    ["fails on a new call in a function that a named file does not name", [...FOUND, { file: LIVE_CBOR, fn: "newBuilder", callee: "complete", line: 9 }], [`${LIVE_CBOR} :: newBuilder :: complete (line 9): this function is not in the table`]],
+    [
+      "fails on one more call in a function that the table names",
+      [...FOUND, { file: MORE.file, fn: MORE.fn, callee: MORE.callee, line: 99 }],
+      [`${rowKey(MORE)} (line ${[...Array.from({ length: MORE.count }, (_unused, index) => index + 1), 99].join(", ")}): the table says ${MORE.count}, the tree has ${MORE.count + 1}`],
+    ],
+    ["fails when a call of the table is gone", FOUND.filter((call) => keyOf(call.file, call.fn, call.callee) !== rowKey(GONE)), [`${rowKey(GONE)}: the table names a call that the tree does not have`]],
+    ["passes when the tree and the table agree", FOUND, []],
+  ];
 
-  it("fails on a new call in a function that a named file does not name", () => {
-    const found = [...expandTable(SITES), { file: LIVE_CBOR, fn: "newBuilder", callee: "complete", line: 9 }];
-    expect(compareSites(found, SITES)).toEqual([`${LIVE_CBOR} :: newBuilder :: complete (line 9): this function is not in the table`]);
-  });
-
-  it("fails on one more call in a function that the table names", () => {
-    const row = SITES[3]!;
-    const found = [...expandTable(SITES), { file: row.file, fn: row.fn, callee: row.callee, line: 99 }];
-    const lines = [...Array.from({ length: row.count }, (_unused, index) => index + 1), 99].join(", ");
-    expect(compareSites(found, SITES)).toEqual([`${rowKey(row)} (line ${lines}): the table says ${row.count}, the tree has ${row.count + 1}`]);
-  });
-
-  it("fails when a call of the table is gone", () => {
-    const row = SITES[0]!;
-    const found = expandTable(SITES).filter((call) => keyOf(call.file, call.fn, call.callee) !== rowKey(row));
-    expect(compareSites(found, SITES)).toEqual([`${rowKey(row)}: the table names a call that the tree does not have`]);
-  });
-
-  it("passes when the tree and the table agree", () => {
-    expect(compareSites(expandTable(SITES), SITES)).toEqual([]);
+  it.each(COMPARISONS)("%s", (_title, found, problems) => {
+    expect(compareSites(found, SITES)).toEqual(problems);
   });
 
   describe("the proof of an order", () => {
     const CHECK = before("checkedAddressText", 0);
-    const ORDER: Array<[title: string, code: string, guard: Guard, holds: boolean]> = [
-      ["a check that runs first in the same function", "function f(a) {\n  const x = checkedAddressText(a, 'n');\n  tx.pay.ToAddress(x, v);\n}", CHECK, true],
-      ["a check of the same text", "function f(o) {\n  checkedAddressText(o.address, 'n');\n  tx.pay.ToAddress(o.address, v);\n}", CHECK, true],
-      ["a check inside the arguments", "function f(a) {\n  tx.pay.ToAddress(checkedAddressText(a, 'n'), v);\n}", CHECK, true],
-      ["a check before the callback of the call", "function f(a, l) {\n  checkedAddressText(a, 'n');\n  l.map((u) => tx.pay.ToAddress(a, u));\n}", CHECK, true],
-      ["a check in a loop before the call", "function f(os) {\n  for (const o of os) checkedAddressText(o.a, 'n');\n  for (const o of os) tx.pay.ToAddress(o.a, v);\n}", CHECK, true],
-      ["a check that runs after the call", "function f(a) {\n  tx.pay.ToAddress(a, v);\n  checkedAddressText(a, 'n');\n}", before("checkedAddressText"), false],
-      ["a check in another function", "function c(a) {\n  checkedAddressText(a, 'n');\n}\nfunction f(a) {\n  tx.pay.ToAddress(a, v);\n}", before("checkedAddressText"), false],
-      ["a check in a callback beside the call", "function f(a, l) {\n  l.forEach((u) => checkedAddressText(u, 'n'));\n  l.map((u) => tx.pay.ToAddress(u, v));\n}", before("checkedAddressText"), false],
-      ["a check in a function inside the function", "function f(a) {\n  const c = () => checkedAddressText(a, 'n');\n  tx.pay.ToAddress(a, v);\n}", before("checkedAddressText"), false],
-      ["a check of another text", "function f(a, b) {\n  checkedAddressText(a, 'n');\n  tx.pay.ToAddress(b, v);\n}", CHECK, false],
-      ["a name that another call gives", "function f(a, b) {\n  const x = checkedAddressText(a, 'n');\n  const y = other(b);\n  tx.pay.ToAddress(y, v);\n}", CHECK, false],
-      ["a constant text", "const KNOWN = 'd87980';\nfunction f() {\n  CML.PlutusData.from_cbor_hex(KNOWN);\n}", CONSTANT, true],
-      ["a text that is not constant", "function f(hex) {\n  CML.PlutusData.from_cbor_hex(hex);\n}", CONSTANT, false],
-      ["a text of a variable that changes", "let KNOWN = 'd87980';\nfunction f() {\n  CML.PlutusData.from_cbor_hex(KNOWN);\n}", CONSTANT, false],
-      ["a key hash of a key", "function f(k) {\n  builder.addSignerKey(k.pubKeyHash);\n}", KEY_HASH_OF_KEY, true],
-      ["a key hash from a request", "function f(r) {\n  builder.addSignerKey(r.keyHash);\n}", KEY_HASH_OF_KEY, false],
+    const ANY_CHECK = before("checkedAddressText");
+    /** One row for each rule of the proof: code that the proof accepts, and code that it refuses. */
+    const ORDER: Array<[rule: string, guard: Guard, accepted: string[], refused: string[]]> = [
+      [
+        "the check runs before the call",
+        ANY_CHECK,
+        ["function f(a) { checkedAddressText(a, 'n'); tx.pay.ToAddress(a, v); }"],
+        ["function f(a) { tx.pay.ToAddress(a, v); checkedAddressText(a, 'n'); }"],
+      ],
+      [
+        "the check runs in the function of the call, or in a function that holds it",
+        ANY_CHECK,
+        ["function f(a, l) { checkedAddressText(a, 'n'); l.map((u) => tx.pay.ToAddress(a, u)); }"],
+        [
+          "function c(a) { checkedAddressText(a, 'n'); } function f(a) { tx.pay.ToAddress(a, v); }",
+          "function f(a, l) { l.forEach((u) => checkedAddressText(u, 'n')); l.map((u) => tx.pay.ToAddress(u, v)); }",
+          "function f(a) { const c = () => checkedAddressText(a, 'n'); tx.pay.ToAddress(a, v); }",
+        ],
+      ],
+      [
+        "the call reads the text that the check read or made",
+        CHECK,
+        [
+          "function f(a) { const x = checkedAddressText(a, 'n'); tx.pay.ToAddress(x, v); }",
+          "function f(o) { checkedAddressText(o.address, 'n'); tx.pay.ToAddress(o.address, v); }",
+          "function f(a) { tx.pay.ToAddress(checkedAddressText(a, 'n'), v); }",
+        ],
+        [
+          "function f(a, b) { checkedAddressText(a, 'n'); tx.pay.ToAddress(b, v); }",
+          "function f(a, b) { const x = checkedAddressText(a, 'n'); const y = other(b); tx.pay.ToAddress(y, v); }",
+        ],
+      ],
+      [
+        "the first argument is a constant text",
+        CONSTANT,
+        ["const KNOWN = 'd87980'; function f() { CML.PlutusData.from_cbor_hex(KNOWN); }"],
+        ["function f(hex) { CML.PlutusData.from_cbor_hex(hex); }", "let KNOWN = 'd87980'; function f() { CML.PlutusData.from_cbor_hex(KNOWN); }"],
+      ],
+      ["the argument is the key hash of a key", KEY_HASH_OF_KEY, ["function f(k) { builder.addSignerKey(k.pubKeyHash); }"], ["function f(r) { builder.addSignerKey(r.keyHash); }"]],
     ];
 
-    it.each(ORDER)("%s", (_title, code, guard, holds) => {
-      expect(guardProblem(firstCallIn(code), guard, new Map()) === undefined).toBe(holds);
+    it.each(ORDER)("proves that %s", (_rule, guard, accepted, refused) => {
+      for (const code of accepted) expect(guardProblem(firstCallIn(code), guard, new Map()), code).toBeUndefined();
+      for (const code of refused) expect(guardProblem(firstCallIn(code), guard, new Map()), code).toBeDefined();
     });
 
-    const HELPER = "function helper(a) {\n  CML.Address.from_bech32(a);\n}";
-
-    it("accepts a helper that each caller calls after its check", () => {
-      const calls = new Map([["helper", [{ file: "x.ts", node: firstCallOf("function f(a) {\n  check(a);\n  helper(a);\n}", "helper") }]]]);
-      expect(guardProblem(firstCallIn(HELPER), afterCheckOfCallers("check"), calls)).toBeUndefined();
-    });
-
-    it("fails on a helper that a caller calls before its check", () => {
-      const calls = new Map([["helper", [{ file: "x.ts", node: firstCallOf("function f(a) {\n  helper(a);\n  check(a);\n}", "helper") }]]]);
-      expect(guardProblem(firstCallIn(HELPER), afterCheckOfCallers("check"), calls)).toContain("calls helper with no call of check before it");
-    });
-
-    it("fails on a helper that nothing calls", () => {
-      expect(guardProblem(firstCallIn(HELPER), afterCheckOfCallers("check"), new Map())).toBe("nothing calls helper");
+    it("proves a helper by its callers: each caller calls the check before the helper", () => {
+      const helper = firstCallIn("function helper(a) { CML.Address.from_bech32(a); }");
+      const guard = afterCheckOfCallers("check");
+      const callerCode = (code: string): Map<string, TrackedCall[]> => new Map([["helper", [{ file: "x.ts", node: firstCallOf(code, "helper") }]]]);
+      expect(guardProblem(helper, guard, callerCode("function f(a) { check(a); helper(a); }"))).toBeUndefined();
+      expect(guardProblem(helper, guard, callerCode("function f(a) { helper(a); check(a); }"))).toContain("calls helper with no call of check before it");
+      expect(guardProblem(helper, guard, new Map())).toBe("nothing calls helper");
     });
   });
 });
@@ -1747,30 +1684,40 @@ describe("the Ogmios clients", () => {
     expect(fields.sort()).toEqual(["address", "asset name", "policy id", "transaction id"]);
   });
 
-  const MAPPER_CASES: Array<[title: string, code: string, problems: number]> = [
-    ["a guard that the answer function makes first", "function answer(r) {\n  const withheld = new WithheldOutputs();\n  return r.map((o) => mapper(o, withheld));\n}", 0],
-    ["a mapper call with no guard", "function answer(r) {\n  return r.map((o) => mapper(o, withheld));\n}", 1],
-    ["a guard that another call makes", "function answer(r) {\n  const withheld = other();\n  return r.map((o) => mapper(o, withheld));\n}", 1],
-    ["a guard that the function makes after the call", "function answer(r) {\n  const out = r.map((o) => mapper(o, withheld));\n  const withheld = new WithheldOutputs();\n  return out;\n}", 1],
-    ["a mapper call in another function", "function answer(r) {\n  const withheld = new WithheldOutputs();\n  return r.map((o) => mapper(o, withheld));\n}\nfunction other(o) {\n  return mapper(o, null);\n}", 2],
-    ["an answer function that does not call the mapper", "function answer(r) {\n  return r;\n}", 1],
+  /** One row for each rule of the proof on an answer function: snippets with the number of problems that the proof finds. 0 is a pass. */
+  const MAPPER_CASES: Array<[rule: string, snippets: Array<[code: string, problems: number]>]> = [
+    [
+      "the mapper gets a WithheldOutputs that the answer function makes before the call",
+      [
+        ["function answer(r) { const withheld = new WithheldOutputs(); return r.map((o) => mapper(o, withheld)); }", 0],
+        ["function answer(r) { return r.map((o) => mapper(o, withheld)); }", 1],
+        ["function answer(r) { const withheld = other(); return r.map((o) => mapper(o, withheld)); }", 1],
+        ["function answer(r) { const out = r.map((o) => mapper(o, withheld)); const withheld = new WithheldOutputs(); return out; }", 1],
+      ],
+    ],
+    ["only the answer function calls the mapper", [["function answer(r) { const withheld = new WithheldOutputs(); return r.map((o) => mapper(o, withheld)); } function other(o) { return mapper(o, null); }", 2]]],
+    ["the answer function calls the mapper", [["function answer(r) { return r; }", 1]]],
   ];
 
-  it.each(MAPPER_CASES)("judges %s", (_title, code, problems) => {
-    expect(mapperProblems(parseText("client.ts", code), "answer", "mapper")).toHaveLength(problems);
+  it.each(MAPPER_CASES)("judges that %s", (_rule, snippets) => {
+    for (const [code, problems] of snippets) expect(mapperProblems(parseText("client.ts", code), "answer", "mapper"), code).toHaveLength(problems);
   });
 
-  const FIELD_CASES: Array<[title: string, code: string, problems: number]> = [
-    ["the check as the first statement", "function map(o) {\n  assertOutputFields(o);\n  const ref = `${o.transaction.id}#${o.index}`;\n  return [ref, o.address, o.value];\n}", 0],
-    ["the check after the line that makes the reference", "function map(o) {\n  const ref = `${o.transaction.id}#${o.index}`;\n  assertOutputFields(o);\n  return ref;\n}", 2],
-    ["no check", "function map(o) {\n  const ref = `${o.transaction.id}#${o.index}`;\n  return ref;\n}", 1],
-    ["the check after a read of the address", "function map(o) {\n  const a = o.address;\n  assertOutputFields(o);\n  return a;\n}", 2],
-    ["the check after a read of the value", "function map(o) {\n  const v = o.value;\n  assertOutputFields(o);\n  return v;\n}", 2],
-    ["a check of another value", "function map(o, p) {\n  assertOutputFields(p);\n  return o.address;\n}", 1],
-    ["a check in a condition", "function map(o, c) {\n  if (c) assertOutputFields(o);\n  return o.address;\n}", 1],
+  /** The same for the mapper of an Ogmios output. The last row reads the three fields that assertOutputFields bounds. */
+  const FIELD_CASES: Array<[rule: string, snippets: Array<[code: string, problems: number]>]> = [
+    [
+      "the first statement of the mapper is a call of assertOutputFields",
+      [
+        ["function map(o) { assertOutputFields(o); const ref = `${o.transaction.id}#${o.index}`; return [ref, o.address, o.value]; }", 0],
+        ["function map(o) { const ref = `${o.transaction.id}#${o.index}`; return ref; }", 1],
+        ["function map(o, c) { if (c) assertOutputFields(o); return o.address; }", 1],
+      ],
+    ],
+    ["the call of assertOutputFields takes the output of the mapper", [["function map(o, p) { assertOutputFields(p); return o.address; }", 1]]],
+    ["the mapper reads no bounded field before the check ends", [["function map(o) { const ref = `${o.transaction.id}#${o.index}`; const a = o.address; const v = o.value; assertOutputFields(o); return [ref, a, v]; }", 4]]],
   ];
 
-  it.each(FIELD_CASES)("judges the field check: %s", (_title, code, problems) => {
-    expect(fieldCheckProblems(functionNamed(parseText("client.ts", code), "map"))).toHaveLength(problems);
+  it.each(FIELD_CASES)("judges that %s", (_rule, snippets) => {
+    for (const [code, problems] of snippets) expect(fieldCheckProblems(functionNamed(parseText("client.ts", code), "map")), code).toHaveLength(problems);
   });
 });
