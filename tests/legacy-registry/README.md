@@ -90,7 +90,7 @@ address (the script, no stake credential).
 | `harness/data.ts` | Plutus Data and its ledger encoding (indefinite lists, 64-byte chunks, bignums, constructor tags 121–127, 1280–1400 and 102). |
 | `harness/ledger.ts` | Hashes, throwaway keys (`testKeyPair`), CIP-19 addresses, values, outputs, the Vector slot clock and `buildTx()`. |
 | `harness/simulate.ts` | `simulate()`: runs `aiken tx simulate` and gives a verdict for each redeemer. |
-| `harness/blueprint.ts` | `blueprintScript()`: loads a validator from a blueprint and applies its parameters with `aiken blueprint apply`. |
+| `harness/blueprint.ts` | `blueprintScript()`: loads a validator from a blueprint and applies its parameters with `aiken blueprint apply`. `appliedScript()`: the same result without a process, with `apply_params_to_script` of `@lucid-evolution/uplc` (`tests/identity-deploy/plan.test.ts` proves that both give the same bytes). |
 | `harness/legacy.ts` | The legacy script, hash, address, `AgentDatum`, redeemers and the identifier derivation. |
 | `harness/identity.ts` | The identity-marketplace test deployment (`identityWorld()`), the conversions between the shared builder types and the harness types (`harnessData`, `harnessUtxo`, `sharedUtxo`), and the evaluation of builder transactions: `simulateUnsigned()` for an unsigned transaction of the identity builders, `evaluateBuiltTx()` for a signed transaction of any builder (the redeemers come from its witness set). |
 | `scenario.ts` | Test wallets, funds, the record profile, the rule-following Register, `evaluate()`. |
@@ -103,43 +103,13 @@ address (the script, no stake credential).
 
 ## Wave 2: the combined adoption test
 
-`deregister.test.ts` already builds an adoption-shaped transaction: the legacy
-Deregister and Burn next to a second Plutus V3 policy, `STAND_IN_IDENTITY`
-(a script that accepts everything). For the combined test, replace the stand-in
-with the identity validator:
-
-```ts
-import { blueprintScript, scriptHash, address, buildTx, withChange, BURN, DEREGISTER, LEGACY_HASH, LEGACY_SCRIPT } from "../legacy-registry/harness/index.js";
-import { evaluate } from "../legacy-registry/scenario.js";
-
-// Parameters as Plutus Data, in the order of the blueprint.
-const identity = blueprintScript("contracts/identity-marketplace/plutus.json", "<module>.<validator>.mint", parameters);
-const idPolicy = scriptHash(identity);
-const result = evaluate(buildTx(withChange({
-  inputs: [{ utxo: legacyRecord, redeemer: DEREGISTER, label: "legacy Deregister" }, { utxo: ownerFunds }],
-  referenceInputs: [configRecord],
-  outputs: [
-    { address: address({ script: idPolicy }), value: { coin: 10_000_000n, assets: [{ policy: idPolicy, name: id, quantity: 1n }] }, datum: { inline: d0 } },
-    { address: ownerAddress, value: { coin: 10_000_000n } }, // the legacy change rule
-  ],
-  fee,
-  mint: [
-    { policy: LEGACY_HASH, assets: [{ name: id, quantity: -1n }], redeemer: BURN, label: "legacy Burn" },
-    { policy: idPolicy, assets: [{ name: id, quantity: 1n }], redeemer: adoptRedeemer, label: "identity Adopt" },
-  ],
-  validity: { invalidBefore: loSlot, invalidHereafter: hiSlot },
-  requiredSigners: [ownerKeyHash, controllerKeyHash /* , listed keys and parties */],
-  scripts: [LEGACY_SCRIPT, identity],
-  signers: [ownerKey, controllerKey],
-}, ownerAddress)));
-```
-
-`slotToPosixMs()` gives the `lo` and `hi` that the scripts see.
-`harness.test.ts` shows the full path with a parameterised validator.
+`adoption-identity.test.ts` is the combined test: the legacy Deregister and Burn run next to the identity Adopt, with the real
+identity validator of `contracts/identity-marketplace/plutus.json` (`identityWorld()` applies its parameters) and the legacy record
+of `scenario.ts`.
 
 ## Tests and results
 
-57 tests in 5 files, all green. Execution units are memory / CPU.
+49 tests in 5 files, all green. Execution units are memory / CPU.
 
 | File | Test | Expected | Result |
 |---|---|---|---|
@@ -165,11 +135,8 @@ const result = evaluate(buildTx(withChange({
 | | Owner payment key with a stake credential | pass | Deregister pass (132,218 / 47,301,658); Burn pass (111,268 / 36,841,216) |
 | | Another payment key with the owner's stake key | fail | Deregister fail; Burn pass |
 | | 25 AP3X record, 10 AP3X to the owner | pass | Deregister pass (123,830 / 42,050,704); Burn pass (105,145 / 33,438,460) |
-| | Ledger min-UTxO of the owner output | below 10 AP3X | 857,690 (enterprise), 978,370 (base) |
 | | The owner does not sign | fail | Deregister fail; Burn fail |
 | | Two records in one transaction | fail | both Deregisters fail; Burn fail |
-| | Adoption shape: the owner adds 10 AP3X + fee | pass | Deregister pass (134,543 / 46,823,098); Burn pass (109,871 / 34,890,263); stand-in pass |
-| | Adoption shape: 1 base unit less | fail | Deregister fail; Burn pass; stand-in pass |
 | `update.test.ts` | Update at the legacy address (positive control) | pass | Update pass (215,723 / 73,628,215) |
 | | The new owner is a script credential | fail | Update fail |
 | | **(a)** Update to `LA` + the owner's stake key | fail | Update fail |
@@ -180,10 +147,8 @@ const result = evaluate(buildTx(withChange({
 | | **(b)** Register + Update, both tokens in one output | pass | Update pass (224,111 / 78,879,169); Register pass (176,696 / 63,168,896); the output holds 2 legacy tokens |
 | | **(b)** Spend the two-token output with Update | fail | Update fail |
 | | **(b)** Spend the two-token output with Deregister + Burn | fail | Deregister fail; Burn pass |
-| `harness.test.ts` | 14 Plutus Data encoding vectors | equal | equal |
+| `harness.test.ts` | 12 Plutus Data encoding vectors | equal | equal |
 | | Missing script → `HarnessError`; unbalanced value and a missing key witness are rejected | throw | throw |
-| | A script withdrawal runs as `Withdraw[0]` in a transaction with both validity bounds | pass | pass |
-| | Parameterised blueprint validator: applied parameter passes, another redeemer fails | pass / fail | pass (11,918 / 3,247,790) / fail |
 
 ## Findings for Part 2
 
