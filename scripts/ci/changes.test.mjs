@@ -55,6 +55,7 @@ const TREE = {
   "contracts/identity-marketplace/fixtures/cbor-fixtures.json": "{}",
   "contracts/identity-marketplace/aiken-shards.json": "{}",
   "contracts/identity-marketplace/README.md": "",
+  "contracts/identity-marketplace/tests/escrow.md": "",
   "contracts/marketplace/plutus.json": "{}",
   "contracts/marketplace/validators/x.ak": "",
   "docs/guide.md": "",
@@ -160,6 +161,19 @@ test("a change of the Aiken tool runs both Aiken jobs", () => {
   assert.deepEqual([result.contractsIdentity, result.contractsLegacy], [true, true]);
   const plan = run(["contracts/identity-marketplace/aiken-shards.json"]);
   assert.deepEqual([plan.contractsIdentity, plan.contractsLegacy], [true, true]);
+});
+
+test("a change of a map of the identity contract runs the job aiken-check and no other job", () => {
+  for (const path of ["contracts/identity-marketplace/tests/escrow.md", "contracts/identity-marketplace/tests/identity.md"]) {
+    const result = run([path]);
+    assert.equal(result.docsOnly, true, path);
+    assert.deepEqual([result.contractsIdentity, result.contractsLegacy, result.aikenEval, result.runTypecheck], [true, false, false, false], path);
+    assert.equal(result.vitestMode, "none", path);
+  }
+  // Other documents add no job.
+  for (const path of ["contracts/identity-marketplace/README.md", "contracts/identity-marketplace/tests/notes/x.md", "docs/other.md"]) {
+    assert.equal(run([path]).contractsIdentity, false, path);
+  }
 });
 
 test("a change of the CI files selects every job; a change of the root config selects all tests", () => {

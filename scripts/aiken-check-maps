@@ -1,0 +1,310 @@
+#!/usr/bin/env node
+// aiken-check-maps: check the rule-to-test maps of the identity contract.
+//
+// The maps are the files `contracts/identity-marketplace/tests/*.md`. They tell, for each attack row of
+// `docs/IDENTITY_REGISTRY.md` §12.1, which Aiken tests cover it. A test that is deleted or renamed leaves its name in a map.
+// This script finds that. It reads the `.ak` files itself (the same static parse as scripts/aiken-check) and runs no aiken.
+//
+// Checks:
+//   1. A name in backticks that looks like a test name is a test of the project. A name that looks like a test name is
+//      lower-case, has an underscore inside, and is not an identifier that the `.ak` files use (a function, a constant, a
+//      field, a module). A name that ends with an underscore is a prefix and is skipped.
+//   2. A prefix pattern such as `datum_valid_*` matches at least one test.
+//   3. In a table of attacks (the first cell of the header is `Attack...` or `§12.1 item`), each row names at least one test.
+//   4. A count row (the first cell is a path to an `.ak` file, the last cell is a number) holds the number of tests of that file.
+//
+// Run `scripts/aiken-check-maps --help` for the options.
+//
+// This file has no extension and the root package.json sets "type": "module". So Node reads it as an ES module.
+
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const DEFAULT_PROJECT = "contracts/identity-marketplace";
+const MAPS_DIR = "tests";
+
+// Aiken reads the tests from these folders.
+const SOURCE_DIRS = ["lib", "validators"];
+
+const EXIT = { pass: 0, fail: 1, usage: 2, tool: 3 };
+const MAX_PROBLEMS_SHOWN = 40;
+
+const HELP = `aiken-check-maps: check the rule-to-test maps of the identity contract.
+
+Usage:
+  scripts/aiken-check-maps [--project DIR]
+
+Options:
+  --project DIR  The aiken project. Default: ${DEFAULT_PROJECT}.
+                 A relative path starts at the repository root. The maps are DIR/${MAPS_DIR}/*.md.
+  -h, --help     Show this text.
+
+Checks:
+  1. Each name in backticks that looks like a test name is a test of the project.
+  2. Each prefix pattern in backticks (for example \`datum_valid_*\`) matches a test.
+  3. Each row of a table of attacks names a test.
+  4. Each count row (a path to an .ak file and a number of tests) holds the number of tests of that file.
+
+Exit status:
+  0  The maps agree with the .ak files.
+  1  A map names a test that does not exist, or a count is wrong.
+  2  Usage error.
+  3  Tool error: an .ak file that the script cannot read.
+`;
+
+class UsageError extends Error {}
+
+function out(line = "") {
+  process.stdout.write(`${line}\n`);
+}
+
+function plural(count, one, many = `${one}s`) {
+  return `${count} ${count === 1 ? one : many}`;
+}
+
+function toPosix(file) {
+  return file.split(path.sep).join("/");
+}
+
+// ---------------------------------------------------------------------------
+// Static parse of the .ak files (the same rules as scripts/aiken-check)
+// ---------------------------------------------------------------------------
+
+const isWordStart = (character) => (character >= "a" && character <= "z") || (character >= "A" && character <= "Z") || character === "_";
+const isDigit = (character) => character >= "0" && character <= "9";
+
+// Words, numbers, strings and single characters. White space and comments (`//`, `///`, `////`) are dropped. A string is
+// `"..."` or `@"..."`; it can span lines and `\` escapes the next character.
+function tokenize(source, label) {
+  const tokens = [];
+  let index = 0;
+  while (index < source.length) {
+    const character = source[index];
+    if (character === " " || character === "\t" || character === "\n" || character === "\r") {
+      index += 1;
+    } else if (character === "/" && source[index + 1] === "/") {
+      while (index < source.length && source[index] !== "\n") index += 1;
+    } else if (character === '"' || (character === "@" && source[index + 1] === '"')) {
+      const start = index;
+      index += character === '"' ? 1 : 2;
+      while (index < source.length && source[index] !== '"') index += source[index] === "\\" ? 2 : 1;
+      if (index >= source.length) throw new Error(`${label}: the string that starts at offset ${start} has no end`);
+      index += 1;
+      tokens.push({ type: "string", value: "" });
+    } else if (isWordStart(character) || isDigit(character)) {
+      const start = index;
+      index += 1;
+      while (index < source.length && (isWordStart(source[index]) || isDigit(source[index]))) index += 1;
+      tokens.push({ type: isDigit(character) ? "number" : "word", value: source.slice(start, index) });
+    } else {
+      tokens.push({ type: "punct", value: character });
+      index += 1;
+    }
+  }
+  return tokens;
+}
+
+// The names of the `test` definitions at the top level of a module: `test NAME ( PARAMETERS ) [fail [once]] { BODY }`.
+function scanTests(tokens, label) {
+  const names = [];
+  let depth = 0;
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token.type === "punct") {
+      if (token.value === "{") depth += 1;
+      if (token.value === "}") depth -= 1;
+      continue;
+    }
+    if (depth !== 0 || token.type !== "word" || token.value !== "test") continue;
+    const name = tokens[index + 1];
+    if (name?.type !== "word" || tokens[index + 2]?.value !== "(") throw new Error(`${label}: cannot read a test definition`);
+    names.push(name.value);
+  }
+  return names;
+}
+
+function listAikenFiles(base) {
+  const files = [];
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.isFile() && entry.name.endsWith(".ak")) files.push(full);
+    }
+  };
+  if (fs.existsSync(base)) walk(base);
+  return files;
+}
+
+// Reads the project. `tests` is the set of test names, `identifiers` the words that the code uses (and the segments of the
+// module paths), `counts` the number of tests of each file, as a path below the project.
+function readProject(dir) {
+  const tests = new Set();
+  const identifiers = new Set();
+  const counts = new Map();
+  for (const sub of SOURCE_DIRS) {
+    for (const file of listAikenFiles(path.join(dir, sub))) {
+      const label = toPosix(path.relative(dir, file));
+      const tokens = tokenize(fs.readFileSync(file, "utf8"), label);
+      const names = scanTests(tokens, label);
+      counts.set(label, names.length);
+      for (const name of names) tests.add(name);
+      for (const token of tokens) if (token.type === "word") identifiers.add(token.value);
+      for (const segment of label.replace(/\.ak$/, "").split("/")) identifiers.add(segment);
+    }
+  }
+  return { tests, identifiers, counts };
+}
+
+// ---------------------------------------------------------------------------
+// The maps
+// ---------------------------------------------------------------------------
+
+// The cells of a table row. A `|` inside a code span does not split.
+function cellsOf(line) {
+  const cells = [];
+  let current = "";
+  let inCode = false;
+  for (const character of line.trim().replace(/^\|/, "").replace(/\|$/, "")) {
+    if (character === "`") inCode = !inCode;
+    if (character === "|" && !inCode) {
+      cells.push(current.trim());
+      current = "";
+    } else {
+      current += character;
+    }
+  }
+  cells.push(current.trim());
+  return cells;
+}
+
+const isSeparator = (cells) => cells.every((cell) => /^:?-+:?$/.test(cell));
+const spansOf = (text) => [...text.matchAll(/`([^`\n]+)`/g)].map((match) => match[1]);
+const isAttackHeader = (cell) => /^(Attack\b|§12\.1 item$)/.test(cell.replaceAll("`", ""));
+
+// The problems of one map: [{ line, text }].
+function checkMap(text, project) {
+  const problems = [];
+  const lines = text.split("\n");
+  let fenced = false;
+  let table = null; // { attack: boolean, header: boolean } while inside a table
+
+  const isTestName = (name) => /^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$/.test(name);
+  const namesOf = (line) => spansOf(line).filter((span) => project.tests.has(span));
+
+  lines.forEach((line, index) => {
+    const number = index + 1;
+    if (/^\s*```/.test(line)) {
+      fenced = !fenced;
+      return;
+    }
+    if (fenced) return;
+
+    for (const span of spansOf(line)) {
+      const prefix = /^([a-z][a-z0-9]*(?:_[a-z0-9]+)*_)\*$/.exec(span);
+      if (prefix) {
+        if (![...project.tests].some((name) => name.startsWith(prefix[1]))) {
+          problems.push({ line: number, text: `the pattern \`${span}\` matches no test` });
+        }
+      } else if (isTestName(span) && !project.tests.has(span) && !project.identifiers.has(span)) {
+        problems.push({ line: number, text: `\`${span}\` is not a test of the project (a test that was deleted or renamed?)` });
+      }
+    }
+
+    if (!line.startsWith("|")) {
+      table = null;
+      return;
+    }
+    const cells = cellsOf(line);
+    if (table === null) {
+      table = { attack: isAttackHeader(cells[0]), separator: false };
+      return;
+    }
+    if (!table.separator) {
+      table.separator = isSeparator(cells);
+      return;
+    }
+    if (table.attack && namesOf(line).length === 0) {
+      problems.push({ line: number, text: `the attack row "${cells[0].slice(0, 60)}" names no test` });
+    }
+    const file = /^`([^`]+\.ak)`$/.exec(cells[0]);
+    const last = cells[cells.length - 1];
+    if (file && /^\d+$/.test(last)) {
+      const count = project.counts.get(file[1]);
+      if (count === undefined) problems.push({ line: number, text: `the count row names \`${file[1]}\`, which is not a file of the project` });
+      else if (count !== Number(last)) problems.push({ line: number, text: `\`${file[1]}\` has ${plural(count, "test")}, the row says ${last}` });
+    }
+  });
+  return problems;
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+function parseArgs(argv) {
+  const args = { project: null, help: false };
+  for (let index = 0; index < argv.length; index += 1) {
+    const name = argv[index];
+    if (name === "-h" || name === "--help") args.help = true;
+    else if (name === "--project") {
+      index += 1;
+      if (index >= argv.length || argv[index] === "") throw new UsageError("--project needs a value");
+      args.project = argv[index];
+    } else if (name.startsWith("--project=")) args.project = name.slice("--project=".length);
+    else throw new UsageError(name.startsWith("-") ? `unknown option ${name}` : `unexpected argument ${name}`);
+  }
+  return args;
+}
+
+function main(argv) {
+  let args;
+  try {
+    args = parseArgs(argv);
+  } catch (error) {
+    if (!(error instanceof UsageError)) throw error;
+    process.stderr.write(`aiken-check-maps: error: ${error.message}\nRun scripts/aiken-check-maps --help for the options.\n`);
+    return EXIT.usage;
+  }
+  if (args.help) {
+    process.stdout.write(HELP);
+    return EXIT.pass;
+  }
+
+  const repoRoot = path.resolve(path.dirname(fs.realpathSync(fileURLToPath(import.meta.url))), "..");
+  const projectDir = path.resolve(repoRoot, args.project ?? DEFAULT_PROJECT);
+  const mapsDir = path.join(projectDir, MAPS_DIR);
+  const maps = fs.existsSync(mapsDir) ? fs.readdirSync(mapsDir).filter((name) => name.endsWith(".md")).sort() : [];
+  if (maps.length === 0) {
+    process.stderr.write(`aiken-check-maps: error: no map in ${toPosix(path.relative(repoRoot, mapsDir))}\n`);
+    return EXIT.usage;
+  }
+
+  let project;
+  try {
+    project = readProject(projectDir);
+  } catch (error) {
+    process.stderr.write(`aiken-check-maps: error: ${error.message}\n`);
+    return EXIT.tool;
+  }
+  const label = (name) => toPosix(path.relative(repoRoot, path.join(mapsDir, name)));
+  const problems = [];
+  for (const name of maps) {
+    for (const problem of checkMap(fs.readFileSync(path.join(mapsDir, name), "utf8"), project)) {
+      problems.push(`${label(name)}:${problem.line}: ${problem.text}`);
+    }
+  }
+
+  out(`aiken-check-maps: ${plural(maps.length, "map")}, ${plural(project.tests.size, "test")} in ${plural(project.counts.size, "file")}`);
+  if (problems.length === 0) {
+    out("aiken-check-maps: PASS");
+    return EXIT.pass;
+  }
+  for (const problem of problems.slice(0, MAX_PROBLEMS_SHOWN)) out(problem);
+  if (problems.length > MAX_PROBLEMS_SHOWN) out(`... and ${problems.length - MAX_PROBLEMS_SHOWN} more`);
+  out(`aiken-check-maps: FAIL ${plural(problems.length, "problem")}. Change the map so that it names the tests that exist.`);
+  return EXIT.fail;
+}
+
+process.exitCode = main(process.argv.slice(2));

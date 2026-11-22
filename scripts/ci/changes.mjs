@@ -21,7 +21,7 @@
  *   vitest_files        the selected test files, one on each line.
  *   vitest_exclude      test files that the substring filter of vitest would add by mistake, one on each line.
  *   aiken_eval          "true" when the job `aiken-eval` runs (blueprint build, the vitest project aiken-eval, generator check).
- *   contracts_identity  "true" when the job `aiken-check` runs (aiken tests of contracts/identity-marketplace).
+ *   contracts_identity  "true" when the job `aiken-check` runs (aiken tests of contracts/identity-marketplace; its step `aiken-check-maps` reads the maps).
  *   contracts_legacy    "true" when the job `legacy-contract` runs (contracts/marketplace).
  *   test_lines, source_lines   added lines of test code and of source code (git numstat; 0 without git).
  *
@@ -37,7 +37,7 @@
  *   5. The test files of ALWAYS_RUN are always selected.
  *   6. A change below contracts/identity-marketplace/ selects the test files that read the blueprints or the CBOR fixtures.
  *   7. A change of the root build or test config, or of .github/ or scripts/ci/, selects everything.
- * Docs only selects nothing.
+ * Docs only selects nothing. One exception: a change of a map below contracts/identity-marketplace/tests/ runs the job `aiken-check` (map check).
  */
 import { execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, readFileSync, readdirSync } from "node:fs";
@@ -83,6 +83,9 @@ const AIKEN_TOOL_RES = [/^scripts\/aiken-check/, /^contracts\/identity-marketpla
 
 /** The Aiken project files that `aiken check` reads. A change of one of these runs the job `aiken-check`. */
 const IDENTITY_AIKEN_RE = /^contracts\/identity-marketplace\/(?:lib\/|validators\/|aiken\.(?:toml|lock)$|plutus\.json$|aiken-shards\.json$)/;
+
+/** The rule-to-test maps of the identity contract. `scripts/aiken-check-maps` reads them. A map is a document, but a change of one runs the job `aiken-check`. */
+const AIKEN_MAP_RE = /^contracts\/identity-marketplace\/tests\/[^/]+\.md$/;
 
 /** Paths with no code: no test, no build, no typecheck reads them (a test that names one still selects itself, see `docsOnly`). */
 const DOC_RES = [
@@ -376,6 +379,8 @@ export function analyse({ changed: changedInput, files, read, lines = { test: 0,
   };
 
   result.contractsIdentity = !docsOnly && (ciChanged || aikenToolChanged || touches(IDENTITY_AIKEN_RE));
+  // A change of a map is docs only for each other job. Only the job `aiken-check` runs, for the map check.
+  result.contractsIdentity ||= changed.some((path) => AIKEN_MAP_RE.test(path));
   result.contractsLegacy = !docsOnly && (ciChanged || aikenToolChanged || touches(/^contracts\/marketplace\//));
 
   // The job aiken-eval: the listed paths, and every file that a test of the 4 folders reaches.

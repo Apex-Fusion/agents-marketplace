@@ -236,6 +236,10 @@ jobs:
           path: ~/.cache/aiken/packages
           key: aiken-packages-${{ hashFiles('contracts/*/aiken.lock') }}
 
+      # The maps contracts/identity-marketplace/tests/*.md name tests. Each name must be a test that exists. It reads the .ak files and runs no aiken.
+      - name: Maps name existing tests
+        run: node scripts/aiken-check-maps
+
       - name: Aiken check, shard ${{ matrix.shard }} of 4
         run: scripts/aiken-check --shard ${{ matrix.shard }} --of 4 --seed 358316146
 
