@@ -1,5 +1,5 @@
 /**
- * Supplier-side AdvertDatum fixture builder — M0-B RED phase
+ * Supplier-side AdvertDatum fixture builder (M0-B)
  *
  * Constructs AdvertDatum INDEPENDENTLY from the spec (ARCHITECTURE.md §4.1).
  * MUST NOT import from buyer-side builders or any shared fixture helper.

@@ -11,6 +11,7 @@ import type { MockChainProvider } from "../../../packages/shared/src/chain/MockC
 import { encodeIdentityDatum, type IdentityDatum } from "../../../packages/shared/src/cbor/IdentityDatum.js";
 import { encodeIdentityEscrowDatum, type IdentityEscrowDatum } from "../../../packages/shared/src/cbor/IdentityEscrowDatum.js";
 import { encodeIdentityAdvertDatum, type IdentityAdvertDatum } from "../../../packages/shared/src/cbor/IdentityAdvertDatum.js";
+import type { EscrowDatum } from "../../../packages/shared/src/cbor/types.js";
 import { utf8ToHex, vectorIdFromSeed } from "../../../packages/shared/src/identity/id.js";
 import type { TestTxBody } from "../../../packages/shared/src/tx/internal/testTxBody.js";
 import type { WalletKey } from "../../../packages/shared/src/tx/types.js";
@@ -18,6 +19,7 @@ import { testIdentityBlueprint } from "../identity-builders/blueprint.js";
 import { agentRecord } from "../identity-builders/world.js";
 import { supplierIdentity, type SupplierIdentity } from "../../../supplier/src/identity/agent.js";
 import { deriveSupplierKey } from "../../../supplier/src/paper2agent/identity.js";
+import { BUYER_PKH } from "./sample-escrow-state.js";
 
 /** The new escrow and advert with the stand-in identity hash applied. */
 export const IDENTITY = testIdentityBlueprint();
@@ -32,6 +34,16 @@ export const CONTROLLER = deriveSupplierKey("c0".repeat(32), 0);
 /** A supplier key whose hash matches its public key (the record lists keys by public key). */
 export function identitySupplierKey(networkId: 0 | 1 = 0): WalletKey {
   return deriveSupplierKey("5e".repeat(32), networkId);
+}
+
+/** The identity layout (16 fields) of an escrow: it names AGENT_ID and a refund address of the buyer. */
+export function withAgent(escrow: EscrowDatum, changes: Partial<IdentityEscrowDatum> = {}): IdentityEscrowDatum {
+  return {
+    ...escrow,
+    agent_id: AGENT_ID,
+    refund: { address: { paymentCredential: { type: "VerificationKey", hash: BUYER_PKH }, stakeCredential: null }, datum: null },
+    ...changes,
+  };
 }
 
 /** A record without a parent: CONTROLLER, the supplier key with purposes 9, an Accountable Party from 0, `capabilities`. */

@@ -1,12 +1,20 @@
 /**
- * Supplier-side sample config fixture — M1-C RED phase
+ * Supplier-side sample config fixture (M1-C)
  *
  * Provides a deterministic SupplierConfig for test injection.
  * Built INDEPENDENTLY from buyer-side fixtures. No shared helpers.
  */
 
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { SupplierConfig } from "../../../supplier/src/config.js";
 import { SUPPLIER_PKH, SUPPLIER_PRIVATE_KEY_HEX } from "./wallet-keys.js";
+
+/**
+ * The drain marker of every test config: a temp path that no test creates. The default marker, /dev/shm/marketplace-draining, is a
+ * host file: a host that holds it would turn each route test into 503 supplier_draining.
+ */
+export const NO_DRAIN_MARKER = join(tmpdir(), `marketplace-no-drain-marker-${process.pid}`);
 
 /** The advert UTxO that this supplier's config points at. */
 export const SAMPLE_ADVERT_TX_HASH = "b".repeat(64);
@@ -47,6 +55,7 @@ export function buildSampleConfig(): SupplierConfig {
     maxChatSessions: 1,
     chatSettleMode: "full",
     liveChain: false,
+    drainMarkerPath: NO_DRAIN_MARKER,
     reseller: null,
   };
 }
@@ -105,6 +114,7 @@ export function buildSampleEnv(): Record<string, string> {
     NETWORK_ID: "0",
     PORT: "8080",
     OLLAMA_TIMEOUT_MS: "120000",
+    DRAIN_MARKER_PATH: NO_DRAIN_MARKER,
   };
 }
 

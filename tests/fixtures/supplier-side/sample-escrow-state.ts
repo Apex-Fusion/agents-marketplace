@@ -1,5 +1,5 @@
 /**
- * Supplier-side escrow UTxO fixtures — M1-C RED phase
+ * Supplier-side escrow UTxO fixtures (M1-C)
  *
  * Builds Utxo objects for mock-chain injection in supplier route tests.
  * Built INDEPENDENTLY from buyer-side fixtures. No shared helpers.
