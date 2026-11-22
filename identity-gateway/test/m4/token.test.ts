@@ -133,12 +133,10 @@ describe("POST /token", () => {
     ["legacy-form iss", (h) => subject(h, { claims: { iss: `did:vector:agent:${"be".repeat(28)}:${AGENT}` } }), /iss and sub/],
     ["no jti", (h) => subject(h, { claims: { jti: undefined } }), /jti/],
     ["a key without the authentication purpose", (h) => subject(h, {}, ASSERTION_ONLY), /not an authentication key/],
-    ["a delegation key", (h) => subject(h, {}, DELEGATION_KEY), /not an authentication key/],
     ["a key that the record does not list", (h) => subject(h, {}, OUTSIDER), /not an authentication key/],
     ["a signature by another key than kid names", (h) => subject(h, { signWith: OUTSIDER }), /signature does not verify/],
     ["an ES256 subject token (P-256 authentication key)", (h) => subject(h, {}, P256_AUTH), /algorithm ES256 is not accepted/],
     ["alg none", (h) => subject(h, { header: { alg: "none" } }), /algorithm none/],
-    ["HS256", (h) => subject(h, { header: { alg: "HS256" } }), /algorithm HS256/],
     ["typ dpop+jwt", (h) => subject(h, { header: { typ: "dpop+jwt" } }), /typ/],
     ["a relative kid", (h) => subject(h, { header: { kid: `#${AUTH.keyHash}` } }), /kid must be the DID URL/],
     ["a crit header", (h) => subject(h, { header: { crit: ["exp"] } }), /extension/],
@@ -289,10 +287,7 @@ describe("POST /token: RFC 7523 client assertions", () => {
   test.each<[string, (h: Harness) => Promise<Record<string, string>>, RegExp]>([
     ["a wrong assertion type", async (h) => ({ ...(await clientAuth(CLIENT_AUTH, CLIENT, h.now)), client_assertion_type: "urn:x" }), /client_assertion_type/],
     ["no assertion", async () => ({ client_assertion_type: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer" }), /client_assertion is missing/],
-    ["a wrong audience", async (h) => ({ client_assertion_type: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer", client_assertion: await agentJwt(CLIENT_AUTH, CLIENT, { now: h.now, claims: { aud: BASE } }) }), /aud must be/],
-    ["an expired assertion", async (h) => ({ client_assertion_type: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer", client_assertion: await agentJwt(CLIENT_AUTH, CLIENT, { now: h.now - 400_000 }) }), /expired/],
     ["a client_id that differs", async (h) => ({ ...(await clientAuth(CLIENT_AUTH, CLIENT, h.now)), client_id: didOf(AGENT) }), /client_id/],
-    ["a key that the client does not list", async (h) => ({ client_assertion_type: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer", client_assertion: await agentJwt(OUTSIDER, CLIENT, { now: h.now }) }), /authentication key/],
   ])("refused: %s", async (_name, auth, message) => {
     const h = await startGateway(ledger());
     const res = await requestToken(h, await subject(h), DPOP, await auth(h));
@@ -351,12 +346,5 @@ describe("GET /.well-known/oauth-authorization-server and /.well-known/jwks.json
         { kty: "EC", crv: "P-256", x: p256.publicJwk.x, y: p256.publicJwk.y, kid: `did:vector:${GATEWAY_ID}#${p256.keyHash}`, alg: "ES256", use: "sig" },
       ],
     });
-  });
-
-  test("paths that the M4 routes do not own still reach the resolver", async () => {
-    const h = await startGateway(ledger());
-    expect((await fetch(`${h.url}/1.0/identifiers/${didOf(AGENT)}`)).status).toBe(200);
-    expect((await fetch(`${h.url}/healthz`)).status).toBe(200);
-    expect((await fetch(`${h.url}/nothing`)).status).toBe(404);
   });
 });

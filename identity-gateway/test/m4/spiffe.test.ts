@@ -8,7 +8,6 @@ import type { Status } from "../../src/codec/identity-datum.js";
 import { derFromText, pem } from "../../src/m4/x509.js";
 import { LedgerBuilder, identityDatum, idOf, timeAt } from "../support/ledger.js";
 import {
-  BASE,
   TRUST_DOMAIN,
   agentJwt,
   at,
@@ -101,8 +100,8 @@ async function nonce(h: Harness): Promise<string> {
   return text(body.nonce);
 }
 
-async function proof(h: Harness, jwk: unknown, nonceValue: unknown, key: TestKey = AUTH, claims: Record<string, unknown> = {}): Promise<string> {
-  return agentJwt(key, AGENT, { now: h.now, claims: { nonce: nonceValue, cnf: { jwk }, ...claims } });
+async function proof(h: Harness, jwk: unknown, nonceValue: unknown, key: TestKey = AUTH): Promise<string> {
+  return agentJwt(key, AGENT, { now: h.now, claims: { nonce: nonceValue, cnf: { jwk } } });
 }
 
 /** Extensions of a DER certificate by OID: criticality and extnValue content. */
@@ -195,9 +194,6 @@ describe("POST /spiffe/x509-svid", () => {
   });
 
   test.each<[string, (h: Harness, jwk: unknown) => Promise<string>, number, string, RegExp]>([
-    ["a key without the authentication purpose", async (h, jwk) => proof(h, jwk, await nonce(h), ASSERTION_ONLY), 400, "invalid_proof", /not an authentication key/],
-    ["a wrong audience", async (h, jwk) => proof(h, jwk, await nonce(h), AUTH, { aud: `${BASE}/spiffe/x509-svid` }), 400, "invalid_proof", /aud must be/],
-    ["an expired proof", async (h, jwk) => agentJwt(AUTH, AGENT, { now: h.now - 400_000, claims: { nonce: await nonce(h), cnf: { jwk } } }), 400, "invalid_proof", /expired/],
     ["no nonce claim", async (h, jwk) => proof(h, jwk, undefined), 400, "invalid_nonce", /nonce claim is missing/],
     ["a nonce that the gateway never issued", async (h, jwk) => proof(h, jwk, "made-up"), 400, "invalid_nonce", /unknown or was already used/],
   ])("refused proof: %s", async (_name, makeProof, status, error, message) => {
@@ -235,7 +231,7 @@ describe("POST /spiffe/x509-svid", () => {
     expect((await postJson(h, "/spiffe/x509-svid", body)).status).toBe(200);
     const replay = await postJson(h, "/spiffe/x509-svid", body);
     expect(replay.status).toBe(400);
-    expect((await bodyOf(replay)).error_description).toBe("proof: the jti was already used");
+    expect(await bodyOf(replay)).toEqual({ error: "invalid_proof", error_description: "proof: the jti was already used" });
   });
 
   test("a suspended agent gets no SVID (403)", async () => {

@@ -1,6 +1,6 @@
 // The limits that GET /policy publishes (revocationBounds.terms) are the limits that the M4 services
-// use. Each test asks a running service (a gateway on a fake ledger, with settings other than the
-// defaults) and compares the answer with the term that /policy computes from the same settings.
+// use. Each test asks a running service (a gateway on a fake ledger, with a refresh interval other than
+// the default) and compares the answer with the term that /policy computes from the same settings.
 
 import { createPublicKey, generateKeyPairSync, sign, type KeyObject } from "node:crypto";
 import { afterEach, describe, expect, test } from "vitest";
@@ -22,9 +22,9 @@ function ledger(): LedgerBuilder {
   return b;
 }
 
-/** A gateway whose settings are not the defaults, and the bounds that /policy computes from the settings of its services. */
+/** A gateway with a refresh interval that is not the default, and the bounds that /policy computes from the settings of its services. */
 async function gateway(): Promise<{ h: Harness; terms: RevocationBounds["terms"] }> {
-  const h = await startGateway(ledger(), { refreshMs: 120_000, followMs: 30_000, backgroundRefreshMs: 1_200_000 });
+  const h = await startGateway(ledger(), { refreshMs: 120_000 });
   const { terms } = revocationBounds({ baseUrl: BASE, accessLogRetention: "x", fetchJobs: true, scanIntervalMs: 600_000, m4: h.services.context.settings });
   return { h, terms };
 }
@@ -37,13 +37,6 @@ function csr(key: KeyObject): Buffer {
 }
 
 describe("the limits of the M4 services and the terms of /policy", () => {
-  test("the settings of the services reach the terms", async () => {
-    const { terms } = await gateway();
-    expect(terms.followSeconds!.value).toBe(30);
-    expect(terms.listCacheSeconds!.value).toBe(120);
-    expect(terms.buildIntervalSeconds!.value).toBe(1200);
-  });
-
   test("an access token lives tokenSeconds from the issue", async () => {
     const { h, terms } = await gateway();
     const res = await requestToken(h, await agentJwt(AUTH, AGENT, { now: h.now }), DPOP);

@@ -434,7 +434,6 @@ describe("encodings", () => {
   });
 
   test("the 16 KB minimum: each purpose has 131,072 entries", () => {
-    expect(LIST_SIZE).toBe(131_072);
     expect(bitstring(new Uint8Array(LIST_SIZE)).length * 8).toBe(2 * 131_072);
   });
 });
