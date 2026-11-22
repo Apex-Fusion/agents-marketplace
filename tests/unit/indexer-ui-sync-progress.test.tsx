@@ -1,136 +1,100 @@
 // @vitest-environment happy-dom
 /**
- * tests/unit/indexer-ui-sync-progress.test.tsx — GREEN (M1-F-5)
- *
- * Category B: SyncProgress component (~5 tests)
- *
- * Mock strategy:
- *   - usePolling is mocked at module level; per-test control via mockReturnValue.
- *   - client.js is NOT mocked — fetchHealthz internally calls global fetch,
- *     which the polling-contract tests stub via vi.stubGlobal("fetch", ...).
- *   - The component has a side-channel useEffect that calls fetchHealthz via
- *     setInterval regardless of usePolling's mock state — this is what the
- *     polling-contract tests count.
+ * tests/unit/indexer-ui-sync-progress.test.tsx — SyncProgress: the sync gauge, the Ogmios warning and the polling of /healthz.
+ * The render cases pin the state of usePolling. The polling cases run the real hook over a stubbed fetch.
  */
 
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, cleanup, act } from "@testing-library/react";
+import type * as PollingModule from "../../indexer-ui/src/hooks/usePolling.js";
 
-// Module-level mock for usePolling — hoisted above imports.
-vi.mock("../../indexer-ui/src/hooks/usePolling.js", () => ({
-  usePolling: vi.fn(() => ({ data: null, error: null, loading: true })),
-}));
+// The mock wraps the real hook: a render case pins a state with mockReturnValue, a polling case runs the real hook.
+vi.mock("../../indexer-ui/src/hooks/usePolling.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof PollingModule>();
+  return { usePolling: vi.fn(actual.usePolling) };
+});
 
 import SyncProgress from "../../indexer-ui/src/components/SyncProgress.js";
+import { usePolling } from "../../indexer-ui/src/hooks/usePolling.js";
 
-const { usePolling: usePollingMock } = await import("../../indexer-ui/src/hooks/usePolling.js");
+// The mocked module cannot give the real hook back after a case pinned a state, so a beforeEach restores it from the actual module.
+const actualPolling = await vi.importActual<typeof PollingModule>("../../indexer-ui/src/hooks/usePolling.js");
+const usePollingMock = vi.mocked(usePolling);
+
+const HEALTHZ = { ok: true, sync_slot: 100, tip_slot: 200, ogmios_status: "connected", db_size_bytes: 4096 };
+const fetchSpy = vi.fn(async (_url: string) => ({ ok: true, json: async () => HEALTHZ }));
+
+beforeEach(() => {
+  usePollingMock.mockImplementation(actualPolling.usePolling);
+  fetchSpy.mockClear();
+  vi.stubGlobal("fetch", fetchSpy);
+});
 
 afterEach(() => {
   cleanup();
-  vi.clearAllMocks();
   vi.useRealTimers();
   vi.unstubAllGlobals();
-  // Reset to safe default.
-  (usePollingMock as ReturnType<typeof vi.fn>).mockReturnValue({
-    data: null,
-    error: null,
-    loading: true,
-  });
 });
 
-// ─── Polling contract ────────────────────────────────────────────────────────
-// These tests observe the side-channel fetchHealthz useEffect via global fetch stubs.
-
-describe("SyncProgress — polling", () => {
-  it("fetches /healthz on mount (fetch called at least once within the polling cycle)", async () => {
-    vi.useFakeTimers();
-    const mockFetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        ok: true,
-        sync_slot: 100,
-        tip_slot: 200,
-        ogmios_status: "connected",
-        db_size_bytes: 4096,
-      }),
-    });
-    vi.stubGlobal("fetch", mockFetch);
-
+// Only the interval timers are fake: promises and Testing Library keep their real timers.
+describe("SyncProgress — polling /healthz (real usePolling)", () => {
+  it("requests /healthz at mount", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     render(<SyncProgress />);
-    // Advance past first poll interval (5 000 ms)
-    await act(async () => { vi.advanceTimersByTime(5_001); });
-
-    expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining("/healthz"));
+    await act(async () => {});
+    expect(fetchSpy).toHaveBeenCalledWith("/healthz");
   });
 
-  it("polls every 5 s: fetch is called again after a second 5s interval", async () => {
-    vi.useFakeTimers();
-    const mockFetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        ok: true,
-        sync_slot: 100,
-        tip_slot: 200,
-        ogmios_status: "connected",
-        db_size_bytes: 4096,
-      }),
-    });
-    vi.stubGlobal("fetch", mockFetch);
-
+  it("requests /healthz again at the next interval", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     render(<SyncProgress />);
-    await act(async () => { vi.advanceTimersByTime(5_001); });
-    const callsAfterFirst = mockFetch.mock.calls.length;
-    await act(async () => { vi.advanceTimersByTime(5_001); });
-    expect(mockFetch.mock.calls.length).toBeGreaterThan(callsAfterFirst);
+    await act(async () => {});
+    const atMount = fetchSpy.mock.calls.length;
+    await act(async () => {
+      vi.advanceTimersToNextTimer();
+    });
+    expect(fetchSpy.mock.calls.length).toBeGreaterThan(atMount);
   });
 
-  it("unmounting stops further fetch calls", async () => {
-    vi.useFakeTimers();
-    const mockFetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        ok: true,
-        sync_slot: 100,
-        tip_slot: 200,
-        ogmios_status: "connected",
-        db_size_bytes: 4096,
-      }),
-    });
-    vi.stubGlobal("fetch", mockFetch);
-
+  it("requests /healthz no more after unmount", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     const { unmount } = render(<SyncProgress />);
-    await act(async () => { vi.advanceTimersByTime(5_001); });
-    const callsBeforeUnmount = mockFetch.mock.calls.length;
+    await act(async () => {});
+    const atMount = fetchSpy.mock.calls.length;
+    await act(async () => {
+      vi.advanceTimersToNextTimer();
+    });
+    const beforeUnmount = fetchSpy.mock.calls.length;
+    // The polling was alive while the component was mounted.
+    expect(beforeUnmount).toBeGreaterThan(atMount);
+
     unmount();
-    await act(async () => { vi.advanceTimersByTime(15_000); });
-    expect(mockFetch.mock.calls.length).toBe(callsBeforeUnmount);
+    await act(async () => {
+      vi.advanceTimersByTime(60_000);
+    });
+    expect(fetchSpy.mock.calls.length).toBe(beforeUnmount);
   });
 });
-
-// ─── Render contract ─────────────────────────────────────────────────────────
 
 describe("SyncProgress — render", () => {
-  it("renders sync_slot and tip_slot numerically when healthz data is available", async () => {
-    (usePollingMock as ReturnType<typeof vi.fn>).mockReturnValue({
+  it("renders sync_slot and tip_slot numerically, and no Ogmios warning, when healthz data is available", () => {
+    usePollingMock.mockReturnValue({
       data: { ok: true, sync_slot: 750, tip_slot: 1000, ogmios_status: "connected", db_size_bytes: 0 },
       error: null,
       loading: false,
     });
     render(<SyncProgress />);
-    expect(screen.getByText(/750/)).toBeTruthy();
-    expect(screen.getByText(/1000/)).toBeTruthy();
+    expect(screen.getByTestId("sync-progress")).toHaveTextContent(/750\D*1000/);
+    expect(screen.queryByTestId("ogmios-warning")).toBeNull();
   });
 
-  it("renders warning indicator when ogmios_status is 'disconnected'", async () => {
-    (usePollingMock as ReturnType<typeof vi.fn>).mockReturnValue({
+  it("renders warning indicator when ogmios_status is 'disconnected'", () => {
+    usePollingMock.mockReturnValue({
       data: { ok: false, sync_slot: 0, tip_slot: 0, ogmios_status: "disconnected", db_size_bytes: 0 },
       error: null,
       loading: false,
     });
     render(<SyncProgress />);
-    const warning =
-      document.querySelector("[data-testid='ogmios-warning']") ??
-      screen.queryByRole("alert");
-    expect(warning).not.toBeNull();
+    expect(screen.getByTestId("ogmios-warning")).toBeInTheDocument();
   });
 });

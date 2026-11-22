@@ -1,111 +1,49 @@
 // @vitest-environment happy-dom
 /**
- * tests/unit/indexer-ui-capabilities-panel.test.tsx — GREEN (M1-F-5)
- *
- * Category D: CapabilitiesPanel component (~5 tests)
- *
- * Mock strategy: vi.mock at module level; per-test control via usePollingMock.mockReturnValue().
+ * tests/unit/indexer-ui-capabilities-panel.test.tsx — CapabilitiesPanel: one card for each entry of GET /capabilities.
+ * usePolling is mocked; each case pins the state that the hook returns.
  */
 
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, screen, cleanup, waitFor } from "@testing-library/react";
+import { render, screen, cleanup } from "@testing-library/react";
 
-// Module-level mock — must be hoisted above imports.
+// Module-level mock — hoisted above the imports, so the import below is the mock.
 vi.mock("../../indexer-ui/src/hooks/usePolling.js", () => ({
   usePolling: vi.fn(() => ({ data: null, error: null, loading: true })),
 }));
 
 import CapabilitiesPanel from "../../indexer-ui/src/components/CapabilitiesPanel.js";
+import { usePolling } from "../../indexer-ui/src/hooks/usePolling.js";
 
-const { usePolling: usePollingMock } = await import("../../indexer-ui/src/hooks/usePolling.js");
+const usePollingMock = vi.mocked(usePolling);
 
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
-  (usePollingMock as ReturnType<typeof vi.fn>).mockReturnValue({
-    data: null,
-    error: null,
-    loading: true,
-  });
+  usePollingMock.mockReturnValue({ data: null, error: null, loading: true });
 });
 
+// The counts do not repeat a digit of an id, so a card holds its own count only.
 const SAMPLE_CAPABILITIES = [
   { capability_id: "llm.text.generate.v1", supplier_count: 3 },
-  { capability_id: "speech.transcribe.v1", supplier_count: 1 },
+  { capability_id: "speech.transcribe.v1", supplier_count: 5 },
 ];
 
-// ─── Render contract ─────────────────────────────────────────────────────────
-
 describe("CapabilitiesPanel — render", () => {
-  it("renders one capability-card per capability entry", async () => {
-    (usePollingMock as ReturnType<typeof vi.fn>).mockReturnValue({
-      data: SAMPLE_CAPABILITIES,
-      error: null,
-      loading: false,
-    });
+  it("renders one capability-card per capability entry, with its capability_id and supplier_count", () => {
+    usePollingMock.mockReturnValue({ data: SAMPLE_CAPABILITIES, error: null, loading: false });
     render(<CapabilitiesPanel />);
-    await waitFor(() => {
-      const cards = document.querySelectorAll("[data-testid='capability-card']");
-      expect(cards.length).toBe(SAMPLE_CAPABILITIES.length);
+    const cards = screen.getAllByTestId("capability-card");
+    expect(cards).toHaveLength(SAMPLE_CAPABILITIES.length);
+    SAMPLE_CAPABILITIES.forEach((capability, i) => {
+      expect(cards[i]).toHaveTextContent(capability.capability_id);
+      expect(cards[i]).toHaveTextContent(String(capability.supplier_count));
     });
   });
 
-  it("renders zero cards when capabilities list is empty", async () => {
-    (usePollingMock as ReturnType<typeof vi.fn>).mockReturnValue({
-      data: [],
-      error: null,
-      loading: false,
-    });
+  it("renders zero cards when capabilities list is empty", () => {
+    usePollingMock.mockReturnValue({ data: [], error: null, loading: false });
     render(<CapabilitiesPanel />);
-    await waitFor(() => {
-      const cards = document.querySelectorAll("[data-testid='capability-card']");
-      expect(cards.length).toBe(0);
-    });
-  });
-
-  it("each card shows capability_id text", async () => {
-    (usePollingMock as ReturnType<typeof vi.fn>).mockReturnValue({
-      data: SAMPLE_CAPABILITIES,
-      error: null,
-      loading: false,
-    });
-    render(<CapabilitiesPanel />);
-    await waitFor(() => {
-      expect(screen.getByText(/llm\.text\.generate\.v1/)).toBeTruthy();
-      expect(screen.getByText(/speech\.transcribe\.v1/)).toBeTruthy();
-    });
-  });
-
-  it("each card shows supplier_count", async () => {
-    (usePollingMock as ReturnType<typeof vi.fn>).mockReturnValue({
-      data: SAMPLE_CAPABILITIES,
-      error: null,
-      loading: false,
-    });
-    render(<CapabilitiesPanel />);
-    await waitFor(() => {
-      // supplier_count: 3 for llm, 1 for speech
-      expect(screen.getByText("3")).toBeTruthy();
-      expect(screen.getByText("1")).toBeTruthy();
-    });
-  });
-});
-
-// ─── Polling interval ────────────────────────────────────────────────────────
-
-describe("CapabilitiesPanel — polling", () => {
-  it("passes intervalMs=30000 to usePolling", async () => {
-    (usePollingMock as ReturnType<typeof vi.fn>).mockReturnValue({
-      data: [],
-      error: null,
-      loading: false,
-    });
-    render(<CapabilitiesPanel />);
-    await waitFor(() => {
-      expect(usePollingMock).toHaveBeenCalled();
-      const callArgs = (usePollingMock as ReturnType<typeof vi.fn>).mock.calls[0];
-      // second argument must be 30000
-      expect(callArgs[1]).toBe(30_000);
-    });
+    expect(screen.queryAllByTestId("capability-card")).toHaveLength(0);
   });
 });

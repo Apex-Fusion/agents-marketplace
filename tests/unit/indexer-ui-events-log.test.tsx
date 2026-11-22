@@ -1,31 +1,18 @@
 // @vitest-environment happy-dom
 /**
- * tests/unit/indexer-ui-events-log.test.tsx — GREEN (M1-F-5)
- *
- * Category E: EventsLog component (~10 tests)
- *
- * SSE reconnect strategy decision (spec resolution):
- *   We use the native EventSource API (auto-reconnect per SSE spec).
- *   The useSSE hook appends ?since_slot=<lastSeenSlot> when it constructs
- *   the EventSource URL on reconnect. Tests verify this contract via the
- *   useSSE hook stub.
- *   We do NOT use Fetch+ReadableStream.
- *
- * Mock strategy: vi.mock must be at module level to be hoisted correctly.
- *   We control per-test return values via useSSEMock.mockReturnValue().
+ * tests/unit/indexer-ui-events-log.test.tsx — EventsLog: the rows (newest first), the type badges and the filter chips.
+ * useSSE is mocked; each case pins the events that the hook returns.
  */
 
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, screen, cleanup, waitFor, fireEvent } from "@testing-library/react";
+import { render, cleanup, waitFor, fireEvent } from "@testing-library/react";
 
 // Module-level mock — hoisted above all imports by Vitest.
 vi.mock("../../indexer-ui/src/hooks/useSSE.js", () => ({
   useSSE: vi.fn(() => ({ events: [], lastSeenSlot: null, connected: true })),
-  MAX_EVENTS: 500,
 }));
 
 // Import AFTER mock declaration so the component gets the mocked module.
-import { MAX_EVENTS } from "../../indexer-ui/src/hooks/useSSE.js";
 import type { ChainEvent } from "../../indexer-ui/src/api/sse.js";
 import EventsLog from "../../indexer-ui/src/components/EventsLog.js";
 
@@ -83,8 +70,12 @@ describe("EventsLog — render", () => {
     await waitFor(() => {
       const rows = Array.from(document.querySelectorAll("[data-testid='event-row']"));
       expect(rows.length).toBe(3);
-      // First rendered row should show the highest slot (300)
-      expect(rows[0].textContent).toMatch(/300/);
+      // The newest slot (300) comes first.
+      expect(rows.map((row) => row.textContent)).toEqual([
+        expect.stringContaining("300"),
+        expect.stringContaining("200"),
+        expect.stringContaining("100"),
+      ]);
     });
   });
 
@@ -186,50 +177,5 @@ describe("EventsLog — filter chips", () => {
       // Only PostAdvert rows (2 of them)
       expect(rows.length).toBe(2);
     });
-  });
-});
-
-// ─── Auto-scroll ─────────────────────────────────────────────────────────────
-
-describe("EventsLog — auto-scroll", () => {
-  it("scrolls the log container to the bottom when new events arrive", async () => {
-    const initialEvents = makeEvents(3);
-    (useSSEMock as ReturnType<typeof vi.fn>).mockReturnValue({
-      events: initialEvents,
-      lastSeenSlot: initialEvents[initialEvents.length - 1].slot,
-      connected: true,
-    });
-    const { rerender } = render(<EventsLog />);
-
-    const container = document.querySelector("[data-testid='events-log']") as HTMLElement;
-    expect(container).not.toBeNull();
-
-    // Simulate useSSE providing updated list with one more event.
-    const updatedEvents = [
-      ...initialEvents,
-      { type: "PostAdvert", ref: "z".repeat(64) + "#99", slot: 9999 },
-    ];
-    (useSSEMock as ReturnType<typeof vi.fn>).mockReturnValue({
-      events: updatedEvents,
-      lastSeenSlot: 9999,
-      connected: true,
-    });
-    rerender(<EventsLog />);
-
-    await waitFor(() => {
-      const el = document.querySelector("[data-testid='events-log']") as HTMLElement;
-      expect(el).not.toBeNull();
-      // scrollTop should be >= 0 after scrolling attempt (happy-dom no-ops scrollIntoView
-      // but the call is made and scrollTop = scrollHeight is also attempted).
-      expect(el.scrollTop).toBeGreaterThanOrEqual(0);
-    });
-  });
-});
-
-// ─── Buffer cap ───────────────────────────────────────────────────────────────
-
-describe("EventsLog — buffer cap", () => {
-  it("MAX_EVENTS constant is 500", () => {
-    expect(MAX_EVENTS).toBe(500);
   });
 });
