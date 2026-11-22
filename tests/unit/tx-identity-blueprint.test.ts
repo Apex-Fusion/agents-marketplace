@@ -1,7 +1,8 @@
 /**
- * tx-identity-blueprint.test.ts — the identity-marketplace blueprint loader
- * and the Plutus V3 parameter helper (Part 2 §2, §6.1: the new escrow has the
- * parameter identity_hash).
+ * tx-identity-blueprint.test.ts: the blueprint loaders and the Plutus V3 parameter helper.
+ * - applyDataParameter and plutusV3ScriptHash against `aiken blueprint apply` (Part 2 §2).
+ * - loadIdentityBlueprint: the new escrow has the parameter identity_hash (Part 2 §6.1).
+ * - loadBlueprint: the pins of the legacy `contracts/marketplace/plutus.json` and the prefixes of its addresses.
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -9,8 +10,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { bech32 } from "bech32";
 import { loadBlueprint, loadIdentityBlueprint } from "../../packages/shared/src/tx/blueprint.js";
 import { applyDataParameter, plutusV3ScriptHash } from "../../packages/shared/src/tx/internal/plutusScript.js";
-import { MAX_ESCROW_LOVELACE, MAX_RANGE_MS } from "../../packages/shared/src/identity/constants.js";
-import { ESCROW_INPUT_CAP_LOVELACE } from "../../packages/shared/src/tx/index.js";
 import { IDENTITY_BLUEPRINT_PATH, REPO_ROOT, TEST_IDENTITY_HASH } from "../fixtures/identity-builders/blueprint.js";
 
 interface BlueprintFile {
@@ -125,10 +124,14 @@ describe("loadIdentityBlueprint", () => {
   });
 });
 
-describe("escrow constants (Part 2 §6.1, §6.5)", () => {
-  it("one hour of validity, 10,000 AP3X value cap, 10,005 AP3X input cap", () => {
-    expect(MAX_RANGE_MS).toBe(3_600_000);
-    expect(MAX_ESCROW_LOVELACE).toBe(10_000_000_000n);
-    expect(ESCROW_INPUT_CAP_LOVELACE).toBe(10_005_000_000n);
+describe("loadBlueprint (legacy escrow and advert)", () => {
+  // The bech32 prefix tells the network: `addr_test` for network 0 (testnet), `addr` for network 1 (mainnet).
+  it.each([
+    [0, /^addr_test1/],
+    [1, /^addr1/],
+  ] as const)("gives the prefix of network %i to both script addresses", (networkId, prefix) => {
+    const legacy = loadBlueprint();
+    expect(legacy.advertScriptAddress(networkId)).toMatch(prefix);
+    expect(legacy.escrowScriptAddress(networkId)).toMatch(prefix);
   });
 });

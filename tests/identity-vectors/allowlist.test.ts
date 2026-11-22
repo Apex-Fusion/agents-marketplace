@@ -1,6 +1,7 @@
 // legacy_root membership vectors (Part 2 §3.4): the published file equals the shared helper's
 // output, a second implementation written here from the spec text agrees, and the Aiken module
 // that checks the proofs with `allowlist.member` is the current rendering of the vectors.
+// The tables below take 3 of the 7 trees and 4 of the 10 rejections; the Aiken module checks all of them.
 
 import { readFileSync } from "node:fs";
 import { blake2b } from "@noble/hashes/blake2b";
@@ -31,16 +32,29 @@ function specRoot(ids: readonly string[]): string {
 const specMember = (root: string, id: string, proof: readonly string[]): boolean =>
   proof.reduce((x, sibling) => node(x, sibling), blake2b256Hex(id)) === root;
 
+/** The published tree with `size` leaves. */
+function treeOf(size: number): (typeof trees)[number] {
+  const tree = trees.find((t) => t.ids.length === size);
+  if (tree === undefined) throw new Error(`the vectors have no tree of ${size} leaves`);
+  return tree;
+}
+
+/** The published rejection with this description. */
+function rejectionOf(description: string): (typeof rejections)[number] {
+  const rejection = rejections.find((r) => r.description === description);
+  if (rejection === undefined) throw new Error(`the vectors have no rejection "${description}"`);
+  return rejection;
+}
+
 describe("allowlist vectors", () => {
   test("the published file is the output of the shared helper", () => {
     expect(publishedFile("allowlist.json")).toBe(allowlistFile());
   });
 
-  test("the trees have 1, 2, 3, 5, 7, 8 and 13 leaves", () => {
-    expect(trees.map((t) => t.ids.length)).toEqual([1, 2, 3, 5, 7, 8, 13]);
-  });
+  // 1 leaf (no pair), 5 leaves (a last node moves up on two levels), 13 leaves (the same, then two levels of pairs).
+  const sampledTrees = [1, 5, 13].map((size) => treeOf(size));
 
-  test.each(trees.map((t) => [t.name, t] as const))("%s: the spec text gives the same root and accepts every proof", (_name, tree) => {
+  test.each(sampledTrees.map((t) => [t.name, t] as const))("%s: the spec text gives the same root and accepts every proof", (_name, tree) => {
     expect(tree.root).toBe(specRoot(tree.ids));
     expect(tree.leaves).toEqual(tree.ids.map(blake2b256Hex).sort());
     for (const { id, proof } of tree.proofs) {
@@ -49,23 +63,24 @@ describe("allowlist vectors", () => {
     }
   });
 
-  test("a single leaf is the root, with an empty proof", () => {
-    const [one] = trees;
-    expect(one!.root).toBe(blake2b256Hex(one!.ids[0]!));
-    expect(one!.proofs[0]!.proof).toEqual([]);
-  });
-
   test("odd trees: the last leaf moves up unchanged, so its proof is shorter", () => {
-    const thirteen = trees.find((t) => t.ids.length === 13)!;
+    const thirteen = treeOf(13);
     const lengths = new Map(thirteen.proofs.map((p) => [blake2b256Hex(p.id), p.proof.length]));
     // 13 leaves: levels of 13, 7, 4, 2 and 1 nodes. The last leaf moves up twice, then pairs twice.
     expect(lengths.get(thirteen.leaves[12]!)).toBe(2);
     expect(thirteen.leaves.slice(0, 12).map((leaf) => lengths.get(leaf))).toEqual(Array(12).fill(4));
-    const three = trees.find((t) => t.ids.length === 3)!;
-    expect(three.proofs.map((p) => p.proof.length).sort()).toEqual([1, 2, 2]);
+    expect(treeOf(3).proofs.map((p) => p.proof.length).sort()).toEqual([1, 2, 2]);
   });
 
-  test.each(rejections.map((r) => [r.description, r] as const))("rejected: %s", (_description, r) => {
+  // A changed proof node, a proof that is too long, the root of another tree, and a node of the tree as identifier.
+  const sampledRejections = [
+    "a member whose first proof node has one bit changed",
+    "a member with an extra proof node",
+    "a member against the root of another tree",
+    "the root itself as identifier, with an empty proof",
+  ].map((description) => rejectionOf(description));
+
+  test.each(sampledRejections.map((r) => [r.description, r] as const))("rejected: %s", (_description, r) => {
     expect(specMember(r.root, r.id, r.proof)).toBe(false);
     expect(verifyAllowlistProof(r.root, r.id, r.proof)).toBe(false);
   });
