@@ -468,7 +468,7 @@ describe("Paper2Agent control service", () => {
   it("rolls back a legacy migration rather than losing malformed saved input", () => {
     const dir = tempDir();
     const original = seedLegacyStore(dir, [{ id: randomUUID(), state: "queued", submissionJson: "{broken original bytes" }]);
-    expect(() => new PaperControlStore(dir)).toThrow();
+    expect(() => new PaperControlStore(dir)).toThrow(/malformed JSON/);
     const db = new Database(join(dir, "control.db"));
     try {
       expect(db.prepare("SELECT * FROM jobs ORDER BY id").all()).toEqual(original);
@@ -494,13 +494,13 @@ describe("Paper2Agent control service", () => {
     expect(() => loadPaperControlConfig({ PAPER2AGENT_CONTROL_TOKEN: "short" })).toThrow(/PAPER2AGENT_CONTROL_TOKEN/);
     expect(() => loadPaperControlConfig({ PAPER2AGENT_CONTROL_TOKEN: TOKEN, PAPER2AGENT_PUBLISHER_URL: "http://publisher.test" }))
       .toThrow(/together/);
-    expect(() => createPaperControlApp({ service, token: "" })).toThrow();
+    expect(() => createPaperControlApp({ service, token: "" })).toThrow(/token must be at least 32 characters/);
   });
 
   it("fails to open rather than falling back to memory", () => {
     const dir = tempDir();
     mkdirSync(join(dir, "control.db"));
-    expect(() => new PaperControlStore(dir)).toThrow();
+    expect(() => new PaperControlStore(dir)).toThrow(/unable to open database file/);
   });
 
   it("queues paper-only input automatically without build limits and keeps retry approval explicit", async () => {
