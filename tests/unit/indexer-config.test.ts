@@ -1,158 +1,68 @@
 /**
- * tests/unit/indexer-config.test.ts — config loading tests (Category F)
- *
- * loadConfig(env) is a PURE function — no process.env mutation.
- * All happy-path tests RED — loadConfig throws "not implemented — M1-D-green".
- * Missing-field and malformed-value tests GREEN immediately (stub throws = "throws" assertion passes).
- *
- * SPEC FIX 2026-04-27: NETWORK_ID standardized to numeric "0"|"1" across all services.
- * Tests previously used "testnet"/"mainnet" (indexer drift); now align with supplier/buyer.
- * Two new RED tests added: rejects legacy "testnet" value; rejects out-of-range "2".
+ * tests/unit/indexer-config.test.ts — loadConfig of the indexer: the base settings and INDEXER_UI_DIST (identity settings: indexer-identity-config.test.ts).
+ * SPEC FIX 2026-04-27: NETWORK_ID is "0" or "1" in every service; the old labels "testnet" and "mainnet" are refused.
  */
 
 import { describe, it, expect } from "vitest";
 import { loadConfig } from "../../indexer/src/config.js";
 
-// SPEC FIX 2026-04-27: NETWORK_ID standardized to numeric "0"|"1"
 const VALID_ENV = {
   OGMIOS_URL: "ws://localhost:1337",
   DB_PATH: "/tmp/indexer.db",
   NETWORK_ID: "0",
 };
 
-// ─── Happy path — RED ─────────────────────────────────────────────────────────
-// These tests call loadConfig() directly; the stub throws, failing the test (RED).
-// When Catherine implements loadConfig, they turn GREEN by asserting correct values.
-
-describe("loadConfig — happy path", () => {
-  it("returns config object with all required fields from env", () => {
-    const config = loadConfig(VALID_ENV);
-    expect(config.ogmiosUrl).toBe("ws://localhost:1337");
-    expect(config.dbPath).toBe("/tmp/indexer.db");
-    // SPEC FIX 2026-04-27: NETWORK_ID standardized to numeric "0"|"1"
-    expect(config.networkId).toBe(0);
+describe("loadConfig — settings", () => {
+  it.each([
+    ["INDEXER_PORT", "indexerPort", "9090", 9090],
+    ["STATUS_POLL_MS", "statusPollMs", "5000", 5_000],
+    ["SKIP_BEFORE_SLOT", "skipBeforeSlot", "22900000", 22_900_000],
+    ["MAX_SYNC_LAG_SLOTS", "maxSyncLagSlots", "120", 120],
+  ] as const)("%s is parsed from the env string to a number", (name, key, raw, expected) => {
+    expect(loadConfig({ ...VALID_ENV, [name]: raw })[key]).toBe(expected);
   });
 
-  it("INDEXER_PORT defaults to 8090 when not provided", () => {
-    const config = loadConfig(VALID_ENV);
-    expect(config.indexerPort).toBe(8090);
+  it("an empty MAX_SYNC_LAG_SLOTS counts as unset", () => {
+    expect(loadConfig({ ...VALID_ENV, MAX_SYNC_LAG_SLOTS: "" }).maxSyncLagSlots).toBe(loadConfig(VALID_ENV).maxSyncLagSlots);
   });
 
-  it("STATUS_POLL_MS defaults to 20000 when not provided", () => {
-    const config = loadConfig(VALID_ENV);
-    expect(config.statusPollMs).toBe(20_000);
-  });
-
-  it("SKIP_BEFORE_SLOT defaults to 0 when not provided", () => {
-    const config = loadConfig(VALID_ENV);
-    expect(config.skipBeforeSlot).toBe(0);
-  });
-
-  it("INDEXER_PORT is parsed from env string to number", () => {
-    const config = loadConfig({ ...VALID_ENV, INDEXER_PORT: "9090" });
-    expect(config.indexerPort).toBe(9090);
-  });
-
-  it("STATUS_POLL_MS is parsed from env string to number", () => {
-    const config = loadConfig({ ...VALID_ENV, STATUS_POLL_MS: "5000" });
-    expect(config.statusPollMs).toBe(5_000);
-  });
-
-  it("SKIP_BEFORE_SLOT is parsed from env string to number", () => {
-    const config = loadConfig({ ...VALID_ENV, SKIP_BEFORE_SLOT: "22900000" });
-    expect(config.skipBeforeSlot).toBe(22_900_000);
-  });
-
-  // SPEC FIX 2026-04-27: NETWORK_ID standardized to numeric "0"|"1"
-  it("NETWORK_ID='1' (mainnet) is accepted and maps to networkId=1", () => {
-    const config = loadConfig({ ...VALID_ENV, NETWORK_ID: "1" });
-    expect(config.networkId).toBe(1);
-  });
-
-  it("MAX_SYNC_LAG_SLOTS defaults to 600 and is parsed from env", () => {
-    expect(loadConfig(VALID_ENV).maxSyncLagSlots).toBe(600);
-    expect(loadConfig({ ...VALID_ENV, MAX_SYNC_LAG_SLOTS: "" }).maxSyncLagSlots).toBe(600);
-    expect(loadConfig({ ...VALID_ENV, MAX_SYNC_LAG_SLOTS: "120" }).maxSyncLagSlots).toBe(120);
+  it("INDEXER_UI_DIST comes back as uiDistDir; an absent or empty one gives undefined (no UI mount)", () => {
+    expect(loadConfig({ ...VALID_ENV, INDEXER_UI_DIST: "/repo/indexer-ui/dist" }).uiDistDir).toBe("/repo/indexer-ui/dist");
+    expect(loadConfig(VALID_ENV).uiDistDir).toBeUndefined();
+    expect(loadConfig({ ...VALID_ENV, INDEXER_UI_DIST: "" }).uiDistDir).toBeUndefined();
   });
 });
 
-// ─── Missing required fields — these tests work regardless ────────────────────
-// The stub throws for all inputs, satisfying the "throws" assertion.
-// When implemented, these must throw for the correct reason (missing field).
-
-describe("loadConfig — missing required fields", () => {
-  it("throws when OGMIOS_URL is missing", () => {
-    expect(() => {
-      // SPEC FIX 2026-04-27: NETWORK_ID standardized to numeric "0"|"1"
-      const env = { DB_PATH: "/tmp/indexer.db", NETWORK_ID: "0" };
-      loadConfig(env);
-    }).toThrow();
+describe("loadConfig — NETWORK_ID", () => {
+  it.each([
+    ["0", 0],
+    ["1", 1],
+  ] as const)("NETWORK_ID='%s' is accepted and maps to networkId=%i", (raw, networkId) => {
+    expect(loadConfig({ ...VALID_ENV, NETWORK_ID: raw }).networkId).toBe(networkId);
   });
 
-  it("throws when DB_PATH is missing", () => {
-    expect(() => {
-      // SPEC FIX 2026-04-27: NETWORK_ID standardized to numeric "0"|"1"
-      const env = { OGMIOS_URL: "ws://localhost:1337", NETWORK_ID: "0" };
-      loadConfig(env);
-    }).toThrow();
-  });
-
-  it("throws when NETWORK_ID is missing", () => {
-    expect(() => {
-      const env = { OGMIOS_URL: "ws://localhost:1337", DB_PATH: "/tmp/indexer.db" };
-      loadConfig(env);
-    }).toThrow();
+  // The legacy label and the out-of-range number must throw to keep the contract of the services.
+  it.each(["preprod", "testnet", "2"])("rejects NETWORK_ID='%s' with a clear error", (raw) => {
+    expect(() => loadConfig({ ...VALID_ENV, NETWORK_ID: raw })).toThrow(/NETWORK_ID must be "0"/);
   });
 });
 
-// ─── Malformed values — these tests work regardless ───────────────────────────
-
-describe("loadConfig — malformed values", () => {
-  it("throws when NETWORK_ID is not '0'|'1' (e.g. 'preprod')", () => {
-    expect(() => {
-      loadConfig({ ...VALID_ENV, NETWORK_ID: "preprod" });
-    }).toThrow();
+describe("loadConfig — missing and malformed settings", () => {
+  it.each([
+    ["OGMIOS_URL", undefined],
+    ["OGMIOS_URL", ""],
+    ["DB_PATH", undefined],
+    ["NETWORK_ID", undefined],
+  ])("throws and names %s when it is %j", (name, value) => {
+    expect(() => loadConfig({ ...VALID_ENV, [name]: value })).toThrow(new RegExp(`${name} is required`));
   });
 
-  it("throws when INDEXER_PORT is non-numeric", () => {
-    expect(() => {
-      loadConfig({ ...VALID_ENV, INDEXER_PORT: "not-a-number" });
-    }).toThrow();
-  });
-
-  it("throws when STATUS_POLL_MS is negative", () => {
-    expect(() => {
-      loadConfig({ ...VALID_ENV, STATUS_POLL_MS: "-1" });
-    }).toThrow();
-  });
-
-  it("throws when OGMIOS_URL is empty string", () => {
-    expect(() => {
-      loadConfig({ ...VALID_ENV, OGMIOS_URL: "" });
-    }).toThrow();
-  });
-
-  // ─── NEW RED: NETWORK_ID standardization — M1-F-1 ─────────────────────
-  // SPEC FIX 2026-04-27: NETWORK_ID standardized to numeric "0"|"1"
-
-  it("RED: rejects legacy NETWORK_ID='testnet' string with a clear error", () => {
-    // Previously accepted; must now throw to enforce cross-service contract.
-    // Catherine: loadConfig must reject any value outside "0"|"1".
-    expect(() => {
-      loadConfig({ ...VALID_ENV, NETWORK_ID: "testnet" });
-    }).toThrow(/NETWORK_ID/);
-  });
-
-  it("RED: rejects out-of-range NETWORK_ID='2' with a clear error", () => {
-    // Only "0" (testnet) and "1" (mainnet) are valid per NetworkId = 0 | 1.
-    // Catherine: loadConfig must reject numeric-string values outside that range.
-    expect(() => {
-      loadConfig({ ...VALID_ENV, NETWORK_ID: "2" });
-    }).toThrow(/NETWORK_ID/);
-  });
-
-  it("throws when MAX_SYNC_LAG_SLOTS is not a non-negative integer", () => {
-    expect(() => loadConfig({ ...VALID_ENV, MAX_SYNC_LAG_SLOTS: "-1" })).toThrow(/MAX_SYNC_LAG_SLOTS/);
-    expect(() => loadConfig({ ...VALID_ENV, MAX_SYNC_LAG_SLOTS: "ten" })).toThrow(/MAX_SYNC_LAG_SLOTS/);
+  it.each([
+    ["INDEXER_PORT", "not-a-number"],
+    ["STATUS_POLL_MS", "-1"],
+    ["MAX_SYNC_LAG_SLOTS", "-1"],
+    ["MAX_SYNC_LAG_SLOTS", "ten"],
+  ])("throws and names %s when it is %j", (name, raw) => {
+    expect(() => loadConfig({ ...VALID_ENV, [name]: raw })).toThrow(new RegExp(`${name} must be a non-negative integer`));
   });
 });

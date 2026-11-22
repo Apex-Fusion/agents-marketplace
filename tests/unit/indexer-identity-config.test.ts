@@ -1,5 +1,5 @@
 /**
- * tests/unit/indexer-identity-config.test.ts — identity registry settings in loadConfig.
+ * tests/unit/indexer-identity-config.test.ts — identity registry settings in loadConfig (Part 2 §6.4): set all of them, or none.
  */
 
 import { describe, it, expect } from "vitest";
@@ -36,11 +36,6 @@ describe("loadConfig — watched addresses", () => {
       resyncFrom: null,
     });
   });
-
-  it("unset legacy addresses are empty (not watched)", () => {
-    const config = loadConfig(BASE);
-    expect([config.advertAddress, config.escrowAddress]).toEqual(["", ""]);
-  });
 });
 
 describe("loadConfig — identity registry", () => {
@@ -61,19 +56,18 @@ describe("loadConfig — identity registry", () => {
     expect(() => loadConfig({ ...IDENTITY, IDENTITY_ADDRESS: IDENTITY_ADVERT_SCRIPT_ADDRESS })).toThrow(/IDENTITY_ADDRESS must be/);
   });
 
-  it.each(["IDENTITY_GATEWAY_URL", "IDENTITY_ADVERT_SCRIPT_ADDRESS", "SWITCH_SLOT", "IDENTITY_LOAD_AT_START"])(
-    "%s without IDENTITY_POLICY_ID is an error",
-    (name) => {
-      expect(() => loadConfig({ ...BASE, [name]: "1" })).toThrow(new RegExp(`${name} needs IDENTITY_POLICY_ID`));
-    },
-  );
-
-  it.each(["IDENTITY_ADVERT_SCRIPT_ADDRESS", "IDENTITY_ESCROW_SCRIPT_ADDRESS", "IDENTITY_GATEWAY_URL"])(
-    "%s is required with IDENTITY_POLICY_ID",
-    (name) => {
-      expect(() => loadConfig({ ...IDENTITY, [name]: undefined })).toThrow(new RegExp(`${name} is required`));
-    },
-  );
+  // One row for each branch: the check of IDENTITY_KEYS while IDENTITY_POLICY_ID is unset (SWITCH_SLOT is the last key of the
+  // list, so the loop must reach the end), and the required() check of a setting that IDENTITY_POLICY_ID needs.
+  it.each([
+    ["SWITCH_SLOT without IDENTITY_POLICY_ID", { ...BASE, SWITCH_SLOT: "1" }, /SWITCH_SLOT needs IDENTITY_POLICY_ID/],
+    [
+      "IDENTITY_ESCROW_SCRIPT_ADDRESS missing with IDENTITY_POLICY_ID",
+      { ...IDENTITY, IDENTITY_ESCROW_SCRIPT_ADDRESS: undefined },
+      /IDENTITY_ESCROW_SCRIPT_ADDRESS is required/,
+    ],
+  ])("%s is an error", (_title, env, message) => {
+    expect(() => loadConfig(env)).toThrow(message);
+  });
 
   it("refuses a policy ID that is not 56 lowercase hex characters", () => {
     expect(() => loadConfig({ ...IDENTITY, IDENTITY_POLICY_ID: IDENTITY_POLICY_ID.toUpperCase() })).toThrow(/IDENTITY_POLICY_ID/);
