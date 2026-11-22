@@ -198,6 +198,16 @@ describe("OgmiosLucidProvider — the reads", () => {
     await expect(provider.getUtxosByOutRef([OUT_REF])).resolves.toEqual([]);
   });
 
+  // A real Ogmios gives a list. For any other result the provider gives one default spend budget, so that lucid sets the ex-units of
+  // the spend (OgmiosLucidProvider.evaluateTx, the fallback after the list case). Before, a diagnostic test reached this code by chance.
+  it("evaluateTx returns one default spend budget when the result is not a list", async () => {
+    mockFetch.mockResolvedValueOnce(rpcOk({}));
+
+    await expect(makeProvider().evaluateTx(DUMMY_TX_CBOR)).resolves.toEqual([
+      { redeemer_tag: "spend", redeemer_index: 0, ex_units: { mem: 1_000_000, steps: 500_000_000 } },
+    ]);
+  });
+
   // The live Vector Ogmios answer uses the Ogmios v6 names for two parameters (commit d786fff).
   it("reads the Ogmios v6 names for the CPU price and the min-UTxO coefficient", async () => {
     // The live Vector Ogmios answer: no `prices` and no `coinsPerUtxoByte`. The
