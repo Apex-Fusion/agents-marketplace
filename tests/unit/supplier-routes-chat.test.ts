@@ -1,895 +1,276 @@
 /**
- * supplier-routes-chat.test.ts — RED phase tests for POST /v1/chat/completions
+ * supplier-routes-chat.test.ts — POST /v1/responses (the chat route) and the job route behind it
  *
- * Uses supertest against createApp(deps) from supplier/src/server.ts.
- * All chain interactions are via MockChainProvider (no real Ogmios).
- * Ollama is mocked via vi.stubGlobal("fetch", ...).
+ * supertest against createApp(deps) from supplier/src/server.ts. A MockChainProvider replaces Ogmios. Ollama answers through
+ * vi.stubGlobal("fetch", ...). The 202 reply and the failures of the Claim are in supplier-routes-chat-async.test.ts.
  *
- * SPEC NOTE (Caroline design decision):
- *   request_spec_hash and prompt_hash in escrow fixture use placeholder values
- *   ("c".repeat(64) and "d".repeat(64)) from sample-escrow-state.ts.
- *   In the happy-path tests, the route handler must compute these hashes from
- *   the request body and compare them to the escrow datum.
- *
- *   Because the stubs throw, request body in happy-path tests uses
- *   TEST_MESSAGES and TEST_MODEL/TEST_MAX_OUTPUT_TOKENS from sample-escrow-state,
- *   and the route handler is expected to recompute matching hashes.
- *
- *   HOWEVER: since the escrow fixture uses placeholder hashes that do NOT
- *   match the canonical hash of the test inputs, the hash validation will fail
- *   in the real implementation unless Catherine replaces the placeholders with
- *   real precomputed values. This is documented in sample-escrow-state.ts.
- *
- *   To keep RED tests compilable and runnable, the hash-mismatch tests rely
- *   on explicit "wrong hash" UTxOs (buildWrongRequestSpecHashEscrowUtxo etc.),
- *   while the happy-path tests expect the route to accept when hashes DO match.
- *   Catherine must pre-compute the correct hash values in the fixture.
+ * The sample escrows (sample-escrow-state.ts) commit to validChatBody(): their request_spec_hash and prompt_hash are real hashes.
  *
  * ORDER OF OPERATIONS per ARCHITECTURE.md §5.1:
  *   Claim → Ollama → Submit (NOT Ollama → Claim)
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { createHash } from "node:crypto";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import request from "supertest";
 import type { Application } from "express";
-import { MockChainProvider } from "../../packages/shared/src/chain/MockChainProvider.js";
-import { encodeAdvertDatum } from "../../packages/shared/src/cbor/AdvertDatum.js";
-import type { AdvertDatum } from "../../packages/shared/src/cbor/types.js";
+import type { MockChainProvider } from "../../packages/shared/src/chain/MockChainProvider.js";
+import type { Utxo } from "../../packages/shared/src/chain/ChainProvider.js";
+import { canonicalize } from "../../packages/shared/src/cbor/canonical.js";
+import { verifyReceipt } from "../../packages/shared/src/receipt/verify.js";
+import { responseResultCommitment } from "../../packages/shared/src/responses.js";
 import type { SupplierConfig } from "../../supplier/src/config.js";
 import { SupplierState } from "../../supplier/src/state.js";
-import { JobStore } from "../../supplier/src/jobs.js";
-import { createApp } from "../../supplier/src/server.js";
-import { buildSampleConfig, SAMPLE_ADVERT_TX_HASH, SAMPLE_ADVERT_INDEX } from "../fixtures/supplier-side/sample-config.js";
-import { buildSupplierWalletKey, SUPPLIER_PKH } from "../fixtures/supplier-side/wallet-keys.js";
 import {
-  buildOpenEscrowUtxo,
+  chainWith, drainRunner, makeApp, mockOllamaFailure, mockOllamaOk, postChat, validChatBody,
+} from "../fixtures/supplier-side/chat-harness.js";
+import {
   buildClaimedEscrowUtxo,
-  buildSubmittedEscrowUtxo,
-  buildWrongSupplierEscrowUtxo,
+  buildOpenEscrowUtxo,
   buildPastDeliverByEscrowUtxo,
+  buildSubmittedEscrowUtxo,
   buildWrongCapabilityEscrowUtxo,
-  buildWrongRequestSpecHashEscrowUtxo,
   buildWrongPromptHashEscrowUtxo,
-  ESCROW_TX_HASH,
-  CAPABILITY_ID,
-  TEST_MODEL,
+  buildWrongRequestSpecHashEscrowUtxo,
+  buildWrongSupplierEscrowUtxo,
+  OPEN_ESCROW_REF,
+  PROMPT_HASH,
   TEST_MAX_OUTPUT_TOKENS,
-  TEST_RESPONSE_INPUT,
+  TEST_MODEL,
 } from "../fixtures/supplier-side/sample-escrow-state.js";
+import { SUPPLIER_PKH, SUPPLIER_PUB_KEY_HEX } from "../fixtures/supplier-side/wallet-keys.js";
 
-// ─── Constants ────────────────────────────────────────────────────────────────
-
-const OPEN_ESCROW_REF_HEADER = `${ESCROW_TX_HASH}#0`;
-const CLAIMED_ESCROW_REF_HEADER = `${ESCROW_TX_HASH}#1`;
-const SUBMITTED_ESCROW_REF_HEADER = `${ESCROW_TX_HASH}#2`;
-const WRONG_SUPPLIER_ESCROW_REF_HEADER = `${ESCROW_TX_HASH}#3`;
-const PAST_DELIVER_BY_ESCROW_REF_HEADER = `${ESCROW_TX_HASH}#4`;
-const WRONG_CAPABILITY_ESCROW_REF_HEADER = `${ESCROW_TX_HASH}#5`;
-const WRONG_REQUEST_SPEC_ESCROW_REF_HEADER = `${ESCROW_TX_HASH}#6`;
-const WRONG_PROMPT_HASH_ESCROW_REF_HEADER = `${ESCROW_TX_HASH}#7`;
-
-// ─── Standard chat request body ──────────────────────────────────────────────
-
-function validChatBody() {
-  return {
-    model: TEST_MODEL,
-    input: TEST_RESPONSE_INPUT,
-    max_output_tokens: TEST_MAX_OUTPUT_TOKENS,
-  };
-}
-
-// ─── Active advert UTxO fixture ──────────────────────────────────────────────
-
-function buildActiveAdvertDatum(): AdvertDatum {
-  return {
-    supplier_pkh: SUPPLIER_PKH,
-    capability_id: CAPABILITY_ID,
-    model: TEST_MODEL,
-    max_output_tokens: TEST_MAX_OUTPUT_TOKENS,
-    max_processing_ms: 60_000,
-    price_lovelace: 2_000_000n,
-    supplier_bond_lovelace: 1_000_000n,
-    buyer_bond_lovelace: 1_000_000n,
-    endpoint_url: "http://supplier.example:8080",
-    detail_uri: "ipfs://QmTest",
-    detail_hash: "a".repeat(64),
-    advertised_at: 1_745_500_000_000,
-    status: "Active",
-  };
-}
-
-function seedAdvertUtxo(chain: MockChainProvider, datum: AdvertDatum = buildActiveAdvertDatum()) {
-  chain.seed({
-    ref: { txHash: SAMPLE_ADVERT_TX_HASH, index: SAMPLE_ADVERT_INDEX },
-    address: "addr_test1wfakeadvertaddress",
-    lovelace: 2_000_000n,
-    assets: {},
-    datumHex: encodeAdvertDatum(datum),
-    scriptRef: null,
-  });
-}
-
-// ─── Ollama mock helpers ──────────────────────────────────────────────────────
-
-function mockOllamaOk(content = "I am a helpful assistant.") {
-  vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-    ok: true,
-    status: 200,
-    json: async () => ({
-      message: { role: "assistant", content },
-      done: true,
-      done_reason: "stop",
-      prompt_eval_count: 12,
-      eval_count: 48,
-      total_duration: 3_200_000_000,
-    }),
-  }));
-}
-
-function mockOllamaFailure() {
-  vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-    ok: false,
-    status: 500,
-    text: async () => "Internal Server Error",
-  }));
-}
-
-// ─── App factory ─────────────────────────────────────────────────────────────
-
-function makeApp(
-  chain: MockChainProvider,
-  state?: SupplierState,
-  configOverrides: Partial<SupplierConfig> = {},
-): Application {
-  return createApp({
-    chain,
-    state: state ?? new SupplierState(),
-    config: { ...buildSampleConfig(), ...configOverrides },
-    supplierKey: buildSupplierWalletKey(),
-  });
-}
-
-/**
- * Variant that injects an observable JobStore so tests can drain the runner
- * and poll the GET endpoint. Returns both the app and the jobs store.
- *
- * SPEC FIX 2026-04-28 M1-F-async-chat-cleanup
- */
-function makeAppWithJobs(
-  chain: MockChainProvider,
-  state: SupplierState,
-): { app: Application; jobs: JobStore } {
-  const jobs = new JobStore();
-  const app = createApp({
-    chain,
-    state,
-    config: buildSampleConfig(),
-    supplierKey: buildSupplierWalletKey(),
-    jobs,
-  });
-  return { app, jobs };
-}
-
-/**
- * Drain the fire-and-forget runner: poll until the supplier lock is released,
- * which happens in runChatJob's finally block regardless of success or failure.
- * Uses vi.waitFor (polls every ~10ms, default 1s timeout).
- */
-async function drainRunner(state: SupplierState, timeoutMs = 1000): Promise<void> {
-  await vi.waitFor(() => {
-    if (state.snapshot().status !== "free") {
-      throw new Error("runner not yet done");
-    }
-  }, { timeout: timeoutMs });
-}
-
-// ─── Header / body validation ────────────────────────────────────────────────
-
-describe("POST /v1/chat/completions — header validation", () => {
-  let app: Application;
-  let chain: MockChainProvider;
-
-  beforeEach(() => {
-    chain = new MockChainProvider();
-    seedAdvertUtxo(chain);
-    app = makeApp(chain);
-  });
-
-  afterEach(() => { vi.restoreAllMocks(); });
-
-  it("400 when X-Escrow-Ref header is missing", async () => {
-    const res = await request(app)
-      .post("/v1/responses")
-      .send(validChatBody());
-    expect(res.status).toBe(400);
-    expect(res.body.reason ?? res.body.error).toMatch(/escrow_ref_required/i);
-  });
-
-  it("400 when X-Escrow-Ref is malformed (not <hex>#<int>)", async () => {
-    const res = await request(app)
-      .post("/v1/responses")
-      .set("X-Escrow-Ref", "not-valid-ref")
-      .send(validChatBody());
-    expect(res.status).toBe(400);
-  });
-
-  it("400 when X-Escrow-Ref txHash part is too short", async () => {
-    const res = await request(app)
-      .post("/v1/responses")
-      .set("X-Escrow-Ref", "abc#0")
-      .send(validChatBody());
-    expect(res.status).toBe(400);
-  });
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
-describe("POST /v1/chat/completions — body validation", () => {
-  let app: Application;
-  let chain: MockChainProvider;
+describe("POST /v1/responses: the request is refused before the Claim", () => {
+  it.each([
+    { header: null, reason: "escrow_ref_required" },
+    { header: "not-valid-ref", reason: "escrow_ref_malformed" },
+    { header: "abc#0", reason: "escrow_ref_malformed" },
+  ])("400 $reason when X-Escrow-Ref is $header", async ({ header, reason }) => {
+    const { app } = makeApp(chainWith());
 
-  beforeEach(() => {
-    chain = new MockChainProvider();
-    seedAdvertUtxo(chain);
-    chain.seed(buildOpenEscrowUtxo());
-    app = makeApp(chain);
+    const res = await postChat(app, validChatBody(), header);
+
+    expect(res.status).toBe(400);
+    expect(res.body.reason).toBe(reason);
   });
 
-  afterEach(() => { vi.restoreAllMocks(); });
+  interface BodyRefusal {
+    name: string;
+    body: Record<string, unknown>;
+    config?: Partial<SupplierConfig>;
+    reason: string;
+    param?: string;
+  }
+  const FUNCTION_CALL_HISTORY = [
+    { type: "message", role: "user", content: [{ type: "input_text", text: "Use the tool" }] },
+    { type: "function_call", call_id: "call_1", name: "lookup", arguments: "{}" },
+    { type: "function_call_output", call_id: "call_1", output: "done" },
+  ];
+  const bodyRefusals: BodyRefusal[] = [
+    { name: "stream: true", body: { stream: true }, reason: "streaming_not_supported" },
+    { name: "a legacy tool definition", body: { tools: [{ type: "function", function: { name: "f" } }] }, reason: "invalid_request" },
+    { name: "a functions array", body: { functions: [{ name: "f", parameters: {} }] }, reason: "unsupported_parameter" },
+    { name: "tool_choice, which Ollama cannot keep", body: { tool_choice: "auto" }, reason: "upstream_api_incompatible", param: "tool_choice" },
+    { name: "reasoning options, which Ollama cannot keep", body: { reasoning: { effort: "high" } }, reason: "upstream_api_incompatible", param: "reasoning" },
+    { name: "function call history, which Ollama cannot replay", body: { input: FUNCTION_CALL_HISTORY }, reason: "upstream_api_incompatible", param: "input[1]" },
+    {
+      name: "reasoning that the operator policy disables",
+      body: { reasoning: { effort: "high" } },
+      config: { llmBackend: "openai", openaiUpstreamApi: "responses", openaiReasoningDisabled: true },
+      reason: "reasoning_disabled",
+      param: "reasoning.effort",
+    },
+    { name: "an empty input", body: { input: [] }, reason: "invalid_request" },
+    { name: "no input", body: { input: undefined }, reason: "invalid_request" },
+  ];
 
-  it("400 when stream: true is requested", async () => {
-    const res = await request(app)
-      .post("/v1/responses")
-      .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
-      .send({ ...validChatBody(), stream: true });
-    expect(res.status).toBe(400);
-    expect(res.body.reason ?? res.body.error).toMatch(/streaming_not_supported/i);
-  });
+  it.each(bodyRefusals)("400 $reason for $name, and nothing is claimed", async ({ body, config, reason, param }) => {
+    const chain = chainWith(buildOpenEscrowUtxo());
+    const submit = vi.spyOn(chain, "submitTx");
+    const { app, state } = makeApp(chain, { config });
 
-  it("rejects legacy Chat Completions tool definitions", async () => {
-    const res = await request(app)
-      .post("/v1/responses")
-      .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
-      .send({ ...validChatBody(), tools: [{ type: "function", function: { name: "f" } }] });
-    expect(res.status).toBe(400);
-    expect(res.body.reason).toBe("invalid_request");
-  });
+    const res = await postChat(app, { ...validChatBody(), ...body });
 
-  it("400 when tool_choice is present", async () => {
-    const res = await request(app)
-      .post("/v1/responses")
-      .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
-      .send({ ...validChatBody(), tool_choice: "auto" });
     expect(res.status).toBe(400);
-  });
-
-  it("400 when functions array is present", async () => {
-    const res = await request(app)
-      .post("/v1/responses")
-      .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
-      .send({ ...validChatBody(), functions: [{ name: "f", parameters: {} }] });
-    expect(res.status).toBe(400);
-  });
-
-  it("rejects reasoning options for Ollama before Claim", async () => {
-    const submitSpy = vi.spyOn(chain, "submitTx");
-    const res = await request(app)
-      .post("/v1/responses")
-      .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
-      .send({ ...validChatBody(), reasoning: { effort: "high" } });
-    expect(res.status).toBe(400);
-    expect(res.body.reason).toBe("upstream_api_incompatible");
-    expect(res.body.param).toBe("reasoning");
-    expect(submitSpy).not.toHaveBeenCalled();
-  });
-
-  it("rejects Ollama function call history before Claim", async () => {
-    const state = new SupplierState();
-    const ollamaApp = makeApp(chain, state);
-    const submitSpy = vi.spyOn(chain, "submitTx");
-    const res = await request(ollamaApp)
-      .post("/v1/responses")
-      .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
-      .send({
-        ...validChatBody(),
-        input: [
-          {
-            type: "message",
-            role: "user",
-            content: [{ type: "input_text", text: "Use the tool" }],
-          },
-          {
-            type: "function_call",
-            call_id: "call_1",
-            name: "lookup",
-            arguments: "{}",
-          },
-          {
-            type: "function_call_output",
-            call_id: "call_1",
-            output: "done",
-          },
-        ],
-      });
-    expect(res.status).toBe(400);
-    expect(res.body.reason).toBe("upstream_api_incompatible");
-    expect(res.body.param).toBe("input[1]");
-    expect(submitSpy).not.toHaveBeenCalled();
+    expect(res.body).toMatchObject({ reason, ...(param === undefined ? {} : { param }) });
+    expect(submit).not.toHaveBeenCalled();
     expect(state.snapshot().status).toBe("free");
   });
 
-  it("rejects policy-conflicting native reasoning before Claim", async () => {
-    const nativeState = new SupplierState();
-    const nativeApp = makeApp(chain, nativeState, {
-      llmBackend: "openai",
-      openaiUpstreamApi: "responses",
-      openaiReasoningDisabled: true,
-    });
-    const submitSpy = vi.spyOn(chain, "submitTx");
-    const res = await request(nativeApp)
-      .post("/v1/responses")
-      .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
-      .send({ ...validChatBody(), reasoning: { effort: "high" } });
-    expect(res.status).toBe(400);
-    expect(res.body.reason).toBe("reasoning_disabled");
-    expect(res.body.param).toBe("reasoning.effort");
-    expect(submitSpy).not.toHaveBeenCalled();
-    expect(nativeState.snapshot().status).toBe("free");
+  interface EscrowRefusal {
+    name: string;
+    /** The escrow on chain; null puts none on chain. */
+    utxo: Utxo | null;
+    status: number;
+    reason: string;
+    /** A text that the message gives to the buyer. */
+    message?: string;
+  }
+  const escrowRefusals: EscrowRefusal[] = [
+    { name: "is not on chain", utxo: null, status: 404, reason: "escrow_not_found" },
+    { name: "is Claimed", utxo: buildClaimedEscrowUtxo(), status: 409, reason: "escrow_not_claimable", message: "Claimed" },
+    { name: "is Submitted", utxo: buildSubmittedEscrowUtxo(), status: 409, reason: "escrow_not_claimable", message: "Submitted" },
+    { name: "names another supplier", utxo: buildWrongSupplierEscrowUtxo(), status: 403, reason: "wrong_supplier" },
+    { name: "has another capability than the advert", utxo: buildWrongCapabilityEscrowUtxo(), status: 409, reason: "capability_mismatch" },
+    { name: "has another request_spec_hash", utxo: buildWrongRequestSpecHashEscrowUtxo(), status: 409, reason: "request_spec_mismatch" },
+    { name: "has another prompt_hash", utxo: buildWrongPromptHashEscrowUtxo(), status: 409, reason: "prompt_mismatch" },
+    { name: "is past deliver_by", utxo: buildPastDeliverByEscrowUtxo(), status: 408, reason: "past_deliver_by" },
+  ];
+
+  it.each(escrowRefusals)("$status $reason when the escrow $name, and nothing is claimed", async ({ utxo, status, reason, message }) => {
+    const chain = chainWith(...(utxo === null ? [] : [utxo]));
+    const submit = vi.spyOn(chain, "submitTx");
+    const { app, state, jobs } = makeApp(chain);
+    const ref = utxo === null ? OPEN_ESCROW_REF : `${utxo.ref.txHash}#${utxo.ref.index}`;
+
+    const res = await postChat(app, validChatBody(), ref);
+
+    expect(res.status).toBe(status);
+    expect(res.body).toMatchObject({ reason, ...(message === undefined ? {} : { message: expect.stringContaining(message) }) });
+    expect(submit).not.toHaveBeenCalled();
+    expect(jobs.count()).toBe(0);
+    expect(state.snapshot().status).toBe("free");
   });
 
-  it("400 when messages is empty array", async () => {
-    const res = await request(app)
-      .post("/v1/responses")
-      .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
-      .send({ ...validChatBody(), input: [] });
-    expect(res.status).toBe(400);
-  });
-
-  it("400 when messages is absent", async () => {
-    const res = await request(app)
-      .post("/v1/responses")
-      .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
-      .send({ model: TEST_MODEL, max_output_tokens: TEST_MAX_OUTPUT_TOKENS });
-    expect(res.status).toBe(400);
-  });
-
-  it("caps max_output_tokens at the advertised limit", async () => {
-    const res = await request(app)
-      .post("/v1/responses")
-      .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
-      .send({ ...validChatBody(), max_output_tokens: TEST_MAX_OUTPUT_TOKENS + 1 });
-    expect(res.status).not.toBe(400);
-  });
-});
-
-// ─── On-chain validation ──────────────────────────────────────────────────────
-
-describe("POST /v1/chat/completions — on-chain validation", () => {
-  let chain: MockChainProvider;
-
-  beforeEach(() => {
-    chain = new MockChainProvider();
-    seedAdvertUtxo(chain);
-    // Set tip well before deliver_by so claim tx would be valid
-    chain.advanceSlot(1_000);
-  });
-
-  afterEach(() => { vi.restoreAllMocks(); });
-
-  it("404 when escrow UTxO not found", async () => {
-    // Don't seed any escrow UTxO
-    const app = makeApp(chain);
-    const res = await request(app)
-      .post("/v1/responses")
-      .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
-      .send(validChatBody());
-    expect(res.status).toBe(404);
-    expect(res.body.reason ?? res.body.error).toMatch(/escrow_not_found/i);
-  });
-
-  it("409 when escrow state is Claimed (not Open)", async () => {
-    chain.seed(buildClaimedEscrowUtxo());
-    const app = makeApp(chain);
-    const res = await request(app)
-      .post("/v1/responses")
-      .set("X-Escrow-Ref", CLAIMED_ESCROW_REF_HEADER)
-      .send(validChatBody());
-    expect(res.status).toBe(409);
-    expect(res.body.reason ?? res.body.error).toMatch(/escrow_not_claimable/i);
-  });
-
-  it("409 escrow_not_claimable response includes the current escrow state", async () => {
-    chain.seed(buildClaimedEscrowUtxo());
-    const app = makeApp(chain);
-    const res = await request(app)
-      .post("/v1/responses")
-      .set("X-Escrow-Ref", CLAIMED_ESCROW_REF_HEADER)
-      .send(validChatBody());
-    expect(JSON.stringify(res.body).toLowerCase()).toMatch(/claimed/i);
-  });
-
-  it("409 when escrow state is Submitted (not Open)", async () => {
-    chain.seed(buildSubmittedEscrowUtxo());
-    const app = makeApp(chain);
-    const res = await request(app)
-      .post("/v1/responses")
-      .set("X-Escrow-Ref", SUBMITTED_ESCROW_REF_HEADER)
-      .send(validChatBody());
-    expect(res.status).toBe(409);
-    expect(res.body.reason ?? res.body.error).toMatch(/escrow_not_claimable/i);
-  });
-
-  it("403 when escrow supplier_pkh does not match self", async () => {
-    chain.seed(buildWrongSupplierEscrowUtxo());
-    const app = makeApp(chain);
-    const res = await request(app)
-      .post("/v1/responses")
-      .set("X-Escrow-Ref", WRONG_SUPPLIER_ESCROW_REF_HEADER)
-      .send(validChatBody());
-    expect(res.status).toBe(403);
-    expect(res.body.reason ?? res.body.error).toMatch(/wrong_supplier/i);
-  });
-
-  it("409 when escrow capability_id does not match advertised", async () => {
-    chain.seed(buildWrongCapabilityEscrowUtxo());
-    const app = makeApp(chain);
-    const res = await request(app)
-      .post("/v1/responses")
-      .set("X-Escrow-Ref", WRONG_CAPABILITY_ESCROW_REF_HEADER)
-      .send(validChatBody());
-    expect(res.status).toBe(409);
-    expect(res.body.reason ?? res.body.error).toMatch(/capability_mismatch/i);
-  });
-
-  it("409 when request_spec_hash does not match escrow datum", async () => {
-    chain.seed(buildWrongRequestSpecHashEscrowUtxo());
-    const app = makeApp(chain);
-    const res = await request(app)
-      .post("/v1/responses")
-      .set("X-Escrow-Ref", WRONG_REQUEST_SPEC_ESCROW_REF_HEADER)
-      .send(validChatBody());
-    expect(res.status).toBe(409);
-    expect(res.body.reason ?? res.body.error).toMatch(/request_spec_mismatch/i);
-  });
-
-  it("409 when prompt_hash does not match escrow datum", async () => {
-    chain.seed(buildWrongPromptHashEscrowUtxo());
-    const app = makeApp(chain);
-    const res = await request(app)
-      .post("/v1/responses")
-      .set("X-Escrow-Ref", WRONG_PROMPT_HASH_ESCROW_REF_HEADER)
-      .send(validChatBody());
-    expect(res.status).toBe(409);
-    expect(res.body.reason ?? res.body.error).toMatch(/prompt_mismatch/i);
-  });
-
-  it("408 when now > deliver_by (past deadline)", async () => {
-    chain.seed(buildPastDeliverByEscrowUtxo());
-    const app = makeApp(chain);
-    const res = await request(app)
-      .post("/v1/responses")
-      .set("X-Escrow-Ref", PAST_DELIVER_BY_ESCROW_REF_HEADER)
-      .send(validChatBody());
-    expect(res.status).toBe(408);
-    expect(res.body.reason ?? res.body.error).toMatch(/past_deliver_by/i);
-  });
-});
-
-// ─── Lock tests ──────────────────────────────────────────────────────────────
-
-describe("POST /v1/chat/completions — single-slot lock", () => {
-  afterEach(() => { vi.restoreAllMocks(); });
-
-  it("409 when supplier is already working", async () => {
+  it("409 supplier_busy while another job holds the slot, and that job keeps it", async () => {
+    const otherRef = `${"e".repeat(64)}#0`;
     const state = new SupplierState();
-    const anotherRef = `${"e".repeat(64)}#0`;
-    state.tryAcquire(anotherRef); // Pre-acquire with a different escrow
+    state.tryAcquire(otherRef);
+    const chain = chainWith(buildOpenEscrowUtxo());
+    const submit = vi.spyOn(chain, "submitTx");
+    const { app, jobs } = makeApp(chain, { state });
 
-    const chain = new MockChainProvider();
-    seedAdvertUtxo(chain);
-    chain.seed(buildOpenEscrowUtxo());
-    const app = makeApp(chain, state);
+    const res = await postChat(app);
 
-    const res = await request(app)
-      .post("/v1/responses")
-      .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
-      .send(validChatBody());
     expect(res.status).toBe(409);
-    expect(res.body.reason ?? res.body.error).toMatch(/supplier_busy/i);
+    expect(res.body.reason).toBe("supplier_busy");
+    expect(submit).not.toHaveBeenCalled();
+    expect(jobs.count()).toBe(0);
+    expect(state.snapshot().currentEscrowRef).toBe(otherRef);
   });
 });
 
-// ─── Happy path ──────────────────────────────────────────────────────────────
-
-describe("POST /v1/chat/completions — happy path", () => {
-  let app: Application;
+describe("POST /v1/responses: an accepted request", () => {
   let chain: MockChainProvider;
+  let app: Application;
   let state: SupplierState;
-  let jobs: JobStore;
 
   beforeEach(() => {
-    chain = new MockChainProvider();
-    seedAdvertUtxo(chain);
-    chain.seed(buildOpenEscrowUtxo());
-    chain.advanceSlot(1_000); // tip well before deliver_by
-    // Mock awaitTx to resolve immediately for both Claim (server) and Submit
-    // (runner). Without this, awaitTx polls for hashes not in knownTxs.
+    chain = chainWith(buildOpenEscrowUtxo());
+    // The Claim (server) and the Submit (runner) wait for the chain to confirm: the stand-in chain confirms at once.
     vi.spyOn(chain, "awaitTx").mockResolvedValue(undefined);
-    state = new SupplierState();
-    ({ app, jobs } = makeAppWithJobs(chain, state));
+    ({ app, state } = makeApp(chain));
     mockOllamaOk("I am a helpful AI assistant.");
   });
 
-  afterEach(() => { vi.restoreAllMocks(); });
+  it("answers 202; then the job route answers 200 with the response, its usage and the signed receipt", async () => {
+    const posted = await postChat(app);
+    expect(posted.status).toBe(202);
+    await drainRunner(state);
 
-  // SPEC FIX 2026-04-28 M1-F-async-chat: response is now async (202, not 200)
-  // Full-body assertions (choices/usage/receipt) are covered by
-  // supplier-routes-chat-jobs-get.test.ts (GET handler).
-  it("returns 202 Accepted on successful end-to-end flow", async () => {
-    const res = await request(app)
-      .post("/v1/responses")
-      .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
-      .send(validChatBody());
-    expect(res.status).toBe(202);
-  });
+    const polled = await request(app).get(`/v1/responses/${posted.body.job_id}`);
 
-  // SPEC FIX 2026-04-28 M1-F-async-chat-cleanup
-  // Migrated from sync (full body in POST) to async (POST→202, GET→200).
-  it("response body contains typed output items", async () => {
-    const postRes = await request(app)
-      .post("/v1/responses")
-      .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
-      .send(validChatBody());
-    expect(postRes.status).toBe(202);
-    const { job_id: jobId } = postRes.body as { job_id: string };
-    await drainRunner(state);
-    const getRes = await request(app).get(`/v1/responses/${jobId}`);
-    expect(getRes.status).toBe(200);
-    expect(getRes.body.output).toHaveLength(1);
-  });
-  // SPEC FIX 2026-04-28 M1-F-async-chat-cleanup
-  it("output message role is assistant", async () => {
-    const postRes = await request(app)
-      .post("/v1/responses")
-      .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
-      .send(validChatBody());
-    expect(postRes.status).toBe(202);
-    const { job_id: jobId } = postRes.body as { job_id: string };
-    await drainRunner(state);
-    const getRes = await request(app).get(`/v1/responses/${jobId}`);
-    expect(getRes.status).toBe(200);
-    expect(getRes.body.output[0].role).toBe("assistant");
-  });
-  // SPEC FIX 2026-04-28 M1-F-async-chat-cleanup
-  it("output text matches Ollama output", async () => {
-    const postRes = await request(app)
-      .post("/v1/responses")
-      .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
-      .send(validChatBody());
-    expect(postRes.status).toBe(202);
-    const { job_id: jobId } = postRes.body as { job_id: string };
-    await drainRunner(state);
-    const getRes = await request(app).get(`/v1/responses/${jobId}`);
-    expect(getRes.status).toBe(200);
-    expect(getRes.body.output[0].content[0].text).toBe("I am a helpful AI assistant.");
-  });
-  // SPEC FIX 2026-04-28 M1-F-async-chat-cleanup
-  it("response body contains usage object", async () => {
-    const postRes = await request(app)
-      .post("/v1/responses")
-      .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
-      .send(validChatBody());
-    expect(postRes.status).toBe(202);
-    const { job_id: jobId } = postRes.body as { job_id: string };
-    await drainRunner(state);
-    const getRes = await request(app).get(`/v1/responses/${jobId}`);
-    expect(getRes.status).toBe(200);
-    expect(getRes.body.usage).toBeTruthy();
-    expect(typeof getRes.body.usage.input_tokens).toBe("number");
-    expect(typeof getRes.body.usage.output_tokens).toBe("number");
-  });
-
-  // SPEC FIX 2026-04-28 M1-F-async-chat-cleanup
-  it("response body contains receipt object", async () => {
-    const postRes = await request(app)
-      .post("/v1/responses")
-      .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
-      .send(validChatBody());
-    expect(postRes.status).toBe(202);
-    const { job_id: jobId } = postRes.body as { job_id: string };
-    await drainRunner(state);
-    const getRes = await request(app).get(`/v1/responses/${jobId}`);
-    expect(getRes.status).toBe(200);
-    expect(getRes.body.receipt).toBeTruthy();
-  });
-
-  // SPEC FIX 2026-04-28 M1-F-async-chat-cleanup
-  it("receipt has required fields", async () => {
-    const postRes = await request(app)
-      .post("/v1/responses")
-      .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
-      .send(validChatBody());
-    expect(postRes.status).toBe(202);
-    const { job_id: jobId } = postRes.body as { job_id: string };
-    await drainRunner(state);
-    const getRes = await request(app).get(`/v1/responses/${jobId}`);
-    expect(getRes.status).toBe(200);
-    const { receipt } = getRes.body;
-    expect(receipt.prompt_hash).toMatch(/^[0-9a-f]{64}$/);
-    expect(receipt.response_hash).toMatch(/^[0-9a-f]{64}$/);
-    expect(receipt.model).toBe(TEST_MODEL);
-    expect(typeof receipt.prompt_tokens).toBe("number");
-    expect(typeof receipt.completion_tokens).toBe("number");
-    expect(typeof receipt.wallclock_ms).toBe("number");
-    expect(receipt.supplier_pkh).toBe(SUPPLIER_PKH);
-    expect(receipt.escrow_ref).toBe(OPEN_ESCROW_REF_HEADER);
-  });
-
-  // SPEC FIX 2026-04-28 M1-F-async-chat-cleanup
-  it("receipt.response_hash is sha256 of canonical(assistant message object)", async () => {
-    const postRes = await request(app)
-      .post("/v1/responses")
-      .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
-      .send(validChatBody());
-    expect(postRes.status).toBe(202);
-    const { job_id: jobId } = postRes.body as { job_id: string };
-    await drainRunner(state);
-    const getRes = await request(app).get(`/v1/responses/${jobId}`);
-    expect(getRes.status).toBe(200);
-    // response_hash must be a 32-byte hex string (64 chars)
-    expect(getRes.body.receipt.response_hash).toMatch(/^[0-9a-f]{64}$/);
-  });
-
-  // SPEC FIX 2026-04-28 M1-F-async-chat-cleanup
-  it("response body contains receipt_signature", async () => {
-    const postRes = await request(app)
-      .post("/v1/responses")
-      .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
-      .send(validChatBody());
-    expect(postRes.status).toBe(202);
-    const { job_id: jobId } = postRes.body as { job_id: string };
-    await drainRunner(state);
-    const getRes = await request(app).get(`/v1/responses/${jobId}`);
-    expect(getRes.status).toBe(200);
-    expect(getRes.body.receipt_signature ?? getRes.body.signature).toMatch(/^[0-9a-fA-F]{128}$/);
-  });
-
-  // SPEC FIX 2026-04-28 M1-F-async-chat-cleanup
-  // Lock is released in runChatJob's finally block; drain before asserting.
-  it("supplier lock is released after successful flow", async () => {
-    const postRes = await request(app)
-      .post("/v1/responses")
-      .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
-      .send(validChatBody());
-    expect(postRes.status).toBe(202);
-    await drainRunner(state);
+    expect(polled.status).toBe(200);
+    const { receipt, receipt_signature: signature, ...response } = polled.body;
+    expect(response).toMatchObject({
+      model: TEST_MODEL,
+      status: "completed",
+      output: [{ role: "assistant", content: [{ type: "output_text", text: "I am a helpful AI assistant." }] }],
+      usage: { input_tokens: 12, output_tokens: 48, total_tokens: 60 },
+      submitted_ref: expect.stringMatching(/^[0-9a-f]{64}#0$/),
+      escrow_ref: OPEN_ESCROW_REF,
+    });
+    // The receipt commits to the escrow's prompt and to the canonical result, and its signature verifies.
+    expect(receipt).toEqual({
+      prompt_hash: PROMPT_HASH,
+      response_hash: createHash("sha256").update(canonicalize(responseResultCommitment(response)), "utf8").digest("hex"),
+      model: TEST_MODEL,
+      prompt_tokens: 12,
+      completion_tokens: 48,
+      wallclock_ms: 3_200,
+      supplier_pkh: SUPPLIER_PKH,
+      escrow_ref: OPEN_ESCROW_REF,
+    });
+    expect(verifyReceipt({ receipt, signature }, SUPPLIER_PUB_KEY_HEX)).toBe(true);
     expect(state.snapshot().status).toBe("free");
+  });
+
+  it("caps max_output_tokens at the advertised limit: the escrow commits to the capped request, and Ollama gets the cap", async () => {
+    const posted = await postChat(app, { ...validChatBody(), max_output_tokens: TEST_MAX_OUTPUT_TOKENS + 1 });
+
+    // Without the cap, the prompt_hash of the escrow does not match the request: 409 prompt_mismatch.
+    expect(posted.status).toBe(202);
+    await drainRunner(state);
+    const sent = JSON.parse(vi.mocked(fetch).mock.calls[0]![1]!.body as string);
+    expect(sent.options).toEqual({ num_predict: TEST_MAX_OUTPUT_TOKENS });
   });
 });
 
-// ─── Error recovery ──────────────────────────────────────────────────────────
+describe("POST /v1/responses: the runner fails after the Claim", () => {
+  it("Ollama fails: the job route answers 502 ollama_failure, and the slot is free again", async () => {
+    const chain = chainWith(buildOpenEscrowUtxo());
+    vi.spyOn(chain, "awaitTx").mockResolvedValue(undefined);
+    mockOllamaFailure();
+    const { app, state } = makeApp(chain);
 
-describe("POST /v1/chat/completions — error recovery", () => {
-  afterEach(() => { vi.restoreAllMocks(); });
+    const posted = await postChat(app);
+    expect(posted.status).toBe(202);
+    await drainRunner(state);
 
-  it("503 when Claim tx submit fails", async () => {
-    const chain = new MockChainProvider({
-      evaluator: () => ({ ok: false, error: "script rejected" }),
-    });
-    // Override submitTx to throw
-    const originalSubmit = chain.submitTx.bind(chain);
-    let callCount = 0;
+    // The escrow stays Claimed on chain: the buyer reclaims it after deliver_by. Only the slot of this process is freed.
+    const polled = await request(app).get(`/v1/responses/${posted.body.job_id}`);
+    expect(polled.status).toBe(502);
+    expect(polled.body.reason).toBe("ollama_failure");
+    expect(state.snapshot().status).toBe("free");
+  });
+
+  it("the chain refuses the Submit: the job route answers 502 submit_failed with no receipt, and the slot is free again", async () => {
+    const chain = chainWith(buildOpenEscrowUtxo());
+    const submit = chain.submitTx.bind(chain);
+    let submitCalls = 0;
     vi.spyOn(chain, "submitTx").mockImplementation(async (tx) => {
-      callCount++;
-      if (callCount === 1) throw new Error("chain submit failed");
-      return originalSubmit(tx);
-    });
-    seedAdvertUtxo(chain);
-    chain.seed(buildOpenEscrowUtxo());
-    chain.advanceSlot(1_000);
-    const app = makeApp(chain);
-
-    const res = await request(app)
-      .post("/v1/responses")
-      .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
-      .send(validChatBody());
-    expect(res.status).toBe(503);
-    expect(res.body.reason ?? res.body.error).toMatch(/chain_submit_failed/i);
-  });
-
-  it("lock is released after Claim tx submit failure", async () => {
-    const state = new SupplierState();
-    const chain = new MockChainProvider();
-    let submitCallCount = 0;
-    vi.spyOn(chain, "submitTx").mockImplementation(async (_tx) => {
-      submitCallCount++;
-      if (submitCallCount === 1) throw new Error("chain submit failed");
-      return "0".repeat(64);
-    });
-    seedAdvertUtxo(chain);
-    chain.seed(buildOpenEscrowUtxo());
-    chain.advanceSlot(1_000);
-    const app = makeApp(chain, state);
-
-    await request(app)
-      .post("/v1/responses")
-      .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
-      .send(validChatBody());
-
-    expect(state.snapshot().status).toBe("free");
-  });
-
-  // SPEC FIX 2026-04-28 M1-F-async-chat-cleanup
-  // Ollama failure is now reported via GET, not via POST (which returns 202).
-  // awaitTx is mocked: Claim tx is submitted via real buildClaimTx so its hash
-  // lands in knownTxs; mock is defensive for the runner's Submit awaitTx.
-  it("502 when Ollama fails after Claim succeeds", async () => {
-    // Claim tx submit succeeds, but Ollama returns 500
-    const chain = new MockChainProvider();
-    seedAdvertUtxo(chain);
-    chain.seed(buildOpenEscrowUtxo());
-    chain.advanceSlot(1_000);
-    vi.spyOn(chain, "awaitTx").mockResolvedValue(undefined);
-    mockOllamaFailure();
-    const state = new SupplierState();
-    const { app, jobs } = makeAppWithJobs(chain, state);
-
-    const postRes = await request(app)
-      .post("/v1/responses")
-      .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
-      .send(validChatBody());
-    expect(postRes.status).toBe(202);
-    const { job_id: jobId } = postRes.body as { job_id: string };
-    await drainRunner(state);
-    const getRes = await request(app).get(`/v1/responses/${jobId}`);
-    expect(getRes.status).toBe(502);
-    expect(getRes.body.reason ?? getRes.body.error).toMatch(/ollama_failure/i);
-    void jobs;
-  });
-
-  it("lock is released after Ollama failure (escrow left in Claimed — v1 hazard)", async () => {
-    // IMPORTANT: After Ollama failure, the escrow remains in Claimed state on-chain.
-    // The supplier cannot recover within v1. The buyer must wait until deliver_by
-    // and then reclaim via the Reclaim redeemer.
-    // This test only verifies that the in-process lock is released.
-    const state = new SupplierState();
-    const chain = new MockChainProvider();
-    seedAdvertUtxo(chain);
-    chain.seed(buildOpenEscrowUtxo());
-    chain.advanceSlot(1_000);
-    mockOllamaFailure();
-    const { app } = makeAppWithJobs(chain, state);
-
-    await request(app)
-      .post("/v1/responses")
-      .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
-      .send(validChatBody());
-
-    // Runner's Ollama failure occurs after POST returns 202; drain before asserting.
-    await drainRunner(state);
-    expect(state.snapshot().status).toBe("free");
-  });
-
-  // SPEC FIX 2026-04-28 M1-F-async-chat-cleanup
-  // Submit-tx failure is reported via GET (job.status="failed"), not via POST.
-  // awaitTx must be mocked: the submitTx mock bypasses knownTxs, so Claim's
-  // awaitTx would otherwise poll for 60s and timeout.
-  it("502 when Submit tx fails after Ollama success — no receipt in body", async () => {
-    const chain = new MockChainProvider();
-    let submitCallCount = 0;
-    vi.spyOn(chain, "submitTx").mockImplementation(async (_tx) => {
-      submitCallCount++;
-      if (submitCallCount === 2) throw new Error("submit tx failed"); // 2nd call = Submit tx
-      return "0".repeat(64);
+      // The chain takes the first transaction, the Claim. The second one is the Submit.
+      if (++submitCalls === 2) throw new Error("submit tx refused");
+      return submit(tx);
     });
     vi.spyOn(chain, "awaitTx").mockResolvedValue(undefined);
-    seedAdvertUtxo(chain);
-    chain.seed(buildOpenEscrowUtxo());
-    chain.advanceSlot(1_000);
     mockOllamaOk("I am a helpful AI assistant.");
-    const state = new SupplierState();
-    const { app } = makeAppWithJobs(chain, state);
+    const { app, state } = makeApp(chain);
 
-    const postRes = await request(app)
-      .post("/v1/responses")
-      .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
-      .send(validChatBody());
-    expect(postRes.status).toBe(202);
-    const { job_id: jobId } = postRes.body as { job_id: string };
+    const posted = await postChat(app);
+    expect(posted.status).toBe(202);
     await drainRunner(state);
-    const getRes = await request(app).get(`/v1/responses/${jobId}`);
-    expect(getRes.status).toBe(502);
-    expect(getRes.body.reason ?? getRes.body.error).toMatch(/submit_failed/i);
-    // Per spec: keep it simple — no receipt returned, buyer reclaims
-    expect(getRes.body.receipt).toBeUndefined();
-  });
 
-  // SPEC FIX 2026-04-28 M1-F-async-chat-cleanup
-  it("lock is released after Submit tx failure", async () => {
-    const state = new SupplierState();
-    const chain = new MockChainProvider();
-    let submitCallCount = 0;
-    vi.spyOn(chain, "submitTx").mockImplementation(async (_tx) => {
-      submitCallCount++;
-      if (submitCallCount === 2) throw new Error("submit failed");
-      return "0".repeat(64);
-    });
-    vi.spyOn(chain, "awaitTx").mockResolvedValue(undefined);
-    seedAdvertUtxo(chain);
-    chain.seed(buildOpenEscrowUtxo());
-    chain.advanceSlot(1_000);
-    mockOllamaOk("response");
-    const { app } = makeAppWithJobs(chain, state);
-
-    await request(app)
-      .post("/v1/responses")
-      .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
-      .send(validChatBody());
-
-    await drainRunner(state);
+    const polled = await request(app).get(`/v1/responses/${posted.body.job_id}`);
+    expect(polled.status).toBe(502);
+    expect(polled.body).toMatchObject({ reason: "submit_failed", message: expect.stringContaining("submit tx refused") });
+    expect(polled.body.receipt).toBeUndefined();
     expect(state.snapshot().status).toBe("free");
   });
 });
 
-// ─── Claim-before-Ollama ordering ────────────────────────────────────────────
-
-describe("POST /v1/chat/completions — operation ordering (Claim before Ollama)", () => {
-  afterEach(() => { vi.restoreAllMocks(); });
-
-  // SPEC FIX 2026-04-28 M1-F-async-chat-cleanup
-  // In async flow: Claim-submitTx happens synchronously in POST before 202 is
-  // returned; Ollama-fetch happens in the fire-and-forget runner after 202.
-  // Ordering invariant: submitTx(Claim) < 202 response < fetch(Ollama).
-  // We verify submitTx was called before POST returned (callOrder check) and
-  // that fetch was called during the runner after draining.
-  // awaitTx must be mocked: submitTx is mocked and bypasses knownTxs, so the
-  // server's awaitTx(claimHash, 60_000) would otherwise poll for 60s.
-  it("submitTx is called before fetch (Ollama) in the happy path", async () => {
-    const callOrder: string[] = [];
-
-    const chain = new MockChainProvider();
-    vi.spyOn(chain, "submitTx").mockImplementation(async (_tx) => {
-      callOrder.push("submitTx");
-      return "0".repeat(64);
-    });
+describe("POST /v1/responses: the order of the operations", () => {
+  it("submits the Claim before it calls Ollama", async () => {
+    const chain = chainWith(buildOpenEscrowUtxo());
+    // The mocked submitTx bypasses the known transactions, so the confirmation is mocked as well.
+    const submit = vi.spyOn(chain, "submitTx").mockResolvedValue("0".repeat(64));
     vi.spyOn(chain, "awaitTx").mockResolvedValue(undefined);
+    mockOllamaOk("Hi");
+    const { app, state } = makeApp(chain);
 
-    vi.stubGlobal("fetch", vi.fn().mockImplementation(async () => {
-      callOrder.push("fetch");
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({
-          message: { role: "assistant", content: "Hi" },
-          done: true,
-          done_reason: "stop",
-          prompt_eval_count: 5,
-          eval_count: 10,
-          total_duration: 1_000_000_000,
-        }),
-      };
-    }));
+    const posted = await postChat(app);
 
-    seedAdvertUtxo(chain);
-    chain.seed(buildOpenEscrowUtxo());
-    chain.advanceSlot(1_000);
-    const state = new SupplierState();
-    const { app } = makeAppWithJobs(chain, state);
-
-    const postRes = await request(app)
-      .post("/v1/responses")
-      .set("X-Escrow-Ref", OPEN_ESCROW_REF_HEADER)
-      .send(validChatBody());
-    // Claim-submitTx MUST have been called before POST returned 202.
-    expect(postRes.status).toBe(202);
-    expect(callOrder).toContain("submitTx");
-
-    // Drain runner so Ollama fetch completes.
+    // The Claim goes out before the 202 comes back; the runner calls Ollama after it.
+    expect(posted.status).toBe(202);
+    expect(submit).toHaveBeenCalled();
     await drainRunner(state);
-
-    // Ordering: first submitTx (Claim) before first fetch (Ollama).
-    const firstSubmit = callOrder.indexOf("submitTx");
-    const firstFetch = callOrder.indexOf("fetch");
-    expect(firstSubmit).toBeGreaterThanOrEqual(0);
-    expect(firstFetch).toBeGreaterThanOrEqual(0);
-    expect(firstSubmit).toBeLessThan(firstFetch);
+    const upstream = vi.mocked(fetch);
+    expect(upstream).toHaveBeenCalled();
+    expect(submit.mock.invocationCallOrder[0]).toBeLessThan(upstream.mock.invocationCallOrder[0]!);
   });
 });
