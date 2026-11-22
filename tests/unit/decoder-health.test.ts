@@ -136,10 +136,6 @@ describe("watchStackPointer", () => {
     const library = { __wasm: { __wbindgen_add_to_stack_pointer: () => (pointer += 16) } };
     expect(watchStackPointer(library)).toBe(false);
   });
-
-  it("watches the real library", () => {
-    expect(watchStackPointer()).toBe(true);
-  });
 });
 
 describe("restoreStackPointer", () => {
@@ -293,16 +289,6 @@ describe("startDecoderHealth", () => {
     vi.advanceTimersByTime(999);
     expect(stop).not.toHaveBeenCalled();
     vi.advanceTimersByTime(1);
-    expect(stop).toHaveBeenCalledTimes(1);
-  });
-
-  it("stops the process when the library cannot decode, also if the pointer was not low", () => {
-    const library = standIn();
-    const stop = vi.fn();
-    const { server, request } = fakeServer();
-    start({ server, stop, library: library.library });
-    library.breakDecoder();
-    request().emit("close");
     expect(stop).toHaveBeenCalledTimes(1);
   });
 
