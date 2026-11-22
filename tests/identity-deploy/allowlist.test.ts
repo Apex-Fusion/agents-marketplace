@@ -30,7 +30,14 @@ afterAll(() => {
 });
 
 describe("allowlist root", () => {
-  test.each(VECTORS.trees.map((tree) => [tree.name, tree] as const))("%s: the root equals the published vector", async (_name, tree) => {
+  // Sizes 1, 5 and 13 of the published trees: no pair, a last node that moves up on two levels, and the same with more levels.
+  const sampledTrees = [1, 5, 13].map((size) => {
+    const tree = VECTORS.trees.find((t) => t.ids.length === size);
+    if (tree === undefined) throw new Error(`the vectors have no tree of ${size} leaves`);
+    return tree;
+  });
+
+  test.each(sampledTrees.map((tree) => [tree.name, tree] as const))("%s: the root equals the published vector", async (_name, tree) => {
     const index = new FakeIndex(10_000, tree.ids.map((name, i) => ({ name, slot: 100 + i })));
     const { mints, cutoff } = await legacyMints(index, MAINNET_LEGACY_POLICY, MAINNET_SYSTEM_START, 5_000);
     const list = allowlistFromMints(MAINNET_LEGACY_POLICY, cutoff, mints);

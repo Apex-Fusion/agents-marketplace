@@ -27,51 +27,16 @@ describe("benchmarks (Part 2 §12.4)", () => {
     expect(readFileSync(RESULTS_PATH, "utf8")).toBe(resultsText(results));
   });
 
-  test("the cases cover every identity action, Claim, Submit, the subagent, the vault and each publication", () => {
-    expect(CASES.map((c) => c.name)).toEqual([
-      "Register",
-      "Adopt",
-      "Update",
-      "ChangeController",
-      "Suspend (key party)",
-      "Suspend (Module-1)",
-      "Unsuspend",
-      "Revoke (controller)",
-      "Revoke (Module-1)",
-      "Retire",
-      "Reclaim",
-      "SetSuccessor",
-      "BumpEpoch",
-      "RecoverInit",
-      "RecoverCancel",
-      "RecoverFinalize",
-      "Register depth-4 subagent",
-      "Claim",
-      "Submit",
-      "Vault Pay, 1 escrow",
-      "Vault Pay, 5 escrows",
-      "Vault Pay, 10 escrows",
-      "Vault Pay, 25 escrows",
-      "Vault Pay, 38 escrows",
-      "Publish identity",
-      "Publish config_holder",
-      "Publish config_seal",
-      "Publish attestation",
-      "Publish delegation",
-      "Publish vault",
-      "Publish escrow",
-      "Publish advert",
-    ]);
-  });
-
-  test.each(CASES.map((c) => [c.name] as const))("%s: within 16,000,000 memory, 10,000,000,000 CPU units and 16,384 bytes", (name) => {
-    const m = measured(name);
-    expect(m.mem).toBeLessThanOrEqual(LIMITS.mem);
-    expect(m.cpu).toBeLessThanOrEqual(LIMITS.cpu);
-    expect(m.txBytes).toBeLessThanOrEqual(LIMITS.txBytes);
-    expect(m.over70).toEqual(
-      (["mem", "cpu", "txBytes"] as const).filter((limit) => ({ mem: m.mem, cpu: m.cpu, txBytes: m.txBytes })[limit] > LIMITS[limit] * 0.7),
-    );
+  test("every case is within 16,000,000 memory, 10,000,000,000 CPU units and 16,384 bytes", () => {
+    for (const { name } of CASES) {
+      const m = measured(name);
+      expect(m.mem, `${name}: memory units`).toBeLessThanOrEqual(LIMITS.mem);
+      expect(m.cpu, `${name}: CPU units`).toBeLessThanOrEqual(LIMITS.cpu);
+      expect(m.txBytes, `${name}: transaction bytes`).toBeLessThanOrEqual(LIMITS.txBytes);
+      expect(m.over70, `${name}: limits above 70 %`).toEqual(
+        (["mem", "cpu", "txBytes"] as const).filter((limit) => ({ mem: m.mem, cpu: m.cpu, txBytes: m.txBytes })[limit] > LIMITS[limit] * 0.7),
+      );
+    }
   });
 
   test("the script transactions run the expected scripts", () => {

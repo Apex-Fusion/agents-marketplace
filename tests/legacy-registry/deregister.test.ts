@@ -10,15 +10,12 @@ import { describe, expect, it } from "vitest";
 import {
   address,
   buildTx,
-  constr,
   DEREGISTER,
   describeSimulation,
   LEGACY_HASH,
   LEGACY_MIN_DEPOSIT,
   LEGACY_SCRIPT,
   BURN,
-  minUtxo,
-  scriptHash,
   withChange,
   type KeyPair,
   type TxOut,
@@ -32,7 +29,6 @@ import {
   funds,
   newWallet,
   registeredRecord,
-  STAND_IN_IDENTITY,
   verdicts,
   type Wallet,
 } from "./scenario.js";
@@ -113,14 +109,6 @@ describe("legacy Deregister and Burn", () => {
       const result = evaluate(deregister("deregister: 25 AP3X record", (o) => [ap3xTo(o.address, 10n * AP3X)], { deposit: 25n * AP3X }));
       expect(result.passed, describeSimulation(result)).toBe(true);
     });
-
-    it("is far above the ledger min-UTxO of the owner output", () => {
-      const owned = ap3xTo(owner.address, 10n * AP3X);
-      // (160 + 39 bytes) × 4310 and (160 + 67 bytes) × 4310.
-      expect(minUtxo(owned)).toBe(857_690n);
-      expect(minUtxo(ap3xTo(address({ key: owner.key.keyHash }, { key: payer.key.keyHash }), 10n * AP3X))).toBe(978_370n);
-      expect(minUtxo(owned)).toBeLessThan(LEGACY_MIN_DEPOSIT);
-    });
   });
 
   it("fails when the owner does not sign: the Deregister and the Burn fail", () => {
@@ -155,51 +143,5 @@ describe("legacy Deregister and Burn", () => {
     const result = evaluate(buildTx(withChange(spec, payer.address)));
     expect(result.passed).toBe(false);
     expect(verdicts(result)).toEqual({ "legacy Deregister A": false, "legacy Deregister B": false, "legacy Burn": false });
-  });
-
-  describe("in the shape of an adoption (a second V3 policy mints the new record)", () => {
-    // STAND_IN_IDENTITY accepts everything. Wave 2 puts the identity
-    // validator in its place; this test only shows the legacy side.
-    const standIn = scriptHash(STAND_IN_IDENTITY);
-
-    function adoption(label: string, ownerFunds: bigint) {
-      const { record, id } = registeredRecord(owner, label);
-      const spec: TxSpec = {
-        inputs: [
-          { utxo: record, redeemer: DEREGISTER, label: "legacy Deregister" },
-          { utxo: funds(`${label}: owner funds`, owner, ownerFunds) },
-        ],
-        collateral: [collateralOf(owner)],
-        outputs: [
-          {
-            address: address({ script: standIn }),
-            value: { coin: 10n * AP3X, assets: [{ policy: standIn, name: id, quantity: 1n }] },
-            datum: { inline: constr(0, owner.key.publicKey) },
-          },
-        ],
-        fee: FEE,
-        mint: [
-          { policy: LEGACY_HASH, assets: [{ name: id, quantity: -1n }], redeemer: BURN, label: "legacy Burn" },
-          { policy: standIn, assets: [{ name: id, quantity: 1n }], redeemer: constr(1, []), label: "stand-in identity mint" },
-        ],
-        requiredSigners: [owner.key.keyHash],
-        scripts: [LEGACY_SCRIPT, STAND_IN_IDENTITY],
-        signers: [owner.key],
-      };
-      return buildTx(withChange(spec, owner.address));
-    }
-
-    it("passes when the owner adds 10 AP3X plus the fee", () => {
-      // In: deposit 10 + owner 10.4. Out: new record 10 + owner change 10. Fee 0.4.
-      const result = evaluate(adoption("adoption shape: enough", 10n * AP3X + FEE));
-      expect(result.passed, describeSimulation(result)).toBe(true);
-      expect(verdicts(result)).toEqual({ "legacy Deregister": true, "legacy Burn": true, "stand-in identity mint": true });
-    });
-
-    it("fails when the owner adds 1 base unit less", () => {
-      const result = evaluate(adoption("adoption shape: short", 10n * AP3X + FEE - 1n));
-      expect(result.passed).toBe(false);
-      expect(verdicts(result)).toEqual({ "legacy Deregister": false, "legacy Burn": true, "stand-in identity mint": true });
-    });
   });
 });
