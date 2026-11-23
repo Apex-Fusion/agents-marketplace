@@ -12,6 +12,7 @@ import { VectorResolver } from "./resolve/resolver.js";
 import { createResolverServer } from "./server/http.js";
 import { m4Routes } from "./server/routes-m4.js";
 import { renderRoutes } from "./server/routes-render.js";
+import { loadSchemas, schemaRoutes } from "./server/routes-schemas.js";
 
 const config = loadConfig(process.env);
 const renderConfig = loadRenderConfig(process.env);
@@ -48,6 +49,7 @@ const server = createResolverServer(resolver, {
       signer: m4?.context.keys.ed25519 ?? null,
       provenance: attestations,
     }),
+    schemaRoutes(loadSchemas(new URL("../schemas/", import.meta.url))),
     ...(m4 ? [m4Routes(m4)] : []),
   ],
 });

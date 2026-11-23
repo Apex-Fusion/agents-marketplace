@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://id.vector.apexfusion.org/schemas/example-1.json",
+  "title": "example",
+  "type": "object",
+  "properties": { "name": { "type": "string", "minLength": 1 } },
+  "additionalProperties": false
+}

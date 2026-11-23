@@ -6,8 +6,8 @@
 #   docker build -f identity-gateway/Dockerfile -t identity-gateway:<version> .
 #
 # Stages: `build` compiles TypeScript to identity-gateway/dist; `production-dependencies` installs
-# only the runtime dependencies; `runtime` holds both, runs as the non-root `node` user and listens
-# on 0.0.0.0:8080.
+# only the runtime dependencies; `runtime` holds both and the schemas folder, runs as the non-root
+# `node` user and listens on 0.0.0.0:8080.
 
 ARG NODE_VERSION=22
 
@@ -34,6 +34,9 @@ COPY --from=production-dependencies /repo/node_modules ./node_modules
 COPY --from=production-dependencies /repo/identity-gateway/node_modules ./identity-gateway/node_modules
 COPY --from=build /repo/identity-gateway/dist ./identity-gateway/dist
 COPY identity-gateway/package.json identity-gateway/LICENSE ./identity-gateway/
+# The gateway serves these JSON Schema files at /schemas/<name>.json (src/server/routes-schemas.ts). The build fails
+# without the folder: a release without its schema files is a mistake.
+COPY identity-gateway/schemas ./identity-gateway/schemas
 
 LABEL org.opencontainers.image.source="https://github.com/Apex-Fusion/agents-marketplace" \
       org.opencontainers.image.licenses="Apache-2.0" \
