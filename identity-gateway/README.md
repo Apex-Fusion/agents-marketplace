@@ -60,6 +60,8 @@ Every variable is optional, except that a deployed identity registry needs both
 | `GATEWAY_ED25519_KEY_FILE` / `GATEWAY_P256_KEY_FILE` | none | PEM private key files of the gateway keys (Part 2 Section 8.2): PKCS#8, or SEC1 for P-256. The gateway refuses a file that its group or other users can read or write (use mode 600 or 400, owned by the container user). Set both or neither; without them the M4 services are off and agent cards answer 503. |
 | `GATEWAY_VECTOR_ID` | none | The gateway's own identifier (64 hex), required with the key files. Key IDs are `did:vector:<id>#<key hash>`, and the gateway's DID issues credentials. |
 | `DELEGATION_POLICY_ID` / `DELEGATION_ADDRESS` | none | The delegation contract (policy ID = script hash; the address must be its enterprise address). Without it, delegation tokens are refused. Mainnet: `bdc16990b844a8860f28c51bb0e6a469c84bebcd57db699ce204785a` / `addr1wx7uz6vshpz23ps09rz3hv8x535usjlte4tak6vuugz8sks9wdc5c`. |
+| `ATTESTATION_POLICY_ID` / `ATTESTATION_ADDRESS` | none | The attestation contract (policy ID = script hash; the address must be its enterprise address). Without it, the metadata has no `vectorProvenance` and the AI Catalog has no Trust Manifests. Mainnet: `f07c644e042ead094cc501f443e03a8955dc1f4d0dcd5b387863e042` / `addr1w8c8cezwqsh26z2vc5qlgslq82y4thqlf5xu6kec0p37qssut0y3q`. |
+| `ATTESTATION_REFRESH_SECONDS` | `30` | Seconds between the reads of the attestation outputs (10 to 300). Each read makes one Koios call for the tip. When the tip is new, it makes one more call for each 1,000 outputs. See "Attestations". |
 | `STATUS_LIST_REFRESH_SECONDS` | `60` | How old the status lists and the status-list index are before a request builds them again (1 to 2400). The age counts from the last read of the chain, by a build or a follow step. For the lists, the limit is the longer of this value and two follow intervals. It is also the `ttl` of the lists, and the longest `max-age` of a list response. |
 | `STATUS_LIST_BACKGROUND_REFRESH_SECONDS` | `600` | How long after the end of a full build the timer starts the next full build, with no request (60 to 2400, and not below `STATUS_LIST_REFRESH_SECONDS`). The gateway refuses a value that breaks the timing rule: see "Status list timing". |
 | `STATUS_LIST_FOLLOW_SECONDS` | `10` | How often the timer reads the changes of the chain into the status lists: 0, or a multiple of 10 up to 300. With 0, the lists change only when a build ends. See "Status list timing". |
@@ -106,7 +108,7 @@ The gateway writes no request log. It logs errors without the requested DID.
 
 Every rendering uses the view without options (Part 2 Section 8.4): the on-chain profile, the
 detected protocol and the listed keys. Bodies are JSON in JCS member order. Every response has
-`Cache-Control: no-store` and `Access-Control-Allow-Origin: *`. `HEAD` and the CORS preflight
+`Cache-Control: no-store` (the schema files excepted, see their row) and `Access-Control-Allow-Origin: *`. `HEAD` and the CORS preflight
 (`OPTIONS`) also work. An error is `{"error": "<text>"}`: 404 when the identifier does not resolve or
 the agent does not qualify, 410 when the DID is deactivated, 500 when the ledger read fails.
 
@@ -114,14 +116,15 @@ the agent does not qualify, 410 when the DID is deactivated, 500 when the ledger
 |---|---|---|
 | `GET /agents/{id}/did.json` | Active agents (also subagents) | `did:web` alias document, `application/did+json`: `id` = `did:web:<host>:agents:{id}`, `alsoKnownAs` = the `did:vector` DID, then the verified domains; the keys and relationships of the `did:vector` document with absolute DID URLs. |
 | `GET /agents/{id}/jwks.json` | Active agents | `application/jwk-set+json` `{keys}`: each listed key (a P-256 key only with a valid proof) as a JWK with `kid` = `did:vector:{id}#<key hash>`, `alg` `EdDSA` or `ES256`, `use` `sig`. A legacy record shows the key that the legacy key search found. |
-| `GET /agents/{id}/agent-card.json` | Listed A2A agents | A2A v1.0 agent card: on-chain name and description, the interfaces on the endpoint's origin and the default modes from the detected card, the on-chain capabilities as skills, `version` = versionId, `documentationUrl` = the resolution URL of the DID, `provider` = a verified organisation. Signed as A2A Section 8.4 specifies (JWS over the JCS form, `alg` EdDSA, `typ` JOSE, `kid`, `jku` = `/.well-known/jwks.json`). 503 when no signing key is configured. `application/a2a-agent-card+json` when the client asks for it, else `application/json`. The gateway signs a card once for each check of the agent and record state, and serves that card again. |
-| `GET /agents/{id}/server-card` | Listed MCP agents | MCP Server Card v1 (SEP-2127): `name` = `<reverse gateway host>/{id}`, description of at most 100 characters, `remotes` = the endpoint with the protocol versions it named, `_meta` with the DID. |
+| `GET /agents/{id}/agent-card.json` | Listed A2A agents | A2A v1.0 agent card: on-chain name and description, the interfaces on the endpoint's origin and the default modes from the detected card, the on-chain capabilities as skills, `version` = versionId, `documentationUrl` = the resolution URL of the DID, `provider` = the verified organisation of the Provider party, else of the Accountable party, else of another party. Signed as A2A Section 8.4 specifies (JWS over the JCS form, `alg` EdDSA, `typ` JOSE, `kid`, `jku` = `/.well-known/jwks.json`). 503 when no signing key is configured. `application/a2a-agent-card+json` when the client asks for it, else `application/json`. The gateway signs a card once for each check of the agent and record state, and serves that card again. |
+| `GET /agents/{id}/server-card` | Listed MCP agents | MCP Server Card v1 (SEP-2127): `name` = `<reverse gateway host>/{id}`, description of at most 100 characters, `remotes` = the endpoint with the protocol versions it named, `_meta` with the DID. `$schema` is the URL that the Server Card schema requires; the MCP project has not published the file at that URL yet, so a validator uses `schema.json` of `modelcontextprotocol/ext-server-card`. |
 | `GET /v0/servers`, `GET /v0.1/servers` | Listed MCP agents | MCP Registry list `{servers: [{server, _meta}], metadata: {count, nextCursor?}}` with server.json entries (schema 2025-12-11). Query: `limit` (1-100, default 30), `cursor`, `search` (name substring), `version` (`latest` or exact), `updated_since` (RFC 3339). |
-| `GET /.well-known/ai-catalog.json` | Listed A2A and MCP agents | AI Catalog 0.9 (the release candidate of version 1.0), `application/ai-catalog+json`: one entry per agent. `identifier` = `urn:air:<gateway host>:{id}`, where `{id}` is the id of the agent's DID. `type` and `url` of its agent card or server card, `tags` = capabilities, `updatedAt`, and `extensions` = `{"<gateway host in reverse DNS order>": {"did": "did:vector:{id}"}}` (on the Foundation gateway the key is `org.apexfusion.vector.id`). |
+| `GET /.well-known/ai-catalog.json` | Listed A2A and MCP agents | AI Catalog 0.9 (the release candidate of version 1.0), `application/ai-catalog+json`: one entry per agent. `identifier` = `urn:air:<gateway host>:{id}`, where `{id}` is the id of the agent's DID. `type` and `url` of its agent card or server card, `tags` = capabilities, `updatedAt`, and `extensions` = `{"<gateway host in reverse DNS order>": {"did": "did:vector:{id}"}}` (on the Foundation gateway the key is `org.apexfusion.vector.id`). `trustManifests` = one unsigned manifest for each software attestation about the agent that has an https locator (see "Attestations"). |
 | `GET /.well-known/ard.json` | Listed A2A and MCP agents | ARD v0.91 manifest `{entries}` with `identifier` (as in the AI Catalog), `displayName`, `description`, `capabilities` and `metadata {did, protocol}`. |
 | `GET /agents/{id}/oasf.json` | Listed agents | OASF record (schema 1.1.0): profile, `skills` mapped from known capability names, the endpoint as `url` locator, `annotations` with the DID, the protocol and the capabilities. |
 | `GET /agents/{id}/registration.json` | Listed agents | ERC-8004 registration file: `services` (A2A, MCP or web, then OASF and DID), `active`, `registrations [{agentId, agentRegistry}]`. `agentId` is the identifier as a decimal integer (78 digits at most, so read it with a big-integer JSON reader). `agentRegistry` is `vector:mainnet:<identity policy>`, or the legacy policy for a legacy record. |
 | `GET /policy` | | The listing rule, the fetch rules (with the repeat of a check that found no protocol), the confirmation rule, the request-log statement, `ACCESS_LOG_RETENTION` and the limits as numbers (with `firstRetrySeconds`). Also the bound of each revocation path at each surface (`revocationBounds`) and the bound for an open escrow (`escrowBound`). The numbers of `revocationBounds` follow `STATUS_LIST_FOLLOW_SECONDS`, `STATUS_LIST_REFRESH_SECONDS`, `STATUS_LIST_BACKGROUND_REFRESH_SECONDS` and `FETCH_SCAN_INTERVAL_S`. |
+| `GET /schemas/{name}.json` | | The JSON Schema files of `identity-gateway/schemas` (the image holds the folder), `application/schema+json`, with `Cache-Control: public, max-age=3600`: the files do not change while the gateway runs. A name has lowercase letters, digits and hyphens. |
 
 The gateway's own JWK set (`GET /.well-known/jwks.json`) belongs to the M4 services. The renderings
 sign agent cards with the M4 Ed25519 key (`main.ts` passes `keys.ed25519` as their signer).
@@ -199,12 +202,36 @@ What the gateway writes, where it is not a plain copy:
   after a dot. The other capabilities show only as a JSON text in `annotations`.
 - `createdAt` of the profile is the creation time that the record holds. OASF `created_at` is the block time of the first mint
   (`created` in the metadata). The two can differ.
-- The A2A `provider` is the verified organisation of a party, an Accountable Party first. A record without a verified
-  organisation has no `provider`.
+- The A2A `provider` is the verified organisation of the Provider party, else of the Accountable party, else of another party.
+  A record without a verified organisation has no `provider`.
 - The AI Catalog entry leaves out `displayName`, `description` and `version`, because the card that it points to holds them. Its
   `updatedAt` is the block time of the newest record output of the agent.
 - Every rendering links to the DID: A2A `documentationUrl`, MCP `websiteUrl` and `_meta`, OASF `authors` and `annotations`, AI
   Catalog `extensions`.
+
+## Attestations (Part 1 Section 8.2)
+
+With `ATTESTATION_POLICY_ID` and `ATTESTATION_ADDRESS` set, the resolver adds `vectorProvenance` to the
+document metadata of a request without a version option. It lists the attestations about the agent that
+count, that are solicited, and that have the type provenance, software or environment: newest first, at
+most 8. `othersCount` counts the other attestations about the agent that count. Part 1 Section 8.2 gives
+the members and the counting rule.
+
+- **Read.** A background read checks the tip every `ATTESTATION_REFRESH_SECONDS` (30). When the tip is
+  new, it reads every output at the attestation address that holds one token of the attestation policy,
+  with one Koios call for each 1,000 outputs, and keeps one list. A request makes no Koios call for
+  attestations: it applies the counting rule to that list at its own tip height and tip block time.
+- **Lag.** A new attestation counts after 30 confirmations of its output, so it shows on every gateway at
+  the same tip. A revocation, a contest or a withdrawal can show on one gateway up to one read interval
+  later than on another.
+- **Limits.** A read of more than 5,000 outputs fails, and the gateway keeps the last list. It does not use
+  a list older than one hour by the block time of the tip.
+- **Not checked.** The resolver does not fetch the document, does not verify the envelope signature and
+  does not check the standing of the issuer. A verifier does that with the token that `id` names.
+- **Cards.** The A2A card and the AI Catalog use the same list (see "Renderings").
+- **Log lines.** `attestations: the background read checks the tip every N s`, `attestations: N at
+  block H`, `attestations: the background read failed: …` (at most once in 5 minutes) and
+  `attestations: the background read works again`.
 
 ## M4 services (Part 2 Section 8.6)
 

@@ -692,19 +692,21 @@ All three modules get new deployments in this phase. They use `vector_identity` 
 - **Fetch rules** (Part 1 §9, amplification). Detection and domain linkage run as background jobs, never during a request. They fetch only `https` URLs whose host resolves to a public unicast address, checked for each connection and each redirect. They do not follow a redirect to another host. Each fetch is limited to 1 MiB and 10 seconds, with at most one fetch per host each minute.
 - **Rechecks.** The gateway checks again one day after the end of the last check and after each record change. After a check whose detection found no protocol, it checks again after 10 minutes, then after 20, 40 and 80 minutes, and so on: the wait doubles with each such check in a row, up to one day. Each wait counts from the end of the last check. The result goes to `vectorFetched`.
 - **Rendering source.** Renderings use the on-chain profile, the detected protocol and the listed keys.
+- **Attestations.** The resolver adds `vectorProvenance` to the metadata (Part 1 §8.2). The gateway reads the attestation outputs in the background: every 30 seconds it reads the tip, and when the tip is new, it reads every output at the attestation address that holds an attestation token, with one Koios call for each 1,000 outputs. A request makes no Koios call for attestations. A read of more than 5,000 outputs fails, and the gateway keeps the last list. It does not use a list older than one hour. The settings are `ATTESTATION_POLICY_ID`, `ATTESTATION_ADDRESS` and `ATTESTATION_REFRESH_SECONDS`.
 - **Profile schema.** The JSON Schema of the profile is `identity-gateway/schemas/vector-profile-1.json`, and the README of `identity-gateway` maps each field to the renderings (Part 1 §8.2).
 - **Labels.** Part 1 §9.1 gives each link of a record one of the labels `proven`, `verified` and `stated`.
 
 | Rendering | Path | Standard |
 |---|---|---|
 | `did:web` alias | `GET /agents/{id}/did.json` (for `did:web:id.vector.apexfusion.org:agents:{id}`; its `alsoKnownAs` names `did:vector:{id}`) | did:web |
-| Agent card | `GET /agents/{id}/agent-card.json`, signed (JWS, Ed25519); A2A agents only, because an A2A card needs an A2A interface | A2A |
-| MCP server card | `GET /agents/{id}/server-card` (MCP agents only) | MCP Server Cards |
+| Agent card | `GET /agents/{id}/agent-card.json`, signed (JWS, Ed25519); A2A agents only, because an A2A card needs an A2A interface. `provider` is the verified organisation of the Provider party; when it has none, that of the Accountable party; when that has none, that of another party. | A2A |
+| MCP server card | `GET /agents/{id}/server-card` (MCP agents only). Its `$schema` is the URL that the MCP Server Card schema requires. The MCP project has not published the schema file at that URL yet; a validator uses `schema.json` of the repository `modelcontextprotocol/ext-server-card`. | MCP Server Cards |
 | MCP subregistry | `GET /v0/servers` | MCP Registry API |
-| Catalogs | `GET /.well-known/ai-catalog.json`, `GET /.well-known/ard.json`; they list A2A agents through the agent card and MCP agents through the server card, so web agents do not appear. An entry has the identifier `urn:air:<gateway host>:{id}`, where `{id}` is the id of the DID. The AI Catalog entry carries the DID in `extensions`. The AI Catalog `specVersion` is 0.9. | AI Catalog, ARD |
+| Catalogs | `GET /.well-known/ai-catalog.json`, `GET /.well-known/ard.json`; they list A2A agents through the agent card and MCP agents through the server card, so web agents do not appear. An entry has the identifier `urn:air:<gateway host>:{id}`, where `{id}` is the id of the DID. The AI Catalog entry carries the DID in `extensions`. The AI Catalog `specVersion` is 0.9. An AI Catalog entry has one unsigned Trust Manifest for each software attestation about the agent that has an https locator: `contributor` is the issuer DID, and the Attestation object has `type` `software`, `uri` = the locator and `digest` = `sha256:<hex>`. The manifest is a statement of the gateway; the proof is the token on the ledger. | AI Catalog, ARD |
 | OASF record | `GET /agents/{id}/oasf.json` | OASF |
 | ERC-8004 file | `GET /agents/{id}/registration.json` (`agentId` = the identifier as an unsigned 256-bit integer, in decimal; `agentRegistry = vector:mainnet:<identity policy>`, provisional until a CAIP namespace for Vector exists; the network magic cannot identify Vector) | ERC-8004 |
 | JWKS | `GET /agents/{id}/jwks.json`, `GET /.well-known/jwks.json` | RFC 7517 |
+| JSON Schema files | `GET /schemas/{name}.json`: the files of `identity-gateway/schemas`, `application/schema+json` | JSON Schema |
 
 ### 8.6 M4 services
 
