@@ -44,14 +44,16 @@ jobs:
       source_lines: ${{ steps.select.outputs.source_lines }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Setup Node.js 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 20
+          # setup-node v5 and later start a pnpm cache by themselves when package.json names a package manager. This job has no pnpm.
+          package-manager-cache: false
 
       # The scripts of the CI have their own tests (the table test of the gate, the selection on a small tree).
       - name: Test the CI scripts
@@ -74,15 +76,15 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 10.33.2
 
       - name: Setup Node.js 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: pnpm
@@ -115,7 +117,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # The tests evaluate builder transactions with `aiken tx simulate`
       # (tests/unit/identity-tx-*.test.ts, tests/unit/paper2agent-identity-e2e.test.ts). They need aiken v1.1.21.
@@ -123,12 +125,12 @@ jobs:
         uses: ./.github/actions/setup-aiken
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 10.33.2
 
       - name: Setup Node.js 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: pnpm
@@ -154,13 +156,13 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup aiken
         uses: ./.github/actions/setup-aiken
 
       - name: Cache aiken packages
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/aiken/packages
           key: aiken-packages-${{ hashFiles('contracts/*/aiken.lock') }}
@@ -174,12 +176,12 @@ jobs:
         run: git diff --exit-code plutus.json
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 10.33.2
 
       - name: Setup Node.js 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: pnpm
@@ -217,7 +219,7 @@ jobs:
         shard: [1, 2, 3, 4]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup aiken v1.1.24
         uses: ./.github/actions/setup-aiken
@@ -225,12 +227,13 @@ jobs:
           version: v1.1.24
 
       - name: Setup Node.js 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 20
+          package-manager-cache: false
 
       - name: Cache aiken packages
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/aiken/packages
           key: aiken-packages-${{ hashFiles('contracts/*/aiken.lock') }}
@@ -250,7 +253,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup aiken v1.1.24
         uses: ./.github/actions/setup-aiken
@@ -258,12 +261,13 @@ jobs:
           version: v1.1.24
 
       - name: Setup Node.js 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 20
+          package-manager-cache: false
 
       - name: Cache aiken packages
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/aiken/packages
           key: aiken-packages-${{ hashFiles('contracts/*/aiken.lock') }}
@@ -293,14 +297,15 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout the CI scripts
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           sparse-checkout: scripts/ci
 
       - name: Setup Node.js 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 20
+          package-manager-cache: false
 
       - name: Decide
         env:
