@@ -15,6 +15,7 @@ import type { ListingSnapshot, RecordSource } from "../fetch/scheduler.js";
 import type { ProvenanceSource } from "../resolve/provenance.js";
 import type { CurrentRecord } from "../resolve/resolver.js";
 import type { ResolverSettings } from "../resolve/settings.js";
+import { blockTimeMs } from "../resolve/time.js";
 import { listingFailure, renderedAgent, type RenderedAgent } from "../render/agent.js";
 import { A2A_CARD_TYPE, MCP_CARD_TYPE, aiCatalog, ardManifest, registryList, registryQuery } from "../render/catalogs.js";
 import type { RenderConfig } from "../render/config.js";
@@ -82,7 +83,7 @@ export function renderRoutes(deps: RenderDeps): Route {
       record,
       deps.facts.current(record.vectorId, factInputs(record, legacyPolicy)),
       deps.settings.network,
-      deps.provenance?.provenance(record.vectorId)?.attestations,
+      deps.provenance?.provenance(record.vectorId, { tipHeight: record.tip.blockHeight, timeMs: blockTimeMs(record.tip.slot, deps.settings.network) })?.attestations,
     );
   const listed = (): RenderedAgent[] => deps.snapshot().records.map(agentOf).filter((agent) => listingFailure(agent) === null);
   const gatewayDid = (): string | null => (deps.signer?.kid.startsWith("did:") ? deps.signer.kid.split("#")[0]! : null);

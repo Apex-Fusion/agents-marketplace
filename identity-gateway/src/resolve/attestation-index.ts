@@ -77,12 +77,10 @@ export class AttestationIndex implements ProvenanceSource {
     this.log = options.log ?? ((message) => console.error(message));
   }
 
-  provenance(vectorId: string, at?: ProvenanceTime): VectorProvenance | undefined {
+  provenance(vectorId: string, at: ProvenanceTime): VectorProvenance | undefined {
     const list = this.list;
-    if (list === null) return undefined;
-    // Without a tip of its own, the caller gets the list as of its tip. Then the clock tells whether the reads still work.
-    if ((at?.timeMs ?? this.now()) - list.timeMs > MAX_LIST_AGE_MS) return undefined;
-    return provenanceOf(list.bySubject.get(vectorId) ?? [], at ?? { tipHeight: list.tip.blockHeight, timeMs: list.timeMs });
+    if (list === null || at.timeMs - list.timeMs > MAX_LIST_AGE_MS) return undefined;
+    return provenanceOf(list.bySubject.get(vectorId) ?? [], at);
   }
 
   /**

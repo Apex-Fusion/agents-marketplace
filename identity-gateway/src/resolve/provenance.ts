@@ -54,11 +54,11 @@ export interface ProvenanceTime {
 /** What the resolver and the renderings need from the background read of the attestations. */
 export interface ProvenanceSource {
   /**
-   * The attestations about one agent that count at `at`, from the last read of the ledger; `at` is
-   * the tip of the last read when it is missing. Undefined when there is nothing to show, and when
-   * no list is young enough: the member is then left out. It never reads the ledger.
+   * The attestations about one agent that count at the tip `at`, from the last read of the ledger.
+   * Undefined when there is nothing to show, and when the list is too old for the tip: the member is
+   * then left out. It never reads the ledger.
    */
-  provenance(vectorId: string, at?: ProvenanceTime): VectorProvenance | undefined;
+  provenance(vectorId: string, at: ProvenanceTime): VectorProvenance | undefined;
 }
 
 /** An authentic attestation with a datum that decodes. */
