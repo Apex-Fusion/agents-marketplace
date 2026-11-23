@@ -68,7 +68,7 @@ const probes = [
   },
 ];
 
-describe.sequential("structured output through gateway, SDK, supplier, and Chat upstream", () => {
+describe("structured output through gateway, SDK, supplier, and Chat upstream", { concurrent: false }, () => {
   const chain = new MockChainProvider();
   const servers: Server[] = [];
   const state = new SupplierState();

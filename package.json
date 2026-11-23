@@ -19,7 +19,7 @@
     "@marketplace/shared": "workspace:*",
     "@modelcontextprotocol/client": "2.3.1",
     "@noble/hashes": "^1.8.0",
-    "@testing-library/jest-dom": "^6.4.0",
+    "@testing-library/jest-dom": "^8.0.0",
     "@testing-library/react": "^16.0.0",
     "@testing-library/user-event": "^14.5.2",
     "@types/eventsource": "^1.1.15",
@@ -29,27 +29,29 @@
     "@types/react-dom": "^18.3.0",
     "@types/supertest": "^6.0.2",
     "@typescript/typescript6": "^6.0.2",
-    "@vitejs/plugin-react": "^4.3.0",
-    "@vitest/coverage-v8": "2.1.9",
+    "@vitejs/plugin-react": "^6.3.0",
+    "@vitest/coverage-v8": "5.1.1",
     "bech32": "^2.0.0",
     "cbor-x": "^1.5.4",
     "eventsource": "^2.0.2",
     "express": "^4.21.2",
     "fast-check": "3.23.2",
-    "happy-dom": "^15.7.4",
+    "happy-dom": "^21.0.4",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^6.26.0",
     "supertest": "^7.0.0",
     "tsx": "^4.19.2",
     "typescript": "^7.0.2",
-    "vitest": "^2.1.8"
+    "vite": "^8.3.8",
+    "vitest": "^5.1.1"
   },
   "pnpm": {
     "patchedDependencies": {
       "libsodium-wrappers-sumo@0.7.16": "patches/libsodium-wrappers-sumo@0.7.16.patch"
     },
     "overrides": {
+      "@types/node": "^24.19.2",
       "ip-address": "^10.7.0"
     }
   }
