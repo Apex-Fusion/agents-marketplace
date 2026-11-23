@@ -2,7 +2,17 @@
 // and mints, transactions by hash, datums by hash, block witnesses by height, the policy asset index,
 // the outputs that hold an asset now.
 
-import { assetKey, type AssetId, type BlockWitnesses, type ChainSource, type ChainTip, type GenesisParameters, type LedgerTx, type PolicyAsset } from "../../src/chain/types.js";
+import {
+  assetKey,
+  type AssetId,
+  type BlockWitnesses,
+  type ChainSource,
+  type ChainTip,
+  type GenesisParameters,
+  type LedgerTx,
+  type PolicyAsset,
+  type UnspentOutput,
+} from "../../src/chain/types.js";
 import { ledgerOrder } from "../../src/resolve/history.js";
 import { VECTOR_MAINNET } from "../../src/resolve/settings.js";
 
@@ -101,5 +111,17 @@ export class FakeChain implements ChainSource {
       }
     }
     return holders;
+  }
+
+  async policyOutputs(policyId: string, maxOutputs: number): Promise<UnspentOutput[]> {
+    this.enter("policyOutputs");
+    const spent = new Set(this.txs.flatMap((t) => t.inputs.map((i) => `${i.txHash}#${i.outputIndex}`)));
+    const outputs = this.txs.flatMap((t) =>
+      t.outputs
+        .filter((o) => !spent.has(`${t.txHash}#${o.outputIndex}`) && o.assets.some((a) => a.policyId === policyId && a.quantity > 0n))
+        .map((o) => ({ txHash: t.txHash, outputIndex: o.outputIndex, blockHeight: t.blockHeight, address: o.address, assets: o.assets, inlineDatum: o.inlineDatum })),
+    );
+    if (outputs.length > maxOutputs) throw new Error(`Koios credential_utxos answered more than ${maxOutputs} outputs that hold a token of the policy`);
+    return outputs;
   }
 }

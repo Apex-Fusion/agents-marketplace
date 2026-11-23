@@ -6,6 +6,7 @@ import { FactsStore } from "./fetch/facts.js";
 import { startBackgroundJobs } from "./fetch/jobs.js";
 import { m4ServicesFromEnv } from "./m4/index.js";
 import { loadRenderConfig } from "./render/config.js";
+import { AttestationIndex } from "./resolve/attestation-index.js";
 import { LegacyKeySearch } from "./resolve/legacy-key.js";
 import { VectorResolver } from "./resolve/resolver.js";
 import { createResolverServer } from "./server/http.js";
@@ -24,7 +25,9 @@ const facts = new FactsStore();
 // One legacy key search for every resolver: one cache of witnesses and results, and one limit on
 // concurrent Ogmios sessions.
 const legacyKeys = new LegacyKeySearch(chain);
-const resolver = new VectorResolver(chain, config.resolver, { fetchedFacts: facts.provider, legacyKeys });
+// The attestations about each agent are read in the background, never on a request (resolve/attestation-index.ts).
+const attestations = config.attestations ? new AttestationIndex(chain, config.attestations.registry, config.resolver.network, { refreshMs: config.attestations.refreshMs }) : null;
+const resolver = new VectorResolver(chain, config.resolver, { fetchedFacts: facts.provider, legacyKeys, provenance: attestations });
 // The background scan and the M4 services share a second resolver: the scan and the status-list
 // builds are passes over every record, and passes share their ledger reads (resolve/history-store.ts).
 // The request path's history cache stays apart.
@@ -48,18 +51,20 @@ const server = createResolverServer(resolver, {
   ],
 });
 m4?.start();
+attestations?.start();
 server.listen(config.port, config.host, () => {
   const identity = config.resolver.registries.identity;
   console.error(
     `identity-gateway listening on http://${config.host}:${config.port}/1.0/identifiers/{did} ` +
       `(identity registry ${identity ? identity.policyId : "not configured"}, legacy registry ${config.resolver.registries.legacy.policyId}, ` +
-      `background fetch jobs ${renderConfig.fetchJobs ? "on" : "off"}, M4 services ${m4 ? "on" : "off"}, Koios at most ${config.koiosRatePerSecond} calls/s)`,
+      `background fetch jobs ${renderConfig.fetchJobs ? "on" : "off"}, M4 services ${m4 ? "on" : "off"}, attestations ${attestations ? "on" : "off"}, Koios at most ${config.koiosRatePerSecond} calls/s)`,
   );
 });
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {
     void jobs?.stop();
     m4?.stop();
+    attestations?.stop();
     server.close(() => process.exit(0));
   });
 }

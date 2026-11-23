@@ -163,3 +163,13 @@ export interface KoiosAssetUtxoRow {
   block_height: number;
   asset_list: KoiosAsset[] | null;
 }
+
+/** A row of `credential_utxos` with `_extended`, with the fields that this package selects: an unspent output at a payment credential. */
+export interface KoiosCredentialUtxoRow {
+  tx_hash: string;
+  tx_index: number;
+  block_height: number;
+  address: string;
+  asset_list: KoiosAsset[] | null;
+  inline_datum: { bytes: string | null } | null;
+}

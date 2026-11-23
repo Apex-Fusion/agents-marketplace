@@ -14,6 +14,8 @@ export type { FactsSubject, FetchedFacts, FetchedFactsProvider } from "./resolve
 export { REASON_NAMES, purposeNames, reasonName, signerName } from "./resolve/metadata.js";
 export type {
   DidDocumentMetadata,
+  VectorAttestation,
+  VectorAttestationType,
   VectorFetched,
   VectorHold,
   VectorKey,
@@ -22,9 +24,12 @@ export type {
   VectorParent,
   VectorParty,
   VectorProfile,
+  VectorProvenance,
   VectorRecovery,
   VectorStatus,
 } from "./resolve/metadata.js";
+export { AttestationIndex, type AttestationIndexOptions } from "./resolve/attestation-index.js";
+export { MAX_SHOWN, attestationRows, provenanceOf, type AttestationRow, type ProvenanceSource, type ProvenanceTime } from "./resolve/provenance.js";
 export { parseResolutionOptions, NO_OPTIONS, type ResolutionOptions, type ResolutionOptionsInput } from "./resolve/options.js";
 export { parseDid, canonicalDid, legacyDid, type DidForm, type ParsedDid } from "./resolve/did.js";
 export { ResolutionError, errorTypeUri, ERROR_HTTP_STATUS, type ResolutionErrorType } from "./resolve/errors.js";
@@ -64,7 +69,29 @@ export {
   type Status,
 } from "./codec/identity-datum.js";
 export { decodeLegacyDatum, encodeLegacyDatum, legacyDatumFromData, type LegacyDatum, type LegacyOwner } from "./codec/legacy-datum.js";
+export {
+  decodeAttestationDatum,
+  encodeAttestationDatum,
+  attestationDatumFromData,
+  attestationDatumToData,
+  type Anchor,
+  type AttStatus,
+  type AttestationDatum,
+  type Link,
+} from "./codec/attestation-datum.js";
 export { decodePlutusData, encodePlutusData, plutusDataEqual, type PlutusData } from "./codec/plutus-data.js";
 export { KoiosOgmiosChainSource, type KoiosOgmiosSourceOptions } from "./chain/koios-ogmios-source.js";
 export { KoiosClient, type KoiosClientOptions } from "./chain/koios.js";
-export type { Asset, BlockWitnesses, ChainSource, ChainTip, GenesisParameters, LedgerTx, PolicyAsset, TxInput, TxOutput, TxWitnesses } from "./chain/types.js";
+export type {
+  Asset,
+  BlockWitnesses,
+  ChainSource,
+  ChainTip,
+  GenesisParameters,
+  LedgerTx,
+  PolicyAsset,
+  TxInput,
+  TxOutput,
+  TxWitnesses,
+  UnspentOutput,
+} from "./chain/types.js";

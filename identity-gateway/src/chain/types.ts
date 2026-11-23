@@ -90,6 +90,19 @@ export interface AssetId {
 /** The key of an asset in `assetHolders` results: `<policy ID>.<asset name>`. */
 export const assetKey = (asset: AssetId): string => `${asset.policyId}.${asset.assetName}`;
 
+/** An unspent output as the source's credential index lists it. */
+export interface UnspentOutput {
+  readonly txHash: string;
+  readonly outputIndex: number;
+  /** Height of the block that holds the transaction. */
+  readonly blockHeight: number;
+  /** Bech32 address. */
+  readonly address: string;
+  readonly assets: readonly Asset[];
+  /** CBOR of the inline datum; null when the output has no inline datum. */
+  readonly inlineDatum: string | null;
+}
+
 export interface ChainSource {
   /** The current tip of the selected chain. */
   tip(): Promise<ChainTip>;
@@ -113,4 +126,10 @@ export interface ChainSource {
    * height>`, by `assetKey`; an asset that no output holds has no entry. One read serves many assets.
    */
   assetHolders(assets: readonly AssetId[]): Promise<Map<string, string[]>>;
+  /**
+   * The unspent outputs at the script whose hash is `policyId` (any stake part) that hold a token of
+   * that policy, in the order of their output reference. For a script that is also its own minting
+   * policy, as the attestation contract is. A read of more than `maxOutputs` outputs fails.
+   */
+  policyOutputs(policyId: string, maxOutputs: number): Promise<UnspentOutput[]>;
 }

@@ -102,6 +102,38 @@ export interface VectorFetched {
   readonly sha256: string;
 }
 
+/** The attestation types that the resolver shows: 1 provenance, 2 software, 3 environment. */
+export type VectorAttestationType = "provenance" | "software" | "environment";
+
+/** One attestation about the agent. Its token on the ledger is the proof; the resolver does not check the issuer, the envelope or the document. */
+export interface VectorAttestation {
+  /** The token name of the attestation: 64 hex characters. */
+  readonly id: string;
+  readonly type: VectorAttestationType;
+  /** `did:vector:<issuer id>` for a registered issuer, else the `did:key` of the issuer key. */
+  readonly issuer: string;
+  /** The upper bound of the validity range of the minting transaction: up to one hour after its block time. */
+  readonly issuedAt: string;
+  readonly validUntil?: string;
+  /** The controller of the agent co-signed: the resolver shows no other attestation in the list. */
+  readonly solicited: true;
+  /** The controller of the agent replied with a `Contest` anchor. */
+  readonly contested?: true;
+  /** SHA-256 of the document: 64 hex characters. */
+  readonly digest: string;
+  /** An https URL where the document can be fetched; left out when the locator is not one. */
+  readonly locator?: string;
+  /** An envelope signature exists. The resolver does not verify it. */
+  readonly envelope?: true;
+}
+
+export interface VectorProvenance {
+  /** Newest first, at most 8. */
+  readonly attestations?: readonly VectorAttestation[];
+  /** The attestations about the agent that count now and that `attestations` does not list. */
+  readonly othersCount?: number;
+}
+
 export interface DidDocumentMetadata {
   readonly created?: string;
   /** DID Core `updated`: the version time of the base. Not present for version 0. */
@@ -125,6 +157,8 @@ export interface DidDocumentMetadata {
   readonly vectorPending?: readonly string[];
   /** Values that depend on a fetch (wave 2: domain linkage and endpoint detection). */
   readonly vectorFetched?: readonly VectorFetched[];
+  /** Requests without a version option only: the attestations about the agent that the resolver shows. */
+  readonly vectorProvenance?: VectorProvenance;
   readonly vectorMetadataError?: VectorMetadataError;
 }
 
@@ -281,6 +315,8 @@ export interface MetadataInput {
   readonly metadataError: VectorMetadataError | null;
   /** Values from background fetches (verified organisations, protocol, fetch records). */
   readonly facts: FetchedFacts | undefined;
+  /** Requests without a version option: the attestations about the agent that the resolver shows (provenance.ts). */
+  readonly provenance?: VectorProvenance;
 }
 
 export function buildMetadata(input: MetadataInput): DidDocumentMetadata {
@@ -345,6 +381,7 @@ export function buildMetadata(input: MetadataInput): DidDocumentMetadata {
     vectorLedger: baseLedger(base, input.counts),
     vectorPending: input.pending.map((v) => v.made.tx.txHash),
     vectorFetched: facts?.fetched?.map((f) => ({ url: f.url, fetchedAt: f.fetchedAt, sha256: f.sha256 })),
+    vectorProvenance: input.provenance,
     vectorMetadataError: input.metadataError ?? undefined,
   });
 }

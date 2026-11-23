@@ -1,20 +1,33 @@
 // ChainSource backed by Koios (indexes: asset history, transactions, datums, blocks, genesis) and
 // Ogmios (block contents, for the vkey witnesses that Koios does not expose).
 
-import type {
-  KoiosAsset,
-  KoiosAssetUtxoRow,
-  KoiosBlockRow,
-  KoiosClient,
-  KoiosDatumRow,
-  KoiosGenesisRow,
-  KoiosPolicyAssetMintRow,
-  KoiosTipRow,
-  KoiosTxInfoRow,
-  KoiosTxRefRow,
+import {
+  KOIOS_PAGE,
+  type KoiosAsset,
+  type KoiosAssetUtxoRow,
+  type KoiosBlockRow,
+  type KoiosClient,
+  type KoiosCredentialUtxoRow,
+  type KoiosDatumRow,
+  type KoiosGenesisRow,
+  type KoiosPolicyAssetMintRow,
+  type KoiosTipRow,
+  type KoiosTxInfoRow,
+  type KoiosTxRefRow,
 } from "./koios.js";
 import { fetchBlocksAfter } from "./ogmios.js";
-import { assetKey, type Asset, type AssetId, type BlockWitnesses, type ChainSource, type ChainTip, type GenesisParameters, type LedgerTx, type PolicyAsset } from "./types.js";
+import {
+  assetKey,
+  type Asset,
+  type AssetId,
+  type BlockWitnesses,
+  type ChainSource,
+  type ChainTip,
+  type GenesisParameters,
+  type LedgerTx,
+  type PolicyAsset,
+  type UnspentOutput,
+} from "./types.js";
 
 const TX_INFO_BATCH = 50;
 const DATUM_BATCH = 50;
@@ -175,5 +188,29 @@ export class KoiosOgmiosChainSource implements ChainSource {
       }
     }
     return holders;
+  }
+
+  async policyOutputs(policyId: string, maxOutputs: number): Promise<UnspentOutput[]> {
+    // The script hash is the payment credential. The filter on the asset list keeps the outputs that hold
+    // a token of the policy, so the outputs that anybody can send to the address do not count.
+    const holdsToken = `asset_list=cs.${encodeURIComponent(JSON.stringify([{ policy_id: policyId }]))}`;
+    const rows: KoiosCredentialUtxoRow[] = [];
+    for (let offset = 0; ; offset += KOIOS_PAGE) {
+      const page = await this.koios.post<KoiosCredentialUtxoRow[]>(
+        `credential_utxos?select=tx_hash,tx_index,block_height,address,asset_list,inline_datum&${holdsToken}&order=tx_hash.asc,tx_index.asc&offset=${offset}&limit=${KOIOS_PAGE}`,
+        { _payment_credentials: [policyId], _extended: true },
+      );
+      rows.push(...page);
+      if (rows.length > maxOutputs) throw new Error(`Koios credential_utxos answered more than ${maxOutputs} outputs that hold a token of the policy`);
+      if (page.length < KOIOS_PAGE) break;
+    }
+    return rows.map((r) => ({
+      txHash: r.tx_hash,
+      outputIndex: r.tx_index,
+      blockHeight: r.block_height,
+      address: r.address,
+      assets: assetsOf(r.asset_list),
+      inlineDatum: r.inline_datum?.bytes?.toLowerCase() ?? null,
+    }));
   }
 }

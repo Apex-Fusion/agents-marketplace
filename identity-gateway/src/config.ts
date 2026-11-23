@@ -1,7 +1,9 @@
 // Runtime configuration from the environment. Every value has a public default except the identity
-// registry values (published at its deployment) and KOIOS_TOKEN (optional, never logged).
+// registry values (published at its deployment), the attestation policy and KOIOS_TOKEN (optional,
+// never logged).
 
-import { LEGACY_REGISTRY, VECTOR_MAINNET, checkRegistrySettings, registryOf, type ResolverSettings } from "./resolve/settings.js";
+import { DEFAULT_ATTESTATION_REFRESH_MS, MAX_ATTESTATION_REFRESH_MS, MIN_ATTESTATION_REFRESH_MS } from "./resolve/attestation-index.js";
+import { LEGACY_REGISTRY, VECTOR_MAINNET, checkRegistrySettings, registryOf, type Registry, type ResolverSettings } from "./resolve/settings.js";
 import { parseVersionTime } from "./resolve/time.js";
 
 export interface GatewayConfig {
@@ -13,6 +15,11 @@ export interface GatewayConfig {
   readonly koiosRatePerSecond: number;
   readonly ogmiosUrl: string;
   readonly resolver: ResolverSettings;
+  /**
+   * The attestation contract (ATTESTATION_POLICY_ID, ATTESTATION_ADDRESS) and the time between the background
+   * reads of its outputs (ATTESTATION_REFRESH_SECONDS). Null without a policy ID: no `vectorProvenance`.
+   */
+  readonly attestations: { readonly registry: Registry; readonly refreshMs: number } | null;
 }
 
 function integer(env: NodeJS.ProcessEnv, name: string, fallback: number, min = 0, max = Number.MAX_SAFE_INTEGER): number {
@@ -36,6 +43,15 @@ function systemStart(env: NodeJS.ProcessEnv): number {
 export function loadConfig(env: NodeJS.ProcessEnv): GatewayConfig {
   const identityPolicy = env.IDENTITY_POLICY_ID || undefined;
   if (!identityPolicy && env.IDENTITY_ADDRESS) throw new Error("IDENTITY_ADDRESS needs IDENTITY_POLICY_ID");
+  const attestationPolicy = env.ATTESTATION_POLICY_ID || undefined;
+  if (!attestationPolicy && env.ATTESTATION_ADDRESS) throw new Error("ATTESTATION_ADDRESS needs ATTESTATION_POLICY_ID");
+  const attestationRefreshSeconds = integer(
+    env,
+    "ATTESTATION_REFRESH_SECONDS",
+    DEFAULT_ATTESTATION_REFRESH_MS / 1000,
+    MIN_ATTESTATION_REFRESH_MS / 1000,
+    MAX_ATTESTATION_REFRESH_MS / 1000,
+  );
   const resolver: ResolverSettings = {
     network: {
       networkMagic: integer(env, "GENESIS_NETWORK_MAGIC", VECTOR_MAINNET.networkMagic),
@@ -58,5 +74,8 @@ export function loadConfig(env: NodeJS.ProcessEnv): GatewayConfig {
     koiosRatePerSecond: integer(env, "KOIOS_RATE_PER_SECOND", 10, 1, 100),
     ogmiosUrl: env.OGMIOS_URL || "wss://ogmios.vector.mainnet.apexfusion.org",
     resolver,
+    attestations: attestationPolicy
+      ? { registry: registryOf(attestationPolicy, env.ATTESTATION_ADDRESS || undefined), refreshMs: attestationRefreshSeconds * 1000 }
+      : null,
   };
 }

@@ -15,6 +15,7 @@ import { LegacyKeySearch } from "./legacy-key.js";
 import { baseLedger, buildMetadata, type DidDocumentMetadata, type VectorLedger, type VectorMetadataError } from "./metadata.js";
 import { parseResolutionOptions, type ResolutionOptionsInput } from "./options.js";
 import type { FetchedFactsProvider } from "./fetched.js";
+import type { ProvenanceSource } from "./provenance.js";
 import { listRecords, type FirstMintCache, type RecordList } from "./records.js";
 import { CONFIRMATION_DEPTH, MAX_ANCESTORS, checkRegistrySettings, type RegistrySettings, type ResolverSettings } from "./settings.js";
 import { evaluate, lineageOf, type Effective, type Evaluation, type Selection } from "./status.js";
@@ -87,6 +88,8 @@ export interface VectorResolverOptions {
   readonly legacyKeys?: LegacyKeySearch;
   /** Verified domains, verified organisations and detected protocols that background jobs stored. Default: none. */
   readonly fetchedFacts?: FetchedFactsProvider;
+  /** The attestations about each agent, from a background read of the ledger. Default or null: none, and no `vectorProvenance`. */
+  readonly provenance?: ProvenanceSource | null;
 }
 
 const VECTOR_ID = /^[0-9a-f]{64}$/;
@@ -124,6 +127,7 @@ export class VectorResolver {
   private readonly historyCacheSize: number;
   private readonly legacyKeys: LegacyKeySearch;
   private readonly fetchedFacts: FetchedFactsProvider;
+  private readonly provenance: ProvenanceSource | null;
   private networkChecked: Promise<void> | null = null;
   private histories: { tipHash: string; entries: Map<string, Promise<HistoryLookup>> } = { tipHash: "", entries: new Map() };
   /** First mints with 30 confirmations, kept between `listRecords` calls. */
@@ -142,6 +146,7 @@ export class VectorResolver {
     this.historyCacheSize = options.historyCacheSize ?? 512;
     this.legacyKeys = options.legacyKeys ?? new LegacyKeySearch(chain);
     this.fetchedFacts = options.fetchedFacts ?? (() => undefined);
+    this.provenance = options.provenance ?? null;
   }
 
   /**
@@ -280,6 +285,9 @@ export class VectorResolver {
     // The stored facts count only while their inputs apply to the view that the result shows (its
     // endpoint, its domains, its assertion keys), also for a view at a requested version or time.
     const facts = this.fetchedFacts({ vectorId: parsed.vectorId, origin: history.origin, view, legacyControllerKey: legacyKey }, legacyPolicy);
+    // The attestations come from the background read, never from the ledger (provenance.ts). A result for a
+    // version option describes time t, and the member shows the state now: such a result has no member.
+    const provenance = versionOption ? undefined : this.provenance?.provenance(parsed.vectorId, { tipHeight: snapshot.tip.blockHeight, timeMs: current.t });
     const didDocument = deactivatedAtT ? null : buildDocument(parsed.did, view, legacyKey, options.expandRelativeUrls, facts?.alsoKnownAs);
     return {
       didDocument,
@@ -298,6 +306,7 @@ export class VectorResolver {
         current: versionOption ? now.effective : null,
         metadataError,
         facts,
+        provenance,
       }),
     };
   }
