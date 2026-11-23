@@ -306,6 +306,7 @@ export class DockerAgentBuilder implements PaperPackageBuilder {
       const failure = closed.find((result): result is PromiseRejectedResult => result.status === "rejected");
       if (failure) {
         context.log("cleanup", "Owned container cleanup failed; check the isolated build host");
+        // oxlint-disable-next-line no-unsafe-finally -- A failed container cleanup must fail the build, also when the build itself threw or returned.
         throw new PaperBuildCleanupError(failure.reason);
       }
     }

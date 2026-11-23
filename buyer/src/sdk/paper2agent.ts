@@ -248,8 +248,9 @@ export class Paper2AgentClient {
     if (!utxo?.datumHex || refString(utxo.ref) !== refString(ref)) fail(`missing or invalid ${kind} script UTxO`);
     const datum = kind === "advert" ? decodeAdvert(utxo.datumHex).datum : decodeEscrow(utxo.datumHex).datum;
     const scripts = agentIdOf(datum) === null ? this.blueprint : this.identity.blueprint();
-    const address = kind === "advert" ? scripts.advertScriptAddress : scripts.escrowScriptAddress;
-    if (utxo.address !== address(0) && utxo.address !== address(1)) fail(`missing or invalid ${kind} script UTxO`);
+    const addresses = ([0, 1] as const).map((networkId) =>
+      kind === "advert" ? scripts.advertScriptAddress(networkId) : scripts.escrowScriptAddress(networkId));
+    if (!addresses.includes(utxo.address)) fail(`missing or invalid ${kind} script UTxO`);
     return { utxo, datum };
   }
 
@@ -261,7 +262,7 @@ export class Paper2AgentClient {
     return response.body;
   }
 
-  private async json(url: string, maxBytes: number, deadline: number, init: RequestInit = {}, requestMs = REQUEST_MS): Promise<{ status: number; body: unknown }> {
+  private async json(url: string, maxBytes: number, deadline: number, init: Omit<RequestInit, "headers"> & { headers?: Record<string, string> } = {}, requestMs = REQUEST_MS): Promise<{ status: number; body: unknown }> {
     const controller = new AbortController();
     let activeReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     return bounded(async () => {
@@ -373,7 +374,7 @@ export class Paper2AgentClient {
     // The current indexer ignores capability_id. Unrelated adverts must not
     // consume the tool catalogue's bound.
     if (refs.length > MAX_ADVERTS) throw new IndexerError("malformed_response", { message: "tool supplier list exceeds the discovery bound" });
-    const offers = new Array<Paper2AgentOffer | undefined>(refs.length);
+    const offers: Array<Paper2AgentOffer | undefined> = [];
     let next = 0;
     const probeMs = filters.supplierPkh !== undefined || filters.manifestHash !== undefined ? REQUEST_MS : DISCOVERY_PROBE_MS;
     const probe = async (): Promise<void> => {

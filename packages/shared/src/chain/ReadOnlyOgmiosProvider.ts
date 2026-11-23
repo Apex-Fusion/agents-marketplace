@@ -263,8 +263,9 @@ function ogmiosScriptRef(script: unknown): string | null {
   return language === "plutus:v3" && typeof cbor === "string" && cbor.length > 0 ? cbor : null;
 }
 
+/** The result of an evaluation: a list of redeemer evaluations (OgmiosRedeemerEval[]) or one budget (OgmiosBudget). Anything else gives undefined. */
 function aggregateBudget(
-  result: OgmiosRedeemerEval[] | OgmiosBudget | unknown,
+  result: unknown,
 ): { memory: number; steps: number } | undefined {
   if (Array.isArray(result)) {
     let memory = 0;

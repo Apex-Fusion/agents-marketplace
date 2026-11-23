@@ -212,5 +212,10 @@ if (
   process.argv[1]?.endsWith("publish-reference-scripts.ts") ||
   process.argv[1]?.endsWith("publish-reference-scripts.js")
 ) {
-  main(process.argv.slice(2), process.env).then((code) => process.exit(code));
+  main(process.argv.slice(2), process.env)
+    .then((code) => process.exit(code))
+    .catch((err: unknown) => {
+      process.stderr.write(`error: ${err instanceof Error ? err.message : String(err)}\n`);
+      process.exitCode = 1;
+    });
 }

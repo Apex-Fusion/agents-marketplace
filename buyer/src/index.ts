@@ -202,7 +202,7 @@ export async function runMain(
     console.log("[buyer] shutting down...");
     // In-flight requests end first, then background Accepts, for at most SHUTDOWN_DRAIN_MS.
     server.close(() => {
-      void Promise.race([Promise.allSettled([...backgroundTasks]), delay(SHUTDOWN_DRAIN_MS)])
+      void Promise.race([Promise.allSettled(backgroundTasks), delay(SHUTDOWN_DRAIN_MS)])
         .then(() => process.exit(exitCode));
     });
   };

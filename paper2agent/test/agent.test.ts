@@ -1,5 +1,5 @@
 import { once } from "node:events";
-import { createServer, type Server } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { FatalFinishError, repairableFinishCheck, runCodingAgent, type AgentSessionOptions, type AgentTool, type FundsShortfall } from "../src/agent.js";
@@ -20,7 +20,7 @@ afterEach(async () => {
 async function modelEndpoint(replies: Reply[]): Promise<{ baseUrl: string; requests: unknown[]; bodyBytes: number[] }> {
   const requests: unknown[] = [];
   const bodyBytes: number[] = [];
-  const server = createServer(async (req, res) => {
+  const answer = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(chunk as Buffer);
     const body = Buffer.concat(chunks);
@@ -28,7 +28,9 @@ async function modelEndpoint(replies: Reply[]): Promise<{ baseUrl: string; reque
     requests.push(JSON.parse(body.toString("utf8")));
     const reply = replies.length > 1 ? replies.shift()! : replies[0];
     res.writeHead(reply.status, { "content-type": "application/json" }).end(JSON.stringify(reply.body));
-  });
+  };
+  // A throw in `answer` is an unhandled rejection, and vitest reports it: the test double does not hide its own error.
+  const server = createServer((req, res) => void answer(req, res));
   servers.push(server);
   server.listen(0, "127.0.0.1");
   await once(server, "listening");

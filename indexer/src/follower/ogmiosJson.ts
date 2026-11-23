@@ -23,7 +23,7 @@
 
 const LABELS_KEY = '"labels"';
 /** A number token of 16 or more digits: after `:`, `,` or `[`, and white space. */
-const LONG_INTEGER = /[:,\[]\s*-?[0-9]{16}/;
+const LONG_INTEGER = /[:,[]\s*-?[0-9]{16}/;
 const STRING = /"[^"\\]*(?:\\.[^"\\]*)*"/y;
 const NUMBER = /-?(?:0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?/y;
 /** A nesting limit for the recursive reader. Native JSON.parse has none. */

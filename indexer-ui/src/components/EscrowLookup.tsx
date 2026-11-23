@@ -85,7 +85,7 @@ export default function EscrowLookup() {
         <button
           type="button"
           data-testid="escrow-lookup-submit"
-          onClick={onSubmit}
+          onClick={() => void onSubmit()}
           disabled={loading}
           className="rounded bg-indigo-600 px-3 py-1 text-sm font-medium text-white disabled:opacity-50"
         >

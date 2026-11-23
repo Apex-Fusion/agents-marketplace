@@ -157,8 +157,9 @@ function syntheticOutputs(value: unknown): SignedTransactionFinancials["outputs"
 }
 
 function liveInputRefs(list: InstanceType<typeof CML.TransactionInputList>): OutputReference[] {
-  const refs: OutputReference[] = new Array(list.len());
-  for (let i = 0; i < refs.length; i++) {
+  const refs: OutputReference[] = [];
+  const count = list.len();
+  for (let i = 0; i < count; i++) {
     const input = list.get(i);
     let hash: InstanceType<typeof CML.TransactionHash> | undefined;
     try {
@@ -201,8 +202,9 @@ export function inspectSignedTransactionFinancials(txCborHex: string): SignedTra
     inputs = body.inputs();
     outputs = body.outputs();
     collateral = body.collateral_inputs();
-    const values: SignedTransactionFinancials["outputs"] = new Array(outputs.len());
-    for (let i = 0; i < values.length; i++) {
+    const values: SignedTransactionFinancials["outputs"] = [];
+    const count = outputs.len();
+    for (let i = 0; i < count; i++) {
       const output = outputs.get(i);
       let address: InstanceType<typeof CML.Address> | undefined;
       let amount: InstanceType<typeof CML.Value> | undefined;

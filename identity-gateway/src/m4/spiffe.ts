@@ -137,7 +137,7 @@ export class SpiffeService {
 
   async bundle(): Promise<M4Response> {
     const { p256 } = this.ctx.keys;
-    const { kid, alg, use, ...key } = p256.publicJwk;
+    const { kid, alg: _alg, use: _use, ...key } = p256.publicJwk;
     const ca = await this.signingCertificate();
     return jsonResponse(
       200,

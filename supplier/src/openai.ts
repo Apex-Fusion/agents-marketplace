@@ -243,7 +243,7 @@ function nativePayload(params: CallResponsesParams, stream: boolean): Record<str
   if (maxOutputTokens !== undefined) payload.max_output_tokens = maxOutputTokens;
   if (params.disableReasoning) {
     payload.reasoning = {
-      ...(params.reasoning ?? {}),
+      ...params.reasoning,
       effort: "none",
     };
   }
@@ -741,7 +741,8 @@ async function* readChatSse(body: ReadableStream<Uint8Array>): AsyncGenerator<un
   let buffer = "";
   let sawDone = false;
 
-  const parseFrame = (frame: string): unknown | undefined => {
+  // Gives undefined for a frame without data, "[DONE]" for the end marker, and the parsed JSON otherwise.
+  const parseFrame = (frame: string): unknown => {
     const data: string[] = [];
     for (const rawLine of frame.split(/\r?\n/)) {
       if (rawLine.startsWith(":")) continue;

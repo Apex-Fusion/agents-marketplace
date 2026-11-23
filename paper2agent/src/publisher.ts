@@ -1048,7 +1048,7 @@ export class PaperPublisherService {
 
   /** Resolves when no publisher operation is running. */
   async idle(): Promise<void> {
-    while (this.operations.size > 0) await Promise.allSettled([...this.operations]);
+    while (this.operations.size > 0) await Promise.allSettled(this.operations);
   }
 
   /**

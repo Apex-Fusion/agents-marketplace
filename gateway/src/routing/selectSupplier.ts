@@ -133,7 +133,7 @@ async function probeStatuses(
   fetchFn: typeof globalThis.fetch,
   signal?: AbortSignal,
 ): Promise<Array<{ raw: SupplierView; status: LiveSupplierStatus }>> {
-  const results = new Array<{ raw: SupplierView; status: LiveSupplierStatus }>(rows.length);
+  const results: Array<{ raw: SupplierView; status: LiveSupplierStatus }> = [];
   let next = 0;
   const worker = async (): Promise<void> => {
     while (next < rows.length) {

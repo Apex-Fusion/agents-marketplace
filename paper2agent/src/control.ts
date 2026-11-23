@@ -780,7 +780,7 @@ export class PaperControlService {
       this.active?.controller.abort(new BuildStop("shutdown"));
       await Promise.allSettled([this.starting]);
       await this.whenIdle();
-      await Promise.allSettled([...this.operations]);
+      await Promise.allSettled(this.operations);
     })();
     return this.closed;
   }

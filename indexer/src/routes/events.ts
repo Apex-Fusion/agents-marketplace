@@ -110,7 +110,7 @@ export function eventsRouter(workerEmitter: EventEmitter, deps: EventsDeps): {
         }
       } catch (err) {
         console.warn(
-          `[events] replay failed (since_slot=${sinceSlotRaw}, limit=${limitRaw}): ${(err as Error).message}`,
+          `[events] replay failed (since_slot=${String(sinceSlotRaw)}, limit=${String(limitRaw)}): ${(err as Error).message}`,
         );
       }
     }
