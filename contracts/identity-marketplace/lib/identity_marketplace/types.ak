@@ -105,7 +105,7 @@ pub type DelegationDatum {
   delegate_key: ByteArray,
   /// 1..16 action patterns.
   actions: List<ByteArray>,
-  /// 0..8 resource patterns.
+  /// 0..11 resource patterns.
   resources: List<ByteArray>,
   not_before: Int,
   not_after: Int,

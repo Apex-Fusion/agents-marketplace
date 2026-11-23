@@ -19,6 +19,7 @@ use identity_marketplace/common.{
   window,
 }
 use identity_marketplace/delegation/chain.{use_delegation}
+use identity_marketplace/delegation/pattern.{hex}
 use identity_marketplace/types.{
   Agent, Close, Delegator, EscrowDatum, Live, Open, Pay, PrincipalKey, Refund,
   Returned, VaultDatum, VaultSpend,
@@ -35,27 +36,7 @@ pub const max_job_ap3x: Int = 10_000_000_000
 /// The resource of vault payments: `script:<escrow_hash>`, with the hash in
 /// lowercase hexadecimal (§5.1).
 pub fn escrow_resource(escrow_hash: ByteArray) -> ByteArray {
-  bytearray.concat(
-    "script:",
-    bytearray.foldr(
-      escrow_hash,
-      #"",
-      fn(byte, hex) {
-        hex
-          |> bytearray.push(hex_digit(byte % 16))
-          |> bytearray.push(hex_digit(byte / 16))
-      },
-    ),
-  )
-}
-
-/// The lowercase hexadecimal digit (`0-9`, `a-f`) of `n` (0..15).
-fn hex_digit(n: Int) -> Int {
-  if n < 10 {
-    n + 48
-  } else {
-    n + 87
-  }
+  bytearray.concat("script:", hex(escrow_hash))
 }
 
 /// The spend handler of the vault contract.
@@ -102,6 +83,10 @@ pub fn vault_spend(
 /// - the delegation `delegation` passes the use checks of §5.2 for the action
 ///   `marketplace.hire.v1` and the resource `script:<escrow_hash>`, its
 ///   delegator is `owner`, and it has a value limit;
+/// - the `agent_id` of each escrow output is a supplier that the delegation
+///   and each of its ancestors name: when a delegation lists `did` patterns
+///   (§5.1), each `agent_id` must be one of them; when it lists none, any
+///   agent is allowed;
 /// - amount = the input AP3X minus the AP3X of the continuing output;
 ///   `0 < amount <= per_tx`;
 /// - when `lo >= period_start + period_ms`, a new period starts with
@@ -129,6 +114,7 @@ fn pay(
   expect Some(own_input) = transaction.find_input(tx.inputs, own_ref)
   expect Script(vault_hash) = own_input.output.address.payment_credential
   let vault_address = address.from_script(vault_hash)
+  let escrows = escrow_outputs(tx.outputs, escrow_hash)
   let leaf =
     use_delegation(
       tx,
@@ -138,6 +124,7 @@ fn pay(
       hire_action,
       escrow_resource(escrow_hash),
       w,
+      list.map(escrows, fn(escrow) { escrow.datum.agent_id }),
     )
   expect Some(limit) = leaf.value
   let continuing = single_output_at(tx.outputs, vault_address)
@@ -163,29 +150,52 @@ fn pay(
     ap3x_only(continuing.value),
     continuing.reference_script == None,
     continuing.datum == InlineDatum(next),
-    escrow_total(tx.outputs, escrow_hash, leaf.delegate_key, refund, w.hi) >= amount,
+    escrow_total(escrows, leaf.delegate_key, refund, w.hi) >= amount,
   }
 }
 
-/// The AP3X of the outputs whose payment credential is `Script(escrow_hash)`.
-/// The function fails unless each of them passes `valid_escrow_output`.
-fn escrow_total(
+/// An escrow output of a payment with its datum.
+type Escrow {
+  output: Output,
+  datum: EscrowDatum,
+}
+
+/// The outputs whose payment credential is `Script(escrow_hash)`, each with
+/// its escrow datum. The function fails unless each of them has an inline
+/// `EscrowDatum`. The payment decodes each datum once: the supplier test
+/// reads `agent_id`, and `valid_escrow_output` reads the other fields.
+fn escrow_outputs(
   outputs: List<Output>,
   escrow_hash: ByteArray,
+) -> List<Escrow> {
+  list.foldr(
+    outputs,
+    [],
+    fn(output, escrows) {
+      if output.address.payment_credential == Script(escrow_hash) {
+        expect datum: EscrowDatum = inline_datum(output)
+        [Escrow { output, datum }, ..escrows]
+      } else {
+        escrows
+      }
+    },
+  )
+}
+
+/// The AP3X of the escrow outputs. The function fails unless each of them
+/// passes `valid_escrow_output`.
+fn escrow_total(
+  escrows: List<Escrow>,
   buyer: ByteArray,
   refund: Option<Refund>,
   hi: Int,
 ) -> Int {
   list.foldl(
-    outputs,
+    escrows,
     0,
-    fn(output, total) {
-      if output.address.payment_credential == Script(escrow_hash) {
-        expect valid_escrow_output(output, buyer, refund, hi)
-        total + ap3x_of(output.value)
-      } else {
-        total
-      }
+    fn(escrow, total) {
+      expect valid_escrow_output(escrow.output, escrow.datum, buyer, refund, hi)
+      total + ap3x_of(escrow.output.value)
     },
   )
 }
@@ -196,7 +206,7 @@ fn escrow_total(
 /// `result_receipt_hash = None`, `buyer_pkh = buyer` (the delegate key), the
 /// vault refund, `0 <= payment, buyer bond, supplier bond`, payment + buyer
 /// bond + supplier bond at most 10,000 AP3X and exactly the output's AP3X, and
-/// `deliver_by <= hi + 7 days`.
+/// `deliver_by <= hi + 7 days`. `escrow` is the decoded datum of `output`.
 ///
 /// The job equals the output's AP3X (decision of 2026-11-02): Accept and
 /// Release check only the job amounts, so with this rule the whole escrow
@@ -204,11 +214,11 @@ fn escrow_total(
 /// Builders put a min-UTxO top-up into the buyer bond.
 fn valid_escrow_output(
   output: Output,
+  escrow: EscrowDatum,
   buyer: ByteArray,
   refund: Option<Refund>,
   hi: Int,
 ) -> Bool {
-  expect escrow: EscrowDatum = inline_datum(output)
   let job =
     escrow.payment_lovelace + escrow.buyer_bond_lovelace + escrow.supplier_bond_lovelace
   and {

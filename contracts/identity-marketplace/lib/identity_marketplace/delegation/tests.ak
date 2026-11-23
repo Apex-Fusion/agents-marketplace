@@ -14,7 +14,8 @@ use identity_marketplace/delegation/chain.{find_delegation, use_delegation}
 use identity_marketplace/delegation/fixtures.{
   agent, agent_delegator, agent_id, ap3x, chain_inputs, chain_link, chain_refs,
   controller_key, delegation_hash, delegation_id, delegation_input,
-  delegation_key, delegation_output, delegation_value, escrow_pattern, hash,
+  delegation_key, delegation_output, delegation_value, did_a, did_b,
+  escrow_pattern, hash,
   identity_hash, input_at, link, new_id, now, other_hash, principal,
   principal_delegator, range, record_input, records, revoked, seed,
   staked_script_address, stranger, suspended, transaction_key, wallet_input,
@@ -186,8 +187,8 @@ test valid_delegation_limits() {
         },
         actions: ["*", ..max_patterns],
         resources: [
-          "*", escrow_pattern, "https://a", "https://b", "oauth:c", "mcp:d",
-          "mcp:e", "mcp:f",
+          "*", escrow_pattern, did_a, did_b, "https://a", "https://b", "oauth:c",
+          "mcp:d", "mcp:e", "mcp:f", "mcp:g",
         ],
         not_before: 0,
         not_after: max_time_ms,
@@ -355,6 +356,57 @@ test delegate_external_pattern_exact() {
   sub2_under(
     DelegationDatum { ..parent_of(2), actions: ["mcp:tools.*"] },
     DelegationDatum { ..child_of(2), actions: ["mcp:tools.*"] },
+  )
+}
+
+/// A child names fewer suppliers than its parent, or the same suppliers.
+test delegate_sub_delegation_with_fewer_suppliers() {
+  and {
+    sub2_under(
+      DelegationDatum {
+        ..parent_of(2),
+        resources: [escrow_pattern, did_a, did_b],
+      },
+      DelegationDatum { ..child_of(2), resources: [escrow_pattern, did_a] },
+    ),
+    sub2_under(
+      DelegationDatum {
+        ..parent_of(2),
+        resources: [escrow_pattern, did_a, did_b],
+      },
+      DelegationDatum {
+        ..child_of(2),
+        resources: [escrow_pattern, did_a, did_b],
+      },
+    ),
+  }
+}
+
+/// A child that drops the supplier list of its parent could pay any supplier.
+test delegate_child_drops_supplier_list() fail {
+  sub2_under(
+    DelegationDatum { ..parent_of(2), resources: [escrow_pattern, did_a] },
+    DelegationDatum { ..child_of(2), resources: [escrow_pattern] },
+  )
+}
+
+/// A child that adds a supplier to the list of its parent.
+test delegate_child_adds_supplier() fail {
+  sub2_under(
+    DelegationDatum { ..parent_of(2), resources: [escrow_pattern, did_a] },
+    DelegationDatum {
+      ..child_of(2),
+      resources: [escrow_pattern, did_a, did_b],
+    },
+  )
+}
+
+/// `*` covers every pattern, but it does not widen a supplier list: a child
+/// that names another supplier under a parent `*` stays refused.
+test delegate_star_does_not_widen_supplier_list() fail {
+  sub2_under(
+    DelegationDatum { ..parent_of(2), resources: ["*", did_a] },
+    DelegationDatum { ..child_of(2), resources: ["*", did_b] },
   )
 }
 
@@ -716,14 +768,14 @@ test delegate_seventeen_actions() fail {
   )
 }
 
-test delegate_nine_resources() fail {
+test delegate_twelve_resources() fail {
   mint_delegate(
     principal_root_tx(
       DelegationDatum {
         ..principal_root(),
         resources: [
-          "*", escrow_pattern, "https://a", "https://b", "oauth:c", "mcp:d",
-          "mcp:e", "mcp:f", "mcp:g",
+          "*", escrow_pattern, did_a, did_b, "https://a", "https://b", "oauth:c",
+          "mcp:d", "mcp:e", "mcp:f", "mcp:g", "mcp:h",
         ],
       },
     ),
@@ -1105,6 +1157,7 @@ fn use_link(
     action,
     resource,
     window(tx.validity_range),
+    [],
   )
 }
 
