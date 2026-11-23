@@ -48,10 +48,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup Node.js 20
+      - name: Setup Node.js 24
         uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 24
           # setup-node v5 and later start a pnpm cache by themselves when package.json names a package manager. This job has no pnpm.
           package-manager-cache: false
 
@@ -69,7 +69,7 @@ jobs:
         run: node scripts/ci/changes.mjs
 
   typecheck:
-    name: typecheck (Node 20)
+    name: typecheck (Node 24)
     needs: changes
     if: needs.changes.outputs.run_typecheck == 'true'
     runs-on: self-hosted
@@ -85,10 +85,10 @@ jobs:
         with:
           version: 10.33.2
 
-      - name: Setup Node.js 20
+      - name: Setup Node.js 24
         uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 24
           cache: pnpm
 
       - name: Install dependencies
@@ -112,7 +112,7 @@ jobs:
             tests/identity-vectors/tsconfig.json
 
   vitest:
-    name: vitest (Node 20)
+    name: vitest (Node 24)
     needs: changes
     if: needs.changes.outputs.vitest_mode != 'none'
     runs-on: self-hosted
@@ -131,10 +131,10 @@ jobs:
         with:
           version: 10.33.2
 
-      - name: Setup Node.js 20
+      - name: Setup Node.js 24
         uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 24
           cache: pnpm
 
       - name: Install dependencies
@@ -151,7 +151,7 @@ jobs:
         run: node scripts/ci/vitest-run.mjs
 
   aiken-eval:
-    name: aiken blueprint + script evaluation (Node 20)
+    name: aiken blueprint + script evaluation (Node 24)
     needs: changes
     if: needs.changes.outputs.aiken_eval == 'true'
     runs-on: self-hosted
@@ -182,10 +182,10 @@ jobs:
         with:
           version: 10.33.2
 
-      - name: Setup Node.js 20
+      - name: Setup Node.js 24
         uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 24
           cache: pnpm
 
       - name: Install dependencies
@@ -228,10 +228,10 @@ jobs:
         with:
           version: v1.1.24
 
-      - name: Setup Node.js 20
+      - name: Setup Node.js 24
         uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 24
           package-manager-cache: false
 
       - name: Cache aiken packages
@@ -262,10 +262,10 @@ jobs:
         with:
           version: v1.1.24
 
-      - name: Setup Node.js 20
+      - name: Setup Node.js 24
         uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 24
           package-manager-cache: false
 
       - name: Cache aiken packages
@@ -303,10 +303,10 @@ jobs:
         with:
           sparse-checkout: scripts/ci
 
-      - name: Setup Node.js 20
+      - name: Setup Node.js 24
         uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 24
           package-manager-cache: false
 
       - name: Decide

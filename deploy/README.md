@@ -163,7 +163,7 @@ collector takes complete Items from `response.output_item.done`; it never
 builds authoritative output from partial deltas.
 
 A call longer than 300 s needs a provider that sends data while it works. The
-Node 20 `fetch` of the supplier ends a call without a response header
+Node `fetch` of the supplier ends a call without a response header
 (`UND_ERR_HEADERS_TIMEOUT`) or without body data after 300 s, whatever
 `OPENAI_TIMEOUT_MS` is. A Hetzner supplier with a long advert collects the
 Chat Completions SSE (`OPENAI_CHAT_STREAM_ONLY=1`) and caps an output limit to

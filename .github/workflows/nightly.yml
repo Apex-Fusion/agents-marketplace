@@ -39,10 +39,10 @@ jobs:
         with:
           sparse-checkout: scripts/ci
 
-      - name: Setup Node.js 20
+      - name: Setup Node.js 24
         uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 24
           # setup-node v5 and later start a pnpm cache by themselves when package.json names a package manager. This job has no pnpm.
           package-manager-cache: false
 
@@ -53,7 +53,7 @@ jobs:
         run: node scripts/ci/nightly.mjs plan
 
   vitest:
-    name: vitest, all files, TEST_DEPTH=nightly (Node 20)
+    name: vitest, all files, TEST_DEPTH=nightly (Node 24)
     needs: plan
     if: needs.plan.outputs.skip != 'true'
     runs-on: self-hosted
@@ -74,10 +74,10 @@ jobs:
         with:
           version: 10.33.2
 
-      - name: Setup Node.js 20
+      - name: Setup Node.js 24
         uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 24
           cache: pnpm
 
       - name: Install dependencies
@@ -105,10 +105,10 @@ jobs:
         with:
           version: 10.33.2
 
-      - name: Setup Node.js 20
+      - name: Setup Node.js 24
         uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 24
           cache: pnpm
 
       - name: Install dependencies
@@ -146,10 +146,10 @@ jobs:
       - name: Setup aiken
         uses: ./.github/actions/setup-aiken
 
-      - name: Setup Node.js 20
+      - name: Setup Node.js 24
         uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 24
           package-manager-cache: false
 
       - name: Cache aiken packages
@@ -178,10 +178,10 @@ jobs:
       - name: Setup aiken
         uses: ./.github/actions/setup-aiken
 
-      - name: Setup Node.js 20
+      - name: Setup Node.js 24
         uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 24
           package-manager-cache: false
 
       - name: Cache aiken packages
@@ -206,10 +206,10 @@ jobs:
       - name: Setup aiken
         uses: ./.github/actions/setup-aiken
 
-      - name: Setup Node.js 20
+      - name: Setup Node.js 24
         uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 24
           package-manager-cache: false
 
       - name: Cache aiken packages
@@ -249,10 +249,10 @@ jobs:
         with:
           sparse-checkout: scripts/ci
 
-      - name: Setup Node.js 20
+      - name: Setup Node.js 24
         uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 24
           package-manager-cache: false
 
       - name: Open, update or close the issue nightly-failure

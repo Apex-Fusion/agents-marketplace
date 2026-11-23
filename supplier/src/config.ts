@@ -43,7 +43,7 @@
  *                          — "1" collects the Chat Completions SSE even for buffered
  *                            one-shot calls. For a provider that sends no response
  *                            header before the answer is complete (Hetzner): the
- *                            Node 20 fetch gives up on such a call after 300 s,
+ *                            Node fetch gives up on such a call after 300 s,
  *                            whatever OPENAI_TIMEOUT_MS is. Strict "1" only. Default
  *                            off. Requires OPENAI_UPSTREAM_API=chat-completions.
  *   OPENAI_CONTEXT_TOKENS  — context window of the upstream model in tokens (default
@@ -226,7 +226,7 @@ export interface SupplierConfig {
   /**
    * Collect the Chat Completions SSE even for buffered one-shot calls. For
    * providers that send no response header before the answer is complete
-   * (Hetzner): the Node 20 fetch gives up on such a call after 300 s, whatever
+   * (Hetzner): the Node fetch gives up on such a call after 300 s, whatever
    * OPENAI_TIMEOUT_MS is. Env: OPENAI_CHAT_STREAM_ONLY="1". Requires
    * OPENAI_UPSTREAM_API=chat-completions.
    */

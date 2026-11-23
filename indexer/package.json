@@ -8,7 +8,7 @@
   },
   "dependencies": {
     "@marketplace/shared": "workspace:*",
-    "better-sqlite3": "^11.9.1",
+    "better-sqlite3": "^13.2.0",
     "express": "^4.21.2",
     "ws": "^8.18.0"
   },

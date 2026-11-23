@@ -5,7 +5,7 @@
  *   node scripts/ci/nightly.mjs plan     writes the outputs `skip` and `seed` to $GITHUB_OUTPUT.
  *   node scripts/ci/nightly.mjs report   opens, updates or closes the issue with the label `nightly-failure`.
  *
- * It needs Node 20 and no packages. The runners have no `gh`, so it calls the REST API with fetch and $GITHUB_TOKEN.
+ * It needs Node 24 and no packages. The runners have no `gh`, so it calls the REST API with fetch and $GITHUB_TOKEN.
  *
  * plan:   `skip` is "true" for a scheduled run when the head of the branch already has a successful nightly run. A run that
  *         someone starts by hand never skips. `seed` is a new random 32-bit number for the Aiken property tests.

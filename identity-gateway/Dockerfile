@@ -9,7 +9,7 @@
 # only the runtime dependencies; `runtime` holds both and the schemas folder, runs as the non-root
 # `node` user and listens on 0.0.0.0:8080.
 
-ARG NODE_VERSION=22
+ARG NODE_VERSION=24.22.3
 
 FROM node:${NODE_VERSION}-alpine AS workspace
 WORKDIR /repo

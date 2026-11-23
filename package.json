@@ -5,7 +5,7 @@
   "description": "Cardano Vector-L2 marketplace where buyers pay AP3X via on-chain bonded escrow for prompts, and suppliers return OpenAI-compatible responses with signed receipts.",
   "type": "module",
   "engines": {
-    "node": ">=20.0.0",
+    "node": ">=24.0.0",
     "pnpm": ">=9.0.0"
   },
   "packageManager": "pnpm@10.33.2",
@@ -24,7 +24,7 @@
     "@testing-library/user-event": "^14.5.2",
     "@types/eventsource": "^1.1.15",
     "@types/express": "^5.0.3",
-    "@types/node": "^25.6.0",
+    "@types/node": "^24.19.2",
     "@types/react": "^18.3.0",
     "@types/react-dom": "^18.3.0",
     "@types/supertest": "^6.0.2",
