@@ -41,6 +41,7 @@ The gateway answers a deactivated DID with HTTP 410, and the body holds the reso
 | `fetch`, Python `requests`, the Java client of the Universal Resolver | Kept. Read the body as for a 200. |
 | `axios` | It throws. The body is in `error.response.data`, or accept the status with `validateStatus`. |
 | Rust `ssi` `HTTPDIDResolver`, DIF `web-did-resolver` | Dropped. Send the request to the gateway with a plain HTTP client and read the body. |
+| Universal Resolver (`uni-resolver-web`) | A revoked DID, resolved without an option, gives HTTP 404 `NOT_FOUND`, and the body of the gateway is lost. A `versionTime` or `versionId` before the end gives HTTP 410 with the body of that version. Send the DID percent-encoded. Each error of the gateway shows as HTTP 500 with the error body. |
 
 ## A run on mainnet
 

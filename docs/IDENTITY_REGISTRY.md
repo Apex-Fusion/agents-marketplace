@@ -731,10 +731,18 @@ All three modules get new deployments in this phase. They use `vector_identity` 
 
 ### 8.8 Universal Resolver
 
-- Build the image off-host or in CI from a version tag.
-- Push `ghcr.io/apex-fusion/uni-resolver-driver-did-vector:<version>` with the labels `org.opencontainers.image.source=https://github.com/Apex-Fusion/agents-marketplace` and `org.opencontainers.image.licenses=Apache-2.0`.
-- Make the package public once. Check this with an anonymous `docker pull`. Do not use a `latest` tag.
-- The driver entry sets `supportsOptions: true`. Without it, the Universal Resolver drops `versionId` and `versionTime` and returns the current version.
+The entry for the Universal Resolver is a URL entry. It has no image. It is prepared as one entry in `application.yml` of the `uni-resolver-web` service of the Universal Resolver, with one row in the driver table of its README.
+
+- **URL.** The `url` is `${uniresolver_web_driver_url_did_vector:https://id.vector.apexfusion.org/}`. The Universal Resolver adds `/1.0/identifiers/` to it.
+- **No `$1` and no `$2`.** The `url` has neither. With `$1` or `$2`, the Universal Resolver drops each option and returns the current version with no error.
+- **Options.** The entry sets `supportsOptions: true`. Without it, the Universal Resolver drops `versionId` and `versionTime` and returns the current version.
+- **Percent-encoding.** A request with an option must send the DID percent-encoded: `/1.0/identifiers/did%3Avector%3A<id>?versionTime=<time>`. An unencoded DID with a query is a DID URL request. With `Accept: application/did-resolution`, the answer to it is 406.
+- **Test identifiers.** A test identifier must be an active record. The test identifiers are the record of the gateway and Agent History. A revoked DID fails the check of the Universal Resolver repository.
+- **Later option: a public image.** The gateway image can become a public driver image:
+  - build the image off-host or in CI from a version tag;
+  - push `ghcr.io/apex-fusion/uni-resolver-driver-did-vector:<version>` with the labels `org.opencontainers.image.source=https://github.com/Apex-Fusion/agents-marketplace` and `org.opencontainers.image.licenses=Apache-2.0`;
+  - make the package public once, and check this with an anonymous `docker pull`;
+  - do not use a `latest` tag.
 
 ## 9. Migration
 
@@ -887,7 +895,7 @@ One combined release, in this order:
 5. **Records:** our agents adopt (§9.1). Our supplier records are registered (§9.2). The gateway registers itself (§8.2).
 6. **Smoke test** (§12.6).
 7. **Escrow switch:** as soon as our supplier records and new adverts exist (§9.3). Switch and drain (§9.6).
-8. **Universal Resolver:** the W3C registry entry is merged (pull request 769). The driver is planned and not published: submit it (§8.8). Its test identifiers are one live native DID, one adopted DID, one legacy DID and one deactivated DID.
+8. **Universal Resolver:** the W3C registry entry is merged (pull request 769). The entry for the Universal Resolver is prepared as a URL entry with no image (§8.8). Its test identifiers are the record of the gateway and Agent History. Both are active. Do not use a revoked DID.
 
 Use the selective release procedure for every service. A push to `main` must never start image builds on the production host.
 
@@ -977,7 +985,7 @@ The tests are in `tests/legacy-registry/` (offline, `aiken tx simulate`). Result
   - the legacy key search;
   - a failed ledger read;
   - the JCS output, `Cache-Control` and the HTTP status codes.
-- Run the image in a local Universal Resolver with `docker compose`. Check that `versionTime` reaches the driver.
+- Run the URL entry in a local Universal Resolver with `docker compose`. Check that `versionTime` reaches the gateway.
 - **Independent review.** A fresh reviewer gets Part 1, this file and the code, with the brief "break it". Fix each finding, or record that we accept it.
 
 ### 12.6 Mainnet smoke test
@@ -998,7 +1006,6 @@ The tests are in `tests/legacy-registry/` (offline, `aiken tx simulate`). Result
 - **Resolution:** resolve all of these through `id.vector.apexfusion.org`.
 - **Escrow:** run one job from end to end through the new escrow.
 - **Token check:** get one token and one SVID.
-- Keep the first test agent live for the Universal Resolver test identifiers.
 
 ## 13. Risks, deferred work and open items
 
