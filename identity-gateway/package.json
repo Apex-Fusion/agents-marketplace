@@ -20,8 +20,8 @@
     "ws": "^8.23.0"
   },
   "devDependencies": {
-    "@types/ws": "^8.5.13",
-    "tsx": "^4.19.0",
+    "@types/ws": "^8.18.2",
+    "tsx": "^4.23.15",
     "typescript": "^7.0.2"
   }
 }
