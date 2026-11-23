@@ -1,0 +1,53 @@
+# Dependabot version updates. The rules are in docs/TESTING.md, section "Dependency updates".
+# A dependency pull request changes pnpm-lock.yaml. deploy/mainnet/deploy.sh counts the lockfile as a shared path, so a merge
+# rebuilds and restarts every service. Do not turn on auto-merge for these pull requests: merge them in a release.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directories:
+      - "/"
+      - "/packages/shared"
+      - "/buyer"
+      - "/gateway"
+      - "/supplier"
+      - "/paper2agent"
+      - "/indexer"
+      - "/indexer-ui"
+      - "/wallet-monitor"
+      - "/identity-gateway"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "build(deps)"
+    groups:
+      # The chain, key and CBOR packages are not in a group: each update gets its own pull request and its own review.
+      runtime:
+        dependency-type: production
+        update-types: [minor, patch]
+        exclude-patterns:
+          - "@lucid-evolution/*"
+          - "@harmoniclabs/*"
+          - "@anastasia-labs/*"
+          - "@cardano-sdk/*"
+          - "@noble/*"
+          - "cbor-x"
+          - "libsodium*"
+      development:
+        dependency-type: development
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directories:
+      - "/"
+      - "/.github/actions/setup-aiken"
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions:
+        patterns: ["*"]
