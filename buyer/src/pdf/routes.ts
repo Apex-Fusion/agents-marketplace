@@ -52,7 +52,7 @@ export function registerPdfRoutes(
 
   // ── POST /v1/pdf-upload ─────────────────────────────────────────────
   app.post("/v1/pdf-upload", (req: Request, res: Response) => {
-    upload.single("file")(req, res, async (err: unknown) => {
+    const answer = async (err: unknown): Promise<Response> => {
       if (err) {
         const code = (err as { code?: string }).code;
         if (code === "LIMIT_FILE_SIZE") {
@@ -107,6 +107,17 @@ export function registerPdfRoutes(
         page_count: extracted.pageCount,
         chunk_count: chunks.length,
         sample_chunk: chunks[0].text.slice(0, 500),
+      });
+    };
+    // multer calls this callback from a stream event, and nothing handles a promise that it rejects: Node ends the process on an
+    // unhandled rejection. So the callback returns no promise. A throw that `answer` does not answer (chunkText, createJob) gets
+    // the 500 here.
+    upload.single("file")(req, res, (err: unknown) => {
+      answer(err).catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`[buyer] /v1/pdf-upload failed: ${message}`);
+        if (res.headersSent) res.destroy();
+        else jsonError(res, 500, "internal_error", message);
       });
     });
   });

@@ -3,7 +3,7 @@
  * createApp.
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -17,6 +17,14 @@ import { makeSupplierView } from "../fixtures/buyer-side/supplier-views.js";
 import type { ChainProvider } from "../../packages/shared/src/chain/ChainProvider.js";
 import type { WalletKey } from "../../packages/shared/src/tx/types.js";
 import { createResponse } from "../../packages/shared/src/responses.js";
+import { extractPdfText } from "../../buyer/src/pdf/extract.js";
+import type * as ExtractModule from "../../buyer/src/pdf/extract.js";
+
+// The real extractor stays in use. One test makes it answer with a text, so that the upload reaches the job store.
+vi.mock("../../buyer/src/pdf/extract.js", async (importOriginal) => {
+  const original = await importOriginal<typeof ExtractModule>();
+  return { ...original, extractPdfText: vi.fn(original.extractPdfText) };
+});
 
 const MARKETPLACE = {
   discoverSuppliers: async () => [makeSupplierView({ model: "kimi-k2" })],
@@ -97,6 +105,20 @@ describe("/v1/pdf-* routes", () => {
       .attach("file", Buffer.from("this is not a pdf"), "junk.pdf");
     expect(res.status).toBe(422);
     expect(["pdf_parse_failed", "scanned_or_image_pdf", "no_text"]).toContain(res.body.error);
+  });
+
+  it("answers 500 and does not end the process when the job store throws after the upload was read", async () => {
+    // The route runs in a callback of multer. A throw there rejected a promise that nothing handles, and Node ended the buyer.
+    vi.mocked(extractPdfText).mockResolvedValueOnce({ text: "A paper with some text.", pageCount: 1 });
+    const store = makeStore();
+    vi.spyOn(store, "createJob").mockImplementation(() => {
+      throw new Error("job database is full");
+    });
+    const app = createApp({ jobStore: store, pdfCaps: loadPdfCaps({}) });
+    const { default: request } = await import("supertest");
+    const res = await request(app).post("/v1/pdf-upload").attach("file", Buffer.from("%PDF-1.4"), "paper.pdf");
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({ error: "internal_error", message: "job database is full" });
   });
 
   it("lists jobs newest-first via GET /v1/pdf-jobs", async () => {
