@@ -174,7 +174,7 @@ took 1.8 s with it and 15.3 s with tsc 5.9.3 (2026-11-23, no build info).
 
 ### Lint
 
-The linter is oxlint. `oxlint` and `oxlint-tsgolint` are in the root `devDependencies`, with exact versions. With `--type-aware`, oxlint-tsgolint reads the tsconfig files and checks the types with TypeScript 7, so the rules that need types run too. The config is `.oxlintrc.json`.
+The linter is oxlint. `oxlint` and `oxlint-tsgolint` are in the root `devDependencies`, with exact versions. With `--type-aware`, oxlint-tsgolint reads the tsconfig files and checks the types with TypeScript 7, so the rules that need types run too. The config is `.oxlintrc.json`. It sets `options.typeAware` as well, so a run without the flag is type-aware too.
 
 | Files | Rules (all are errors) |
 |---|---|
