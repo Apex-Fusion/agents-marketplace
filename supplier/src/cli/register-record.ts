@@ -263,5 +263,10 @@ export async function runRegisterRecord(
 }
 
 if (process.argv[1]?.endsWith("register-record.ts") || process.argv[1]?.endsWith("register-record.js")) {
-  runRegisterRecord(process.argv.slice(2), process.env).then((code) => process.exit(code));
+  runRegisterRecord(process.argv.slice(2), process.env)
+    .then((code) => process.exit(code))
+    .catch((err: unknown) => {
+      process.stderr.write(`error: ${err instanceof Error ? err.message : String(err)}\n`);
+      process.exitCode = 1;
+    });
 }

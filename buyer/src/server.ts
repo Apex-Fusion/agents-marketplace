@@ -1232,7 +1232,7 @@ export function createApp(deps: AppDeps): Express {
           `escrow ${currentRefStr} has already been accepted (UTxO is no longer on chain)`,
         );
       }
-    } catch (err) {
+    } catch {
       // Chain probe failed — proceed to runAccept; if the UTxO is missing,
       // runAccept will fail with a structured TxConstructionError which
       // becomes a 502 below. Don't block on a transient Ogmios hiccup.

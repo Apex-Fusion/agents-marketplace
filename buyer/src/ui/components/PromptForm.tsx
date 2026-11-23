@@ -87,7 +87,7 @@ export default function PromptForm({ advertRef, payment_lovelace, onSubmit }: Pr
       });
       const body = (await resp.json()) as ServerResponse;
       if (!resp.ok) {
-        throw new Error(`${body.error ?? resp.statusText}: ${body.message ?? ""}`);
+        throw new Error(`${String(body.error ?? resp.statusText)}: ${body.message ?? ""}`);
       }
       const escrow = refToOutput(body.escrow_ref);
       if (
@@ -165,7 +165,7 @@ export default function PromptForm({ advertRef, payment_lovelace, onSubmit }: Pr
   };
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-3">
+    <form onSubmit={(event) => void handleSubmit(event)} className="space-y-3">
       <textarea
         className="w-full rounded border border-gray-300 p-3 text-sm font-mono text-gray-900"
         rows={6}

@@ -34,7 +34,7 @@ function toWords(bytes: Uint8Array): number[] {
 
 export function bech32Encode(hrp: string, bytes: Uint8Array): string {
   const words = toWords(bytes);
-  const expanded = [...[...hrp].map((c) => c.charCodeAt(0) >> 5), 0, ...[...hrp].map((c) => c.charCodeAt(0) & 31)];
+  const expanded = [...Array.from(hrp, (c) => c.charCodeAt(0) >> 5), 0, ...Array.from(hrp, (c) => c.charCodeAt(0) & 31)];
   const mod = polymod([...expanded, ...words, 0, 0, 0, 0, 0, 0]) ^ 1;
   const checksum = Array.from({ length: 6 }, (_, i) => (mod >>> (5 * (5 - i))) & 31);
   return `${hrp}1${[...words, ...checksum].map((w) => CHARSET[w]).join("")}`;

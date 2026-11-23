@@ -769,11 +769,6 @@ function nonNegativeSafeInteger(value: unknown, field: string): number {
   return value;
 }
 
-function optionalSafeInteger(value: unknown, field: string): number {
-  if (value === null || value === undefined) return 0;
-  return nonNegativeSafeInteger(value, field);
-}
-
 function microUsd(value: unknown, field: string): number {
   if (typeof value === "string" && /^(?:0|[1-9]\d*)$/.test(value)) {
     const parsed = Number(value);

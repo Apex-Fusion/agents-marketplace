@@ -127,7 +127,7 @@ export async function listRecords(chain: ChainSource, snapshot: LedgerSnapshot, 
 
   /** A mint in a block after the tip came in after the tip was read: the list describes the tip. */
   const visible = (mint: MintFacts | undefined): MintFacts | null => (mint && mint.blockHeight <= tip.blockHeight ? mint : null);
-  const firstMintOf = ({ burnsLegacy: _, ...mint }: MintFacts): FirstMint => ({ ...mint, confirmations: tip.blockHeight - mint.blockHeight });
+  const firstMintOf = ({ burnsLegacy: _burnsLegacy, ...mint }: MintFacts): FirstMint => ({ ...mint, confirmations: tip.blockHeight - mint.blockHeight });
 
   const entries: Array<Omit<RecordListEntry, "statusListIndex">> = [];
   for (const [vectorId, mint] of identityFirst) {

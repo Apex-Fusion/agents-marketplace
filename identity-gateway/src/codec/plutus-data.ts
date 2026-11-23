@@ -99,7 +99,7 @@ function head(major: number, arg: bigint, out: number[]): void {
 }
 
 function bigEndian(n: bigint, length: number): number[] {
-  const out: number[] = new Array(length);
+  const out: number[] = [];
   for (let i = length - 1; i >= 0; i--) {
     out[i] = Number(n & 0xffn);
     n >>= 8n;

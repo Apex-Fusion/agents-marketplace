@@ -30,8 +30,6 @@ import {
   buildPostEscrowTx,
   buildReclaimTx,
   buildReleaseTx,
-  buildAcceptTx,
-  TxConstructionError,
 } from "@marketplace/shared/tx";
 import { canonicalize } from "@marketplace/shared/cbor";
 import {
@@ -39,7 +37,6 @@ import {
   type ResponseRequest,
 } from "@marketplace/shared/responses";
 import { Marketplace, MemoryTaskHistoryStore } from "../src/sdk/index.js";
-import { runAccept } from "../src/cli/acceptFlow.js";
 import { deriveWalletKey } from "../src/index.js";
 import { parseSwitchSlot } from "../src/config.js";
 
@@ -72,10 +69,6 @@ for (const key of ["IDENTITY_POLICY_ID", "IDENTITY_ESCROW_REF_UTXO"]) {
 
 const ADVERT_REF_ACTIVE: OutputReference = {
   txHash: "9e9a86098c18cecf544d4c69e16ace850ab8c271a8bbea2facdaafc3be52701c",
-  index: 0,
-};
-const ADVERT_REF_RETIRED: OutputReference = {
-  txHash: "386d30fdc3e69c5a7063b9bb99a6ea3e2bee79498c16a22cf3a9c74a4a004040",
   index: 0,
 };
 const ADVERT_PRICE_LOVELACE = 5_000_000n;
@@ -215,13 +208,6 @@ async function attack_A2(): Promise<AttackResult> {
   }
 }
 
-async function attack_A3(): Promise<AttackResult> {
-  const id = "A3";
-  const what = "PostEscrow expects deliver_by computed by builder; we can't easily set it in the past via the SDK without forking the builder. We try buildPostEscrowTx in a state where the advert's max_processing_ms produces a future deliver_by — so the BUILDER won't reject, but we verify the build path computes deliver_by correctly.";
-  const expected = "Defense: builder always computes deliver_by = now + advert.max_processing_ms + 30000ms, so the buyer can't choose. This attack is effectively unreachable via the standard builder; skip with note.";
-  return { id, category: "A", what, expected, what_happened: "deferred — builder computes deliver_by; manual datum forge needed to inject past value", verdict: "SKIPPED", evidence: "buildPostEscrowTx packages/shared/src/tx/escrow/postEscrow.ts" };
-}
-
 async function attack_A4(): Promise<AttackResult> {
   const id = "A4";
   const what = "PostEscrow then immediately attempt Reclaim before deliver_by.";
@@ -280,149 +266,7 @@ async function attack_A4(): Promise<AttackResult> {
   }
 }
 
-// ─── B: Protocol-fuzzing ────────────────────────────────────────────────
-
-async function attack_B2(): Promise<AttackResult> {
-  const id = "B2";
-  const what = "PostEscrow with a Responses request commitment, then send different input.";
-  const expected = "supplier 409 prompt_mismatch (server.ts:278).";
-  checkCapsBeforePost();
-  const startBal = await walletLovelace();
-  try {
-    const requestA = responseRequest("B2 probe: commit-this-prompt", 100);
-    log("B2: posting escrow with request A");
-    let escrowRef: OutputReference;
-    try {
-      const escrowResult = await buildPostEscrowTx({
-        chain,
-        buyerKey: wk,
-        advertRef: ADVERT_REF_ACTIVE,
-        prompt_hash: promptHash(requestA),
-        payment_lovelace: ADVERT_PRICE_LOVELACE,
-        ...(await marketplace.identity.postOptions()),
-      });
-      escrowRef = escrowResult.escrowOutputRef;
-      await chain.awaitTx(escrowResult.expectedTxHash, 120_000);
-    } catch (err) {
-      const endBal = await walletLovelace();
-      counters.burnedLovelace += (startBal - endBal);
-      return { id, category: "B", what, expected, what_happened: `couldn't post escrow: ${head(err instanceof Error ? err.message : String(err))}`, verdict: "UNCLEAR", evidence: "" };
-    }
-    counters.escrowsPosted += 1;
-    const escrowRefStr = `${escrowRef.txHash}#${escrowRef.index}`;
-    log(`B2: escrow=${escrowRefStr}; sending different request B`);
-
-    const requestB = responseRequest("B2 probe: but-actually-this-prompt", 100);
-    const resp = await rateLimitedFetch(`${SUPPLIER_URL}/v1/responses`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "X-Escrow-Ref": escrowRefStr },
-      body: JSON.stringify({ model: "qwen3.6:35b", ...requestB }),
-    });
-    const text = await resp.text();
-    // Reclaim after the supplier rejects so we get our money back.
-    // We have to wait until past deliver_by to reclaim. For the report we just
-    // observe the immediate response; reclaim happens on a later sweep or
-    // post-window automatic.
-    const verdict: Verdict = resp.status === 409 && text.includes("prompt_mismatch") ? "BLOCKED" : (resp.status >= 200 && resp.status < 300 ? "GAP" : "BLOCKED");
-    const endBal = await walletLovelace();
-    counters.burnedLovelace += (startBal - endBal);
-    return { id, category: "B", what, expected, what_happened: `HTTP ${resp.status}: ${head(text, 200)}`, verdict, evidence: `escrow=${escrowRefStr}; status=${resp.status}; body=${head(text, 400)}` };
-  } catch (err) {
-    const endBal = await walletLovelace();
-    counters.burnedLovelace += (startBal - endBal);
-    const msg = err instanceof Error ? err.message : String(err);
-    return { id, category: "B", what, expected, what_happened: `setup error: ${head(msg)}`, verdict: "UNCLEAR", evidence: msg.slice(0, 500) };
-  }
-}
-
-async function attack_B3(): Promise<AttackResult> {
-  const id = "B3";
-  const what = "POST /v1/responses with X-Escrow-Ref pointing at a random non-existent ref.";
-  const expected = "404 escrow_not_found or 400 — should not reach inference.";
-  const bogus = "0".repeat(63) + "1#0";
-  const resp = await rateLimitedFetch(`${SUPPLIER_URL}/v1/responses`, {
-    method: "POST",
-    headers: { "content-type": "application/json", "X-Escrow-Ref": bogus },
-    body: JSON.stringify({ model: "qwen3.6:35b", ...responseRequest("B3 probe", 50) }),
-  });
-  const text = await resp.text();
-  const verdict: Verdict = (resp.status >= 400 && resp.status < 500) ? "BLOCKED" : "GAP";
-  return { id, category: "B", what, expected, what_happened: `HTTP ${resp.status}: ${head(text, 200)}`, verdict, evidence: `status=${resp.status}; body=${head(text, 400)}` };
-}
-
-async function attack_B5(): Promise<AttackResult> {
-  const id = "B5";
-  const what = "Call buildPostEscrowTx with payment_lovelace strictly less than advert.price_lovelace.";
-  const expected = "TxConstructionError 'payment must equal advertised price' (postEscrow.ts:96) — build-time rejection, no chain spend.";
-  try {
-    const request = responseRequest("B5 probe");
-    await buildPostEscrowTx({
-      chain, buyerKey: wk, advertRef: ADVERT_REF_ACTIVE, prompt_hash: promptHash(request), payment_lovelace: 1_000_000n,
-      ...(await marketplace.identity.postOptions()),
-    });
-    return { id, category: "B", what, expected, what_happened: "builder accepted underpayment — GAP", verdict: "GAP", evidence: "buildPostEscrowTx succeeded with payment=1_000_000 vs advert.price=5_000_000" };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    const isPriceErr = msg.toLowerCase().includes("payment") && msg.toLowerCase().includes("price");
-    return { id, category: "B", what, expected, what_happened: `rejected: ${head(msg)}`, verdict: isPriceErr ? "BLOCKED" : "UNCLEAR", evidence: msg.slice(0, 500) };
-  }
-}
-
 // ─── C: Liveness / DoS ──────────────────────────────────────────────────
-
-async function attack_C1(): Promise<AttackResult> {
-  const id = "C1";
-  const what = "Send a request body >100KB.";
-  const expected = "413 or 400 before LLM invocation.";
-  const big = "A".repeat(120_000);
-  const resp = await rateLimitedFetch(`${SUPPLIER_URL}/v1/responses`, {
-    method: "POST",
-    headers: { "content-type": "application/json", "X-Escrow-Ref": "0".repeat(64) + "#0" },
-    body: JSON.stringify({ model: "qwen3.6:35b", ...responseRequest(big, 50) }),
-  });
-  const text = await resp.text();
-  const verdict: Verdict = (resp.status >= 400 && resp.status < 500) ? "BLOCKED" : "GAP";
-  return { id, category: "C", what, expected, what_happened: `HTTP ${resp.status}: ${head(text, 200)}`, verdict, evidence: `status=${resp.status}; body_bytes=120000; resp=${head(text, 200)}` };
-}
-
-async function attack_C2(): Promise<AttackResult> {
-  const id = "C2";
-  const what = "PostEscrow honestly, then chat body with max_output_tokens 999999.";
-  const expected = "400 output_cap_exceeded (server.ts:234).";
-  checkCapsBeforePost();
-  const startBal = await walletLovelace();
-  try {
-    const request = responseRequest("C2 probe — request huge output.", 999_999);
-    log("C2: posting honest escrow then sending oversized max_output_tokens");
-    const escrowResult = await buildPostEscrowTx({
-      chain,
-      buyerKey: wk,
-      advertRef: ADVERT_REF_ACTIVE,
-      prompt_hash: promptHash(request),
-      payment_lovelace: ADVERT_PRICE_LOVELACE,
-      ...(await marketplace.identity.postOptions()),
-    });
-    counters.escrowsPosted += 1;
-    await chain.awaitTx(escrowResult.expectedTxHash, 120_000);
-    const escrowRefStr = `${escrowResult.escrowOutputRef.txHash}#${escrowResult.escrowOutputRef.index}`;
-
-    const resp = await rateLimitedFetch(`${SUPPLIER_URL}/v1/responses`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "X-Escrow-Ref": escrowRefStr },
-      body: JSON.stringify({ model: "qwen3.6:35b", ...request }),
-    });
-    const text = await resp.text();
-    const verdict: Verdict = resp.status === 400 && text.includes("output_cap_exceeded") ? "BLOCKED" : (resp.status === 200 ? "GAP" : "UNCLEAR");
-    const endBal = await walletLovelace();
-    counters.burnedLovelace += (startBal - endBal);
-    return { id, category: "C", what, expected, what_happened: `HTTP ${resp.status}: ${head(text, 200)}`, verdict, evidence: `escrow=${escrowRefStr}; status=${resp.status}; body=${head(text, 400)}` };
-  } catch (err) {
-    const endBal = await walletLovelace();
-    counters.burnedLovelace += (startBal - endBal);
-    const msg = err instanceof Error ? err.message : String(err);
-    return { id, category: "C", what, expected, what_happened: `setup error: ${head(msg)}`, verdict: "UNCLEAR", evidence: msg.slice(0, 500) };
-  }
-}
 
 async function attack_C4(): Promise<AttackResult> {
   const id = "C4";
@@ -457,7 +301,7 @@ async function attack_C4(): Promise<AttackResult> {
           livenessOk = ok.ok;
         } catch { livenessOk = false; }
       }
-    } catch (err) {
+    } catch {
       other += 1;
       if (counters.requestsSent >= CAP_REQUESTS) break;
     }
@@ -467,48 +311,7 @@ async function attack_C4(): Promise<AttackResult> {
   return { id, category: "C", what, expected, what_happened: `${ok4xx}/${results.length} 4xx, ${other} other; liveness=${livenessOk}; duration=${dur}ms`, verdict, evidence: `burst N=${N}, status_codes=${[...new Set(results)].join(",")}, liveness_probe=${livenessOk}` };
 }
 
-async function attack_C5(): Promise<AttackResult> {
-  const id = "C5";
-  const what = "Spam indexer /suppliers + /escrows/<ref> at 2 rps for 30s.";
-  const expected = "all 200; report any 5xx.";
-  const start = Date.now();
-  const statuses: number[] = [];
-  const refsToHit = [
-    `${env.INDEXER_URL}/suppliers`,
-    `${env.INDEXER_URL}/escrows/${ADVERT_REF_ACTIVE.txHash}%23${ADVERT_REF_ACTIVE.index}`,
-  ];
-  let i = 0;
-  while (Date.now() - start < 30_000) {
-    try {
-      const url = refsToHit[i++ % refsToHit.length];
-      const resp = await rateLimitedFetch(url);
-      statuses.push(resp.status);
-    } catch (err) {
-      statuses.push(0);
-      if (counters.requestsSent >= CAP_REQUESTS) break;
-    }
-  }
-  const count5xx = statuses.filter((s) => s >= 500).length;
-  const count200 = statuses.filter((s) => s === 200).length;
-  const verdict: Verdict = (count5xx === 0 && count200 > 0) ? "BLOCKED" : (count5xx > 0 ? "GAP" : "UNCLEAR");
-  return { id, category: "C", what, expected, what_happened: `${statuses.length} reqs in 30s: ${count200} 200s, ${count5xx} 5xx`, verdict, evidence: `unique_codes=${[...new Set(statuses)].join(",")}; n=${statuses.length}` };
-}
-
 // ─── D: Social / spec attacks ───────────────────────────────────────────
-
-async function attack_D1(): Promise<AttackResult> {
-  const id = "D1";
-  const what = "POST /v1/responses with NO X-Escrow-Ref header.";
-  const expected = "400 escrow_ref_required.";
-  const resp = await rateLimitedFetch(`${SUPPLIER_URL}/v1/responses`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ model: "qwen3.6:35b", ...responseRequest("D1 probe", 50) }),
-  });
-  const text = await resp.text();
-  const isBlocked = resp.status === 400 && text.includes("escrow_ref_required");
-  return { id, category: "D", what, expected, what_happened: `HTTP ${resp.status}: ${head(text, 200)}`, verdict: isBlocked ? "BLOCKED" : (resp.status === 200 ? "GAP" : "UNCLEAR"), evidence: `status=${resp.status}; body=${head(text, 400)}` };
-}
 
 async function attack_D3(): Promise<AttackResult> {
   const id = "D3";
@@ -545,23 +348,6 @@ async function attack_D3(): Promise<AttackResult> {
     counters.burnedLovelace += (startBal - endBal);
     const msg = err instanceof Error ? err.message : String(err);
     return { id, category: "D", what, expected, what_happened: `setup error: ${head(msg)}`, verdict: "UNCLEAR", evidence: msg.slice(0, 500) };
-  }
-}
-
-async function attack_D4(): Promise<AttackResult> {
-  const id = "D4";
-  const what = "buildPostEscrowTx pointing at the RETIRED advert ref (386d30…004040#0).";
-  const expected = "Builder rejects because advert UTxO is no longer on chain — chain.queryUtxo returns null.";
-  try {
-    const request = responseRequest("D4 probe");
-    await buildPostEscrowTx({
-      chain, buyerKey: wk, advertRef: ADVERT_REF_RETIRED, prompt_hash: promptHash(request), payment_lovelace: ADVERT_PRICE_LOVELACE,
-      ...(await marketplace.identity.postOptions()),
-    });
-    return { id, category: "D", what, expected, what_happened: "builder accepted post against retired advert", verdict: "GAP", evidence: `retired_advert=${ADVERT_REF_RETIRED.txHash}#${ADVERT_REF_RETIRED.index}` };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return { id, category: "D", what, expected, what_happened: `rejected: ${head(msg)}`, verdict: "BLOCKED", evidence: msg.slice(0, 500) };
   }
 }
 
@@ -624,8 +410,8 @@ async function attack_A1(): Promise<AttackResult> {
 
 // ─── Main orchestrator ──────────────────────────────────────────────────
 
-// Continuation run: attacks D1, B3, C1, C5, A3, B5, D4, B2, C2 all completed
-// BLOCKED in the first pass. This continuation runs the remaining 5.
+// Continuation run: attacks D1, B3, C1, C5, A3, B5, D4, B2, C2 all completed BLOCKED in the first pass. Their code is no longer
+// in this file (see the git history). This continuation runs the remaining 5.
 const ATTACKS: { id: string; fn: () => Promise<AttackResult> }[] = [
   // Post-escrow rejection (1 escrow; supplier 409 expected)
   { id: "D3", fn: attack_D3 },

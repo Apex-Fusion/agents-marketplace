@@ -128,7 +128,7 @@ export async function signAgentCard(card: AgentCard, baseUrl: string, signer: Ed
 
 /** At most `max` code points; a cut text ends with an ellipsis. */
 function clip(text: string, max: number): string {
-  const points = [...text];
+  const points = Array.from(text);
   return points.length <= max ? text : `${points.slice(0, max - 1).join("")}…`;
 }
 
