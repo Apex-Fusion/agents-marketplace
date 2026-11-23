@@ -222,11 +222,12 @@ export async function runMain(
   });
 }
 
-// Boot only when invoked directly (not when imported by tests).
+// Boot only when invoked directly (not when imported by tests): from the source through tsx, or from the bundle that
+// scripts/ci/build-service.mjs writes to buyer/dist-server/ (the image).
 const invokedDirectly =
   typeof process !== "undefined" &&
   process.argv?.[1] !== undefined &&
-  /buyer\/(src|dist)\/index\.(t|j)s$/.test(process.argv[1]);
+  /buyer\/(src|dist-server)\/index\.(t|j)s$/.test(process.argv[1]);
 
 if (invokedDirectly) {
   runMain(process.env).catch((err) => {

@@ -13,6 +13,7 @@
 
 # Compiled / built artifacts (Vite + tsc) — rebuilt in builder
 **/dist
+**/dist-server
 **/build
 **/.vite
 **/.vitest-cache

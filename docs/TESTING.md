@@ -29,6 +29,7 @@ All commands that load the CPU run on a build host through `rx` (`rx --help`).
 | The typecheck of one package | `rx pnpm --filter ./<package folder> typecheck` |
 | The typecheck of all source | `rx pnpm -r typecheck` |
 | The typecheck of the test files (blocking in CI) | `rx node scripts/ci/tsc-report.mjs tests/tsconfig.json gateway/tsconfig.test.json paper2agent/tsconfig.test.json tests/legacy-registry/tsconfig.json tests/identity-builders/tsconfig.json tests/identity-vectors/tsconfig.json` |
+| The service bundles of the images | `rx node scripts/ci/build-service.mjs --all` (writes `<service>/dist-server/`; deploy/README.md section 12) |
 | One Aiken area | `rx mise exec github:aiken-lang/aiken@1.1.24 node@24 -- scripts/aiken-check --modules identity_marketplace/escrow` |
 | One Aiken shard | `rx mise exec github:aiken-lang/aiken@1.1.24 node@24 -- scripts/aiken-check --shard 1 --of 4 --seed 358316146` |
 | The legacy contract | `rx mise exec github:aiken-lang/aiken@1.1.24 node@24 -- scripts/aiken-check --project contracts/marketplace --all` |
@@ -90,7 +91,7 @@ The workflow `CI` has the same triggers as before: a push on `main`, and each pu
 | Job | Runs when | What it does |
 |---|---|---|
 | `changes` | Always | Lists the changed files (the pull request from the merge base to the head, a push from `before` to the new commit; every file when `before` is missing). Runs `scripts/ci/changes.mjs`. Tests the CI scripts first. |
-| `typecheck` | The change is not docs only | `pnpm -r typecheck` (blocking). Then the type check of the test files (blocking too): `tests/tsconfig.json`, `gateway/tsconfig.test.json`, `paper2agent/tsconfig.test.json` and three folder configs. An error in any config fails the job. The error count of each config is in the job summary. Section "The type check of the test files". |
+| `typecheck` | The change is not docs only | `pnpm -r typecheck` (blocking). Then the type check of the test files (blocking too): `tests/tsconfig.json`, `gateway/tsconfig.test.json`, `paper2agent/tsconfig.test.json` and three folder configs. An error in any config fails the job. The error count of each config is in the job summary. Section "The type check of the test files". Then it bundles the six services (`node scripts/ci/build-service.mjs --all`); a bundle error fails the job. |
 | `vitest` | The selection is not empty | The projects `unit` and `ui`: the selected test files, or every file of the two projects when the selection is `all`. Fails when it runs no file. The 10 slowest test files are in the job summary. |
 | `aiken-eval` | `contracts/identity-marketplace/` changed, or a file that the tests of the project `aiken-eval` reach | `aiken build` with the blueprint diff, the project `aiken-eval` (the 4 folders, one run, the 10 slowest files in the job summary), `tsc -p tests/identity-deploy/tsconfig.json`, and `fixtures/generate.mjs --check`. Aiken v1.1.21. |
 | `aiken-check` | The identity contract changed, the Aiken tool changed, or a map `contracts/identity-marketplace/tests/*.md` changed | The map check (`scripts/aiken-check-maps`), then 4 shards of `scripts/aiken-check`, aiken v1.1.24, one fixed seed. |
@@ -249,7 +250,8 @@ A red nightly run does not stop a deploy. Agents look for an open `nightly-failu
 `deploy/mainnet/deploy.sh` decides from the diff which compose projects to rebuild. It drops test-only paths first (`tests/`, `test/`,
 `__tests__/`, `*.test.*`, `*.spec.*`, `tsconfig.test.json`, `vitest.*` in the root) and logs how many it ignored. Below `contracts/`
 only the two `plutus.json` blueprints count, because the images copy only these files. A change of tests alone, or of an Aiken
-test, restarts nothing. `FORCE=1` still redeploys everything.
+test, restarts nothing. `FORCE=1` still redeploys everything. The images run esbuild bundles of the servers, not the TypeScript sources
+(deploy/README.md section 12).
 
 ## 7. Coverage guard
 

@@ -2,11 +2,11 @@
 #
 # gateway/Dockerfile — multi-stage image for the OpenAI-compatible gateway.
 #
-# Mirrors buyer/Dockerfile: we do NOT run `tsc` for the server because
-# @marketplace/shared and @marketplace/buyer export .ts directly via
-# package.json#exports — the tsx loader handles them at runtime. The gateway
-# reuses the buyer's Marketplace SDK + lucid (buildAcceptTx / buildWithdrawTx),
-# so it needs the same better-sqlite3 native rebuild + libsodium patch and the
+# Like buyer/Dockerfile, the image runs an esbuild bundle of the server
+# (gateway/dist-server/index.js, scripts/ci/build-service.mjs), which includes
+# @marketplace/shared and @marketplace/buyer (both export .ts files). The
+# gateway reuses the buyer's Marketplace SDK + lucid (buildAcceptTx /
+# buildWithdrawTx), so it needs the libsodium patch and the
 # contracts/marketplace/plutus.json blueprint.
 #
 # Build:
@@ -18,7 +18,7 @@ ARG NODE_VERSION=24.22.3
 FROM node:${NODE_VERSION}-alpine AS builder
 WORKDIR /repo
 
-RUN apk add --no-cache python3 make g++
+# better-sqlite3 13 ships prebuilt N-API binaries (musl too), so the builder needs no C toolchain.
 RUN corepack enable && corepack prepare pnpm@10.33.2 --activate
 
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json tsconfig.base.json .npmrc ./
@@ -31,11 +31,7 @@ COPY gateway/package.json ./gateway/package.json
 # Install the gateway and its workspace deps (buyer + shared) with their deps.
 RUN pnpm install --frozen-lockfile --filter '@marketplace/gateway...'
 
-# better-sqlite3 native binding (same step as buyer/indexer images).
-RUN BSQ_DIR=$(ls -d node_modules/.pnpm/better-sqlite3@*/node_modules/better-sqlite3 2>/dev/null | head -1) \
- && [ -n "$BSQ_DIR" ] || (echo "FATAL: better-sqlite3 not in pnpm store" && exit 1) \
- && (cd "$BSQ_DIR" && (npx --yes prebuild-install --runtime=node || npm install --build-from-source --no-save)) \
- && ls -la "$BSQ_DIR/build/Release/better_sqlite3.node"
+# better-sqlite3 13 loads its prebuilt musl binary; pnpm skips its build script (ignoredBuiltDependencies).
 
 # libsodium wrapper patch (lucid/CML dep) — same fix as the buyer image.
 RUN set -e \
@@ -51,6 +47,10 @@ COPY gateway ./gateway
 COPY contracts/marketplace/plutus.json ./contracts/marketplace/plutus.json
 # loadIdentityBlueprint reads the new escrow (settle, sweeper, RefundRevoked).
 COPY contracts/identity-marketplace/plutus.json ./contracts/identity-marketplace/plutus.json
+
+# Bundle the server into gateway/dist-server/: the image runs no tsx. The bundle holds absolute /repo paths.
+COPY scripts/ci/build-service.mjs ./scripts/ci/build-service.mjs
+RUN node scripts/ci/build-service.mjs gateway
 
 # ─── runtime ──────────────────────────────────────────────────────────────
 FROM node:${NODE_VERSION}-alpine AS runtime
@@ -71,4 +71,4 @@ HEALTHCHECK --interval=20s --timeout=5s --start-period=15s --retries=3 \
   CMD wget -qO- http://127.0.0.1:${GATEWAY_PORT}/healthz >/dev/null || exit 1
 
 ENTRYPOINT ["/sbin/tini", "--"]
-CMD ["node_modules/.bin/tsx", "gateway/src/index.ts"]
+CMD ["node", "--enable-source-maps", "gateway/dist-server/index.js"]

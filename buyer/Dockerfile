@@ -4,19 +4,15 @@
 #
 # Two artifacts produced:
 #   1. Vite-built static UI bundle at  buyer/dist/{index.html, assets/...}
-#   2. tsx-runnable Express server at  buyer/src/index.ts
+#   2. esbuild bundle of the Express server at  buyer/dist-server/index.js
+#      (scripts/ci/build-service.mjs; it also bundles @marketplace/shared, which exports .ts files)
 #
-# The Express server (buyer/src/index.ts:78) reads
+# The Express server (buyer/src/index.ts) reads
 #   resolve(process.cwd(), "buyer/dist")
 # at boot and serves that directory, so we set the runtime WORKDIR to /repo
 # (the repo root, since the path is "buyer/dist" not "./dist") and ensure the
-# Vite output lands there.
-#
-# We do NOT run `tsc` for the server because @marketplace/shared exports .ts
-# files directly via package.json#exports — the tsx loader handles them. The
-# buyer's tsconfig.json#outDir of "./dist" would in fact COLLIDE with the
-# Vite outDir if both were run, since vite.config.ts has emptyOutDir:true and
-# would wipe any tsc-emitted index.js. tsx-only runtime avoids this trap.
+# Vite output lands there. The server bundle is in buyer/dist-server/, so the
+# static UI never serves it.
 #
 # Build:
 #   docker build -f buyer/Dockerfile -t marketplace-buyer .
@@ -27,10 +23,7 @@ ARG NODE_VERSION=24.22.3
 FROM node:${NODE_VERSION}-alpine AS builder
 WORKDIR /repo
 
-# better-sqlite3 (used by the response archive) ships native bindings —
-# python3 + make + g++ are needed during pnpm install for the prebuild
-# install / fallback compile. Toolchain stays in the BUILDER stage only.
-RUN apk add --no-cache python3 make g++
+# better-sqlite3 13 ships prebuilt N-API binaries (musl too), so the builder needs no C toolchain.
 
 RUN corepack enable && corepack prepare pnpm@10.33.2 --activate
 
@@ -46,14 +39,7 @@ COPY indexer/package.json ./indexer/package.json
 # must install with dev deps included (default).
 RUN pnpm install --frozen-lockfile --filter '@marketplace/buyer...'
 
-# better-sqlite3 native binding fetch (mirrors indexer/Dockerfile). pnpm 10's
-# approve-builds gate skips the postinstall on native modules, so we manually
-# resolve the binary into build/Release/.
-RUN BSQ_DIR=$(ls -d node_modules/.pnpm/better-sqlite3@*/node_modules/better-sqlite3 2>/dev/null | head -1) \
- && [ -n "$BSQ_DIR" ] || (echo "FATAL: better-sqlite3 not in pnpm store" && exit 1) \
- && echo "rebuilding native binding at: $BSQ_DIR" \
- && (cd "$BSQ_DIR" && (npx --yes prebuild-install --runtime=node || npm install --build-from-source --no-save)) \
- && ls -la "$BSQ_DIR/build/Release/better_sqlite3.node"
+# better-sqlite3 13 loads its prebuilt musl binary; pnpm skips its build script (ignoredBuiltDependencies).
 
 # libsodium-wrappers-sumo (transitive via @lucid-evolution/lucid → CML) does
 # `import "./libsodium-sumo.mjs"` from its wrapper, but pnpm's strict store
@@ -83,6 +69,11 @@ COPY contracts/identity-marketplace/plutus.json ./contracts/identity-marketplace
 # emptyOutDir:true is fine here because we run this exactly once).
 RUN pnpm --filter @marketplace/buyer build:ui
 
+# Bundle the server into buyer/dist-server/: the image runs no tsx. The bundle holds absolute /repo paths, so it is
+# built in /repo and runs in /repo.
+COPY scripts/ci/build-service.mjs ./scripts/ci/build-service.mjs
+RUN node scripts/ci/build-service.mjs buyer
+
 # ─── runtime ──────────────────────────────────────────────────────────────
 FROM node:${NODE_VERSION}-alpine AS runtime
 WORKDIR /repo
@@ -110,4 +101,4 @@ HEALTHCHECK --interval=20s --timeout=5s --start-period=15s --retries=3 \
   CMD wget -qO- http://127.0.0.1:${BUYER_PORT}/healthz >/dev/null || exit 1
 
 ENTRYPOINT ["/sbin/tini", "--"]
-CMD ["node_modules/.bin/tsx", "buyer/src/index.ts"]
+CMD ["node", "--enable-source-maps", "buyer/dist-server/index.js"]

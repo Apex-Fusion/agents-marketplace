@@ -2,10 +2,10 @@
 #
 # wallet-monitor/Dockerfile — image for the one-shot wallet-balance alerter.
 #
-# Same multi-stage tsx strategy as supplier/Dockerfile: install workspace deps
-# in a builder stage, ship source + node_modules to a slim runtime stage, run
-# the entry point with tsx (we do NOT compile ahead-of-time because
-# @marketplace/shared exports .ts via package.json#exports — see supplier/Dockerfile).
+# Same multi-stage strategy as supplier/Dockerfile: install workspace deps in a
+# builder stage, bundle the entry point with esbuild (scripts/ci/build-service.mjs →
+# wallet-monitor/dist-server/index.js), and ship the tree + node_modules to a
+# slim runtime stage that runs the bundle with plain node.
 #
 # This is NOT a long-running server: there is no HEALTHCHECK / EXPOSE. It's
 # invoked one-shot by cron: `docker compose -f deploy/mainnet/docker-compose.wallet-monitor.yml run --rm wallet-monitor`.
@@ -53,6 +53,10 @@ RUN set -e \
 COPY packages/shared ./packages/shared
 COPY wallet-monitor ./wallet-monitor
 
+# Bundle the entry point into wallet-monitor/dist-server/ (absolute /repo paths: built and run in /repo).
+COPY scripts/ci/build-service.mjs ./scripts/ci/build-service.mjs
+RUN node scripts/ci/build-service.mjs wallet-monitor
+
 # ─── runtime ──────────────────────────────────────────────────────────────
 FROM node:${NODE_VERSION}-alpine AS runtime
 WORKDIR /repo
@@ -67,6 +71,5 @@ COPY --from=builder /repo /repo
 # root-owned on the box. No ports, no privileges to drop for a server.
 ENV NODE_ENV=production
 
-# tsx is hoisted to /repo/node_modules/.bin by pnpm — invoke via the workspace bin.
 ENTRYPOINT ["/sbin/tini", "--"]
-CMD ["node_modules/.bin/tsx", "wallet-monitor/src/index.ts"]
+CMD ["node", "--enable-source-maps", "wallet-monitor/dist-server/index.js"]

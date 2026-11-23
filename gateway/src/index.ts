@@ -97,8 +97,9 @@ const invokedDirectly =
   process.argv?.[1] !== undefined &&
   // Accept both path separators: on Windows process.argv[1] arrives with
   // backslashes, so a forward-slash-only pattern silently never matches and
-  // the process exits 0 without ever starting the server.
-  /gateway[\\/](src|dist)[\\/]index\.(t|j)s$/.test(process.argv[1]);
+  // the process exits 0 without ever starting the server. dist-server is the
+  // bundle of scripts/ci/build-service.mjs that the image runs.
+  /gateway[\\/](src|dist-server)[\\/]index\.(t|j)s$/.test(process.argv[1]);
 
 if (invokedDirectly) {
   try {
