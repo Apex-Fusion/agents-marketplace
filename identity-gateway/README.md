@@ -61,7 +61,7 @@ Every variable is optional, except that a deployed identity registry needs both
 | `GATEWAY_VECTOR_ID` | none | The gateway's own identifier (64 hex), required with the key files. Key IDs are `did:vector:<id>#<key hash>`, and the gateway's DID issues credentials. |
 | `DELEGATION_POLICY_ID` / `DELEGATION_ADDRESS` | none | The delegation contract (policy ID = script hash; the address must be its enterprise address). Without it, delegation tokens are refused. Mainnet: `bdc16990b844a8860f28c51bb0e6a469c84bebcd57db699ce204785a` / `addr1wx7uz6vshpz23ps09rz3hv8x535usjlte4tak6vuugz8sks9wdc5c`. |
 | `ATTESTATION_POLICY_ID` / `ATTESTATION_ADDRESS` | none | The attestation contract (policy ID = script hash; the address must be its enterprise address). Without it, the metadata has no `vectorProvenance` and the AI Catalog has no Trust Manifests. Mainnet: `f07c644e042ead094cc501f443e03a8955dc1f4d0dcd5b387863e042` / `addr1w8c8cezwqsh26z2vc5qlgslq82y4thqlf5xu6kec0p37qssut0y3q`. |
-| `ATTESTATION_REFRESH_SECONDS` | `30` | Seconds between the reads of the attestation outputs (10 to 300). Each read makes one Koios call for the tip. When the tip is new, it makes one more call for each 1,000 outputs. See "Attestations". |
+| `ATTESTATION_REFRESH_SECONDS` | `30` | Seconds between the checks of the attestation outputs (10 to 60). See "Attestations" for the Koios calls of a check. |
 | `STATUS_LIST_REFRESH_SECONDS` | `60` | How old the status lists and the status-list index are before a request builds them again (1 to 2400). The age counts from the last read of the chain, by a build or a follow step. For the lists, the limit is the longer of this value and two follow intervals. It is also the `ttl` of the lists, and the longest `max-age` of a list response. |
 | `STATUS_LIST_BACKGROUND_REFRESH_SECONDS` | `600` | How long after the end of a full build the timer starts the next full build, with no request (60 to 2400, and not below `STATUS_LIST_REFRESH_SECONDS`). The gateway refuses a value that breaks the timing rule: see "Status list timing". |
 | `STATUS_LIST_FOLLOW_SECONDS` | `10` | How often the timer reads the changes of the chain into the status lists: 0, or a multiple of 10 up to 300. With 0, the lists change only when a build ends. See "Status list timing". |
@@ -217,15 +217,20 @@ count, that are solicited, and that have the type provenance, software or enviro
 most 8. `othersCount` counts the other attestations about the agent that count. Part 1 Section 8.2 gives
 the members and the counting rule.
 
-- **Read.** A background read checks the tip every `ATTESTATION_REFRESH_SECONDS` (30). When the tip is
-  new, it reads every output at the attestation address that holds one token of the attestation policy,
-  with one Koios call for each 1,000 outputs, and keeps one list. A request makes no Koios call for
-  attestations: it applies the counting rule to that list at its own tip height and tip block time.
-- **Lag.** A new attestation counts after 30 confirmations of its output, so it shows on every gateway at
-  the same tip. A revocation, a contest or a withdrawal can show on one gateway up to one read interval
-  later than on another.
-- **Limits.** A read of more than 5,000 outputs fails, and the gateway keeps the last list. It does not use
-  a list older than one hour by the block time of the tip.
+- **Read.** A background check reads the tip every `ATTESTATION_REFRESH_SECONDS` (30): one Koios call.
+  When the tip is new, one more call asks whether the attestation address had a transaction since 30
+  blocks before the tip of the list. With none, the list moves to the new tip. Otherwise the check
+  reads every output at the attestation address that holds one token of the attestation policy: one call
+  that checks the limit, then one call for each 1,000 outputs. The gateway keeps one list, and keeps one
+  output for each token. A request makes no Koios call for attestations: it applies the counting rule to
+  that list at its own tip height and tip block time.
+- **Lag.** A new attestation counts after 30 confirmations of its output, so two gateways at the same tip
+  that both show the member show it. A revocation, a contest or a withdrawal can show on one gateway up
+  to 29 blocks later than on another. A contest makes a new output, so the attestation is hidden until
+  that output has 30 confirmations.
+- **Limits.** When more than 5,000 attestation outputs exist, the read stops before the download, and the
+  next try comes after 10 minutes. A list that is 30 or more blocks behind the tip of a request is not
+  used, so a failed read leaves out the member for every agent once the list is 30 blocks behind.
 - **Not checked.** The resolver does not fetch the document, does not verify the envelope signature and
   does not check the standing of the issuer. A verifier does that with the token that `id` names.
 - **Cards.** The A2A card and the AI Catalog use the same list (see "Renderings").
