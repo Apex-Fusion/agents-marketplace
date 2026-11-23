@@ -8,6 +8,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vitest";
+import { decodeAttestationDatum, encodeAttestationDatum, type AttestationDatum } from "../src/codec/attestation-datum.js";
 import { decodeIdentityDatum, encodeIdentityDatum } from "../src/codec/identity-datum.js";
 import { decodeLegacyDatum, encodeLegacyDatum } from "../src/codec/legacy-datum.js";
 import { decodePlutusData, encodePlutusData } from "../src/codec/plutus-data.js";
@@ -56,5 +57,66 @@ describe(`golden CBOR fixtures (${path})`, () => {
 
   test.each(legacy)("%s: LegacyDatum decode and encode give the same bytes", (_name, fixture) => {
     expect(hex(encodeLegacyDatum(decodeLegacyDatum(bytes(fixture.cbor))))).toBe(fixture.cbor);
+  });
+
+  // The values of lib/identity_marketplace/cbor_fixtures.ak (t0 is 2026-11-02T00:00:00Z). A decode that swaps a Bool or an Option
+  // gives other values, so these rows catch what a round trip through the same codec cannot.
+  const filled = (byte: string, length: number) => byte.repeat(length);
+  const t0 = 1_793_577_600_000;
+  const day = 86_400_000;
+  const attestations: Array<[string, AttestationDatum]> = [
+    [
+      "attestation_datum_full",
+      {
+        subject: filled("a1", 32),
+        issuer: filled("a2", 32),
+        issuerId: filled("a3", 32),
+        attType: 2,
+        format: 50,
+        profile: filled("a4", 32),
+        digest: filled("a5", 32),
+        locator: new TextEncoder().encode("https://attestations.example.org/vector/2026/11/02/fixture-attestation-document.json"),
+        envelopeSig: filled("a6", 64),
+        issuedAt: t0,
+        validFrom: t0,
+        validUntil: t0 + 366 * day,
+        solicited: true,
+        status: { type: "Revoked", at: t0 + 30 * day, reason: 5n },
+        contested: { uri: new TextEncoder().encode("https://subject.example.org/reply.json"), sha256: filled("a7", 32) },
+        links: [
+          { rel: 0, target: filled("a8", 32) },
+          { rel: 3, target: filled("a9", 32) },
+        ],
+      },
+    ],
+    [
+      "attestation_datum_minimal",
+      {
+        subject: filled("a1", 32),
+        issuer: filled("a2", 32),
+        issuerId: null,
+        attType: 0,
+        format: null,
+        profile: null,
+        digest: filled("a5", 32),
+        locator: null,
+        envelopeSig: null,
+        issuedAt: t0,
+        validFrom: null,
+        validUntil: null,
+        solicited: false,
+        status: { type: "Active" },
+        contested: null,
+        links: [],
+      },
+    ],
+  ];
+
+  test.each(attestations)("%s: AttestationDatum decodes to the values of the contracts and encodes back to the same bytes", (name, expected) => {
+    const fixture = file.fixtures[name];
+    if (!fixture) throw new Error(`fixture ${name} is missing from ${path}`);
+    const datum = decodeAttestationDatum(bytes(fixture.cbor));
+    expect(datum).toEqual(expected);
+    expect(hex(encodeAttestationDatum(datum))).toBe(fixture.cbor);
   });
 });
