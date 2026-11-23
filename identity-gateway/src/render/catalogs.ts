@@ -4,6 +4,7 @@
 // describe it; its per-agent renderings stay available. No entry names only a DID: an agent without
 // a card has no entry, because a catalog client could not call it.
 
+import type { VectorAttestation } from "../resolve/metadata.js";
 import { formatTime } from "../resolve/time.js";
 import { agentUrl, catalogIdentifier, fallbackName, reverseHost, type RenderedAgent } from "./agent.js";
 import { serverJson } from "./documents.js";
@@ -36,6 +37,20 @@ function cardRefs(agents: readonly RenderedAgent[], baseUrl: string): CardRef[] 
 }
 
 /**
+ * One Trust Manifest for each software attestation that `vectorProvenance` lists for the agent and that has
+ * an https locator: the contributor is the issuer of the attestation, and its one Attestation object has the
+ * type, the locator as `uri` and the digest of the document. The manifest has no signature. The specification
+ * accepts that: a manifest with a non-empty `attestations` array is valid without one, and a consumer must
+ * not infer authentication from the contributor. So the manifest is a statement of the gateway. The proof is
+ * the token of the attestation on the ledger, which `vectorProvenance.attestations[].id` names.
+ */
+function trustManifests(attestations: readonly VectorAttestation[]): Array<Record<string, unknown>> {
+  return attestations.flatMap((a) =>
+    a.type === "software" && a.locator !== undefined ? [{ contributor: a.issuer, attestations: [{ type: a.type, uri: a.locator, digest: `sha256:${a.digest}` }] }] : [],
+  );
+}
+
+/**
  * AI Catalog (https://github.com/Agent-Card/ai-catalog, specification/ai-catalog.md at 19208af, the v0.9
  * release candidate of version 1.0: implementations of it use `specVersion` "0.9"). Entries leave out the
  * name, description and version that the referenced card carries, as the specification recommends.
@@ -47,14 +62,18 @@ export function aiCatalog(agents: readonly RenderedAgent[], baseUrl: string, gat
   return {
     specVersion: "0.9",
     host: { displayName: "Vector identity gateway", ...(gatewayDid ? { identifier: gatewayDid } : {}), documentationUrl: `${baseUrl}/policy` },
-    entries: cardRefs(agents, baseUrl).map((ref) => ({
-      identifier: ref.identifier,
-      type: ref.type,
-      url: ref.url,
-      ...(ref.agent.capabilities.length ? { tags: ref.agent.capabilities } : {}),
-      updatedAt: formatTime(ref.agent.updatedAt),
-      extensions: { [reverseHost(baseUrl)]: { did: ref.agent.did } },
-    })),
+    entries: cardRefs(agents, baseUrl).map((ref) => {
+      const manifests = trustManifests(ref.agent.attestations);
+      return {
+        identifier: ref.identifier,
+        type: ref.type,
+        url: ref.url,
+        ...(ref.agent.capabilities.length ? { tags: ref.agent.capabilities } : {}),
+        updatedAt: formatTime(ref.agent.updatedAt),
+        extensions: { [reverseHost(baseUrl)]: { did: ref.agent.did } },
+        ...(manifests.length ? { trustManifests: manifests } : {}),
+      };
+    }),
   };
 }
 

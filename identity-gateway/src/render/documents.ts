@@ -69,7 +69,7 @@ export interface AgentCard {
   readonly signatures?: readonly AgentCardSignature[];
 }
 
-/** A verified organisation of a party, Accountable Parties first: the card's provider. */
+/** A verified organisation of a party: the Provider's first, then the Accountable Party's, then that of another party in record order. This is the card's provider. */
 function provider(agent: RenderedAgent): AgentCard["provider"] {
   const { view } = agent.record;
   if (view.kind !== "identity") return undefined;
@@ -77,7 +77,7 @@ function provider(agent: RenderedAgent): AgentCard["provider"] {
   const named = view.parties
     .map((p) => ({ role: p.role, text: p.organisation === null ? null : recordText(p.organisation) }))
     .filter((p): p is { role: typeof p.role; text: string } => p.text !== null && verified.has(p.text));
-  const chosen = named.find((p) => p.role === "Accountable") ?? named[0];
+  const chosen = named.find((p) => p.role === "Provider") ?? named.find((p) => p.role === "Accountable") ?? named[0];
   return chosen ? { organization: chosen.text, url: `https://${domainOf(chosen.text)}` } : undefined;
 }
 

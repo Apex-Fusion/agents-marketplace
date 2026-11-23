@@ -12,6 +12,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { FactsStore, changeKey, factInputs, type RecordFacts } from "../fetch/facts.js";
 import type { ListingSnapshot, RecordSource } from "../fetch/scheduler.js";
+import type { ProvenanceSource } from "../resolve/provenance.js";
 import type { CurrentRecord } from "../resolve/resolver.js";
 import type { ResolverSettings } from "../resolve/settings.js";
 import { listingFailure, renderedAgent, type RenderedAgent } from "../render/agent.js";
@@ -33,6 +34,8 @@ export interface RenderDeps {
   readonly config: RenderConfig;
   /** Signs agent cards. Null: no key is configured, and agent cards answer 503. */
   readonly signer: Ed25519Signer | null;
+  /** The attestations about each agent (the AI Catalog shows the software ones as Trust Manifests). Null or missing: none. */
+  readonly provenance?: ProvenanceSource | null;
   /** Error log; messages never name a DID. */
   readonly log?: (message: string) => void;
 }
@@ -75,7 +78,12 @@ export function renderRoutes(deps: RenderDeps): Route {
   const { baseUrl } = deps.config;
   const legacyPolicy = deps.settings.registries.legacy.policyId;
   const agentOf = (record: CurrentRecord): RenderedAgent =>
-    renderedAgent(record, deps.facts.current(record.vectorId, factInputs(record, legacyPolicy)), deps.settings.network);
+    renderedAgent(
+      record,
+      deps.facts.current(record.vectorId, factInputs(record, legacyPolicy)),
+      deps.settings.network,
+      deps.provenance?.provenance(record.vectorId)?.attestations,
+    );
   const listed = (): RenderedAgent[] => deps.snapshot().records.map(agentOf).filter((agent) => listingFailure(agent) === null);
   const gatewayDid = (): string | null => (deps.signer?.kid.startsWith("did:") ? deps.signer.kid.split("#")[0]! : null);
   /** Card bodies by facts object, then by file: the record state that the body shows and the body. */

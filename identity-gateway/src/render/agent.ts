@@ -4,6 +4,7 @@
 
 import { recordText } from "../codec/text.js";
 import { canonicalDid } from "../resolve/did.js";
+import type { VectorAttestation } from "../resolve/metadata.js";
 import type { CurrentRecord } from "../resolve/resolver.js";
 import type { NetworkParameters } from "../resolve/settings.js";
 import { blockTimeMs } from "../resolve/time.js";
@@ -23,11 +24,13 @@ export interface RenderedAgent {
   readonly capabilities: readonly string[];
   /** Block time of the newest record output that the base version owns (POSIX ms). */
   readonly updatedAt: number;
+  /** The attestations that `vectorProvenance` lists for the agent now (resolve/provenance.ts). */
+  readonly attestations: readonly VectorAttestation[];
 }
 
 const textOf = (bytes: Uint8Array | undefined): string | null => (bytes && recordText(bytes)) || null;
 
-export function renderedAgent(record: CurrentRecord, facts: CurrentFacts, network: NetworkParameters): RenderedAgent {
+export function renderedAgent(record: CurrentRecord, facts: CurrentFacts, network: NetworkParameters, attestations: readonly VectorAttestation[] = []): RenderedAgent {
   const { view } = record;
   const profile = view.kind === "identity" ? view : view.profile;
   return {
@@ -40,6 +43,7 @@ export function renderedAgent(record: CurrentRecord, facts: CurrentFacts, networ
     endpoint: endpointOf(record),
     capabilities: (profile?.capabilities ?? []).map(recordText).filter((c): c is string => !!c),
     updatedAt: blockTimeMs(record.ledger.slot, network),
+    attestations,
   };
 }
 
