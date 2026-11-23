@@ -9,8 +9,8 @@ Commands, tiers and the selection rule are in `docs/TESTING.md`. The reasons are
 
 ## The test loop
 
-- Run `scripts/test-changed`. It runs the tests that your change reaches, the typecheck of the changed packages and
-  `aiken check` of the changed Aiken area, on a build host through `rx`. It prints each command.
+- Run `scripts/test-changed`. It runs the tests that your change reaches, the lint (oxlint) of the changed code files, the
+  typecheck of the changed packages and `aiken check` of the changed Aiken area, on a build host through `rx`. It prints each command.
 - Never run the full suite. CI runs the gate, and the nightly run runs everything.
 - Never run a test, a typecheck or `aiken check` on this computer. When `rx` fails (exit status 125) or no build host answers,
   push the branch and let CI test.
@@ -38,6 +38,9 @@ remove the guard (no mutation checks by hand).
 
 - Push your branch, open the pull request, then run `gh pr merge --auto --rebase`. Watch CI (`gh pr checks`). When a job is red,
   repair it and push again.
+- Exception: a change of `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `tsconfig.base.json`, `.npmrc` or `patches/`
+  makes the deploy of `main` rebuild and restart every service. Do not turn on auto-merge for it; the owner chooses when and how it
+  merges (docs/TESTING.md, "Dependency updates").
 - The `gate` job is the only required check. It prints how many test lines and how many source lines the pull request adds. When
   the test lines are more, give the reason in the text of the pull request.
 - A pull request that prunes tests attaches the table of `scripts/coverage-diff`.
