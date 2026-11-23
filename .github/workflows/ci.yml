@@ -1,5 +1,6 @@
 name: CI
 
+# Timing baseline of the base commit (vitest 2 on Node 24). Not for merge.
 # One workflow, one required check: the job `gate`.
 #
 # The job `changes` reads the changed files (scripts/ci/changes.mjs) and switches the other jobs on and off. A job that a change
