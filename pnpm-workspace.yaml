@@ -9,5 +9,9 @@ packages:
   - "wallet-monitor"
   - "identity-gateway"
 
-onlyBuiltDependencies:
+# These packages ship prebuilt binaries (better-sqlite3 13 is an N-API addon with prebuilds for glibc and musl), so their
+# build scripts never run. A build script would compile better-sqlite3 again and needs node-gyp, python3 and g++.
+ignoredBuiltDependencies:
   - better-sqlite3
+  - cbor-extract
+  - esbuild

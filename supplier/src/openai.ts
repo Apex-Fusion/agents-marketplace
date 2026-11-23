@@ -36,7 +36,7 @@ export interface CallResponsesParams extends ResponseRequest {
   responsesStreamOnly?: boolean;
   /**
    * Collect the Chat Completions SSE even for buffered calls. For providers
-   * that send no response header before the answer is complete: the Node 20
+   * that send no response header before the answer is complete: the Node
    * fetch gives up on such a call after 300 s, whatever `timeoutMs` is.
    */
   chatStreamOnly?: boolean;

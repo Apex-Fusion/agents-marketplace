@@ -4,7 +4,7 @@
  *
  *   node scripts/ci/tsc-report.mjs <tsconfig>...
  *
- * It needs Node 20. It runs `pnpm exec tsc --noEmit -p <tsconfig>` for each config from the repository root (the configs run at the
+ * It needs Node 24. It runs `pnpm exec tsc --noEmit -p <tsconfig>` for each config from the repository root (the configs run at the
  * same time), counts the errors, prints the first errors and writes one table to the job summary ($GITHUB_STEP_SUMMARY). The exit status is 1 when any config
  * has an error or cannot run. The type check of the test files is blocking: the job `typecheck` of .github/workflows/ci.yml and the
  * job `typecheck-tests` of .github/workflows/nightly.yml fail on that status.

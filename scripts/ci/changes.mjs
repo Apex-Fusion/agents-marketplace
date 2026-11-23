@@ -2,7 +2,7 @@
 /**
  * scripts/ci/changes.mjs: choose the jobs of the workflow `CI` for one change.
  *
- * It needs Node 20 and no packages. The job `changes` of .github/workflows/ci.yml runs it on a full checkout.
+ * It needs Node 24 and no packages. The job `changes` of .github/workflows/ci.yml runs it on a full checkout.
  *
  *   node scripts/ci/changes.mjs                       the event of the workflow (env, see below); writes $GITHUB_OUTPUT
  *   node scripts/ci/changes.mjs --files LIST          changed paths, one on each line ("-" reads stdin); no git

@@ -69,12 +69,15 @@ export function decompressP256(compressed: Uint8Array): Uint8Array {
 
 const ECDSA = { name: "ECDSA", hash: "SHA-256" } as const;
 
+/** The key type of the global Web Crypto API (DOM or Node). The Node 24 types declare `CryptoKey` as a value only. */
+type WebCryptoKey = InstanceType<typeof CryptoKey>;
+
 /**
  * Creates the pop of a P-256 key pair for the record `vectorId`. Returns the
  * compressed public key and the pop, both hex, for `p256Key(key, purposes, pop)`.
  * For a Register, the identifier comes from the seed (`vectorIdFromSeed`).
  */
-export async function createP256Pop(vectorId: string, keyPair: { privateKey: CryptoKey; publicKey: CryptoKey }): Promise<{ key: string; pop: string }> {
+export async function createP256Pop(vectorId: string, keyPair: { privateKey: WebCryptoKey; publicKey: WebCryptoKey }): Promise<{ key: string; pop: string }> {
   const raw = new Uint8Array(await globalThis.crypto.subtle.exportKey("raw", keyPair.publicKey));
   const key = bytesToHex(compressP256(raw));
   const signature = new Uint8Array(await globalThis.crypto.subtle.sign(ECDSA, keyPair.privateKey, p256PopMessage(vectorId, key)));

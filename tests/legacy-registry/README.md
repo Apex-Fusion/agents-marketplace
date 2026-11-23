@@ -13,7 +13,7 @@ From the repository root (once: `npx -y pnpm@10.33.2 install --frozen-lockfile -
 npx vitest run --project aiken-eval tests/legacy-registry/
 ```
 
-- Requirements: `aiken` v1.1.21 on `PATH` (`blueprint.test.ts` checks the version) and Node 20 or later. No network.
+- Requirements: `aiken` v1.1.21 on `PATH` (`blueprint.test.ts` checks the version) and Node 24 or later. No network.
 - Type check: `npx tsc -p tests/legacy-registry/tsconfig.json`.
 - `LEGACY_REGISTRY_ARTIFACTS=<dir>` keeps `tx.hex`, `inputs.hex`, `outputs.hex` and `command.txt` of each evaluation. Use `command.txt` to run `aiken tx simulate` again by hand.
 - `LEGACY_REGISTRY_REPORT=<file>` appends one JSON line per evaluation (test name, transaction ID, verdicts, execution units). The results table below comes from this file.
