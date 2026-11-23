@@ -553,7 +553,7 @@ A label tells who checked a link. It does not rate the thing at the other end of
 | Item | Location |
 |---|---|
 | Contracts (Aiken) | `contracts/identity-marketplace/` in https://github.com/Apex-Fusion/agents-marketplace |
-| Resolver and gateway | `identity-gateway/` in the same repository. Licence: Apache-2.0, pending Foundation approval. |
+| Resolver and gateway | `identity-gateway/` in the same repository. Licence: Apache-2.0 ([`LICENSE`](../identity-gateway/LICENSE)). |
 | Public resolver | `https://id.vector.apexfusion.org/1.0/identifiers/{did}` |
 | Universal Resolver driver | Planned. It is not published yet. |
 

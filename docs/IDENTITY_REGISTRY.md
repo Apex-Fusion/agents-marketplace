@@ -668,7 +668,7 @@ All three modules get new deployments in this phase. They use `vector_identity` 
   - a failed Koios or Ogmios read gives `INTERNAL_ERROR`.
 - Rename "generation" in the code to the registry names.
 - Add `GET /healthz`, which answers 200 without a ledger call.
-- Add `identity-gateway/LICENSE` (Apache-2.0, after Foundation approval), the `license` field in `package.json`, a Dockerfile and a README section on running, troubleshooting and updating the image.
+- Add `identity-gateway/LICENSE` (Apache-2.0), the `license` field in `package.json`, a Dockerfile and a README section on running, troubleshooting and updating the image.
 
 ### 8.4 Confirmation wait and listing rule
 
@@ -1076,7 +1076,6 @@ The tests are in `tests/legacy-registry/` (offline, `aiken tx simulate`). Result
 | Module owners' review of the module changes | David |
 | Module-1 verdict policy: the action and the duration for each challenge outcome (§3.8) | David, module owners |
 | Module change list for the module owners | David |
-| Foundation approval of Apache-2.0 for `identity-gateway` | David |
 | Contact email for the DIF entry (the W3C entry is merged, pull request 769, with its contact) | David |
 | npm and PyPI publication rights | David |
 | The switch date | David (decided 2026-11-03: as soon as our supplier records and new adverts exist) |
