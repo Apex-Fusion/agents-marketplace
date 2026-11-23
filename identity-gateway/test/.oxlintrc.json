@@ -1,0 +1,12 @@
+{
+  // Test files: the two promise rules only. A floating promise in a test can hide an assertion.
+  // This file replaces the config of the repository root for this folder: oxlint does not merge them. On 2026-11-23 the category
+  // `correctness` found 129 other things in the test folders (95 of them no-base-to-string). They are not repaired here.
+  "categories": {
+    "correctness": "off"
+  },
+  "rules": {
+    "typescript/no-floating-promises": "error",
+    "typescript/no-misused-promises": "error"
+  }
+}

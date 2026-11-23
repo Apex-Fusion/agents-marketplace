@@ -1,0 +1,25 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  // The category `correctness`: code that is wrong or useless. With `--type-aware` it also holds the rules that need the types
+  // (await-thenable, no-floating-promises, unbound-method, ...). The command and the folders are in docs/TESTING.md, section "Lint".
+  "categories": {
+    "correctness": "error"
+  },
+  "rules": {
+    // A Promise that nobody handles is an unhandled rejection, and Node ends the process. no-floating-promises is in `correctness`.
+    // no-misused-promises is not, so it is named here. Both need `--type-aware`.
+    "typescript/no-floating-promises": "error",
+    "typescript/no-misused-promises": "error",
+
+    // Off, with the reason. Any other finding is repaired, or silenced on its own line with `// oxlint-disable-next-line <rule> -- <reason>`.
+    //
+    // no-control-regex: the input checks and the cleaners of text match control characters on purpose (9 places in 6 files:
+    // paper2agent/src/{archive,control,publisher-config,store}.ts, buyer/src/paper2agent/routes.ts, indexer/src/disputes/module1.ts).
+    // The rule finds only a control character that someone wrote by mistake.
+    "eslint/no-control-regex": "off",
+    // no-base-to-string: it reports `String(x)` where TypeScript narrowed an `unknown` (a JSON body, a query value, a caught error)
+    // to `{}`, and `String(url)` for `RequestInfo | URL` in the test doubles. This is how the repository turns such a value into text.
+    // No repair keeps the behavior (19 places in the source folders, 95 in the test folders, on 2026-11-23).
+    "typescript/no-base-to-string": "off"
+  }
+}
