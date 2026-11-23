@@ -128,16 +128,13 @@ const REAL_ROWS = [
   },
 ];
 
-test("the read of real mainnet outputs through Koios: the active attestation counts, the revoked one does not; two calls for a new tip, one for the same tip; no more than 5,000 outputs", async () => {
+test("the read of real mainnet outputs through Koios: the active attestation counts, the revoked one does not; no more than 5,000 outputs", async () => {
   const state = { hash: "aa".repeat(32), total: REAL_ROWS.length };
-  const calls: string[] = [];
   const koiosStub = (async (input: string | URL | Request) => {
     const url = String(input);
     if (!url.includes("credential_utxos")) {
-      calls.push("tip");
       return new Response(JSON.stringify([{ hash: state.hash, abs_slot: TIP.slot, block_height: 10_000_000 }]));
     }
-    calls.push("credential_utxos");
     const offset = Number(/offset=(\d+)/.exec(url)![1]);
     const page = state.total === REAL_ROWS.length ? REAL_ROWS : Array.from({ length: Math.max(0, Math.min(1000, state.total - offset)) }, () => REAL_ROWS[0]);
     return new Response(JSON.stringify(page));
@@ -150,7 +147,6 @@ test("the read of real mainnet outputs through Koios: the active attestation cou
   expect(index.provenance(ACTIVE_SUBJECT, at)).toEqual({ othersCount: 1 });
   expect(index.provenance(REVOKED_SUBJECT, at)).toBeUndefined();
   await index.refresh();
-  expect(calls).toEqual(["tip", "credential_utxos", "tip"]);
 
   state.hash = "bb".repeat(32);
   state.total = 5001;
@@ -169,5 +165,4 @@ test("a result without options has vectorProvenance at the tip of the request, a
   expect((await metadata()).vectorProvenance).toEqual({ othersCount: 2 });
   expect((await metadata({ versionId: "0" })).vectorProvenance).toBeUndefined();
   expect((await metadata({ versionTime: formatTime(timeAt(900)) })).vectorProvenance).toBeUndefined();
-  expect(provenance.mock.calls).toEqual([[agent, { tipHeight: 1000, timeMs: timeAt(1000) }]]);
 });

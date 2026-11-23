@@ -6,7 +6,6 @@ import { FactsStore } from "../../src/fetch/facts.js";
 import { FetchScheduler } from "../../src/fetch/scheduler.js";
 import type { RenderConfig } from "../../src/render/config.js";
 import type { Ed25519Signer } from "../../src/render/signer.js";
-import type { ProvenanceSource } from "../../src/resolve/provenance.js";
 import { VectorResolver } from "../../src/resolve/resolver.js";
 import { createResolverServer } from "../../src/server/http.js";
 import { renderRoutes } from "../../src/server/routes-render.js";
@@ -112,9 +111,7 @@ export function renderNet(): FakeNet {
 }
 
 /** Builds the gateway, runs one scan with its checks, then suspends HELD_ID and revokes REVOKED_ID (both confirmed). */
-export async function startGateway(
-  options: { signer?: Ed25519Signer | null; ledger?: LedgerBuilder; net?: FakeNet; logs?: string[]; provenance?: ProvenanceSource } = {},
-): Promise<Gateway> {
+export async function startGateway(options: { signer?: Ed25519Signer | null; ledger?: LedgerBuilder; net?: FakeNet; logs?: string[] } = {}): Promise<Gateway> {
   const net = options.net ?? renderNet();
   const ledger = options.ledger ?? renderLedger();
   const store = new FactsStore();
@@ -144,7 +141,6 @@ export async function startGateway(
         settings: ledger.settings,
         config: CONFIG,
         signer: options.signer === undefined ? SIGNER : options.signer,
-        provenance: options.provenance,
         log: (message) => options.logs?.push(message),
       }),
     ],
