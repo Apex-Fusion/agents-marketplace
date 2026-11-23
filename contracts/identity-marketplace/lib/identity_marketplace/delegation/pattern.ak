@@ -3,34 +3,52 @@
 ////
 //// ```abnf
 //// action           = internal / external
-//// resource         = script / external
+//// resource         = script / did / external
 //// action-pattern   = "*" / internal / prefix / external
-//// resource-pattern = "*" / script / external
+//// resource-pattern = "*" / script / did / external
 //// internal         = seg *( "." seg )
 //// prefix           = seg *( "." seg ) ".*"
 //// seg              = 1*( %x61-7A / DIGIT / "-" )
 //// external         = ( %s"oauth:" / %s"mcp:" / %s"https://" ) 1*VCHAR
 //// script           = %s"script:" 56lowhex
+//// did              = %s"did:vector:" 64lowhex
 //// ```
 ////
 //// Coverage: a pattern `p` covers a value `a` when `p = "*"`, or `p = a`, or
-//// `p = x ".*"` (a `prefix`) and `a` starts with `x "."`. External and script
-//// patterns match only exactly.
+//// `p = x ".*"` (a `prefix`) and `a` starts with `x "."`. External, script and
+//// did patterns match only exactly.
 ////
 //// The same rule decides whether a parent pattern covers a child pattern. A
 //// child `x.*` is then covered only by `*`, by `x.*` itself, or by a parent
 //// `y.*` where `x` starts with `y "."`. A child `*` is covered only by `*`. A
 //// plain string-prefix test is wrong: `oc.*` does not cover `ocr.*`.
 ////
+//// A `did` pattern names one supplier agent. The 64 digits are the
+//// identifier of the agent record. A resource list with `did` patterns
+//// limits the agents that a vault can pay. `*` never counts as a `did`
+//// pattern, and it never widens the list. So `resources_narrower` compares
+//// the `did` patterns of two lists by equality, apart from the other
+//// patterns, and the supplier test of a vault payment never calls `covers`.
+////
 //// `covers` trusts that its pattern follows the grammar. The delegation
 //// contract checks the grammar of every pattern when it mints a delegation,
 //// and a delegation output never changes.
 
+use aiken/builtin
 use aiken/collection/list
 use aiken/primitive/bytearray
 
 /// The pattern that covers every value.
 pub const star: ByteArray = "*"
+
+/// The prefix of a `did` pattern.
+pub const did_prefix: ByteArray = "did:vector:"
+
+/// The length of the prefix of a `did` pattern.
+const did_prefix_length: Int = 11
+
+/// The length of a `did` pattern: the prefix and 64 hexadecimal digits.
+const did_length: Int = 75
 
 /// True when `pattern` is an `action-pattern`.
 pub fn valid_action_pattern(pattern: ByteArray) -> Bool {
@@ -58,6 +76,8 @@ pub fn valid_resource_pattern(pattern: ByteArray) -> Bool {
     let scheme = external_scheme_length(pattern)
     if scheme > 0 {
       visible_span(pattern, scheme, n)
+    } else if is_did(pattern) {
+      n == did_length && lowhex_span(pattern, did_prefix_length, n)
     } else {
       and {
         n == 63,
@@ -65,6 +85,52 @@ pub fn valid_resource_pattern(pattern: ByteArray) -> Bool {
         lowhex_span(pattern, 7, n),
       }
     }
+  }
+}
+
+/// True when `pattern` starts with the prefix of a `did` pattern.
+/// `valid_resource_pattern` decides whether the whole pattern is valid.
+pub fn is_did(pattern: ByteArray) -> Bool {
+  bytearray.take(pattern, did_prefix_length) == did_prefix
+}
+
+/// The resource `did:vector:<agent_id>`, with the 32-byte identifier of the
+/// agent in lowercase hexadecimal.
+pub fn did_resource(agent_id: ByteArray) -> ByteArray {
+  bytearray.concat(did_prefix, hex(agent_id))
+}
+
+/// The lowercase hexadecimal text (`0-9`, `a-f`) of `bytes`.
+pub fn hex(bytes: ByteArray) -> ByteArray {
+  hex_from(#"", bytes, 0, builtin.length_of_bytearray(bytes))
+}
+
+/// The ASCII text `000102...fdfeff`: the two lowercase hexadecimal digits of
+/// each byte `00` to `ff`, in order (512 bytes). A table is faster than the
+/// arithmetic for each digit: a vault payment writes one agent identifier for
+/// each escrow output. The test `hex_writes_every_byte` checks the table.
+const hex_pairs: ByteArray =
+  #"3030303130323033303430353036303730383039306130623063306430653066313031313132313331343135313631373138313931613162316331643165316632303231323232333234323532363237323832393261326232633264326532663330333133323333333433353336333733383339336133623363336433653366343034313432343334343435343634373438343934613462346334643465346635303531353235333534353535363537353835393561356235633564356535663630363136323633363436353636363736383639366136623663366436653666373037313732373337343735373637373738373937613762376337643765376638303831383238333834383538363837383838393861386238633864386538663930393139323933393439353936393739383939396139623963396439653966613061316132613361346135613661376138613961616162616361646165616662306231623262336234623562366237623862396261626262636264626562666330633163326333633463356336633763386339636163626363636463656366643064316432643364346435643664376438643964616462646364646465646665306531653265336534653565366537653865396561656265636564656565666630663166326633663466356636663766386639666166626663666466656666"
+
+/// `text` followed by the hexadecimal digits of the bytes `[ix, end)` of
+/// `bytes`.
+fn hex_from(text: ByteArray, bytes: ByteArray, ix: Int, end: Int) -> ByteArray {
+  if ix == end {
+    text
+  } else {
+    hex_from(
+      builtin.append_bytearray(
+        text,
+        builtin.slice_bytearray(
+          2 * builtin.index_bytearray(bytes, ix),
+          2,
+          hex_pairs,
+        ),
+      ),
+      bytes,
+      ix + 1,
+      end,
+    )
   }
 }
 
@@ -90,9 +156,41 @@ pub fn covered(patterns: List<ByteArray>, value: ByteArray) -> Bool {
 }
 
 /// True when the `child` list is narrower than the `parent` list: a parent
-/// pattern covers each child pattern.
+/// pattern covers each child pattern. A sub-delegation uses it for actions.
 pub fn narrower(child: List<ByteArray>, parent: List<ByteArray>) -> Bool {
   list.all(child, fn(pattern) { covered(parent, pattern) })
+}
+
+/// True when the `child` resource list is narrower than the `parent` list. A
+/// sub-delegation uses it for resources. The `did` patterns of a list are
+/// the supplier list. The other patterns are `*`, `script` and `external`
+/// patterns.
+///
+/// - The other patterns of the child follow `narrower`: a parent pattern that
+///   is not a `did` pattern covers each of them.
+/// - A parent without `did` patterns names no supplier. The child can have
+///   any `did` patterns, or none.
+/// - A parent with `did` patterns limits the suppliers. The child must have
+///   `did` patterns, and each one must equal a `did` pattern of the parent.
+///
+/// `*` is not a `did` pattern. It never widens a supplier list.
+pub fn resources_narrower(
+  child: List<ByteArray>,
+  parent: List<ByteArray>,
+) -> Bool {
+  let (child_dids, child_others) = list.partition(child, is_did)
+  let (parent_dids, parent_others) = list.partition(parent, is_did)
+  and {
+    narrower(child_others, parent_others),
+    when parent_dids is {
+      [] -> True
+      _ ->
+        when child_dids is {
+          [] -> False
+          _ -> list.all(child_dids, fn(did) { list.has(parent_dids, did) })
+        }
+    },
+  }
 }
 
 // ## Internal helpers
@@ -170,6 +268,12 @@ fn lowhex_span(bytes: ByteArray, i: Int, end: Int) -> Bool {
 const script_resource: ByteArray =
   "script:e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5"
 
+const did_a: ByteArray =
+  "did:vector:a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+
+const did_b: ByteArray =
+  "did:vector:b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+
 test valid_action_patterns() {
   list.all(
     [
@@ -195,7 +299,10 @@ test invalid_action_patterns() {
 
 test valid_resource_patterns() {
   list.all(
-    ["*", script_resource, "https://api.example.com/v1", "oauth:x", "mcp:y"],
+    [
+      "*", script_resource, did_a, "https://api.example.com/v1", "oauth:x",
+      "mcp:y",
+    ],
     valid_resource_pattern,
   )
 }
@@ -214,6 +321,20 @@ test invalid_resource_patterns() {
       "script:g5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
       "Script:e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
       "https://", "mcp:", "oauth:", "https://a b",
+      // did: uppercase digits
+      "did:vector:A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1",
+      // did: 63 and 65 hexadecimal digits
+      "did:vector:a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+      "did:vector:a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+      // did: a digit outside 0-9 a-f
+      "did:vector:a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1g1",
+      // did: no scheme, another method, the testnet form, the legacy form
+      "vector:a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "did:web:example.com",
+      "did:vector:testnet:a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "did:vector:agent:e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5:a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      // did: a prefix form
+      "did:vector:*",
     ],
     fn(pattern) { !valid_resource_pattern(pattern) },
   )
@@ -267,6 +388,42 @@ test covers_external_only_exactly() {
     !covers("https://api.example.com/v1", "https://api.example.com/v1/jobs"),
     !narrower(["mcp:tools.read"], ["mcp:tools.*"]),
     !narrower(["https://api.example.com/.v1"], ["https://api.example.com/.*"]),
+  }
+}
+
+/// A `did` pattern matches by equality only. `*` still covers a `did`
+/// pattern as it covers every value, so the supplier test of a vault payment
+/// must not call `covers`.
+test covers_did_only_exactly() {
+  and {
+    covers(did_a, did_a),
+    !covers(did_a, did_b),
+    !covers(did_a, script_resource),
+    !covers(did_a, "*"),
+    !covers(script_resource, did_a),
+    covers("*", did_a),
+  }
+}
+
+/// The table of `hex` gives the same two digits as the arithmetic of a digit
+/// for each of the 256 byte values.
+test hex_writes_every_byte() {
+  list.all(
+    list.range(0, 255),
+    fn(byte) {
+      hex(bytearray.push(#"", byte)) == bytearray.push(
+        bytearray.push(#"", digit(byte % 16)),
+        digit(byte / 16),
+      )
+    },
+  )
+}
+
+fn digit(n: Int) -> Int {
+  if n < 10 {
+    n + 48
+  } else {
+    n + 87
   }
 }
 

@@ -38,13 +38,13 @@
     },
     {
       "name": "delegation",
-      "hash": "5feb14a533a7456daa5a387152f99b3ede6e6949c38bf3e0f8a805f0",
-      "bytes": 7081
+      "hash": "14670deb66afba81e55c7f3b0eebe87a32ccd28b607b2c2132a1b19c",
+      "bytes": 7331
     },
     {
       "name": "vault",
-      "hash": "91379f2f9e36b9528a9822890a0a7cd16502cc5e0c969d76896c0b4e",
-      "bytes": 6932
+      "hash": "c10553e571479067aa31152e9d0738c8f3c5dc809e0feebcd9e02044",
+      "bytes": 7740
     },
     {
       "name": "escrow",
@@ -489,19 +489,19 @@
       "name": "Vault Pay, 1 escrow",
       "group": "vault",
       "description": "Pay through a depth-4 delegation chain (4 delegations with 16 actions and 8 resources, 5 agent records of the largest size) into 1 escrow output",
-      "mem": 6683804,
-      "cpu": 2141411829,
+      "mem": 6721731,
+      "cpu": 2145377048,
       "txBytes": 1430,
-      "memPercent": 41.8,
-      "cpuPercent": 21.4,
+      "memPercent": 42,
+      "cpuPercent": 21.5,
       "txBytesPercent": 8.7,
       "over70": [],
       "redeemers": [
         {
           "purpose": "Spend[1]",
           "label": "vault spend Pay",
-          "mem": 6683804,
-          "cpu": 2141411829
+          "mem": 6721731,
+          "cpu": 2145377048
         }
       ]
     },
@@ -509,19 +509,19 @@
       "name": "Vault Pay, 5 escrows",
       "group": "vault",
       "description": "Pay through a depth-4 delegation chain (4 delegations with 16 actions and 8 resources, 5 agent records of the largest size) into 5 escrow outputs",
-      "mem": 7370300,
-      "cpu": 2420396797,
+      "mem": 7436803,
+      "cpu": 2434057604,
       "txBytes": 3046,
-      "memPercent": 46.1,
-      "cpuPercent": 24.2,
+      "memPercent": 46.5,
+      "cpuPercent": 24.3,
       "txBytesPercent": 18.6,
       "over70": [],
       "redeemers": [
         {
           "purpose": "Spend[1]",
           "label": "vault spend Pay",
-          "mem": 7370300,
-          "cpu": 2420396797
+          "mem": 7436803,
+          "cpu": 2434057604
         }
       ]
     },
@@ -529,19 +529,19 @@
       "name": "Vault Pay, 10 escrows",
       "group": "vault",
       "description": "Pay through a depth-4 delegation chain (4 delegations with 16 actions and 8 resources, 5 agent records of the largest size) into 10 escrow outputs",
-      "mem": 8228420,
-      "cpu": 2769128007,
+      "mem": 8330643,
+      "cpu": 2794908299,
       "txBytes": 5066,
-      "memPercent": 51.4,
-      "cpuPercent": 27.7,
+      "memPercent": 52.1,
+      "cpuPercent": 27.9,
       "txBytesPercent": 30.9,
       "over70": [],
       "redeemers": [
         {
           "purpose": "Spend[1]",
           "label": "vault spend Pay",
-          "mem": 8228420,
-          "cpu": 2769128007
+          "mem": 8330643,
+          "cpu": 2794908299
         }
       ]
     },
@@ -549,19 +549,19 @@
       "name": "Vault Pay, 25 escrows",
       "group": "vault",
       "description": "Pay through a depth-4 delegation chain (4 delegations with 16 actions and 8 resources, 5 agent records of the largest size) into 25 escrow outputs",
-      "mem": 10802780,
-      "cpu": 3815321637,
+      "mem": 11012163,
+      "cpu": 3877460384,
       "txBytes": 11127,
-      "memPercent": 67.5,
-      "cpuPercent": 38.2,
+      "memPercent": 68.8,
+      "cpuPercent": 38.8,
       "txBytesPercent": 67.9,
       "over70": [],
       "redeemers": [
         {
           "purpose": "Spend[1]",
           "label": "vault spend Pay",
-          "mem": 10802780,
-          "cpu": 3815321637
+          "mem": 11012163,
+          "cpu": 3877460384
         }
       ]
     },
@@ -569,11 +569,11 @@
       "name": "Vault Pay, 38 escrows",
       "group": "vault",
       "description": "Pay through a depth-4 delegation chain (4 delegations with 16 actions and 8 resources, 5 agent records of the largest size) into 38 escrow outputs",
-      "mem": 13033892,
-      "cpu": 4722022783,
+      "mem": 13336147,
+      "cpu": 4815672191,
       "txBytes": 16383,
-      "memPercent": 81.5,
-      "cpuPercent": 47.2,
+      "memPercent": 83.4,
+      "cpuPercent": 48.2,
       "txBytesPercent": 100,
       "over70": [
         "mem",
@@ -583,8 +583,90 @@
         {
           "purpose": "Spend[1]",
           "label": "vault spend Pay",
-          "mem": 13033892,
-          "cpu": 4722022783
+          "mem": 13336147,
+          "cpu": 4815672191
+        }
+      ]
+    },
+    {
+      "name": "Vault Pay with suppliers, 1 escrow",
+      "group": "vault",
+      "description": "Pay through a depth-4 delegation chain whose 4 delegations name their suppliers (16 actions and 11 resources: 10 DID patterns, the paid supplier last, then the escrow script; 5 agent records of the largest size) into 1 escrow output for that supplier",
+      "mem": 6986732,
+      "cpu": 2217998095,
+      "txBytes": 1430,
+      "memPercent": 43.7,
+      "cpuPercent": 22.2,
+      "txBytesPercent": 8.7,
+      "over70": [],
+      "redeemers": [
+        {
+          "purpose": "Spend[1]",
+          "label": "vault spend Pay",
+          "mem": 6986732,
+          "cpu": 2217998095
+        }
+      ]
+    },
+    {
+      "name": "Vault Pay with suppliers, 5 escrows",
+      "group": "vault",
+      "description": "Pay through a depth-4 delegation chain whose 4 delegations name their suppliers (16 actions and 11 resources: 10 DID patterns, the paid supplier last, then the escrow script; 5 agent records of the largest size) into 5 escrow outputs for that supplier",
+      "mem": 8825480,
+      "cpu": 2810849343,
+      "txBytes": 3046,
+      "memPercent": 55.2,
+      "cpuPercent": 28.1,
+      "txBytesPercent": 18.6,
+      "over70": [],
+      "redeemers": [
+        {
+          "purpose": "Spend[1]",
+          "label": "vault spend Pay",
+          "mem": 8825480,
+          "cpu": 2810849343
+        }
+      ]
+    },
+    {
+      "name": "Vault Pay with suppliers, 10 escrows",
+      "group": "vault",
+      "description": "Pay through a depth-4 delegation chain whose 4 delegations name their suppliers (16 actions and 11 resources: 10 DID patterns, the paid supplier last, then the escrow script; 5 agent records of the largest size) into 10 escrow outputs for that supplier",
+      "mem": 11123915,
+      "cpu": 3551913403,
+      "txBytes": 5066,
+      "memPercent": 69.5,
+      "cpuPercent": 35.5,
+      "txBytesPercent": 30.9,
+      "over70": [],
+      "redeemers": [
+        {
+          "purpose": "Spend[1]",
+          "label": "vault spend Pay",
+          "mem": 11123915,
+          "cpu": 3551913403
+        }
+      ]
+    },
+    {
+      "name": "Vault Pay with suppliers, 16 escrows",
+      "group": "vault",
+      "description": "Pay through a depth-4 delegation chain whose 4 delegations name their suppliers (16 actions and 11 resources: 10 DID patterns, the paid supplier last, then the escrow script; 5 agent records of the largest size) into 16 escrow outputs for that supplier",
+      "mem": 13882037,
+      "cpu": 4441190275,
+      "txBytes": 7494,
+      "memPercent": 86.8,
+      "cpuPercent": 44.4,
+      "txBytesPercent": 45.7,
+      "over70": [
+        "mem"
+      ],
+      "redeemers": [
+        {
+          "purpose": "Spend[1]",
+          "label": "vault spend Pay",
+          "mem": 13882037,
+          "cpu": 4441190275
         }
       ]
     },
@@ -645,26 +727,26 @@
     {
       "name": "Publish delegation",
       "group": "publication",
-      "description": "Publication of the applied delegation script (7081 bytes) as a reference script at the zero key hash address",
+      "description": "Publication of the applied delegation script (7331 bytes) as a reference script at the zero key hash address",
       "mem": 0,
       "cpu": 0,
-      "txBytes": 7330,
+      "txBytes": 7580,
       "memPercent": 0,
       "cpuPercent": 0,
-      "txBytesPercent": 44.7,
+      "txBytesPercent": 46.3,
       "over70": [],
       "redeemers": []
     },
     {
       "name": "Publish vault",
       "group": "publication",
-      "description": "Publication of the applied vault script (6932 bytes) as a reference script at the zero key hash address",
+      "description": "Publication of the applied vault script (7740 bytes) as a reference script at the zero key hash address",
       "mem": 0,
       "cpu": 0,
-      "txBytes": 7181,
+      "txBytes": 7989,
       "memPercent": 0,
       "cpuPercent": 0,
-      "txBytesPercent": 43.8,
+      "txBytesPercent": 48.8,
       "over70": [],
       "redeemers": []
     },

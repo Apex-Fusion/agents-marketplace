@@ -10,7 +10,7 @@
  *   Adopt and the 12 spends, with both actors of Suspend and Revoke);
  * - Claim and Submit with the largest record of the escrow benchmarks;
  * - a depth-4 subagent Register with its four ancestors of the largest size;
- * - a vault Pay through a depth-4 delegation chain with several escrow outputs;
+ * - a vault Pay through a depth-4 delegation chain with several escrow outputs, also when the delegations name their suppliers;
  * - the publication of each validator as a reference script.
  */
 import {
@@ -595,20 +595,38 @@ const delegationId = (n: number): string => toHex(blake2b256(utf8(`identity benc
 
 /** 16 action patterns and 8 resource patterns; the ones that cover the vault payment come last. */
 const ACTIONS = [...Array.from({ length: 15 }, (_, i) => `svc${i + 1}.*`), "marketplace.*"].map((s) => Buffer.from(s).toString("hex"));
-const RESOURCES = [...Array.from({ length: 7 }, (_, i) => `script:${(i + 1).toString(16).padStart(2, "0").repeat(28)}`), `script:${toHex(ESCROW_HASH)}`].map((s) =>
+const ESCROW_RESOURCE = `script:${toHex(ESCROW_HASH)}`;
+const RESOURCES = [...Array.from({ length: 7 }, (_, i) => `script:${(i + 1).toString(16).padStart(2, "0").repeat(28)}`), ESCROW_RESOURCE].map((s) =>
   Buffer.from(s).toString("hex"),
 );
+
+/** The most resource patterns that a delegation holds (the limit of the delegation contract). */
+export const SUPPLIER_RESOURCES = 11;
+
+/**
+ * `count` resource patterns of a delegation that names its suppliers: decoy DID patterns first, then the DID pattern of
+ * the supplier that the vault pays (`AGENT_ID`) as the last DID pattern, then the escrow script, the entry that covers
+ * the payment, last. A DID pattern has 75 bytes. With `namesPaidSupplier` false, another decoy takes the place of the
+ * paid supplier.
+ */
+export const supplierResources = (count: number, namesPaidSupplier = true): string[] =>
+  [
+    ...Array.from({ length: count - 2 }, (_, i) => `did:vector:${toHex(blake2b256(utf8(`identity bench: decoy supplier ${i + 1}`)))}`),
+    `did:vector:${namesPaidSupplier ? AGENT_ID : toHex(blake2b256(utf8("identity bench: decoy supplier 0")))}`,
+    ESCROW_RESOURCE,
+  ].map((s) => Buffer.from(s).toString("hex"));
+
 /** The largest value limit: 10,000 AP3X per transaction and in total, per day. */
 const LIMIT = { perTx: 10_000n * AP3X, total: 10_000n * AP3X, periodMs: DAY };
 
 /** Link `n` (1 to 4): agent `n - 1` delegates to agent `n`; link 1 has the root delegator agent 0. */
-const link = (n: number): DelegationDatum => ({
+const link = (n: number, resources: string[]): DelegationDatum => ({
   delegator: { type: "Agent", id: AGENT[n - 1]!.id },
   parent: n === 1 ? null : delegationId(n - 1),
   delegate: AGENT[n]!.id,
   delegateKey: keyHashOf(AGENT[n]!.delegationKey),
   actions: ACTIONS,
-  resources: RESOURCES,
+  resources,
   notBefore: LO - 7 * DAY + n,
   notAfter: LO + 30 * DAY - n,
   depth: n,
@@ -617,11 +635,14 @@ const link = (n: number): DelegationDatum => ({
   value: LIMIT,
 });
 
-const delegationUtxo = (n: number): Utxo =>
+/** The resource patterns of every link, or of link `n`. */
+type Resources = string[] | ((link: number) => string[]);
+
+const delegationUtxo = (n: number, resources: Resources): Utxo =>
   existing(`delegation ${n}`, {
     address: DELEGATION_ADDRESS,
     value: { coin: 0n, assets: [{ policy: DELEGATION_HASH, name: fromHex(delegationId(n)), quantity: 1n }] },
-    datum: { inline: harnessData(delegationDatumToData(link(n))) },
+    datum: { inline: harnessData(delegationDatumToData(link(n, typeof resources === "function" ? resources(n) : resources))) },
   });
 
 /** The owner of the vault: agent 3, the delegator of link 4. Agent 4 is the delegate. */
@@ -663,16 +684,17 @@ function paidEscrow(index: number, coin: bigint): TxOut {
 
 /**
  * A Pay of `escrows` escrows of 20 AP3X each from the vault of agent 3, signed by `signer` (agent 4's
- * delegation key, the delegate key of link 4).
+ * delegation key, the delegate key of link 4). Each link of the chain lists `resources`. Every escrow pays
+ * the supplier `AGENT_ID`.
  */
-export function vaultPay(escrows: number, signer: Wallet = AGENT[4]!.delegationKey): BuiltTx {
+export function vaultPay(escrows: number, signer: Wallet = AGENT[4]!.delegationKey, resources: Resources = RESOURCES): BuiltTx {
   const each = 20n * AP3X;
   const amount = each * BigInt(escrows);
   return scriptTx(`vault pay ${escrows}`, {
     inputs: [{ utxo: existing("vault", vaultOutput(0n, VAULT_FUNDS)), redeemer: asData(encodeVaultSpend({ type: "Pay" })), label: "vault spend Pay" }],
     referenceInputs: [
       REFERENCE.vault,
-      ...[1, 2, 3, 4].map(delegationUtxo),
+      ...[1, 2, 3, 4].map((n) => delegationUtxo(n, resources)),
       ...[0, 1, 2, 3, 4].map((n) => recordUtxo(`agent ${n} record`, AGENT[n]!.id, agentRecord(n))),
     ],
     outputs: [vaultOutput(amount, VAULT_FUNDS - amount), ...Array.from({ length: escrows }, (_, i) => paidEscrow(i, each))],
@@ -691,6 +713,19 @@ const vaultCases: BenchCase[] = VAULT_ESCROW_COUNTS.map((escrows) => ({
   group: "vault" as const,
   description: `Pay through a depth-4 delegation chain (4 delegations with 16 actions and 8 resources, 5 agent records of the largest size) into ${escrows} escrow output${escrows === 1 ? "" : "s"}`,
   build: () => vaultPay(escrows),
+}));
+
+/**
+ * The escrow counts of the benchmarks with supplier lists. 10 is the most that stays under 70 % of every limit;
+ * 16 is the most that the evaluator runs (a budget of 14,000,000 memory units).
+ */
+export const SUPPLIER_ESCROW_COUNTS = [1, 5, 10, 16] as const;
+
+const supplierCases: BenchCase[] = SUPPLIER_ESCROW_COUNTS.map((escrows) => ({
+  name: `Vault Pay with suppliers, ${escrows} escrow${escrows === 1 ? "" : "s"}`,
+  group: "vault" as const,
+  description: `Pay through a depth-4 delegation chain whose 4 delegations name their suppliers (16 actions and ${SUPPLIER_RESOURCES} resources: ${SUPPLIER_RESOURCES - 1} DID patterns, the paid supplier last, then the escrow script; 5 agent records of the largest size) into ${escrows} escrow output${escrows === 1 ? "" : "s"} for that supplier`,
+  build: () => vaultPay(escrows, undefined, supplierResources(SUPPLIER_RESOURCES)),
 }));
 
 // ─── Reference-script publication ────────────────────────────────────────
@@ -723,7 +758,7 @@ const publicationCases: BenchCase[] = PUBLISHED.map(([label, script]) => ({
   build: () => publication(label, script),
 }));
 
-export const CASES: readonly BenchCase[] = [...identityCases, ...subagentCases, ...escrowCases, ...vaultCases, ...publicationCases];
+export const CASES: readonly BenchCase[] = [...identityCases, ...subagentCases, ...escrowCases, ...vaultCases, ...supplierCases, ...publicationCases];
 
 /**
  * Changed cases that the scripts must reject, with the purpose that fails. They show that the
@@ -764,6 +799,20 @@ export const CONTROLS: ReadonlyArray<BenchCase & { readonly fails: string }> = [
     description: "Agent 3's delegation key signs instead of the delegate key of link 4",
     fails: "vault spend Pay",
     build: () => vaultPay(1, AGENT[3]!.delegationKey),
+  },
+  {
+    name: "Vault Pay to a supplier that no delegation names",
+    group: "vault",
+    description: "The 4 delegations list DID patterns, but not the DID pattern of the paid supplier",
+    fails: "vault spend Pay",
+    build: () => vaultPay(1, undefined, supplierResources(SUPPLIER_RESOURCES, false)),
+  },
+  {
+    name: "Vault Pay to a supplier that only the delegation in use names",
+    group: "vault",
+    description: "The delegation in use names the paid supplier; its 3 ancestors list DID patterns without it",
+    fails: "vault spend Pay",
+    build: () => vaultPay(1, undefined, (n) => supplierResources(SUPPLIER_RESOURCES, n === 4)),
   },
 ];
 

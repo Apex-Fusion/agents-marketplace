@@ -53,6 +53,14 @@
           ]
         },
         {
+          "module": "identity_marketplace/properties/suppliers",
+          "tests": [
+            "prop_pay_funds_named_suppliers",
+            "prop_pay_never_funds_unnamed_supplier",
+            "prop_sub_delegation_narrows_supplier_lists"
+          ]
+        },
+        {
           "module": "identity_marketplace/properties/vault",
           "tests": [
             "prop_returned_vault_closes_by_owner"

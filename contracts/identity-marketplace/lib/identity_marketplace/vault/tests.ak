@@ -16,10 +16,10 @@ use cardano/transaction.{
 }
 use identity_marketplace/delegation/fixtures.{
   agent, agent_delegator, agent_id, ap3x, chain_link, chain_refs, controller_key,
-  delegation_hash, delegation_id, delegation_input, delegation_key, escrow_hash,
-  escrow_pattern, hash, hi, identity_hash, lo, now, other_hash, principal,
-  principal_delegator, range, record_input, records, seed, staked_script_address,
-  stranger, vault_hash, wallet_input,
+  delegation_hash, delegation_id, delegation_input, delegation_key, did_a, did_b,
+  escrow_hash, escrow_pattern, hash, hi, identity_hash, listing_refs, lo, now,
+  other_hash, principal, principal_delegator, range, record_input, records, seed,
+  staked_script_address, stranger, vault_hash, wallet_input,
 }
 use identity_marketplace/delegation/pattern.{covers, valid_action_pattern}
 use identity_marketplace/types.{
@@ -250,6 +250,76 @@ fn pay4_tx(escrows: Int) -> Transaction {
     extra_signatories: [buyer4()],
     validity_range: now(),
   }
+}
+
+// ### A chain whose links list suppliers
+
+/// The owner of the vault of the delegate of link `depth`: the principal of
+/// link 1, else the delegator agent of the link.
+fn owner_at(depth: Int) -> Delegator {
+  if depth == 1 {
+    owner1()
+  } else {
+    agent_delegator(depth - 1)
+  }
+}
+
+/// A Pay from the vault of the delegate of link `depth` of the chain whose
+/// root delegator is the principal. Link `n` lists the resources
+/// `lists[n - 1]`. The Pay holds one escrow output of 20 AP3X for each agent of
+/// `agents`.
+pub fn pay_listing(
+  depth: Int,
+  lists: List<List<ByteArray>>,
+  agents: List<ByteArray>,
+) -> Bool {
+  let owner = owner_at(depth)
+  let buyer = hash(delegation_key(depth))
+  let datum =
+    Live {
+      owner,
+      delegation: delegation_id(depth),
+      spent: 0,
+      period_start: start,
+    }
+  let amount = 20 * ap3x * list.length(agents)
+  pay(
+    datum,
+    Transaction {
+      ..transaction.placeholder,
+      inputs: [wallet_input(seed()), vault_input(0, datum, funds)],
+      reference_inputs: listing_refs(
+        depth,
+        owner1(),
+        fn(n) {
+          expect Some(resources) = list.at(lists, n - 1)
+          resources
+        },
+      ),
+      outputs: [
+        vault_output(
+          Live {
+            owner,
+            delegation: delegation_id(depth),
+            spent: amount,
+            period_start: start,
+          },
+          funds - amount,
+        ),
+        ..list.map(
+          agents,
+          fn(agent) {
+            escrow_output(
+              EscrowDatum { ..job(buyer, owner, 18 * ap3x), agent_id: agent },
+              20 * ap3x,
+            )
+          },
+        )
+      ],
+      extra_signatories: [buyer],
+      validity_range: now(),
+    },
+  )
 }
 
 // ## Constants
@@ -806,6 +876,53 @@ test pay_continuing_datum_other_delegation() fail {
 /// Decision: Pay moves a positive amount.
 test pay_zero_amount() fail {
   pay1_with([continuing1(0, start, 0), escrow1(job1())])
+}
+
+// ## Pay: suppliers
+
+/// Every list that has `did` patterns names each paid supplier. The second
+/// Pay is a hand-built chain: the root names fewer suppliers than the leaf, and
+/// the paid supplier is in both lists.
+test pay_to_suppliers_that_every_list_names() {
+  and {
+    pay_listing(
+      1,
+      [[escrow_pattern, did_a, did_b]],
+      [agent_id(10), agent_id(11), agent_id(10)],
+    ),
+    pay_listing(
+      2,
+      [[escrow_pattern, did_a], [escrow_pattern, did_a, did_b]],
+      [agent_id(10)],
+    ),
+  }
+}
+
+test pay_to_unlisted_supplier() fail {
+  pay_listing(1, [[escrow_pattern, did_a]], [agent_id(11)])
+}
+
+/// One escrow output for an unlisted supplier makes the whole Pay fail.
+test pay_with_last_output_to_unlisted_supplier() fail {
+  pay_listing(
+    1,
+    [[escrow_pattern, did_a]],
+    [agent_id(10), agent_id(10), agent_id(11)],
+  )
+}
+
+/// The delegation in use names the supplier, but its parent does not.
+test pay_ancestor_list_without_supplier() fail {
+  pay_listing(
+    2,
+    [[escrow_pattern, did_a], [escrow_pattern, did_a, did_b]],
+    [agent_id(11)],
+  )
+}
+
+/// `*` covers the escrow script, but it does not widen the supplier list.
+test pay_star_does_not_widen_supplier_list() fail {
+  pay_listing(1, [["*", did_a]], [agent_id(11)])
 }
 
 // ## Close

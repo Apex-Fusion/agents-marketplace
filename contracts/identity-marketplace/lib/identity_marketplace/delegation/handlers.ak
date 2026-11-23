@@ -26,7 +26,7 @@ use identity_marketplace/delegation/chain.{
   agent_signed, find_delegation, sole_token,
 }
 use identity_marketplace/delegation/pattern.{
-  narrower, valid_action_pattern, valid_resource_pattern,
+  narrower, resources_narrower, valid_action_pattern, valid_resource_pattern,
 }
 use identity_marketplace/types.{
   Agent, Delegate, DelegationDatum, DelegationMint, Delegator, PrincipalKey,
@@ -77,7 +77,7 @@ pub fn delegation_spend(
 /// True when the datum follows the datum comments of §5.2 and the patterns
 /// follow §5.1: delegator key hash 28 bytes, organisation 1..64 bytes, agent,
 /// parent and delegate identifiers 32 bytes, `delegate_key` 28 bytes, 1..16
-/// action patterns, 0..8 resource patterns, valid times with
+/// action patterns, 0..11 resource patterns, valid times with
 /// `not_before < not_after`, `depth` 1..4, `remaining >= 0`,
 /// `depth + remaining <= 4`, `purpose` 32 bytes, and a valid value limit.
 pub fn valid_delegation(delegation: DelegationDatum) -> Bool {
@@ -88,7 +88,7 @@ pub fn valid_delegation(delegation: DelegationDatum) -> Bool {
     bytearray.length(delegation.delegate_key) == 28,
     count_within(delegation.actions, 1, 16),
     list.all(delegation.actions, valid_action_pattern),
-    count_within(delegation.resources, 0, 8),
+    count_within(delegation.resources, 0, 11),
     list.all(delegation.resources, valid_resource_pattern),
     valid_time(delegation.not_before),
     valid_time(delegation.not_after),
@@ -171,7 +171,9 @@ fn root_authorised(
 /// A delegation with a parent: the authentic parent is a reference input, its
 /// delegate is the delegator agent, its `remaining >= 1`, and its
 /// `delegate_key` signs and is still a delegation key of that agent, which is
-/// Active. The child is narrower than the parent.
+/// Active. The child is narrower than the parent: the actions by `narrower`,
+/// the resources by `resources_narrower` (the `did` patterns are compared
+/// apart from the other patterns).
 fn sub_authorised(
   delegation: DelegationDatum,
   parent_id: ByteArray,
@@ -191,7 +193,7 @@ fn sub_authorised(
     effective(record, refs, identity_hash, w.lo, w.hi) == EffActive,
     active_key(record, parent.delegate_key, purpose_delegation),
     narrower(delegation.actions, parent.actions),
-    narrower(delegation.resources, parent.resources),
+    resources_narrower(delegation.resources, parent.resources),
     parent.not_before <= delegation.not_before,
     delegation.not_after <= parent.not_after,
     delegation.depth == parent.depth + 1,

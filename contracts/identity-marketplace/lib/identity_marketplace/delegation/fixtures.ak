@@ -376,6 +376,47 @@ pub fn chain_refs(depth: Int, root: Delegator) -> List<Input> {
   )
 }
 
+// ## Suppliers
+
+/// The `did` resources of the supplier agents 10, 11 and 12: the identifier
+/// `agent_id(n)` in lowercase hexadecimal. They do not use the library
+/// function that writes the hexadecimal text, so a test of that function does
+/// not repeat its own mistake.
+pub const did_a: ByteArray =
+  "did:vector:0a00000000000000000000000000000000000000000000000000000000000000"
+
+pub const did_b: ByteArray =
+  "did:vector:0b00000000000000000000000000000000000000000000000000000000000000"
+
+pub const did_c: ByteArray =
+  "did:vector:0c00000000000000000000000000000000000000000000000000000000000000"
+
+/// Links 1 to `depth` of the chain with the root delegator `root`, where link
+/// `n` lists the resources `resources(n)`, and every reference input that the
+/// use of link `depth` reads (see `chain_refs`).
+pub fn listing_refs(
+  depth: Int,
+  root: Delegator,
+  resources: fn(Int) -> List<ByteArray>,
+) -> List<Input> {
+  let links =
+    list.map(
+      list.range(1, depth),
+      fn(n) {
+        delegation_input(
+          delegation_id(n),
+          DelegationDatum { ..chain_link(n, root), resources: resources(n) },
+        )
+      },
+    )
+  let root_records =
+    when root is {
+      Agent { .. } -> [record_input(0, agent(0))]
+      PrincipalKey { .. } -> []
+    }
+  list.concat(links, list.concat(records(1, depth), root_records))
+}
+
 // ## Other inputs
 
 /// A seed for `Delegate`.

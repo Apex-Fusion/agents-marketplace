@@ -7,14 +7,15 @@
 //// The delegation contract checks the datum when it mints the token, and a
 //// delegation output never changes. Thus an authentic delegation has a valid
 //// datum, and it is narrower than its parent: its actions, resources, period
-//// and value limit are inside those of the parent.
+//// and value limit are inside those of the parent. The supplier list of a
+//// child (its `did` patterns) is inside the supplier list of its parent.
 
 use aiken/collection/dict
 use aiken/collection/list
 use cardano/assets.{Value}
 use cardano/transaction.{InlineDatum, Input, Transaction}
 use identity_marketplace/common.{Window, at_script_address, signed_by}
-use identity_marketplace/delegation/pattern.{covered}
+use identity_marketplace/delegation/pattern.{covered, did_resource, is_did}
 use identity_marketplace/types.{Agent, DelegationDatum, Delegator, PrincipalKey}
 use vector_identity.{
   active_key, controller_signed, effective, find_record, max_depth,
@@ -98,16 +99,24 @@ pub fn agent_signed(record: IdentityDatum, tx: Transaction) -> Bool {
 /// - a pattern of the delegation covers `action`, and a pattern covers
 ///   `resource` (an empty resource list covers nothing);
 /// - `[w.lo, w.hi]` is inside the period of the delegation
-///   (`not_before <= lo`, `hi <= not_after`).
+///   (`not_before <= lo`, `hi <= not_after`);
+/// - each link (the delegation and every ancestor) that has `did` patterns
+///   names each agent of `suppliers`: the resource `did:vector:<agent id>`
+///   equals one of its `did` patterns. A link without `did` patterns names
+///   no supplier, and it limits nothing. `*` does not widen a supplier list.
 ///
 /// The patterns, the period and the value limit of the delegation `id` are
 /// inside those of every ancestor (see the module documentation), so the
 /// coverage and the period are checked on the delegation `id` only. The
+/// supplier lists are checked on every link: the rule of the payment then
+/// does not depend on the narrowing rule of the delegation contract. The
 /// function returns the datum of the delegation `id`.
 ///
-/// Pass `w = common.window(tx.validity_range)`. Every record and delegation
-/// that the checks read must be a reference input, including the ancestors of
-/// subagent records (`effective`).
+/// Pass `w = common.window(tx.validity_range)`. `suppliers` are the 32-byte
+/// agent identifiers that the transaction pays; the list is empty when the
+/// transaction pays no agent. Every record and delegation that the checks
+/// read must be a reference input, including the ancestors of subagent
+/// records (`effective`).
 pub fn use_delegation(
   tx: Transaction,
   identity_hash: ByteArray,
@@ -116,6 +125,7 @@ pub fn use_delegation(
   action: ByteArray,
   resource: ByteArray,
   w: Window,
+  suppliers: List<ByteArray>,
 ) -> DelegationDatum {
   let refs = tx.reference_inputs
   expect Some(delegation) = find_delegation(refs, delegation_hash, id)
@@ -125,32 +135,46 @@ pub fn use_delegation(
   expect delegation.not_before <= w.lo
   expect w.hi <= delegation.not_after
   expect
-    links_active(delegation, refs, identity_hash, delegation_hash, w, max_depth)
+    suppliers_listed(
+      check_links(
+        delegation,
+        refs,
+        identity_hash,
+        delegation_hash,
+        w,
+        max_depth,
+      ),
+      suppliers,
+    )
   delegation
 }
 
-/// The delegate of `delegation` is Active and still lists `delegate_key` with
-/// the delegation purpose; then the same for the parent, up to the root,
-/// whose `Agent` delegator is Active.
-fn links_active(
+/// The function fails unless the delegate of `delegation` is Active and still
+/// lists `delegate_key` with the delegation purpose; then the same for the
+/// parent, up to the root, whose `Agent` delegator is Active. It returns the
+/// resource list of each link that has a `did` pattern, the delegation first.
+fn check_links(
   delegation: DelegationDatum,
   refs: List<Input>,
   identity_hash: ByteArray,
   delegation_hash: ByteArray,
   w: Window,
   links_left: Int,
-) -> Bool {
+) -> List<List<ByteArray>> {
   expect links_left > 0
   expect Some(delegate) = find_record(refs, identity_hash, delegation.delegate)
-  and {
-    effective(delegate, refs, identity_hash, w.lo, w.hi) == EffActive,
-    active_key(delegate, delegation.delegate_key, purpose_delegation),
+  expect effective(delegate, refs, identity_hash, w.lo, w.hi) == EffActive
+  expect active_key(delegate, delegation.delegate_key, purpose_delegation)
+  let above =
     when delegation.parent is {
-      None ->
-        root_delegator_active(delegation.delegator, refs, identity_hash, w)
+      None -> {
+        expect
+          root_delegator_active(delegation.delegator, refs, identity_hash, w)
+        []
+      }
       Some(parent_id) -> {
         expect Some(parent) = find_delegation(refs, delegation_hash, parent_id)
-        links_active(
+        check_links(
           parent,
           refs,
           identity_hash,
@@ -159,7 +183,31 @@ fn links_active(
           links_left - 1,
         )
       }
-    },
+    }
+  if list.any(delegation.resources, is_did) {
+    [delegation.resources, ..above]
+  } else {
+    above
+  }
+}
+
+/// True when each resource list of `lists` holds the resource
+/// `did:vector:<agent id>` of each agent id of `suppliers`. The resources are
+/// written once, and only when a link has a `did` pattern. A `did` pattern
+/// equals no other kind of pattern, so the test needs no filter.
+fn suppliers_listed(
+  lists: List<List<ByteArray>>,
+  suppliers: List<ByteArray>,
+) -> Bool {
+  when lists is {
+    [] -> True
+    _ -> {
+      let named = list.map(suppliers, did_resource)
+      list.all(
+        lists,
+        fn(resources) { list.all(named, fn(did) { list.has(resources, did) }) },
+      )
+    }
   }
 }
 
