@@ -40,8 +40,10 @@ All commands that load the CPU run on a build host through `rx` (`rx --help`).
 
 ### Vitest projects
 
-`vitest.workspace.ts` defines three projects. `pnpm test` (`vitest run`) runs all three. `vitest.config.ts` holds only the options of
-the whole run (`passWithNoTests`, `cacheDir`): vitest 2 gives a project none of its options.
+`vitest.config.ts` defines three projects in `test.projects`. `pnpm test` (`vitest run`) runs all three. An inline project inherits the
+options of the file (vitest 5 sets `extends` to true): `cacheDir`, `resolve.alias`, `exclude` and `passWithNoTests`. Each project holds
+the rest. The project `ui` has a plugin (`@vitejs/plugin-react`), so it gets its own Vite server; `unit` and `aiken-eval` share the
+server of the root file.
 
 | Project | Test files | Environment | Time limit of a test | Needs |
 |---|---|---|---|---|
@@ -53,9 +55,23 @@ Run one project with `--project <name>`. Repeat the flag for more projects. A pa
 `vitest run tests/identity-deploy/` runs that folder and needs no `--config`. The job `vitest` of the gate runs `unit` and `ui`.
 The job `aiken-eval` runs `aiken-eval`. The nightly run runs all three.
 
-A new test folder needs entries in three places: the `include` of its project in `vitest.workspace.ts`, `UNIT_UI_TEST_ROOTS` or
+A new test folder needs entries in three places: the `include` of its project in `vitest.config.ts`, `UNIT_UI_TEST_ROOTS` or
 `EVAL_DIRS` in `scripts/ci/changes.mjs`, and, for `aiken-eval`, the cases of `scripts/test-changed`. A test file outside these folders
-runs in no project. The alias block of the lucid entry points is in `vitest.workspace.ts`, once.
+runs in no project. The alias block of the lucid entry points is in `vitest.config.ts`, once.
+
+The test tools and the reasons for their versions (2026-11-23):
+
+| Tool | Version | Note |
+|---|---|---|
+| `vitest`, `@vitest/coverage-v8` | 5.1.1 | The coverage package is an exact pin: it needs the same version as `vitest`. Vitest 5 needs Node 22.12 or later and `vite` 6.4 or later. |
+| `vite`, `@vitejs/plugin-react` | 8.3.8, 6.3.0 | The root, `buyer` and `indexer-ui` use one Vite major. Plugin 6 needs Vite 8. Vite 8 builds with Rolldown, Oxc and Lightning CSS. |
+| `happy-dom` | 21.0.4 | Versions before 20 have critical advisories. Version 20 turns off the evaluation of scripts. Version 21 turns off the loading of CSS files and iframes. The tests run with these defaults. |
+| `@testing-library/jest-dom` | 8.0.0 | The setup file imports `@testing-library/jest-dom/vitest`. Only version 8 types its matchers for the `Assertion<R, T>` of vitest 5. |
+| `@types/node` | 24.19.2 | An entry of `pnpm.overrides` in the root `package.json` keeps one version in the tree. With two versions pnpm made two copies of `vitest`, and the matcher types of jest-dom did not reach the copy that the tests import. |
+
+After a change of Vite or Tailwind, build both UIs (`rx --pull buyer/dist pnpm --filter @marketplace/buyer build:ui` and
+`rx --pull indexer-ui/dist pnpm --filter @marketplace/indexer-ui build`) and compare the CSS with the build of the base commit. A build
+with no Tailwind output is much smaller. On 2026-11-23 the CSS of the buyer was 21.0 kB and the CSS of the indexer UI was 8.7 kB.
 
 ### Test depth
 
@@ -123,16 +139,16 @@ the graph follows each quoted text that names a file or a folder of the reposito
 6. A change below `contracts/identity-marketplace/` also selects the test files that read the blueprints
    (`contracts/*/plutus.json`) or `fixtures/cbor-fixtures.json` themselves. A change of a blueprint selects each test that reaches it.
 7. A change of the root build or test config selects everything (`all`): `package.json`, `pnpm-lock.yaml`,
-   `pnpm-workspace.yaml`, `tsconfig.base.json`, `.npmrc`, `.nvmrc`, `patches/**`, any `vitest.*` file (`vitest.config.ts`,
-   `vitest.workspace.ts`), `tests/setup.ts`. A change of `.github/**` or `scripts/ci/**` selects everything and switches on every job.
+   `pnpm-workspace.yaml`, `tsconfig.base.json`, `.npmrc`, `.nvmrc`, `patches/**`, any `vitest.*` file (`vitest.config.ts`),
+   `tests/setup.ts`. A change of `.github/**` or `scripts/ci/**` selects everything and switches on every job.
 8. A change of documents only (`*.md`, `docs/**`, images, `LICENSE`) selects nothing and runs no job. A document that a test names
    by its path is not "documents only".
    The maps `contracts/identity-marketplace/tests/*.md` are an exception: a change of a map runs the job `aiken-check` (the map check).
 
 The vitest filter is a substring match on the path: `gateway/test/http.test.ts` also matches `identity-gateway/test/http.test.ts`.
 `changes.mjs` lists the files that the filter would add by mistake in `vitest_exclude`. `scripts/ci/vitest-run.mjs` gives the list
-to the run in the variable `VITEST_EXCLUDE`, and `vitest.workspace.ts` reads it (the option `--exclude` of the command line reaches
-no project of a workspace). The run fails when the files that ran are not exactly the selected files.
+to the run in the variable `VITEST_EXCLUDE`, and `vitest.config.ts` reads it into its `exclude` (the option `--exclude` of the command
+line reaches no inline project, checked with vitest 5.1.1). The run fails when the files that ran are not exactly the selected files.
 
 Known gap (design risk 1): a test that depends on a package without an import (a file that a path built from parts names, a process
 that it starts) can miss the gate. The nightly run finds it. Add the test to the always-run list in `scripts/ci/changes.mjs`
@@ -248,17 +264,27 @@ scripts/coverage-diff --base <ref> --md-out table.md --json-out result.json
 ```
 
 Put the table in the text of the pull request. The script needs `rx` and a git worktree. It runs the same v8 coverage of the default
-suite (the projects `unit` and `ui`; the base commit needs `vitest.workspace.ts`) twice, with the reporters `json-summary` and `json`:
-on a temporary worktree of the base commit, and on the head (the worktree with its uncommitted changes). With two answering build hosts
-the runs go at the same time; `--host NAME` runs both one after the other on one host.
+suite (the projects `unit` and `ui`; the base commit needs projects with these names, in `vitest.workspace.ts` or in `vitest.config.ts`)
+twice, with the reporters `json-summary` and `json`: on a temporary worktree of the base commit, and on the head (the worktree with its
+uncommitted changes). Each side uses its own vitest. With two answering build hosts the runs go at the same time; `--host NAME` runs
+both one after the other on one host.
 
 The rule: a guarded file lost coverage when it has a statement or a branch that the base run covers (count above 0) and the head run
 does not cover (count 0). The script reads `coverage-final.json` of both runs and matches the locations by source position (line and
-column; a branch by its start, its end and its arm), not by the key of the v8 data. v8 adds and moves items with count 0 between two
-runs of the same code, so the keys and the number of branches of a file shift. A base location with no head location at the same
-position is not compared (the source changed there, or v8 reports no range for it). The script exits 1 when a guarded file has a lost
-location, and prints each one with its file, line and kind (`statement` or `branch`). A run of consecutive lost lines is one row of the
-table; `--json-out` holds every location.
+column; a branch arm by its start, its end and its number; the implicit `else` of an `if` has no position of its own, so it takes the
+position of its `if` and the arm number), not by the key of the v8 data. v8 adds and moves items with count 0 between two runs of the
+same code, so the keys and the number of branches of a file shift. A base location with no head location at the same position is not
+compared (the source changed there, or v8 reports no range for it). The script exits 1 when a guarded file has a lost location, and
+prints each one with its file, line and kind (`statement` or `branch`). A run of lost statements on one line or on consecutive lines is
+one row of the table; `--json-out` holds every location.
+
+Both runs must have the same shape of data. Vitest 4 replaced the remapping of the v8 data: vitest 2 and 3 give one statement for each
+line and one branch for each block range, vitest 4 and later give the statements and the branches of the source (an AST-aware
+remapping, as exact as the istanbul provider). A base run of vitest 2 and a head run of vitest 5 share almost no position: on
+2026-11-23, 18 of 21,009 covered locations of the guarded files matched. The script counts the covered base locations that have a head
+location at the same position. When fewer than half do, it prints `RESULT: NOT COMPARABLE` and exits 3, because a comparison of nothing
+would pass. Only the pull request that moved the repository from vitest 2 to vitest 5 has such a base. The percentages of the totals
+differ for the same reason, so they are not a measure of lost tests there.
 
 The percentages in the table are information. The flag `fell` marks a fall of a percentage by more than `--epsilon` (default 0.005
 points) with more uncovered items than before. Without a lost location it is no drop. A drop in a guarded file stops the change until a

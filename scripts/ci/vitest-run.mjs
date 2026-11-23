@@ -6,13 +6,13 @@
  *
  * Environment:
  *   VITEST_MODE      "all" runs every test file of the projects. "selected" runs the files of VITEST_FILES.
- *   VITEST_PROJECTS  the vitest projects to run (vitest.workspace.ts), names separated by spaces, commas or lines, for example
+ *   VITEST_PROJECTS  the vitest projects to run (vitest.config.ts), names separated by spaces, commas or lines, for example
  *                    "unit ui". Empty: all projects (`pnpm test`).
  *   VITEST_FILES     the selected test files, one on each line.
  *   VITEST_EXCLUDE   test files to leave out, one on each line. The vitest filter is a substring match, so "gateway/test/a.test.ts"
  *                    also matches "identity-gateway/test/a.test.ts": the list names the files that must not run. This script does
- *                    not read the list: vitest.workspace.ts does. The option `--exclude` of the command line reaches no project of
- *                    a workspace.
+ *                    not read the list: vitest.config.ts does. The option `--exclude` of the command line reaches no inline
+ *                    project (checked with vitest 5.1.1).
  *   VITEST_REPORT    path of the JSON report (default: $RUNNER_TEMP/vitest-result.json).
  *
  * The run fails when vitest fails, when it ran no file although the mode asked for tests, or (mode "selected") when the files

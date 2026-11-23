@@ -136,7 +136,7 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # The projects `unit` and `ui` of vitest.workspace.ts. The project `aiken-eval` runs in the job `aiken-eval`.
+      # The projects `unit` and `ui` of vitest.config.ts. The project `aiken-eval` runs in the job `aiken-eval`.
       # mode all: every file of the two projects. mode selected: the files of the job `changes`. The run fails when it ran no file.
       - name: Vitest (projects unit and ui)
         env:
@@ -190,7 +190,7 @@ jobs:
       - name: Typecheck the deployment tool
         run: pnpm exec tsc -p tests/identity-deploy/tsconfig.json
 
-      # The project `aiken-eval` of vitest.workspace.ts: tests/legacy-registry (the deployed legacy registry script and adoption),
+      # The project `aiken-eval` of vitest.config.ts: tests/legacy-registry (the deployed legacy registry script and adoption),
       # tests/identity-builders (escrow and advert with the shared builders), tests/identity-vectors (vectors, benchmarks, resolver
       # properties) and tests/identity-deploy (the deployment tool: plan, seal and publish transactions, allowlist, resume).
       # The run fails when it ran no file.

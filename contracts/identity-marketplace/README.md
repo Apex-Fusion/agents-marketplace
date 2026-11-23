@@ -49,7 +49,7 @@ git diff --exit-code plutus.json    # the committed blueprint must equal the bui
 
 Aiken v1.1.21, Plutus V3, aiken-lang/stdlib v3.1.0, aiken-lang/fuzz v2.2.0.
 
-These suites run the compiled scripts with `aiken tx simulate`. They are the vitest project `aiken-eval` (`vitest.workspace.ts`). Run them from the repository root after `pnpm install`. They need `aiken` v1.1.21 on PATH and no network:
+These suites run the compiled scripts with `aiken tx simulate`. They are the vitest project `aiken-eval` (`vitest.config.ts`). Run them from the repository root after `pnpm install`. They need `aiken` v1.1.21 on PATH and no network:
 
 ```sh
 npx vitest run --project aiken-eval tests/legacy-registry/     # deployed legacy registry script and adoption (§12.2)

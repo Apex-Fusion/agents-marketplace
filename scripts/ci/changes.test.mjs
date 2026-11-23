@@ -15,7 +15,6 @@ const TREE = {
   "pnpm-workspace.yaml": 'packages:\n  - "packages/*"\n  - "buyer"\n  - "gateway"\n  - "identity-gateway"\n  - "indexer-ui"\n\nonlyBuiltDependencies:\n  - better-sqlite3\n',
   "package.json": "{}",
   "vitest.config.ts": "export default {};",
-  "vitest.workspace.ts": "export default [];",
   "tests/setup.ts": "",
   "packages/shared/package.json": pkg("@marketplace/shared", {}, { ".": "./src/index.ts", "./tx": "./src/tx/index.ts" }),
   "packages/shared/src/index.ts": 'export * from "./util.js";\n',
@@ -182,7 +181,7 @@ test("a change of the CI files selects every job; a change of the root config se
     assert.equal(result.vitestMode, "all", path);
     assert.deepEqual([result.runTypecheck, result.aikenEval, result.contractsIdentity, result.contractsLegacy], [true, true, true, true], path);
   }
-  for (const path of ["package.json", "vitest.config.ts", "vitest.workspace.ts", "tests/setup.ts", "pnpm-lock.yaml", "tsconfig.base.json", "patches/x.patch"]) {
+  for (const path of ["package.json", "vitest.config.ts", "tests/setup.ts", "pnpm-lock.yaml", "tsconfig.base.json", "patches/x.patch"]) {
     const result = run([path]);
     assert.equal(result.vitestMode, "all", path);
     assert.equal(result.aikenEval, true, path);
@@ -226,7 +225,7 @@ test("a package export with a star maps the subpath of an import to the file (ea
 
 test("path classes", () => {
   // The test-only rule is the one of deploy/mainnet/deploy.sh (TEST_ONLY_RE).
-  for (const path of ["tests/unit/a.ts", "gateway/test/x.ts", "supplier/src/__tests__/a.ts", "packages/shared/src/a.test.ts", "buyer/src/ui/A.test.tsx", "gateway/tsconfig.test.json", "vitest.config.ts", "vitest.workspace.ts", "tests/tsconfig.json"]) {
+  for (const path of ["tests/unit/a.ts", "gateway/test/x.ts", "supplier/src/__tests__/a.ts", "packages/shared/src/a.test.ts", "buyer/src/ui/A.test.tsx", "gateway/tsconfig.test.json", "vitest.config.ts", "tests/tsconfig.json"]) {
     assert.equal(isTestPath(path), true, path);
   }
   for (const path of ["gateway/src/contest.ts", "supplier/src/attest/a.ts", "contracts/identity-marketplace/lib/a.ak", "packages/shared/src/tx/index.ts", ".github/workflows/ci.yml", "tsconfig.base.json"]) {
@@ -249,7 +248,7 @@ test("path classes", () => {
   assert.equal(lineClass("pnpm-lock.yaml"), "other");
   assert.equal(lineClass("docs/a.md"), "other");
   assert.equal(lineClass("tests/fixtures/golden/x.hex"), "other");
-  // The projects unit and ui run these. The folders are the ones of vitest.workspace.ts.
+  // The projects unit and ui run these. The folders are the ones of vitest.config.ts.
   assert.equal(isUnitUiTest("tests/unit/a.test.ts"), true);
   assert.equal(isUnitUiTest("tests/unit/a.test.tsx"), true);
   assert.equal(isUnitUiTest("gateway/test/a.test.ts"), true);

@@ -3,7 +3,7 @@
 #
 # It reads the files that changed against the merge base with origin/main (committed, staged, unstaged and untracked files) and
 # runs three kinds of command through `rx`:
-#   1. vitest on the changed files and on the tests that import them (the projects `unit` and `ui` of vitest.workspace.ts):
+#   1. vitest on the changed files and on the tests that import them (the projects `unit` and `ui` of vitest.config.ts):
 #        rx pnpm exec vitest related --run --project unit --project ui <changed code files> [always-run tests]
 #   2. the typecheck of the source of each changed package:
 #        rx pnpm --filter ./<package> typecheck
