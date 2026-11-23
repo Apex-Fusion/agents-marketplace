@@ -75,6 +75,10 @@ The test tools and the reasons for their versions (2026-11-23):
 After a change of Vite or Tailwind, build both UIs (`rx --pull buyer/dist pnpm --filter @marketplace/buyer build:ui` and
 `rx --pull indexer-ui/dist pnpm --filter @marketplace/indexer-ui build`) and compare the CSS with the build of the base commit. A build
 with no Tailwind output is much smaller. On 2026-11-23 the CSS of the buyer was 21.0 kB and the CSS of the indexer UI was 8.7 kB.
+A build leaves `buyer/dist` in the copy of the worktree on the build host. `tests/unit/buyer-decoder-health.test.ts` starts the buyer
+entry point (`runMain`), which serves that folder when it exists. This changes the coverage of `buyer/src/server.ts`, so a run of
+`scripts/coverage-diff` then reports lost locations that are no lost tests. After a build, remove the folders:
+`rx --no-sync --no-prepare rm -rf buyer/dist indexer-ui/dist`.
 
 ### Test depth
 
