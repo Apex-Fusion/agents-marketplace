@@ -84,13 +84,6 @@ async function fetchTipSlot(): Promise<number> {
   return await chain.tip();
 }
 
-interface ChainEvent {
-  type: string;
-  ref: string;
-  slot: number;
-  txHash: string;
-}
-
 interface EscrowView {
   utxo_ref: string;
   buyer_pkh: string;
@@ -163,58 +156,6 @@ function extractLifecycleTxs(rows: EscrowView[], promptHash: string): { post: st
     else if (r.state === "Open") out.post = tx;
   }
   return out;
-}
-
-/** Pull events since `sinceSlot - 1` and return as an array. */
-async function fetchEvents(sinceSlot: number, limit = 200): Promise<ChainEvent[]> {
-  const url = `${env.INDEXER_URL}/events?since_slot=${Math.max(0, sinceSlot - 1)}&limit=${limit}`;
-  // The /events endpoint is SSE-only. Pull with manual abort after 2s.
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), 2_500);
-  try {
-    const resp = await fetch(url, { signal: ctrl.signal });
-    if (!resp.ok || !resp.body) return [];
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = "";
-    const evts: ChainEvent[] = [];
-    while (true) {
-      let chunk;
-      try {
-        chunk = await reader.read();
-      } catch {
-        break;
-      }
-      if (chunk.done) break;
-      buf += decoder.decode(chunk.value, { stream: true });
-      // Process complete SSE messages (delimited by \n\n).
-      while (true) {
-        const i = buf.indexOf("\n\n");
-        if (i === -1) break;
-        const msg = buf.slice(0, i);
-        buf = buf.slice(i + 2);
-        const lines = msg.split("\n");
-        let type = "";
-        let data = "";
-        for (const ln of lines) {
-          if (ln.startsWith("event:")) type = ln.slice(6).trim();
-          else if (ln.startsWith("data:")) data = ln.slice(5).trim();
-        }
-        if (!type || type === "sync-progress" || !data) continue;
-        try {
-          const parsed = JSON.parse(data) as ChainEvent;
-          evts.push(parsed);
-        } catch {
-          /* ignore */
-        }
-      }
-    }
-    return evts;
-  } catch {
-    return [];
-  } finally {
-    clearTimeout(t);
-  }
 }
 
 interface CycleResult {

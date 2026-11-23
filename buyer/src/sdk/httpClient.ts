@@ -88,7 +88,7 @@ export class HttpClient {
     return mod._performRequest(this.fetchImpl, url, {
       method: "POST",
       body: JSON.stringify(body),
-      headers: { "Content-Type": "application/json", ...(opts?.headers ?? {}) },
+      headers: { "Content-Type": "application/json", ...opts?.headers },
       timeoutMs: opts?.timeoutMs ?? this.defaultTimeoutMs,
     });
   }

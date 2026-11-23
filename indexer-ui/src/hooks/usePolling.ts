@@ -58,8 +58,8 @@ export function usePolling<T>(
       }
     };
 
-    run();
-    const id = setInterval(run, intervalMs);
+    void run();
+    const id = setInterval(() => void run(), intervalMs);
 
     return () => {
       mounted = false;

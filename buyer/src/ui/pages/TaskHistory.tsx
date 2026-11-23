@@ -351,7 +351,7 @@ function ArchivePanel({ row }: { row: ArchiveRow }): JSX.Element {
   // It's small JSON (chat messages array OR TTS body), no streaming worry.
   useEffect(() => {
     let cancelled = false;
-    (async () => {
+    void (async () => {
       try {
         const resp = await fetch(requestUrl);
         if (!resp.ok) throw new Error(`fetch failed: ${resp.status}`);
@@ -369,7 +369,7 @@ function ArchivePanel({ row }: { row: ArchiveRow }): JSX.Element {
   useEffect(() => {
     if (isAudio) return;
     let cancelled = false;
-    (async () => {
+    void (async () => {
       try {
         const resp = await fetch(responseUrl);
         if (!resp.ok) throw new Error(`fetch failed: ${resp.status}`);

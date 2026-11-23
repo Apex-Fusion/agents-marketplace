@@ -57,6 +57,7 @@ function ipv6Bytes(text: string): number[] | null {
   const [left = "", right] = hex.split("::");
   const leftGroups = left === "" ? [] : left.split(":");
   const rightGroups = right === undefined || right === "" ? [] : right.split(":");
+  // oxlint-disable-next-line unicorn/no-new-array -- The count is never below 0 for a text that isIPv6 accepted. If it were, the RangeError of new Array fails closed; Array.from would give an empty list.
   const zeros = new Array<string>(8 - leftGroups.length - rightGroups.length).fill("0");
   return [...leftGroups, ...zeros, ...rightGroups].flatMap((group) => {
     const value = parseInt(group, 16);

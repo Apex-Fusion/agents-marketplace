@@ -364,6 +364,6 @@ export class Paper2AgentRuntime {
     this.closing = true;
     // Stop processes first; an in-flight chain confirmation must not delay this.
     await Promise.all([...this.sessions].map((session) => session.close()));
-    await Promise.allSettled([...this.tasks]);
+    await Promise.allSettled(this.tasks);
   }
 }

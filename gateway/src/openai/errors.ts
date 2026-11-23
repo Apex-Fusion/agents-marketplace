@@ -52,7 +52,7 @@ export const rateLimited = (message: string): GatewayError =>
 export function toErrorBody(err: GatewayError): Record<string, unknown> {
   return {
     error: { message: err.message, type: err.type, code: err.code, param: err.param },
-    ...(err.extra ?? {}),
+    ...err.extra,
   };
 }
 

@@ -447,7 +447,7 @@ export class JobStore {
     while (summaries.length > 1) {
       level++;
       const groups = groupBy(summaries, caps.reduceFanin);
-      const nextLevel: (string | undefined)[] = new Array(groups.length);
+      const nextLevel: (string | undefined)[] = [];
       await runWithConcurrency(
         groups.map((g, i) => ({ g, i })),
         async ({ g, i }) => {

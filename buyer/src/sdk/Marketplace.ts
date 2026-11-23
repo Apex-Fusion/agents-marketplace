@@ -59,7 +59,8 @@ class FallbackEventEmitter {
   emit(event: string, ...args: unknown[]): boolean {
     const arr = this.listeners.get(event);
     if (!arr || arr.length === 0) return false;
-    for (const cb of [...arr]) cb(...args);
+    // Iterate a copy: a listener may call off() while the event runs.
+    for (const cb of arr.slice()) cb(...args);
     return true;
   }
   removeAllListeners(): this {
@@ -134,7 +135,6 @@ import type {
   TaskRecord,
   GetTaskHistoryOptions,
   ProgressEvent,
-  ProgressEventType,
   Receipt,
 } from "./types.js";
 import { IndexerError, SupplierError, ReceiptVerificationError } from "./types.js";
@@ -1858,11 +1858,11 @@ export class Marketplace extends EventEmitterBase {
     this.removeAllListeners();
   }
 
-  on(event: "progress" | ProgressEventType | string, listener: (...args: unknown[]) => void): this {
+  on(event: string, listener: (...args: unknown[]) => void): this {
     return super.on(event, listener);
   }
 
-  off(event: "progress" | ProgressEventType | string, listener: (...args: unknown[]) => void): this {
+  off(event: string, listener: (...args: unknown[]) => void): this {
     return super.off(event, listener);
   }
 }

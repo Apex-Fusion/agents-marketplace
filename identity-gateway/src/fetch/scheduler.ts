@@ -143,7 +143,7 @@ export class FetchScheduler {
   async scan(): Promise<{ readonly records: number; readonly started: readonly string[] }> {
     const list = await this.source.listRecords();
     const { entries } = list;
-    const found: Array<CurrentRecord | null> = new Array<CurrentRecord | null>(entries.length).fill(null);
+    const found: Array<CurrentRecord | null> = Array.from({ length: entries.length }, () => null);
     let next = 0;
     const worker = async (): Promise<void> => {
       for (let i = next++; i < entries.length; i = next++) {

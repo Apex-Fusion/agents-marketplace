@@ -162,7 +162,7 @@ export default function PendingReceipts() {
         <h1 className="text-2xl font-semibold">Pending Receipts</h1>
         <button
           type="button"
-          onClick={loadPending}
+          onClick={() => void loadPending()}
           className="rounded border border-gray-300 bg-white px-3 py-1 text-sm hover:bg-gray-50"
           data-testid="pending-refresh"
         >

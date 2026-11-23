@@ -115,7 +115,7 @@ export class BuildSandbox {
   }
 
   async putBytes(bytes: Buffer, destination: string): Promise<void> {
-    if (!/^\/workspace\/[A-Za-z0-9_.\/+!-]+$/.test(destination) || destination.split("/").includes("..")) throw new Error("Invalid sandbox destination");
+    if (!/^\/workspace\/[A-Za-z0-9_./+!-]+$/.test(destination) || destination.split("/").includes("..")) throw new Error("Invalid sandbox destination");
     if (bytes.length > MAX_PACKAGE_BYTES) throw new Error("Sandbox input exceeds size limit");
     // Docker's archive-copy API rejects a read-only rootfs, even for writable tmpfs.
     // Stream through a trusted isolated helper instead; no host mount is needed.

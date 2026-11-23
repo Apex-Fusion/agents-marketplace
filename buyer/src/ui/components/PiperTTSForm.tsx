@@ -153,7 +153,7 @@ export default function PiperTTSForm({ advertRef, payment_lovelace }: PiperTTSFo
 
   return (
     <form
-      onSubmit={handleSubmit}
+      onSubmit={(event) => void handleSubmit(event)}
       className="space-y-4 rounded border border-gray-200 bg-white p-4"
       data-testid="piper-tts-form"
     >
