@@ -188,10 +188,10 @@ test fails, or when the number or the names of the tests that ran differ from th
 `mise exec <tool> --` starts a clean environment, so name `node@20` in the same call (the script starts with `#!/usr/bin/env node`).
 `aiken fmt --check` is not part of any job: it fails today for the legacy contract (3 files) and, on v1.1.24, for the identity contract.
 
-The shard plan splits the 1,156 tests by measured cost. 454 of them are `fail` tests and 15 are property tests (`prop_*`). The 4 shards
-hold 324, 342, 238 and 252 tests. One thread: the slowest shard took 161 s on v1.1.21 and 68 s on v1.1.24 on a calm host before 115
+The shard plan splits the 1,171 tests by measured cost. 463 of them are `fail` tests and 18 are property tests (`prop_*`). The 4 shards
+hold 331, 345, 243 and 252 tests. One thread: the slowest shard took 161 s on v1.1.21 and 68 s on v1.1.24 on a calm host before 115
 tests were pruned. No calm host measured it again, and `estimated_seconds` of the plan keeps the old values. Each module with tests is
-in one shard, except the property modules: their 15 `prop_*` tests are split by name (`records` goes over all 4 shards). After you add,
+in one shard, except the property modules: their 18 `prop_*` tests are split by name (`records` goes over all 4 shards). After you add,
 rename or delete a test module, or a `prop_*` test in a property module, run `scripts/aiken-check --check-plan` and change
 `aiken-shards.json`. A run fails when a test is in no shard or in two, or when the tests that aiken ran are not the tests of the files.
 

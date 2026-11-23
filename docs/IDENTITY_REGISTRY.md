@@ -363,18 +363,20 @@ Relying parties compute trust labels themselves from the issuer, `issuer_id`, `s
 
 ```abnf
 action           = internal / external
-resource         = script / external
+resource         = script / did / external
 action-pattern   = "*" / internal / prefix / external
-resource-pattern = "*" / script / external
+resource-pattern = "*" / script / did / external
 internal         = seg *( "." seg )
 prefix           = seg *( "." seg ) ".*"
 seg              = 1*( %x61-7A / DIGIT / "-" )
 external         = ( %s"oauth:" / %s"mcp:" / %s"https://" ) 1*VCHAR
 script           = %s"script:" 56lowhex                     ; lowhex as in Part 1 §3
+did              = %s"did:vector:" 64lowhex                 ; exactly 75 bytes
 ```
 
-- A pattern `p` covers a value `a` when `p = "*"`, or `p = a`, or `p = x ".*"` and `a` starts with `x "."`. External and script patterns match only exactly.
-- A child list is narrower than a parent list when a parent pattern covers each child pattern. A child `x.*` is covered only by `*` or by a parent `y.*` where `x = y` or `x` starts with `y "."`. A plain string-prefix test is wrong: `oc.*` does not cover `ocr.*`.
+- A pattern `p` covers a value `a` when `p = "*"`, or `p = a`, or `p = x ".*"` and `a` starts with `x "."`. External, script and `did` patterns match only exactly.
+- A child action list is narrower than a parent action list when a parent pattern covers each child pattern. A child `x.*` is covered only by `*` or by a parent `y.*` where `x = y` or `x` starts with `y "."`. A plain string-prefix test is wrong: `oc.*` does not cover `ocr.*`. A child resource list follows this rule for the patterns that are not `did` patterns, and the rule of §5.2 for the `did` patterns.
+- **`did` patterns name suppliers.** A `did` pattern is `did:vector:` and the 64 lowercase hexadecimal digits of one `vector-id` (Part 1 §3). It names one agent. The legacy form, the testnet form, a form with an uppercase digit and a prefix form such as `did:vector:*` are not patterns. `*` is not a `did` pattern, and `*` never widens a supplier list. A resource list that has `did` patterns is a supplier list: a vault pays only agents that the lists of its delegation chain name (§5.3). A list without `did` patterns names no supplier and limits none. A delegation holds 0 to 11 resource patterns. A vault payment needs one pattern that covers `script:<escrow_hash>`, so a delegation for a vault names at most 10 suppliers.
 - Capability IDs on records do not change. A single-part ID such as `document-extraction` can be matched exactly or by `*`.
 - The action for vault payments is `marketplace.hire.v1`. Its resource is `script:<escrow_hash>`.
 
@@ -394,7 +396,7 @@ pub type DelegationDatum {
   delegate: ByteArray,             // identifier of the delegate agent
   delegate_key: ByteArray,         // key hash of the delegate's Ed25519 delegation key
   actions: List<ByteArray>,        // 1..16 action patterns
-  resources: List<ByteArray>,      // 0..8 resource patterns
+  resources: List<ByteArray>,      // 0..11 resource patterns; the did patterns name suppliers
   not_before: Int,
   not_after: Int,
   depth: Int,                      // 1..4
@@ -408,10 +410,17 @@ pub type DelegationMint { Delegate { seed: OutputReference }  Undelegate }
 
 `DA` is the delegation address. A delegation is authentic only when it is an output at `DA` that holds exactly one token of the delegation policy. Every transaction has `hi − lo ≤ 3,600,000`. `organisation` follows the rules of Part 1 §5 and §10: an organisation, never a person.
 
+**What a delegation limits.** A delegation limits four things: the value (`value`), the period (`not_before` and `not_after`), the action (`actions`) and the supplier (the `did` patterns of `resources`). It does not limit a capability, and it sets no price for a supplier.
+
 - **`Delegate { seed }`**
   - **Output:** the transaction spends `seed` and mints exactly `[(blake2b_256(serialise(seed)), +1)]`. Exactly one output is at `DA`, with the token, an inline datum, no other asset and no reference script.
   - **Delegator without a parent:** a `PrincipalKey` signs. For an `Agent`, the agent's effective status is Active, and either `controller_signed` or a listed key with the delegation purpose signs. `depth = 1`.
-  - **Delegator with a parent:** the authentic parent delegation is a reference input. Its `delegate` is this delegator's `Agent { id }`, its `remaining ≥ 1`, and its `delegate_key` signs. The record of that agent is a reference input, its effective status is Active, and `active_key(record, parent.delegate_key, delegation)` holds. The parent covers every action and resource. The period is inside the parent's period. `depth` is the parent's depth plus one. `remaining ≤` the parent's `remaining − 1`. If the parent has a value limit, this delegation has one with `per_tx` and `total` at most the parent's values and `period_ms` at least the parent's value.
+  - **Delegator with a parent:** the authentic parent delegation is a reference input. Its `delegate` is this delegator's `Agent { id }`, its `remaining ≥ 1`, and its `delegate_key` signs. The record of that agent is a reference input, its effective status is Active, and `active_key(record, parent.delegate_key, delegation)` holds. The parent covers every action. The resources follow the next bullet. The period is inside the parent's period. `depth` is the parent's depth plus one. `remaining ≤` the parent's `remaining − 1`. If the parent has a value limit, this delegation has one with `per_tx` and `total` at most the parent's values and `period_ms` at least the parent's value.
+  - **Resources of a child:** the lists are compared by kind. The `did` patterns of a list are its supplier list. The other patterns are `*`, `script` and external patterns.
+    - Each pattern of the child that is not a `did` pattern is covered by a pattern of the parent that is not a `did` pattern (§5.1).
+    - When the parent has no `did` pattern, the child can have any `did` patterns, or none.
+    - When the parent has `did` patterns, the child has `did` patterns, and each one equals a `did` pattern of the parent.
+    - So a child cannot drop the supplier list of its parent, and it cannot add a supplier. `*` never widens a supplier list: when the parent has `did` patterns, a parent `*` does not let the child name another agent. A delegation without a parent can list any `did` patterns.
   - **Delegate:** the delegate's effective status is Active, `active_key(delegate, delegate_key, delegation)`, and `delegate_key` signs.
   - **Other checks:** the patterns follow §5.1; `not_before < not_after`; the value limit is valid; lengths and counts are as in the datum comments.
 - **`Undelegate`:** exactly one input at `DA`, and it holds the delegation token `id`. The burn is exactly `[(id, −1)]`. The delegator of that delegation, or of an ancestor (ancestors as reference inputs), signs: a `PrincipalKey`, or, for an agent, its controller or a listed key with the delegation purpose (the agent's record as a reference input). Delegations below it become unusable at once, because their parent no longer exists.
@@ -421,6 +430,7 @@ pub type DelegationMint { Delegate { seed: OutputReference }  Undelegate }
   - each delegator agent and the delegate have effective status Active;
   - `active_key(delegate, delegate_key, delegation)` still holds, and `delegate_key` signed. The same `active_key` check holds for the delegate key of every ancestor link, so the removal of a key ends every sub-delegation that this key signed (decision of 2026-11-02, stricter than the first text);
   - the action and the resource are covered;
+  - each link that has `did` patterns names every agent that the dependent contract pays: the resource `did:vector:<id>` of each paid agent equals a `did` pattern of that link. The check covers the delegation and every ancestor, so it does not rely on the narrowing rule. A link without `did` patterns names no supplier and limits none;
   - `[lo, hi]` is inside the period.
 - **Fresh keys.** The gateway and the SDKs refuse a `delegate_key` that another live delegation uses. Thus one agent can hold at most 8 live delegations, one for each listed key.
 
@@ -439,6 +449,7 @@ pub type VaultSpend { Pay  Close }
 - **`Pay`**
   - **Scope:** the input is `Live`. `hi − lo ≤ 3,600,000`. The vault input is the only script input. No mint, withdrawal, certificate, vote or proposal.
   - **Delegation:** the delegation `(delegation_hash, datum.delegation)` and its ancestors pass the use checks (§5.2) for the action `marketplace.hire.v1` and the resource `script:<escrow_hash>`. Its delegator equals `owner`. It has a value limit.
+  - **Suppliers:** the vault reads the `agent_id` of each escrow output. Each link of the chain (the delegation and every ancestor) that has `did` patterns must name each `agent_id` (§5.2): the resource `did:vector:<agent_id>`, with the 32 bytes in 64 lowercase hexadecimal digits, equals one of the `did` patterns of that link. One output that fails refuses the whole Pay. A chain without `did` patterns lets the Pay fund any agent. The check does not bound a price, and it does not stop a delegate that controls a listed supplier. The key that Claims an escrow must be a listed key of the agent in `agent_id` (§6.1). So the funds of a Pay can go only to a key of a named agent, or back to the vault.
   - **Amount:** the input AP3X minus the AP3X of the continuing output. The escrow outputs together hold at least the amount.
   - **Escrow outputs:** each is at the escrow address, with AP3X only and no reference script. Its inline datum is a new escrow datum (§6.1) with:
     - state Open, `submitted_at = None` and `result_receipt_hash = None`;
@@ -446,13 +457,14 @@ pub type VaultSpend { Pay  Close }
     - `refund = Some { address: VA, datum: Some(Returned { owner }) }`;
     - payment + buyer bond + supplier bond ≤ 10,000 AP3X, and equal to the output's AP3X (a builder puts any min-UTxO top-up into the buyer bond);
     - `deliver_by ≤ hi + 7 days`.
+  - **Number of outputs:** with supplier lists, the hosted builders put at most 10 escrow outputs in one Pay (the margin of the bench, §12.4), and 16 is the evaluator limit.
   - **Limits:** the amount is at most `per_tx`. When `lo ≥ period_start + period_ms`, a new period starts with `period_start = hi`, and `spent` restarts with the amount. Otherwise, `spent` grows by the amount. In both cases, the new `spent` is at most `total`.
   - **Continuing output:** exactly one output is at `VA`, with AP3X only, no reference script and the datum `Live { owner, delegation, spent, period_start }` with the new values.
 - **`Close`:** the owner signs: the `PrincipalKey`, or the agent's controller with the agent's record as a reference input. It works for `Live` and `Returned` outputs, after `Undelegate` too. Several vault inputs can close in one transaction. The funds can go anywhere.
 - Escrow refunds arrive at `VA` as `Returned` outputs. Only the owner can spend them, so a refund never raises what the delegate can spend.
 - The limits apply to each `Live` output. An owner who opens several vaults for one delegation adds their limits.
 
-**Who refuses.** The vault contract is the authority for a vault payment. It applies its rules to every transaction, whoever builds it. It refuses a payment above `per_tx`, a spending above `total` in the period, a delegation whose delegator is not the owner, a vault input with an asset other than AP3X, an escrow output above 10,000 AP3X, and a delegation that fails the use checks of §5.2. A builder or a signer can check the same rules first. The MCP builder `vector_build_vault_pay` does this, so that a refusal names the rule. A local signer can also have its own spend limits. These are not the limits of a delegation. With `ledger_decides: true`, the builder skips these checks and its listing checks, and shows the verdict of the node. The node runs the vault script on the draft transaction. Its verdict names the validator that failed, with its purpose and its index. It does not name the rule, because the deployed scripts carry no trace messages. Without the listing checks, a payment can lock funds in an escrow that no supplier can claim. The funds then come back only from `deliver_by` on.
+**Who refuses.** The vault contract is the authority for a vault payment. It applies its rules to every transaction, whoever builds it. It refuses a payment above `per_tx`, a spending above `total` in the period, a delegation whose delegator is not the owner, a vault input with an asset other than AP3X, an escrow output above 10,000 AP3X, an escrow output for an agent that the delegation, or an ancestor, does not name, and a delegation that fails the use checks of §5.2. A builder or a signer can check the same rules first. The MCP builder `vector_build_vault_pay` does this, so that a refusal names the rule. A local signer can also have its own spend limits. These are not the limits of a delegation. With `ledger_decides: true`, the builder skips these checks and its listing checks, and shows the verdict of the node. The node runs the vault script on the draft transaction. Its verdict names the validator that failed, with its purpose and its index. It does not name the rule, because the deployed scripts carry no trace messages. Without the listing checks, a payment can lock funds in an escrow that no supplier can claim. The funds then come back only from `deliver_by` on.
 
 **When a delegation or an identity ends.**
 
@@ -913,8 +925,8 @@ Each attack must fail on-chain, unless the row says that it must pass.
 | Recovery | RecoverInit below the threshold, with an ineligible guardian, with one guardian counted twice (same index or same signer), with a recovery pending, or without the new key's signature; RecoverFinalize before `effective_after`; recovery after a controller change; an Update with a threshold above the guardian bound; a pending recovery with threshold 0. Must pass: Suspend, Unsuspend and RecoverFinalize after a guardian's period ended |
 | Subagents | Depth 5; a stale `parent_epoch`; a parent that does not sign or is not Active; an endpoint on a subagent; a subagent that survives an epoch increase, a controller change or a recovery |
 | Attestation | No subject record; the issuer does not sign; an `issuer_id` key without the assertion purpose; RevokeAtt or Withdraw by a removed issuer key; `solicited` without the subject's controller; an output with a foreign asset, a reference script or a stake credential; a RevokeAtt or Contest that moves the token away from `AA` or lowers the value; `issued_at ≠ hi`; `valid_until` before `issued_at`; a reserved `att_type`; RevokeAtt by the subject; Contest by the issuer; Withdraw before 90 days; a burn of two attestations with one input |
-| Delegation | A child wider than its parent (actions, resources, period, depth, remaining, value or a shorter `period_ms`); `oc.*` treated as covering `ocr.*`; an external pattern used as a prefix; `period_ms = 0`; a delegate key without the delegation purpose; a delegate key that does not sign; a sub-delegation without the signature of the parent's delegate key; a sub-delegation signed by a parent delegate key that its agent removed; a parent token from another policy or address; a change to a delegation output; Undelegate by a stranger; use after the parent's Undelegate; use with a delegate key that the delegate removed |
-| Vault | Pay without the delegate key; pay above `per_tx` or `total`; a new period that starts before `hi`; pay to an escrow that is not Open, not at the exact escrow address, above the cap, not fully funded, with more AP3X than payment + bonds, with `deliver_by` beyond 7 days, without the vault refund, or with another buyer key; a second script input; Pay from a `Returned` output; Close by anybody but the owner. Must pass: Close after Undelegate |
+| Delegation | A child wider than its parent (actions, resources, period, depth, remaining, value or a shorter `period_ms`); `oc.*` treated as covering `ocr.*`; an external pattern used as a prefix; `period_ms = 0`; a delegate key without the delegation purpose; a delegate key that does not sign; a sub-delegation without the signature of the parent's delegate key; a sub-delegation signed by a parent delegate key that its agent removed; a parent token from another policy or address; a change to a delegation output; Undelegate by a stranger; use after the parent's Undelegate; use with a delegate key that the delegate removed; a child that drops or adds a `did` pattern (`delegate_child_drops_supplier_list`, `delegate_child_adds_supplier`, `prop_sub_delegation_narrows_supplier_lists`); a child `*` under a parent that lists a supplier (`delegate_child_star_under_supplier_parent`); `*` used to widen a supplier list (`delegate_star_does_not_widen_supplier_list`, `covers_did_only_exactly`); a `did` pattern with a wrong length or case, or in another form (`invalid_resource_patterns`); more than 11 resource patterns (`delegate_twelve_resources`). Must pass: a child that names fewer suppliers than its parent (`delegate_sub_delegation_with_fewer_suppliers`) |
+| Vault | Pay without the delegate key; pay above `per_tx` or `total`; a new period that starts before `hi`; pay to an escrow that is not Open, not at the exact escrow address, above the cap, not fully funded, with more AP3X than payment + bonds, with `deliver_by` beyond 7 days, without the vault refund, or with another buyer key; a second script input; Pay from a `Returned` output; Close by anybody but the owner; a Pay to an agent that the delegation, or an ancestor, does not name (`pay_to_unlisted_supplier`, `pay_ancestor_list_without_supplier`, `prop_pay_never_funds_unnamed_supplier`); one named and one unnamed escrow output in the same Pay (`pay_with_last_output_to_unlisted_supplier`); `*` used to widen a supplier list (`pay_star_does_not_widen_supplier_list`). Must pass: Close after Undelegate; a Pay to suppliers that every list names (`pay_to_suppliers_that_every_list_names`, `prop_pay_funds_named_suppliers`) |
 | Escrow | Two escrow inputs; a legacy escrow input; any second script input; a mint, withdrawal or certificate; Claim with an unlisted key, a key without the transaction purpose, a controller-only key, no capability, a subagent, a suspended or unaccountable agent, a record at a wrong address or with a fake token, or the record of another agent; Claim above the cap; Claim or Submit with a range over one hour; a continuing escrow output with a stake credential; Submit after key removal, suspension or revocation; a changed `agent_id` or `refund`; a buyer payout to a wrong refund address or with a wrong datum; Reclaim with a refund address and less than a full refund; RefundRevoked against a live agent; RefundRevoked of a Submitted escrow without an "invalid from" time at or before `submitted_at`; RefundRevoked with less than a full refund or to a buyer address with a stake credential; a full refund that leaves out a non-AP3X asset of the escrow input; each payout below its due amount |
 | Other purposes | Each script used as withdraw, publish, vote or propose, except the Module-1 withdraw handler |
 
@@ -942,6 +954,8 @@ The tests are in `tests/legacy-registry/` (offline, `aiken tx simulate`). Result
 - No path lets anybody except the controller reduce a record's value.
 - No action by one author removes or shortens the hold in force of another current author.
 - No vault action lets the delegate spend a `Returned` output.
+- No sub-delegation lets a child drop or add a supplier of its parent, at depth 2 to 4, whatever the lists (`prop_sub_delegation_narrows_supplier_lists`).
+- No vault Pay funds an escrow for an agent that a list of its delegation chain does not name, whatever the depth, the lists and the order of the outputs (`prop_pay_never_funds_unnamed_supplier`; the control is `prop_pay_funds_named_suppliers`).
 - A record's datum, rendered to a DID document and read back, gives the same keys, relationships and status.
 
 ### 12.4 Benchmarks and vectors
@@ -950,8 +964,9 @@ The tests are in `tests/legacy-registry/` (offline, `aiken tx simulate`). Result
   - the largest record (8 keys, 8 parties, 10 holds, 16 capabilities, the longest profile) through every identity action;
   - Claim and Submit with that record;
   - a depth-4 subagent with its ancestors;
-  - a depth-4 delegation chain used by a vault payment with several escrow outputs;
+  - a depth-4 delegation chain used by a vault payment with several escrow outputs, with and without supplier lists (11 resources in each delegation, 10 of them `did` patterns);
   - verdict applications (Suspend and Revoke) and a Consent Update on the largest record, and a challenge resolution with the verdict mint.
+- **Margin for supplier lists.** The bench flags a case above 70 % of a limit. With supplier lists, a Pay with up to 10 escrow outputs stays under 70 % of the memory and CPU limits, when each of the 4 delegations has 11 resources and the vault checks every list. This sets the limit of 11 resources (§5.1) and the 10 escrow outputs of a hosted Pay (§5.3). 16 escrow outputs is the most that the evaluator runs (a budget of 14,000,000 memory units). A build with traces is not used: it takes a Pay with 5 escrow outputs over 70 %. The numbers are in `contracts/identity-marketplace/tests/delegation.md`.
 - **Vectors.** Publish these with the resolver:
   - identifier derivation and the DNS-safe form (Part 1 §3);
   - `legacy_root` membership proofs, including a tree with an odd number of leaves;
