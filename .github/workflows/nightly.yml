@@ -1,7 +1,7 @@
 name: Nightly
 
-# The full run at 02:30 UTC from the default branch: the whole vitest suite with TEST_DEPTH=nightly, the type check of the test
-# files, `aiken check` of both contracts on aiken v1.1.21 (the compiler of the deployed contracts) in 4 shards with
+# The full run at 02:30 UTC from the default branch: the whole vitest suite with TEST_DEPTH=nightly, the lint (oxlint) and the type
+# check of the test files, `aiken check` of both contracts on aiken v1.1.21 (the compiler of the deployed contracts) in 4 shards with
 # one thread each, a new random seed and 100 property iterations, the blueprint diffs, and the check of the CBOR fixtures.
 #
 # The job `plan` skips everything when the head of the branch already has a successful nightly run, and draws the seed.
@@ -113,6 +113,25 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      # The same step as in ci.yml (docs/TESTING.md, section "Lint"): a finding fails the job, and the job `report` opens the issue.
+      - name: Lint (oxlint)
+        run: |
+          pnpm exec oxlint --type-aware \
+            packages/shared/src \
+            gateway/src \
+            supplier/src \
+            buyer/src \
+            buyer/scripts \
+            indexer/src \
+            indexer-ui/src \
+            paper2agent/src \
+            identity-gateway/src \
+            wallet-monitor/src \
+            tests \
+            gateway/test \
+            paper2agent/test \
+            identity-gateway/test
 
       # Blocking: an error in one of these configs makes tsc-report.mjs exit 1, so the step and the job fail, and the job `report` opens
       # the issue. The tsc matcher of setup-node would turn each error line into an annotation: remove it. The job summary has the counts.
