@@ -75,10 +75,12 @@ const TOKEN_NAME = /^[0-9a-f]{64}$/;
 /**
  * The attestations among the outputs of a read. Each is authentic (Part 2 Section 4.1): exactly at the
  * attestation address, with exactly one token of the policy, in quantity 1, named by 32 bytes; and its
- * inline datum decodes. An output that is not, is left out and counted in `skipped`.
+ * inline datum decodes. An output that is not, is left out and counted in `skipped`. A read in pages of
+ * a set that changes can list one token twice: the output with the highest block height is the state
+ * of the token, so the token counts once, by that output.
  */
 export function attestationRows(outputs: readonly UnspentOutput[], registry: Registry): { readonly rows: AttestationRow[]; readonly skipped: number } {
-  const rows: AttestationRow[] = [];
+  const byToken = new Map<string, AttestationRow>();
   let skipped = 0;
   for (const output of outputs) {
     const [token, ...others] = output.assets.filter((a) => a.policyId === registry.policyId);
@@ -94,12 +96,14 @@ export function attestationRows(outputs: readonly UnspentOutput[], registry: Reg
       continue;
     }
     try {
-      rows.push({ id: token.assetName, blockHeight: output.blockHeight, datum: decodeAttestationDatum(hexToBytes(output.inlineDatum)) });
+      const row = { id: token.assetName, blockHeight: output.blockHeight, datum: decodeAttestationDatum(hexToBytes(output.inlineDatum)) };
+      const known = byToken.get(row.id);
+      if (known === undefined || row.blockHeight > known.blockHeight) byToken.set(row.id, row);
     } catch {
       skipped++;
     }
   }
-  return { rows, skipped };
+  return { rows: [...byToken.values()], skipped };
 }
 
 /** Does the attestation count at this tip? (see the head of this file) */

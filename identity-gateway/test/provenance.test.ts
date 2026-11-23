@@ -72,6 +72,7 @@ test.each<[string, UnspentOutput[], unknown, ProvenanceTime?]>([
   ["an unsolicited attestation is only counted", one({ solicited: false }), { othersCount: 1 }],
   ["an attestation of another type is only counted", one({ attType: 15 }), { othersCount: 1 }],
   ["a revoked attestation", one({ status: { type: "Revoked", at: NOW - 1000, reason: 0n } }), undefined],
+  ["a token in two outputs counts once, by the output with the highest block height", [...one({}, 800), ...one({ status: { type: "Revoked", at: NOW - 1000, reason: 0n } }, 900)], undefined],
   ["before valid_from", one({ validFrom: NOW + 1000 }), undefined],
   ["after valid_until", one({ validUntil: NOW - 1000 }), undefined],
   ["29 confirmations", one({}, 971), undefined],
