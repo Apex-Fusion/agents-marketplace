@@ -164,10 +164,7 @@ type Escrow {
 /// its escrow datum. The function fails unless each of them has an inline
 /// `EscrowDatum`. The payment decodes each datum once: the supplier test
 /// reads `agent_id`, and `valid_escrow_output` reads the other fields.
-fn escrow_outputs(
-  outputs: List<Output>,
-  escrow_hash: ByteArray,
-) -> List<Escrow> {
+fn escrow_outputs(outputs: List<Output>, escrow_hash: ByteArray) -> List<Escrow> {
   list.foldr(
     outputs,
     [],

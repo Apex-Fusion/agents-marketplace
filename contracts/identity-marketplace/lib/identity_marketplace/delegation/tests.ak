@@ -15,9 +15,8 @@ use identity_marketplace/delegation/fixtures.{
   agent, agent_delegator, agent_id, ap3x, chain_inputs, chain_link, chain_refs,
   controller_key, delegation_hash, delegation_id, delegation_input,
   delegation_key, delegation_output, delegation_value, did_a, did_b,
-  escrow_pattern, hash,
-  identity_hash, input_at, link, new_id, now, other_hash, principal,
-  principal_delegator, range, record_input, records, revoked, seed,
+  escrow_pattern, hash, identity_hash, input_at, link, new_id, now, other_hash,
+  principal, principal_delegator, range, record_input, records, revoked, seed,
   staked_script_address, stranger, suspended, transaction_key, wallet_input,
   without_delegation_key,
 }
@@ -394,10 +393,7 @@ test delegate_child_drops_supplier_list() fail {
 test delegate_child_adds_supplier() fail {
   sub2_under(
     DelegationDatum { ..parent_of(2), resources: [escrow_pattern, did_a] },
-    DelegationDatum {
-      ..child_of(2),
-      resources: [escrow_pattern, did_a, did_b],
-    },
+    DelegationDatum { ..child_of(2), resources: [escrow_pattern, did_a, did_b] },
   )
 }
 

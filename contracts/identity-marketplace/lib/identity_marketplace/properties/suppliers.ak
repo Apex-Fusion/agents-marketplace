@@ -52,10 +52,7 @@ type Narrowing {
 /// Some of `*` and `script:<escrow hash>`, then some `did` patterns.
 fn resource_list() -> Fuzzer<List<ByteArray>> {
   let others <- fuzz.and_then(fuzz.sublist(["*", escrow_pattern]))
-  fuzz.map(
-    fuzz.sublist(did_patterns()),
-    fn(dids) { list.concat(others, dids) },
-  )
+  fuzz.map(fuzz.sublist(did_patterns()), fn(dids) { list.concat(others, dids) })
 }
 
 fn narrowing() -> Fuzzer<Narrowing> {

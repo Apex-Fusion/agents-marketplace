@@ -276,7 +276,12 @@ pub fn pay_listing(
   let owner = owner_at(depth)
   let buyer = hash(delegation_key(depth))
   let datum =
-    Live { owner, delegation: delegation_id(depth), spent: 0, period_start: start }
+    Live {
+      owner,
+      delegation: delegation_id(depth),
+      spent: 0,
+      period_start: start,
+    }
   let amount = 20 * ap3x * list.length(agents)
   pay(
     datum,
