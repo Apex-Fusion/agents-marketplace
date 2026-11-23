@@ -23,7 +23,7 @@ const AT: ProvenanceTime = { tipHeight: 1000, timeMs: NOW };
 
 /** What the resolver shows for SUBJECT after a read of these outputs. */
 async function shownFor(outputs: UnspentOutput[], at: ProvenanceTime = AT): Promise<VectorProvenance | undefined> {
-  const index = new AttestationIndex({ tip: async () => TIP, policyOutputs: async () => outputs }, ATTESTATION, VECTOR_MAINNET, { log: () => undefined });
+  const index = new AttestationIndex({ tip: async () => TIP, policyOutputs: async () => outputs }, ATTESTATION, { log: () => undefined });
   await index.refresh();
   return index.provenance(SUBJECT, at);
 }
@@ -50,7 +50,7 @@ const nine = Array.from({ length: 9 }, (_, i) => attestationOutput(attestationDa
 const OTHER_ADDRESS = "addr1wx7uz6vshpz23ps09rz3hv8x535usjlte4tak6vuugz8sks9wdc5c";
 const policyToken = (n: number) => ({ policyId: ATTESTATION.policyId, assetName: tokenName(n), quantity: 1n });
 
-test.each<[string, UnspentOutput[], unknown]>([
+test.each<[string, UnspentOutput[], unknown, ProvenanceTime?]>([
   ["accepted: a solicited software attestation of a registered issuer", one(), { attestations: [SHOWN] }],
   [
     "accepted: no registered issuer (a did:key), the reply of the subject's controller, no envelope, no end of validity, the type provenance",
@@ -66,6 +66,7 @@ test.each<[string, UnspentOutput[], unknown]>([
     },
   ],
   ["accepted: 30 confirmations", one({}, 970), { attestations: [SHOWN] }],
+  ["accepted: the list is 29 blocks behind the tip of the request", one(), { attestations: [SHOWN] }, { tipHeight: 1029, timeMs: NOW }],
   ["accepted: at the second of valid_until", one({ validUntil: NOW }), { attestations: [{ ...SHOWN, validUntil: formatTime(NOW) }] }],
   ["an unsolicited attestation is only counted", one({ solicited: false }), { othersCount: 1 }],
   ["an attestation of another type is only counted", one({ attType: 15 }), { othersCount: 1 }],
@@ -73,14 +74,15 @@ test.each<[string, UnspentOutput[], unknown]>([
   ["before valid_from", one({ validFrom: NOW + 1000 }), undefined],
   ["after valid_until", one({ validUntil: NOW - 1000 }), undefined],
   ["29 confirmations", one({}, 971), undefined],
+  ["the list is 30 blocks behind the tip of the request", one(), undefined, { tipHeight: 1030, timeMs: NOW }],
   ["an output at another address", one({}, 900, { address: OTHER_ADDRESS }), undefined],
   ["an output with two tokens of the policy", one({}, 900, { assets: [policyToken(1), policyToken(2)] }), undefined],
   ["an output without an inline datum", one({}, 900, { inlineDatum: null }), undefined],
   ["a datum of another layout", one({}, 900, { inlineDatum: "d87980" }), undefined],
   ["a locator that is not an https URL is left out", one({ locator: utf8("http://attestations.example.org/a.json") }), { attestations: [{ ...SHOWN, locator: undefined }] }],
   ["a locator with credentials is left out", one({ locator: utf8("https://user:secret@attestations.example.org/a.json") }), { attestations: [{ ...SHOWN, locator: undefined }] }],
-])("the list that an agent shows: %s", async (_name, outputs, expected) => {
-  expect(await shownFor(outputs)).toEqual(expected);
+])("the list that an agent shows: %s", async (_name, outputs, expected, at) => {
+  expect(await shownFor(outputs, at)).toEqual(expected);
 });
 
 // Two outputs of the attestation contract on Vector mainnet, as Koios lists them: an active attestation of the type
@@ -140,7 +142,7 @@ test("the read of real mainnet outputs through Koios: the active attestation cou
     return new Response(JSON.stringify(page));
   }) as typeof fetch;
   const chain = new KoiosOgmiosChainSource({ koios: new KoiosClient({ baseUrl: "https://koios.test/api/v1", fetch: koiosStub }), ogmiosUrl: "ws://unused.invalid" });
-  const index = new AttestationIndex(chain, ATTESTATION, VECTOR_MAINNET, { log: () => undefined });
+  const index = new AttestationIndex(chain, ATTESTATION, { log: () => undefined });
   const at: ProvenanceTime = { tipHeight: 10_000_000, timeMs: NOW };
 
   await index.refresh();

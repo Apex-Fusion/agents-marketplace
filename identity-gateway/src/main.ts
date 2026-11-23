@@ -27,7 +27,7 @@ const facts = new FactsStore();
 // concurrent Ogmios sessions.
 const legacyKeys = new LegacyKeySearch(chain);
 // The attestations about each agent are read in the background, never on a request (resolve/attestation-index.ts).
-const attestations = config.attestations ? new AttestationIndex(chain, config.attestations.registry, config.resolver.network, { refreshMs: config.attestations.refreshMs }) : null;
+const attestations = config.attestations ? new AttestationIndex(chain, config.attestations.registry, { refreshMs: config.attestations.refreshMs }) : null;
 const resolver = new VectorResolver(chain, config.resolver, { fetchedFacts: facts.provider, legacyKeys, provenance: attestations });
 // The background scan and the M4 services share a second resolver: the scan and the status-list
 // builds are passes over every record, and passes share their ledger reads (resolve/history-store.ts).

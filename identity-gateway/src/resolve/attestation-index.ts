@@ -9,30 +9,27 @@
 // requests. With the default interval of 30 s that is at most 5,760 calls in a day. A full build of
 // the status lists makes about 2,300 calls.
 //
-// The list keeps the tip that it was read at. A request filters the list at its own tip, and the
-// list can be one interval behind that tip. A new attestation shows after 30 confirmations
-// (provenance.ts). At the usual rate of one block in 4 s that is about 2 minutes, which is more than
-// the default interval, so the delay of the read does not decide when it shows. A revocation or a
-// contest can show up to one interval later on one resolver than on another.
-// A failed read leaves the last list in place. A list serves requests only while the block time of
-// the tip of the request is at most MAX_LIST_AGE_MS after the block time of its own tip.
+// The list keeps the tip that it was read at. A request filters the list at its own tip. The list
+// serves a request only while the tip of the request is fewer than 30 blocks (CONFIRMATION_DEPTH)
+// above the tip of the list. An attestation that has 30 confirmations at the tip of the request is
+// in a block below the tip of the list, so the list holds it. So two resolvers at one tip show the
+// same additions whenever they show the member. A revocation, a contest or a withdrawal can show up
+// to 29 blocks late (at the usual rate of one block in 4 s, about 2 minutes). A failed read leaves
+// the last list in place. The list then serves requests until its tip is 30 blocks behind.
 
 import { inBackground } from "../chain/limiter.js";
 import type { ChainSource, ChainTip } from "../chain/types.js";
 import type { VectorProvenance } from "./metadata.js";
 import { attestationRows, provenanceOf, type AttestationRow, type ProvenanceSource, type ProvenanceTime } from "./provenance.js";
-import type { NetworkParameters, Registry } from "./settings.js";
-import { blockTimeMs } from "./time.js";
+import { CONFIRMATION_DEPTH, type Registry } from "./settings.js";
 
 /** The default of ATTESTATION_REFRESH_SECONDS. */
 export const DEFAULT_ATTESTATION_REFRESH_MS = 30_000;
-/** The range of ATTESTATION_REFRESH_SECONDS: 10 to 300 s. */
+/** The range of ATTESTATION_REFRESH_SECONDS: 10 to 60 s. */
 export const MIN_ATTESTATION_REFRESH_MS = 10_000;
-export const MAX_ATTESTATION_REFRESH_MS = 300_000;
+export const MAX_ATTESTATION_REFRESH_MS = 60_000;
 /** The most outputs that one read takes. Anybody can lock 5 AP3X in an attestation, so a read that has no end would have none. */
 export const MAX_ATTESTATION_OUTPUTS = 5_000;
-/** A list serves requests while the block time of their tip is at most this long (1 hour, as a status list) after the block time of its own tip. */
-export const MAX_LIST_AGE_MS = 3_600_000;
 /** A failed read is logged at most this often. */
 const FAILURE_LOG_INTERVAL_MS = 300_000;
 
@@ -40,8 +37,6 @@ const FAILURE_LOG_INTERVAL_MS = 300_000;
 interface AttestationList {
   /** The tip that the read started at. */
   readonly tip: ChainTip;
-  /** The block time of that tip (POSIX ms). */
-  readonly timeMs: number;
   readonly bySubject: ReadonlyMap<string, readonly AttestationRow[]>;
   readonly size: number;
   /** Outputs that hold the token and are not attestations. */
@@ -69,7 +64,6 @@ export class AttestationIndex implements ProvenanceSource {
   constructor(
     private readonly chain: Pick<ChainSource, "tip" | "policyOutputs">,
     private readonly registry: Registry,
-    private readonly network: NetworkParameters,
     options: AttestationIndexOptions = {},
   ) {
     this.refreshMs = options.refreshMs ?? DEFAULT_ATTESTATION_REFRESH_MS;
@@ -79,7 +73,8 @@ export class AttestationIndex implements ProvenanceSource {
 
   provenance(vectorId: string, at: ProvenanceTime): VectorProvenance | undefined {
     const list = this.list;
-    if (list === null || at.timeMs - list.timeMs > MAX_LIST_AGE_MS) return undefined;
+    // A list that is 30 or more blocks behind the tip of the request can miss an output that has 30 confirmations at that tip.
+    if (list === null || at.tipHeight - list.tip.blockHeight >= CONFIRMATION_DEPTH) return undefined;
     return provenanceOf(list.bySubject.get(vectorId) ?? [], at);
   }
 
@@ -135,7 +130,7 @@ export class AttestationIndex implements ProvenanceSource {
       else own.push(row);
     }
     const changed = this.list === null || this.list.size !== rows.length || this.list.skipped !== skipped;
-    this.list = { tip, timeMs: blockTimeMs(tip.slot, this.network), bySubject, size: rows.length, skipped };
+    this.list = { tip, bySubject, size: rows.length, skipped };
     if (changed) this.log(`identity-gateway: attestations: ${rows.length} at block ${tip.blockHeight}${skipped > 0 ? `, ${skipped} outputs that are not attestations` : ""}`);
   }
 }
