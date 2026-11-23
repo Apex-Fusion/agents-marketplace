@@ -99,7 +99,7 @@ async function eventually<T>(readValue: () => T | undefined, timeoutMs = 10_000)
   }
 }
 
-describe.sequential("paid one-shot concurrency", () => {
+describe("paid one-shot concurrency", { concurrent: false }, () => {
   const chain = new ControlledChain();
   const servers: Server[] = [];
   const supplierStates: SupplierState[] = [];
