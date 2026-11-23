@@ -83,7 +83,7 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # All three projects of vitest.workspace.ts (unit, ui, aiken-eval), with TEST_DEPTH=nightly from the env of the job.
+      # All three projects of vitest.config.ts (unit, ui, aiken-eval), with TEST_DEPTH=nightly from the env of the job.
       # The run fails when it ran no file.
       - name: Vitest (pnpm test, all projects)
         env:
