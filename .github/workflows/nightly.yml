@@ -35,14 +35,16 @@ jobs:
       seed: ${{ steps.plan.outputs.seed }}
     steps:
       - name: Checkout the CI scripts
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           sparse-checkout: scripts/ci
 
       - name: Setup Node.js 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 20
+          # setup-node v5 and later start a pnpm cache by themselves when package.json names a package manager. This job has no pnpm.
+          package-manager-cache: false
 
       - name: Check for a green run of this commit, draw the seed
         id: plan
@@ -60,18 +62,18 @@ jobs:
       TEST_DEPTH: nightly
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup aiken
         uses: ./.github/actions/setup-aiken
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 10.33.2
 
       - name: Setup Node.js 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: pnpm
@@ -94,15 +96,15 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 10.33.2
 
       - name: Setup Node.js 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: pnpm
@@ -137,18 +139,19 @@ jobs:
         shard: [1, 2, 3, 4]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup aiken
         uses: ./.github/actions/setup-aiken
 
       - name: Setup Node.js 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 20
+          package-manager-cache: false
 
       - name: Cache aiken packages
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/aiken/packages
           key: aiken-packages-${{ hashFiles('contracts/*/aiken.lock') }}
@@ -168,18 +171,19 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup aiken
         uses: ./.github/actions/setup-aiken
 
       - name: Setup Node.js 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 20
+          package-manager-cache: false
 
       - name: Cache aiken packages
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/aiken/packages
           key: aiken-packages-${{ hashFiles('contracts/*/aiken.lock') }}
@@ -195,18 +199,19 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup aiken
         uses: ./.github/actions/setup-aiken
 
       - name: Setup Node.js 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 20
+          package-manager-cache: false
 
       - name: Cache aiken packages
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/aiken/packages
           key: aiken-packages-${{ hashFiles('contracts/*/aiken.lock') }}
@@ -238,14 +243,15 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout the CI scripts
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           sparse-checkout: scripts/ci
 
       - name: Setup Node.js 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 20
+          package-manager-cache: false
 
       - name: Open, update or close the issue nightly-failure
         env:
