@@ -3,16 +3,12 @@
 # indexer/Dockerfile — multi-stage image for the chain-follower indexer.
 #
 # Notes:
-#   - better-sqlite3 has native components and needs python3 + make + g++ to
-#     build during `pnpm install`. We install them in the builder stage only
-#     and ship the prebuilt binding to the runtime image (no toolchain in
-#     prod).
-#   - We tried node:20-alpine first; better-sqlite3 11.x ships prebuilds for
-#     musl on linux/x64 so it works without a fallback. If a future version
-#     drops musl prebuilds, switch BUILDER_IMAGE to node:20-bookworm-slim and
-#     replace `apk add` with `apt-get install -y python3 make g++`.
-#   - Same tsx-based runtime as supplier (see supplier/Dockerfile for the
-#     rationale: shared package exports .ts directly).
+#   - better-sqlite3 13 ships prebuilt N-API binaries, also for musl on
+#     linux/x64, so the builder needs no C toolchain and pnpm skips its build
+#     script (ignoredBuiltDependencies in pnpm-workspace.yaml).
+#   - The image runs an esbuild bundle of the server (indexer/dist-server/,
+#     scripts/ci/build-service.mjs), which includes @marketplace/shared (it
+#     exports .ts files). No tsx at runtime.
 #
 # Build:
 #   docker build -f indexer/Dockerfile -t marketplace-indexer .
@@ -23,8 +19,7 @@ ARG NODE_VERSION=24.22.3
 FROM node:${NODE_VERSION}-alpine AS builder
 WORKDIR /repo
 
-# Toolchain for native modules (better-sqlite3). These do NOT land in runtime.
-RUN apk add --no-cache python3 make g++
+# No C toolchain: better-sqlite3 13 has a prebuilt musl binary.
 
 RUN corepack enable && corepack prepare pnpm@10.33.2 --activate
 
@@ -41,15 +36,7 @@ COPY supplier/package.json ./supplier/package.json
 # bundle) so the multi-stage build can produce a self-hosted dashboard image.
 RUN pnpm install --frozen-lockfile --filter '@marketplace/indexer...' --filter '@marketplace/indexer-ui...'
 
-# better-sqlite3 has native bindings. pnpm 10's "approve-builds" gate skips
-# postinstall on native modules by default. Explicitly fetch the prebuilt
-# binary into build/Release/. Match Catherine's M1-D-green diagnosis (the
-# .node file lands at .pnpm/better-sqlite3@*/.../build/Release/).
-RUN BSQ_DIR=$(ls -d node_modules/.pnpm/better-sqlite3@*/node_modules/better-sqlite3 2>/dev/null | head -1) \
- && [ -n "$BSQ_DIR" ] || (echo "FATAL: better-sqlite3 not in pnpm store" && exit 1) \
- && echo "rebuilding native binding at: $BSQ_DIR" \
- && (cd "$BSQ_DIR" && (npx --yes prebuild-install --runtime=node || npm install --build-from-source --no-save)) \
- && ls -la "$BSQ_DIR/build/Release/better_sqlite3.node"
+# better-sqlite3 13 loads its prebuilt musl binary; pnpm skips its build script.
 
 COPY packages/shared ./packages/shared
 COPY indexer ./indexer
@@ -58,6 +45,10 @@ COPY indexer-ui ./indexer-ui
 # Build the indexer-ui dashboard. Output lands at indexer-ui/dist/ which the
 # runtime image will serve via express.static when INDEXER_UI_DIST is set.
 RUN pnpm --filter @marketplace/indexer-ui build
+
+# Bundle the server into indexer/dist-server/: the image runs no tsx. The bundle holds absolute /repo paths.
+COPY scripts/ci/build-service.mjs ./scripts/ci/build-service.mjs
+RUN node scripts/ci/build-service.mjs indexer
 
 # ─── runtime ──────────────────────────────────────────────────────────────
 FROM node:${NODE_VERSION}-alpine AS runtime
@@ -85,4 +76,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD wget -qO- http://127.0.0.1:${INDEXER_PORT}/healthz >/dev/null || exit 1
 
 ENTRYPOINT ["/sbin/tini", "--"]
-CMD ["node_modules/.bin/tsx", "indexer/src/index.ts"]
+CMD ["node", "--enable-source-maps", "indexer/dist-server/index.js"]

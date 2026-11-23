@@ -2,13 +2,11 @@
 #
 # supplier/Dockerfile — multi-stage image for the supplier node.
 #
-# Strategy: install workspace deps in a builder stage, then ship the source
-# tree + node_modules to a slim runtime stage that runs the entry point with
-# tsx. We do NOT compile TypeScript ahead-of-time because @marketplace/shared
-# exports .ts files via package.json#exports (`"./chain": "./src/chain/index.ts"`),
-# which means a `tsc`-compiled `dist/index.js` cannot resolve those imports
-# at runtime without an additional build step on the shared package. Running
-# tsx is what apex-dashboard does and matches that working pattern.
+# Strategy: install workspace deps in a builder stage, bundle the server with
+# esbuild (scripts/ci/build-service.mjs → supplier/dist-server/index.js; the bundle
+# includes @marketplace/shared, which exports .ts files), then ship the tree +
+# node_modules to a slim runtime stage. tsx stays installed for the operator
+# CLIs (tx:*), but the server runs as plain node: no tsx or esbuild process.
 #
 # Build context MUST be the repo root so pnpm can resolve workspace deps:
 #   docker build -f supplier/Dockerfile -t marketplace-supplier .
@@ -59,6 +57,11 @@ COPY contracts/marketplace/plutus.json ./contracts/marketplace/plutus.json
 # loadIdentityBlueprint reads the new escrow and advert (Part 2 §6.1, §6.2).
 COPY contracts/identity-marketplace/plutus.json ./contracts/identity-marketplace/plutus.json
 
+# Bundle the server into supplier/dist-server/. The bundle holds absolute /repo paths, so it is built in /repo and
+# runs in /repo.
+COPY scripts/ci/build-service.mjs ./scripts/ci/build-service.mjs
+RUN node scripts/ci/build-service.mjs supplier
+
 # ─── runtime ──────────────────────────────────────────────────────────────
 FROM node:${NODE_VERSION}-alpine AS runtime
 WORKDIR /repo
@@ -88,6 +91,5 @@ EXPOSE 8080
 HEALTHCHECK --interval=20s --timeout=5s --start-period=15s --retries=3 \
   CMD wget -qO- http://127.0.0.1:${PORT}/healthz >/dev/null || exit 1
 
-# tsx is hoisted to /repo/node_modules/.bin by pnpm — invoke via the workspace bin.
 ENTRYPOINT ["/sbin/tini", "--"]
-CMD ["node_modules/.bin/tsx", "supplier/src/index.ts"]
+CMD ["node", "--enable-source-maps", "supplier/dist-server/index.js"]

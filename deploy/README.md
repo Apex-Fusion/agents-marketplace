@@ -430,3 +430,28 @@ keeps each limit at or below the `stop_grace_period` in its compose file in `dep
 keeps the limit of the publisher equal to it.
 
 When no failure happens, the check changes nothing and writes nothing.
+
+## 12. Images: bundled servers
+
+The images of the buyer, the gateway, the indexer, the supplier, the wallet monitor and Paper2Agent run an esbuild bundle of the
+server, not the TypeScript source: `node --enable-source-maps <service>/dist-server/index.js`. The Dockerfile builds it with
+`node scripts/ci/build-service.mjs <service>` after it copies the sources. So no tsx process and no esbuild process run next to a
+service. On 2026-11-23 these two processes used about 250 MiB of RAM and 175 MiB of swap on the mainnet host.
+
+The rules of the bundle (the header of the script has the details):
+
+- The workspace packages (`@marketplace/*`) are in the bundle. Each other import is the path of a file in `node_modules`, resolved
+  from the source file that imports it, because pnpm gives each package only its own dependencies. So the bundle works only in
+  `/repo`, where the image builds it.
+- `import.meta.url` of a bundled source file is the URL of that source file, so the blueprint readers still find
+  `contracts/*/plutus.json`.
+- The live CBOR builders load lucid through a dynamic import with `@vite-ignore`, which keeps lucid out of the browser bundle of the
+  buyer. The script makes these imports literal, and esbuild puts the modules into lazy chunks: lucid still loads only on the live
+  path. A marked import without a constant fails the build.
+- Stack traces show the TypeScript files and lines (`--enable-source-maps`), also in the field `frame=` of the error log lines.
+- An entry file starts its service only when `process.argv[1]` is the source (`src/index.ts`) or the bundle
+  (`dist-server/index.js`).
+
+tsx stays in the images for the operator CLIs (for example `node_modules/.bin/tsx supplier/src/cli/post-advert.ts`), for the surplus
+seller (its compose file runs a CLI) and for the supplier children of the Paper2Agent publisher. CI builds all six bundles in the job
+`typecheck` (step "Bundle the services").

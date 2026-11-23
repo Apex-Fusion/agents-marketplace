@@ -219,7 +219,7 @@ async function main(startHealth: typeof startDecoderHealth = startDecoderHealth)
 
 // Only run when executed directly (not when imported by tests).
 const isDirectRun = process.argv[1]?.endsWith("supplier/src/index.ts")
-  || process.argv[1]?.endsWith("supplier/dist/index.js");
+  || process.argv[1]?.endsWith("supplier/dist-server/index.js");
 if (isDirectRun) {
   main().catch((err) => {
     // eslint-disable-next-line no-console

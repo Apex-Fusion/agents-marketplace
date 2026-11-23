@@ -111,6 +111,11 @@ jobs:
             tests/identity-builders/tsconfig.json \
             tests/identity-vectors/tsconfig.json
 
+      # The images run these bundles (scripts/ci/build-service.mjs). The step fails on an import that does not resolve and on a
+      # dynamic import with @vite-ignore that the script cannot make literal, before a deploy builds an image.
+      - name: Bundle the services
+        run: node scripts/ci/build-service.mjs --all
+
   vitest:
     name: vitest (Node 24)
     needs: changes
