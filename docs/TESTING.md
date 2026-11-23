@@ -170,6 +170,21 @@ took 1.8 s with it and 15.3 s with tsc 5.9.3 (2026-11-23, no build info).
   imports `@typescript/typescript6` (the API of TypeScript 6, in the root `devDependencies`). TypeScript 7.1 brings a new API; the test can then
   move to it.
 
+### Dependency updates
+
+Dependabot (`.github/dependabot.yml`) opens version updates each Monday: one pull request for the minor and patch updates of the runtime
+packages, one for the development packages, and a separate pull request for each chain, key or CBOR package (`@lucid-evolution/*`,
+`@harmoniclabs/*`, `@anastasia-labs/*`, `@cardano-sdk/*`, `@noble/*`, `cbor-x`, `libsodium*`) and for each major update. The GitHub
+Actions updates come once a month.
+
+- A dependency pull request changes `pnpm-lock.yaml`, so a merge rebuilds and restarts every service (`SHARED_RE` of
+  `deploy/mainnet/deploy.sh`). Do not turn on auto-merge for it. Merge it in a release window.
+- A security fix for a transitive package whose parent locks an old version goes into `pnpm.overrides` of the root `package.json` as a
+  floor: `"<package>@<<fixed version>": "~<fixed version>"`. Remove the line when the parent itself requires the fixed version.
+- Open alerts without a fix in the allowed range (2026-11-23): `@effect/platform` (the provider of lucid-evolution locks 0.71; the
+  cookie advisory needs 0.97, and the marketplace does not use its cookies) and `@hono/node-server` below 2.1.3 (the MCP SDK requires 1.x;
+  the advisory is about `serveStatic`).
+
 ## 4. Aiken
 
 | Use | Compiler | Where |
