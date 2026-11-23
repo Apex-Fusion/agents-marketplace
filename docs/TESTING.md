@@ -190,7 +190,7 @@ Actions updates come once a month.
 
 ### Lint
 
-The linter is oxlint. `oxlint` and `oxlint-tsgolint` are in the root `devDependencies`, with exact versions. With `--type-aware`, oxlint-tsgolint reads the tsconfig files and checks the types with TypeScript 7, so the rules that need types run too. The config is `.oxlintrc.json`.
+The linter is oxlint. `oxlint` and `oxlint-tsgolint` are in the root `devDependencies`, with exact versions. With `--type-aware`, oxlint-tsgolint reads the tsconfig files and checks the types with TypeScript 7, so the rules that need types run too. The config is `.oxlintrc.json`. It sets `options.typeAware` as well, so a run without the flag is type-aware too.
 
 | Files | Rules (all are errors) |
 |---|---|
