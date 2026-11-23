@@ -23,7 +23,8 @@ const AT: ProvenanceTime = { tipHeight: 1000, timeMs: NOW };
 
 /** What the resolver shows for SUBJECT after a read of these outputs. */
 async function shownFor(outputs: UnspentOutput[], at: ProvenanceTime = AT): Promise<VectorProvenance | undefined> {
-  const index = new AttestationIndex({ tip: async () => TIP, policyOutputs: async () => outputs }, ATTESTATION, { log: () => undefined });
+  const chain = { tip: async () => TIP, policyOutputs: async () => outputs, policyChangedSince: async () => true };
+  const index = new AttestationIndex(chain, ATTESTATION, { log: () => undefined });
   await index.refresh();
   return index.provenance(SUBJECT, at);
 }
@@ -130,30 +131,58 @@ const REAL_ROWS = [
   },
 ];
 
-test("the read of real mainnet outputs through Koios: the active attestation counts, the revoked one does not; no more than 5,000 outputs", async () => {
-  const state = { hash: "aa".repeat(32), total: REAL_ROWS.length };
+test("the read of real mainnet outputs through Koios: the active attestation counts, the revoked one does not; a new tip with no change keeps the list; a change reads again; more than 5,000 outputs fail at once and wait 10 minutes", async () => {
+  const state = { hash: "aa".repeat(32), height: 10_000_000, total: REAL_ROWS.length, changed: false, downloaded: 0, calls: 0, now: NOW };
   const koiosStub = (async (input: string | URL | Request) => {
     const url = String(input);
-    if (!url.includes("credential_utxos")) {
-      return new Response(JSON.stringify([{ hash: state.hash, abs_slot: TIP.slot, block_height: 10_000_000 }]));
-    }
+    state.calls++;
+    if (url.includes("credential_txs")) return new Response(JSON.stringify(state.changed ? [{ tx_hash: "ab".repeat(32) }] : []));
+    if (!url.includes("credential_utxos")) return new Response(JSON.stringify([{ hash: state.hash, abs_slot: TIP.slot, block_height: state.height }]));
     const offset = Number(/offset=(\d+)/.exec(url)![1]);
-    const page = state.total === REAL_ROWS.length ? REAL_ROWS : Array.from({ length: Math.max(0, Math.min(1000, state.total - offset)) }, () => REAL_ROWS[0]);
+    const limit = Number(/limit=(\d+)/.exec(url)![1]);
+    const page = Array.from({ length: state.total }, (_, i) => REAL_ROWS[i % REAL_ROWS.length]).slice(offset, offset + limit);
+    // The limit check asks for one row. A page is a download.
+    if (limit > 1) state.downloaded += page.length;
     return new Response(JSON.stringify(page));
   }) as typeof fetch;
   const chain = new KoiosOgmiosChainSource({ koios: new KoiosClient({ baseUrl: "https://koios.test/api/v1", fetch: koiosStub }), ogmiosUrl: "ws://unused.invalid" });
-  const index = new AttestationIndex(chain, ATTESTATION, { log: () => undefined });
-  const at: ProvenanceTime = { tipHeight: 10_000_000, timeMs: NOW };
+  const index = new AttestationIndex(chain, ATTESTATION, { log: () => undefined, now: () => state.now });
+  const at = (tipHeight: number): ProvenanceTime => ({ tipHeight, timeMs: NOW });
+  const newTip = (hash: string, height: number): void => {
+    state.hash = hash.repeat(32);
+    state.height = height;
+  };
 
   await index.refresh();
-  expect(index.provenance(ACTIVE_SUBJECT, at)).toEqual({ othersCount: 1 });
-  expect(index.provenance(REVOKED_SUBJECT, at)).toBeUndefined();
-  await index.refresh();
+  expect(index.provenance(ACTIVE_SUBJECT, at(10_000_000))).toEqual({ othersCount: 1 });
+  expect(index.provenance(REVOKED_SUBJECT, at(10_000_000))).toBeUndefined();
+  expect(state.downloaded).toBe(2);
 
-  state.hash = "bb".repeat(32);
+  // A new tip and no transaction at the address: the list moves to the new tip, and nothing is downloaded.
+  newTip("bb", 10_000_020);
+  await index.refresh();
+  expect(state.downloaded).toBe(2);
+  expect(index.provenance(ACTIVE_SUBJECT, at(10_000_049))).toEqual({ othersCount: 1 });
+  expect(index.provenance(ACTIVE_SUBJECT, at(10_000_050))).toBeUndefined();
+
+  // A new tip and a transaction at the address: the outputs are read again.
+  newTip("cc", 10_000_100);
+  state.changed = true;
+  await index.refresh();
+  expect(state.downloaded).toBe(4);
+
+  // More than 5,000 outputs: the limit check fails the read before a download, and the next 10 minutes make no call.
+  newTip("dd", 10_000_200);
   state.total = 5001;
   await expect(index.refresh()).rejects.toThrow("more than 5000");
-  expect(index.provenance(ACTIVE_SUBJECT, at)).toEqual({ othersCount: 1 });
+  expect(state.downloaded).toBe(4);
+  const calls = state.calls;
+  await expect(index.refresh()).rejects.toThrow("more than 5000");
+  expect(state.calls).toBe(calls);
+  state.now += 600_000;
+  state.total = REAL_ROWS.length;
+  await index.refresh();
+  expect(state.downloaded).toBe(6);
 });
 
 test("a result without options has vectorProvenance at the tip of the request, and a result for a version option has none", async () => {

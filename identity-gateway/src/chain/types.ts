@@ -103,6 +103,14 @@ export interface UnspentOutput {
   readonly inlineDatum: string | null;
 }
 
+/** A read found more outputs than its limit. */
+export class TooManyOutputs extends Error {
+  constructor(readonly limit: number) {
+    super(`more than ${limit} outputs hold a token of the policy`);
+    this.name = "TooManyOutputs";
+  }
+}
+
 export interface ChainSource {
   /** The current tip of the selected chain. */
   tip(): Promise<ChainTip>;
@@ -129,7 +137,13 @@ export interface ChainSource {
   /**
    * The unspent outputs at the script whose hash is `policyId` (any stake part) that hold a token of
    * that policy, in the order of their output reference. For a script that is also its own minting
-   * policy, as the attestation contract is. A read of more than `maxOutputs` outputs fails.
+   * policy, as the attestation contract is. A read of more than `maxOutputs` outputs fails with
+   * `TooManyOutputs`, before the source downloads them.
    */
   policyOutputs(policyId: string, maxOutputs: number): Promise<UnspentOutput[]>;
+  /**
+   * True when a transaction in a block at or above `blockHeight` made or spent an output at the script
+   * whose hash is `policyId`.
+   */
+  policyChangedSince(policyId: string, blockHeight: number): Promise<boolean>;
 }

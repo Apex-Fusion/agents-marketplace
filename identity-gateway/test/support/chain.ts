@@ -4,6 +4,7 @@
 
 import {
   assetKey,
+  TooManyOutputs,
   type AssetId,
   type BlockWitnesses,
   type ChainSource,
@@ -121,7 +122,13 @@ export class FakeChain implements ChainSource {
         .filter((o) => !spent.has(`${t.txHash}#${o.outputIndex}`) && o.assets.some((a) => a.policyId === policyId && a.quantity > 0n))
         .map((o) => ({ txHash: t.txHash, outputIndex: o.outputIndex, blockHeight: t.blockHeight, address: o.address, assets: o.assets, inlineDatum: o.inlineDatum })),
     );
-    if (outputs.length > maxOutputs) throw new Error(`Koios credential_utxos answered more than ${maxOutputs} outputs that hold a token of the policy`);
+    if (outputs.length > maxOutputs) throw new TooManyOutputs(maxOutputs);
     return outputs;
+  }
+
+  async policyChangedSince(policyId: string, blockHeight: number): Promise<boolean> {
+    this.enter("policyChangedSince");
+    const holds = (assets: LedgerTx["mint"]) => assets.some((a) => a.policyId === policyId);
+    return this.txs.some((t) => t.blockHeight >= blockHeight && (t.outputs.some((o) => holds(o.assets)) || t.inputs.some((i) => holds(i.assets))));
   }
 }

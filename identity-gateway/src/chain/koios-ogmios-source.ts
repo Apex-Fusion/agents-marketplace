@@ -18,6 +18,7 @@ import {
 import { fetchBlocksAfter } from "./ogmios.js";
 import {
   assetKey,
+  TooManyOutputs,
   type Asset,
   type AssetId,
   type BlockWitnesses,
@@ -194,14 +195,20 @@ export class KoiosOgmiosChainSource implements ChainSource {
     // The script hash is the payment credential. The filter on the asset list keeps the outputs that hold
     // a token of the policy, so the outputs that anybody can send to the address do not count.
     const holdsToken = `asset_list=cs.${encodeURIComponent(JSON.stringify([{ policy_id: policyId }]))}`;
+    const order = "order=tx_hash.asc,tx_index.asc";
+    const body = { _payment_credentials: [policyId], _extended: true };
+    // A row at the limit means that the read is too big. Then nothing is downloaded.
+    const beyond = await this.koios.post<unknown[]>(`credential_utxos?select=tx_hash,tx_index&${holdsToken}&${order}&offset=${maxOutputs}&limit=1`, body);
+    if (beyond.length > 0) throw new TooManyOutputs(maxOutputs);
     const rows: KoiosCredentialUtxoRow[] = [];
     for (let offset = 0; ; offset += KOIOS_PAGE) {
       const page = await this.koios.post<KoiosCredentialUtxoRow[]>(
-        `credential_utxos?select=tx_hash,tx_index,block_height,address,asset_list,inline_datum&${holdsToken}&order=tx_hash.asc,tx_index.asc&offset=${offset}&limit=${KOIOS_PAGE}`,
-        { _payment_credentials: [policyId], _extended: true },
+        `credential_utxos?select=tx_hash,tx_index,block_height,address,asset_list,inline_datum&${holdsToken}&${order}&offset=${offset}&limit=${KOIOS_PAGE}`,
+        body,
       );
       rows.push(...page);
-      if (rows.length > maxOutputs) throw new Error(`Koios credential_utxos answered more than ${maxOutputs} outputs that hold a token of the policy`);
+      // The set can grow between the check and a page.
+      if (rows.length > maxOutputs) throw new TooManyOutputs(maxOutputs);
       if (page.length < KOIOS_PAGE) break;
     }
     return rows.map((r) => ({
@@ -212,5 +219,10 @@ export class KoiosOgmiosChainSource implements ChainSource {
       assets: assetsOf(r.asset_list),
       inlineDatum: r.inline_datum?.bytes?.toLowerCase() ?? null,
     }));
+  }
+
+  async policyChangedSince(policyId: string, blockHeight: number): Promise<boolean> {
+    const rows = await this.koios.post<unknown[]>("credential_txs?select=tx_hash&limit=1", { _payment_credentials: [policyId], _after_block_height: blockHeight });
+    return rows.length > 0;
   }
 }
