@@ -5,6 +5,11 @@
   "categories": {
     "correctness": "error"
   },
+  "options": {
+    // The same as `--type-aware` on the command line. A run without the flag then does not skip the type rules, and the promise rules
+    // of the test folders (which need types) never go silent.
+    "typeAware": true
+  },
   "rules": {
     // A Promise that nobody handles is an unhandled rejection, and Node ends the process. no-floating-promises is in `correctness`.
     // no-misused-promises is not, so it is named here. Both need `--type-aware`.
