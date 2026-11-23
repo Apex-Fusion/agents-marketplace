@@ -7,7 +7,7 @@ The rules for agents are in `AGENTS.md`. The reasons for each choice are in `doc
 
 | Tier | When | What |
 |---|---|---|
-| Agent loop | During the work | `scripts/test-changed`: the tests that the changed files reach, the typecheck of the source of the changed packages (not of the test files: CI checks them, by the owner's decision) and `aiken check` of the changed Aiken area, on a build host through `rx`. One thread for `aiken check`. Never the full suite. |
+| Agent loop | During the work | `scripts/test-changed`: the tests that the changed files reach, the typecheck of the source of the changed packages (not of the test files: CI checks them, by the owner's decision), the lint of the changed code files (section "Lint") and `aiken check` of the changed Aiken area, on a build host through `rx`. One thread for `aiken check`. Never the full suite. |
 | Pull request gate | Each pull request | The workflow `CI` (`.github/workflows/ci.yml`). The job `changes` chooses the jobs. The job `gate` is the only required check. |
 | Push on `main` | Each merge | The same jobs and the same path rule as the pull request. Then `deploy-mainnet.yml` deploys. |
 | Nightly | 02:30 UTC | `.github/workflows/nightly.yml`: everything, with `TEST_DEPTH=nightly`, on the compiler of the deployed contracts. |
@@ -20,7 +20,7 @@ All commands that load the CPU run on a build host through `rx` (`rx --help`).
 
 | Need | Command |
 |---|---|
-| The tests, the typecheck and the Aiken area that your change reaches | `scripts/test-changed` (add `--dry-run` to see the commands) |
+| The tests, the typecheck, the lint and the Aiken area that your change reaches | `scripts/test-changed` (add `--dry-run` to see the commands, `--no-lint` to skip the lint) |
 | One test file | `rx pnpm exec vitest run tests/unit/<file>.test.ts` |
 | The tests that import one source file | `rx pnpm exec vitest related --run --project unit --project ui <source file>` |
 | One vitest project | `rx pnpm exec vitest run --project unit` (also `ui`, `aiken-eval`; section "Vitest projects") |
@@ -30,6 +30,8 @@ All commands that load the CPU run on a build host through `rx` (`rx --help`).
 | The typecheck of all source | `rx pnpm -r typecheck` |
 | The typecheck of the test files (blocking in CI) | `rx node scripts/ci/tsc-report.mjs tests/tsconfig.json gateway/tsconfig.test.json paper2agent/tsconfig.test.json tests/legacy-registry/tsconfig.json tests/identity-builders/tsconfig.json tests/identity-vectors/tsconfig.json` |
 | The service bundles of the images | `rx node scripts/ci/build-service.mjs --all` (writes `<service>/dist-server/`; deploy/README.md section 12) |
+| The lint of all folders (blocking in CI) | `rx pnpm exec oxlint --type-aware packages/shared/src gateway/src supplier/src buyer/src buyer/scripts indexer/src indexer-ui/src paper2agent/src identity-gateway/src wallet-monitor/src tests gateway/test paper2agent/test identity-gateway/test` |
+| The lint of some files | `rx pnpm exec oxlint --type-aware <file>...` |
 | One Aiken area | `rx mise exec github:aiken-lang/aiken@1.1.24 node@24 -- scripts/aiken-check --modules identity_marketplace/escrow` |
 | One Aiken shard | `rx mise exec github:aiken-lang/aiken@1.1.24 node@24 -- scripts/aiken-check --shard 1 --of 4 --seed 358316146` |
 | The legacy contract | `rx mise exec github:aiken-lang/aiken@1.1.24 node@24 -- scripts/aiken-check --project contracts/marketplace --all` |
@@ -91,7 +93,7 @@ The workflow `CI` has the same triggers as before: a push on `main`, and each pu
 | Job | Runs when | What it does |
 |---|---|---|
 | `changes` | Always | Lists the changed files (the pull request from the merge base to the head, a push from `before` to the new commit; every file when `before` is missing). Runs `scripts/ci/changes.mjs`. Tests the CI scripts first. |
-| `typecheck` | The change is not docs only | `pnpm -r typecheck` (blocking). Then the type check of the test files (blocking too): `tests/tsconfig.json`, `gateway/tsconfig.test.json`, `paper2agent/tsconfig.test.json` and three folder configs. An error in any config fails the job. The error count of each config is in the job summary. Section "The type check of the test files". Then it bundles the six services (`node scripts/ci/build-service.mjs --all`); a bundle error fails the job. |
+| `typecheck` | The change is not docs only | The lint (`oxlint --type-aware`, blocking). Section "Lint". Then `pnpm -r typecheck` (blocking). Then the type check of the test files (blocking too): `tests/tsconfig.json`, `gateway/tsconfig.test.json`, `paper2agent/tsconfig.test.json` and three folder configs. An error in any config fails the job. The error count of each config is in the job summary. Section "The type check of the test files". Then it bundles the six services (`node scripts/ci/build-service.mjs --all`); a bundle error fails the job. |
 | `vitest` | The selection is not empty | The projects `unit` and `ui`: the selected test files, or every file of the two projects when the selection is `all`. Fails when it runs no file. The 10 slowest test files are in the job summary. |
 | `aiken-eval` | `contracts/identity-marketplace/` changed, or a file that the tests of the project `aiken-eval` reach | `aiken build` with the blueprint diff, the project `aiken-eval` (the 4 folders, one run, the 10 slowest files in the job summary), `tsc -p tests/identity-deploy/tsconfig.json`, and `fixtures/generate.mjs --check`. Aiken v1.1.21. |
 | `aiken-check` | The identity contract changed, the Aiken tool changed, or a map `contracts/identity-marketplace/tests/*.md` changed | The map check (`scripts/aiken-check-maps`), then 4 shards of `scripts/aiken-check`, aiken v1.1.24, one fixed seed. |
@@ -186,6 +188,25 @@ Actions updates come once a month.
   cookie advisory needs 0.97, and the marketplace does not use its cookies) and `@hono/node-server` below 2.1.3 (the MCP SDK requires 1.x;
   the advisory is about `serveStatic`).
 
+### Lint
+
+The linter is oxlint. `oxlint` and `oxlint-tsgolint` are in the root `devDependencies`, with exact versions. With `--type-aware`, oxlint-tsgolint reads the tsconfig files and checks the types with TypeScript 7, so the rules that need types run too. The config is `.oxlintrc.json`.
+
+| Files | Rules (all are errors) |
+|---|---|
+| The source folders | The category `correctness` (with `--type-aware` it holds type rules such as `no-floating-promises`, `await-thenable`, `unbound-method` and `no-misused-spread`) and `typescript/no-misused-promises`. |
+| The test folders `tests`, `gateway/test`, `paper2agent/test` and `identity-gateway/test` | `typescript/no-floating-promises` and `typescript/no-misused-promises`, and nothing else. A floating promise in a test can hide an assertion. A `.oxlintrc.json` in each folder says so: oxlint does not merge it with the root config. A new test folder needs a copy of it. |
+
+Two rules are off in the whole repository, with the reason in `.oxlintrc.json`: `eslint/no-control-regex` (the input checks match control characters on purpose) and `typescript/no-base-to-string` (it flags `String(x)` on a value that TypeScript narrowed from `unknown`).
+
+The command is the same in the job `typecheck` of `ci.yml`, in the nightly job `typecheck-tests` and in the table of section 2. A finding fails the job, so it fails the gate. The folders are also in `scripts/test-changed`, which lints the changed code files below them (all folders when a `.oxlintrc.json` changed). Change the four places together when you add a folder.
+
+To repair a finding:
+
+- Repair the code. An unused variable goes away; a parameter that a signature needs gets the prefix `_`. A function that returns a promise and goes where a `void` function is expected (an event handler, a timer, a callback of a library) gets `() => void handler()` when it catches its own errors, and a `.catch` when it does not.
+- Silence a finding only with a comment that gives the reason, on the line before it: `// oxlint-disable-next-line <rule> -- <reason>`. Never silence a finding without a reason. A rule that does not fit the whole repository goes off in `.oxlintrc.json`, with a comment that says why.
+- Do not repair a finding by a change of behavior. Keep what the code accepts and refuses. When the repair would change it, silence the finding with the reason.
+
 ## 4. Aiken
 
 | Use | Compiler | Where |
@@ -236,7 +257,7 @@ it, and puts it in the issue. To repeat a night: run the same shard with that se
 The job `plan` skips the run when the head of the branch already has a successful nightly run, and draws the seed. The jobs:
 
 - `vitest`: `pnpm test` (the three projects `unit`, `ui` and `aiken-eval`), with `TEST_DEPTH=nightly` (the deep variants of "Test depth");
-- `typecheck-tests`: the type check of the test files (blocking: an error fails the job). It runs the six configs of the gate and `tests/identity-deploy/tsconfig.json`;
+- `typecheck-tests`: the lint (the same step as in the gate) and the type check of the test files (blocking: an error fails the job). It runs the six configs of the gate and `tests/identity-deploy/tsconfig.json`;
 - `aiken-check`: the map check, then 4 shards on aiken v1.1.21, one thread, the seed of the night, `--max-success 100`;
 - `legacy-contract`: the legacy contract on v1.1.21;
 - `blueprints`: the blueprint diff of the identity contract and `fixtures/generate.mjs --check`;
