@@ -406,6 +406,15 @@ test delegate_star_does_not_widen_supplier_list() fail {
   )
 }
 
+/// A child `*` is wider than the other patterns of a parent that lists a
+/// supplier: the parent must hold `*` itself.
+test delegate_child_star_under_supplier_parent() fail {
+  sub2_under(
+    DelegationDatum { ..parent_of(2), resources: [escrow_pattern, did_a] },
+    DelegationDatum { ..child_of(2), resources: ["*", did_a] },
+  )
+}
+
 /// §12.1 Delegation: `period_ms = 0`.
 test delegate_period_ms_zero() fail {
   mint_delegate(
