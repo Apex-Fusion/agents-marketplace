@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-ARG NODE_VERSION=20.20.2
+ARG NODE_VERSION=24.22.3
 FROM node:${NODE_VERSION}-alpine AS builder
 WORKDIR /repo
 RUN apk add --no-cache python3 make g++

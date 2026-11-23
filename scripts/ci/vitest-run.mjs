@@ -2,7 +2,7 @@
 /**
  * scripts/ci/vitest-run.mjs: run the vitest part of the workflow `CI` and check what ran.
  *
- * It needs Node 20 and no packages. It runs `pnpm`, so run it from the repository root after `pnpm install`.
+ * It needs Node 24 and no packages. It runs `pnpm`, so run it from the repository root after `pnpm install`.
  *
  * Environment:
  *   VITEST_MODE      "all" runs every test file of the projects. "selected" runs the files of VITEST_FILES.

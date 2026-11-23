@@ -55,7 +55,7 @@ for one-off / **1800000** for chat (the session spans the whole conversation).
 advert cap. When the buyer omits it, no token limit is sent upstream.
 
 Long calls: Hetzner sends the response header only when the whole answer is
-complete, and the Node 20 `fetch` of the supplier gives up on a call without a
+complete, and the Node `fetch` of the supplier gives up on a call without a
 header after 300 s, whatever `OPENAI_TIMEOUT_MS` is. A supplier whose advert
 allows more than 300 s sets `OPENAI_CHAT_STREAM_ONLY=1`. The supplier then reads
 the provider's SSE and returns the same Response as the buffered call (the

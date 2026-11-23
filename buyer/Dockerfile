@@ -21,7 +21,7 @@
 # Build:
 #   docker build -f buyer/Dockerfile -t marketplace-buyer .
 
-ARG NODE_VERSION=20.19.0
+ARG NODE_VERSION=24.22.3
 
 # ─── builder ──────────────────────────────────────────────────────────────
 FROM node:${NODE_VERSION}-alpine AS builder

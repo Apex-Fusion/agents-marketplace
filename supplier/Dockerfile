@@ -13,10 +13,10 @@
 # Build context MUST be the repo root so pnpm can resolve workspace deps:
 #   docker build -f supplier/Dockerfile -t marketplace-supplier .
 #
-# Base image: node:20-alpine. Supplier has no native compile dependencies
+# Base image: node:24-alpine. Supplier has no native compile dependencies
 # (@noble/ed25519, express, cbor-x are pure JS). Stay on alpine for size.
 
-ARG NODE_VERSION=20.19.0
+ARG NODE_VERSION=24.22.3
 
 # ─── builder ──────────────────────────────────────────────────────────────
 FROM node:${NODE_VERSION}-alpine AS builder

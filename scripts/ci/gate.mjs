@@ -2,7 +2,7 @@
 /**
  * scripts/ci/gate.mjs: decide the result of the required check `gate` of the workflow `CI`.
  *
- * It needs Node 20 and no packages. The job `gate` runs it with `if: always()` after all other jobs, because GitHub counts a
+ * It needs Node 24 and no packages. The job `gate` runs it with `if: always()` after all other jobs, because GitHub counts a
  * skipped required job as passed. The rules:
  *   - The job `changes` must be "success". Without it no flag can be trusted.
  *   - A job whose flag is on must be "success". "skipped", "failure" and "cancelled" fail the gate.

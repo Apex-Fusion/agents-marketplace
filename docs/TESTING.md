@@ -29,9 +29,9 @@ All commands that load the CPU run on a build host through `rx` (`rx --help`).
 | The typecheck of one package | `rx pnpm --filter ./<package folder> typecheck` |
 | The typecheck of all source | `rx pnpm -r typecheck` |
 | The typecheck of the test files (blocking in CI) | `rx node scripts/ci/tsc-report.mjs tests/tsconfig.json gateway/tsconfig.test.json paper2agent/tsconfig.test.json tests/legacy-registry/tsconfig.json tests/identity-builders/tsconfig.json tests/identity-vectors/tsconfig.json` |
-| One Aiken area | `rx mise exec github:aiken-lang/aiken@1.1.24 node@20 -- scripts/aiken-check --modules identity_marketplace/escrow` |
-| One Aiken shard | `rx mise exec github:aiken-lang/aiken@1.1.24 node@20 -- scripts/aiken-check --shard 1 --of 4 --seed 358316146` |
-| The legacy contract | `rx mise exec github:aiken-lang/aiken@1.1.24 node@20 -- scripts/aiken-check --project contracts/marketplace --all` |
+| One Aiken area | `rx mise exec github:aiken-lang/aiken@1.1.24 node@24 -- scripts/aiken-check --modules identity_marketplace/escrow` |
+| One Aiken shard | `rx mise exec github:aiken-lang/aiken@1.1.24 node@24 -- scripts/aiken-check --shard 1 --of 4 --seed 358316146` |
+| The legacy contract | `rx mise exec github:aiken-lang/aiken@1.1.24 node@24 -- scripts/aiken-check --project contracts/marketplace --all` |
 | The plan of the Aiken shards | `scripts/aiken-check --check-plan` |
 | The maps of the Aiken tests: does each name exist? | `node scripts/aiken-check-maps` (runs no aiken, about 1 s) |
 | The jobs that CI would run for a change | `printf 'gateway/src/sweeper.ts\n' \| node scripts/ci/changes.mjs --files -` |
@@ -195,7 +195,7 @@ test fails, or when the number or the names of the tests that ran differ from th
 | `--all` | Each test of the project (`--project contracts/marketplace`) |
 | `--check-plan` | Validates the plan against the files; runs no aiken |
 
-`mise exec <tool> --` starts a clean environment, so name `node@20` in the same call (the script starts with `#!/usr/bin/env node`).
+`mise exec <tool> --` starts a clean environment, so name `node@24` in the same call (the script starts with `#!/usr/bin/env node`).
 `aiken fmt --check` is not part of any job: it fails today for the legacy contract (3 files) and, on v1.1.24, for the identity contract.
 
 The shard plan splits the 1,156 tests by measured cost. 454 of them are `fail` tests and 15 are property tests (`prop_*`). The 4 shards

@@ -13,7 +13,7 @@
 # Build context MUST be the repo root so pnpm can resolve workspace deps:
 #   docker build -f wallet-monitor/Dockerfile -t marketplace-wallet-monitor .
 
-ARG NODE_VERSION=20.19.0
+ARG NODE_VERSION=24.22.3
 
 # ─── builder ──────────────────────────────────────────────────────────────
 FROM node:${NODE_VERSION}-alpine AS builder

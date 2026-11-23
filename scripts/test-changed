@@ -8,7 +8,7 @@
 #   2. the typecheck of the source of each changed package:
 #        rx pnpm --filter ./<package> typecheck
 #   3. `aiken check` of each changed Aiken area, with one thread and aiken v1.1.24 (the compiler of the pull request gate):
-#        rx RAYON_NUM_THREADS=1 mise exec github:aiken-lang/aiken@1.1.24 node@20 -- scripts/aiken-check --modules <area>[,<area>]
+#        rx RAYON_NUM_THREADS=1 mise exec github:aiken-lang/aiken@1.1.24 node@24 -- scripts/aiken-check --modules <area>[,<area>]
 # A changed file below one of the 4 folders of the project `aiken-eval` runs that project on the changed folders:
 #        rx pnpm exec vitest run --project aiken-eval <folder>...
 # The command line of each step is printed before it runs.
@@ -186,10 +186,10 @@ fi
 if [ "$do_aiken" -eq 1 ]; then
   if [ "${#areas[@]}" -gt 0 ]; then
     modules=$(IFS=,; echo "${areas[*]}")
-    run_step "aiken check $modules" "${rx_cmd[@]}" RAYON_NUM_THREADS=1 mise exec "github:aiken-lang/aiken@$aiken_version" node@20 -- scripts/aiken-check --modules "$modules" --seed 358316146
+    run_step "aiken check $modules" "${rx_cmd[@]}" RAYON_NUM_THREADS=1 mise exec "github:aiken-lang/aiken@$aiken_version" node@24 -- scripts/aiken-check --modules "$modules" --seed 358316146
   fi
   if [ "$legacy_changed" -eq 1 ]; then
-    run_step "aiken check legacy" "${rx_cmd[@]}" RAYON_NUM_THREADS=1 mise exec "github:aiken-lang/aiken@$aiken_version" node@20 -- scripts/aiken-check --project contracts/marketplace --all --seed 358316146
+    run_step "aiken check legacy" "${rx_cmd[@]}" RAYON_NUM_THREADS=1 mise exec "github:aiken-lang/aiken@$aiken_version" node@24 -- scripts/aiken-check --project contracts/marketplace --all --seed 358316146
   fi
   if [ "$plan_changed" -eq 1 ]; then
     run_step "aiken shard plan" "${rx_cmd[@]}" node scripts/aiken-check --check-plan

@@ -17,7 +17,7 @@
 # Build:
 #   docker build -f indexer/Dockerfile -t marketplace-indexer .
 
-ARG NODE_VERSION=20.19.0
+ARG NODE_VERSION=24.22.3
 
 # ─── builder ──────────────────────────────────────────────────────────────
 FROM node:${NODE_VERSION}-alpine AS builder
