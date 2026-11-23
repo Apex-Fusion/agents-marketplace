@@ -90,6 +90,26 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # Type-aware: oxlint-tsgolint reads the tsconfig files. The config is .oxlintrc.json (docs/TESTING.md, section "Lint").
+      # The folders are the same in the nightly run, in scripts/test-changed and in the docs.
+      - name: Lint (oxlint)
+        run: |
+          pnpm exec oxlint --type-aware \
+            packages/shared/src \
+            gateway/src \
+            supplier/src \
+            buyer/src \
+            buyer/scripts \
+            indexer/src \
+            indexer-ui/src \
+            paper2agent/src \
+            identity-gateway/src \
+            wallet-monitor/src \
+            tests \
+            gateway/test \
+            paper2agent/test \
+            identity-gateway/test
+
       - name: Typecheck (all workspaces)
         run: pnpm -r typecheck
 

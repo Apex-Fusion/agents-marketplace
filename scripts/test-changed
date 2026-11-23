@@ -11,15 +11,19 @@
 #        rx RAYON_NUM_THREADS=1 mise exec github:aiken-lang/aiken@1.1.24 node@24 -- scripts/aiken-check --modules <area>[,<area>]
 # A changed file below one of the 4 folders of the project `aiken-eval` runs that project on the changed folders:
 #        rx pnpm exec vitest run --project aiken-eval <folder>...
+# The changed code files below the lint folders (docs/TESTING.md, section "Lint") get one more command. A changed .oxlintrc.json lints
+# all the lint folders instead:
+#        rx pnpm exec oxlint --type-aware <changed code files>
 # The command line of each step is printed before it runs.
 #
 # It never runs the full suite, and it never runs a test on this computer. When `rx` fails (exit status 125) the command did not
 # run: push the branch and let CI test (docs/TESTING.md). CI runs the same steps by package, and the nightly run runs everything.
 #
-# Usage: scripts/test-changed [--base REF] [--host NAME] [--dry-run] [--no-vitest] [--no-typecheck] [--no-aiken] [-h]
+# Usage: scripts/test-changed [--base REF] [--host NAME] [--dry-run] [--no-vitest] [--no-typecheck] [--no-lint] [--no-aiken] [-h]
 #   --base REF     compare with the merge base of HEAD and REF (default origin/main)
 #   --host NAME    pass `--host NAME` to rx
 #   --dry-run      print the commands, run none
+#   --no-lint      skip the oxlint step
 set -uo pipefail
 
 base_ref=origin/main
@@ -28,11 +32,12 @@ dry_run=0
 do_vitest=1
 do_typecheck=1
 do_aiken=1
+do_lint=1
 # Tests that CI runs with every selection (ALWAYS_RUN of scripts/ci/changes.mjs): they scan the text of the repository.
 always_run=(tests/unit/decoder-sites.test.ts)
 aiken_version=1.1.24
 
-usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -42,6 +47,7 @@ while [ $# -gt 0 ]; do
     --no-vitest) do_vitest=0; shift ;;
     --no-typecheck) do_typecheck=0; shift ;;
     --no-aiken) do_aiken=0; shift ;;
+    --no-lint) do_lint=0; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "test-changed: unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -146,6 +152,23 @@ for path in "${changed[@]}"; do
   esac
 done
 
+# ── 4. lint ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+# The folders that CI lints. Keep them equal to the step "Lint (oxlint)" of .github/workflows/ci.yml and nightly.yml.
+lint_roots=(packages/shared/src gateway/src supplier/src buyer/src buyer/scripts indexer/src indexer-ui/src paper2agent/src identity-gateway/src wallet-monitor/src tests gateway/test paper2agent/test identity-gateway/test)
+in_lint_roots() {
+  local root
+  for root in "${lint_roots[@]}"; do [[ "$1" == "$root"/* ]] && return 0; done
+  return 1
+}
+lint_files=()
+lint_all=0
+for path in "${existing[@]}"; do
+  case "$path" in
+    .oxlintrc.json|*/.oxlintrc.json) lint_all=1 ;;
+  esac
+  if is_code "$path" && in_lint_roots "$path"; then lint_files+=("$path"); fi
+done
+
 # ── Run ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 declare -a step_names=()
 declare -a step_status=()
@@ -183,6 +206,13 @@ if [ "$do_typecheck" -eq 1 ] && [ "${#packages[@]}" -gt 0 ]; then
   for dir in "${packages[@]}"; do filters+=(--filter "./$dir"); done
   run_step "typecheck ${packages[*]}" "${rx_cmd[@]}" pnpm "${filters[@]}" typecheck
 fi
+if [ "$do_lint" -eq 1 ]; then
+  if [ "$lint_all" -eq 1 ]; then
+    run_step "oxlint all folders" "${rx_cmd[@]}" pnpm exec oxlint --type-aware "${lint_roots[@]}"
+  elif [ "${#lint_files[@]}" -gt 0 ]; then
+    run_step "oxlint ${#lint_files[@]} file(s)" "${rx_cmd[@]}" pnpm exec oxlint --type-aware "${lint_files[@]}"
+  fi
+fi
 if [ "$do_aiken" -eq 1 ]; then
   if [ "${#areas[@]}" -gt 0 ]; then
     modules=$(IFS=,; echo "${areas[*]}")
@@ -197,7 +227,7 @@ if [ "$do_aiken" -eq 1 ]; then
 fi
 
 if [ "${#step_names[@]}" -eq 0 ]; then
-  echo "test-changed: no test, typecheck or Aiken step applies to these changes."
+  echo "test-changed: no test, typecheck, lint or Aiken step applies to these changes."
   exit 0
 fi
 
