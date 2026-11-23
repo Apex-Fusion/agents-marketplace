@@ -13,13 +13,15 @@
 
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
-import { resolve } from "path";
+import { resolve } from "node:path";
+
+const dir = import.meta.dirname;
 
 export default defineConfig({
   plugins: [react()],
-  root: resolve(__dirname, "src"),
+  root: resolve(dir, "src"),
   build: {
-    outDir: resolve(__dirname, "dist"),
+    outDir: resolve(dir, "dist"),
     emptyOutDir: true,
   },
   server: {
@@ -28,14 +30,14 @@ export default defineConfig({
   resolve: {
     alias: [
       // Sub-path aliases first.
-      { find: "@marketplace/shared/chain", replacement: resolve(__dirname, "../packages/shared/src/chain/index.ts") },
-      { find: "@marketplace/shared/cbor", replacement: resolve(__dirname, "../packages/shared/src/cbor/index.ts") },
-      { find: "@marketplace/shared/receipt", replacement: resolve(__dirname, "../packages/shared/src/receipt/index.ts") },
-      { find: "@marketplace/shared/tx", replacement: resolve(__dirname, "../packages/shared/src/tx/index.ts") },
-      { find: "@marketplace/shared/network", replacement: resolve(__dirname, "../packages/shared/src/network.ts") },
+      { find: "@marketplace/shared/chain", replacement: resolve(dir, "../packages/shared/src/chain/index.ts") },
+      { find: "@marketplace/shared/cbor", replacement: resolve(dir, "../packages/shared/src/cbor/index.ts") },
+      { find: "@marketplace/shared/receipt", replacement: resolve(dir, "../packages/shared/src/receipt/index.ts") },
+      { find: "@marketplace/shared/tx", replacement: resolve(dir, "../packages/shared/src/tx/index.ts") },
+      { find: "@marketplace/shared/network", replacement: resolve(dir, "../packages/shared/src/network.ts") },
       // Bare alias as a regex anchored to end — only matches exact
       // `@marketplace/shared`, never a sub-path.
-      { find: /^@marketplace\/shared$/, replacement: resolve(__dirname, "../packages/shared/src/index.ts") },
+      { find: /^@marketplace\/shared$/, replacement: resolve(dir, "../packages/shared/src/index.ts") },
     ],
   },
 });

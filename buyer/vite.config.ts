@@ -16,17 +16,16 @@
 
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
-import { resolve } from "path";
+import { resolve } from "node:path";
+
+const dir = import.meta.dirname;
 
 export default defineConfig({
   plugins: [react()],
-  root: resolve(__dirname, "src/ui"),
+  root: resolve(dir, "src/ui"),
   build: {
-    outDir: resolve(__dirname, "dist"),
+    outDir: resolve(dir, "dist"),
     emptyOutDir: true,
-    // Preserve CommonJS initialization order. CborString -> Cbor -> SubCborRef
-    // is circular; hoisted requires make SubCborRef extend an undefined class.
-    commonjsOptions: { strictRequires: true },
   },
   server: {
     port: 5173,
@@ -34,22 +33,22 @@ export default defineConfig({
   resolve: {
     alias: [
       // Sub-path aliases first (longest prefixes win on string matching).
-      { find: "@marketplace/shared/chain", replacement: resolve(__dirname, "../packages/shared/src/chain/index.ts") },
-      { find: "@marketplace/shared/cbor", replacement: resolve(__dirname, "../packages/shared/src/cbor/index.ts") },
-      { find: "@marketplace/shared/identity", replacement: resolve(__dirname, "../packages/shared/src/identity/index.ts") },
+      { find: "@marketplace/shared/chain", replacement: resolve(dir, "../packages/shared/src/chain/index.ts") },
+      { find: "@marketplace/shared/cbor", replacement: resolve(dir, "../packages/shared/src/cbor/index.ts") },
+      { find: "@marketplace/shared/identity", replacement: resolve(dir, "../packages/shared/src/identity/index.ts") },
       // The receipt field lists without Node imports (receipt/index.ts imports Node crypto).
-      { find: "@marketplace/shared/receipt-fields", replacement: resolve(__dirname, "../packages/shared/src/receipt/fields.ts") },
-      { find: "@marketplace/shared/receipt", replacement: resolve(__dirname, "../packages/shared/src/receipt/index.ts") },
-      { find: "@marketplace/shared/tx", replacement: resolve(__dirname, "../packages/shared/src/tx/index.ts") },
-      { find: "@marketplace/shared/network", replacement: resolve(__dirname, "../packages/shared/src/network.ts") },
+      { find: "@marketplace/shared/receipt-fields", replacement: resolve(dir, "../packages/shared/src/receipt/fields.ts") },
+      { find: "@marketplace/shared/receipt", replacement: resolve(dir, "../packages/shared/src/receipt/index.ts") },
+      { find: "@marketplace/shared/tx", replacement: resolve(dir, "../packages/shared/src/tx/index.ts") },
+      { find: "@marketplace/shared/network", replacement: resolve(dir, "../packages/shared/src/network.ts") },
       // Bare alias as a regex anchored to end — only matches exact
       // `@marketplace/shared`, never a sub-path.
-      { find: /^@marketplace\/shared$/, replacement: resolve(__dirname, "../packages/shared/src/index.ts") },
+      { find: /^@marketplace\/shared$/, replacement: resolve(dir, "../packages/shared/src/index.ts") },
       // Browser stub for tx/blueprint.ts. The real module reads plutus.json
       // via fs/path/url; the SPA transitively imports `loadBlueprint` but
       // never calls it (tx construction is server-side via /v1/*). Aliasing
       // to a stub keeps Node builtins out of the Rollup browser bundle.
-      { find: /\/packages\/shared\/src\/tx\/blueprint\.ts$/, replacement: resolve(__dirname, "src/ui/stubs/blueprintStub.ts") },
+      { find: /\/packages\/shared\/src\/tx\/blueprint\.ts$/, replacement: resolve(dir, "src/ui/stubs/blueprintStub.ts") },
     ],
   },
 });
