@@ -22,7 +22,7 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "typescript": "^5.7.2"
+    "typescript": "^7.0.2"
   },
   "dependencies": {
     "@harmoniclabs/cbor": "1.6.6",

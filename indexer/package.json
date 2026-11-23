@@ -20,6 +20,6 @@
     "@types/ws": "^8.5.13",
     "eventsource": "^2.0.2",
     "supertest": "^7.0.0",
-    "typescript": "^5.7.2"
+    "typescript": "^7.0.2"
   }
 }

@@ -160,6 +160,16 @@ A test file with a type error fails the job `typecheck`, and so it fails the gat
 - A deliberate wrong input (a `null` where the type forbids it) takes a cast through `unknown` and one comment that says why.
 - When only a change of the product code can fix the error, keep the test and put a narrow `// @ts-expect-error <reason>` on that line. The compiler then fails when the error goes away.
 
+### The TypeScript compiler
+
+The type check uses TypeScript 7 (`typescript` ^7.0.2 in each `package.json`). Its `tsc` is a native program. On build-1, `pnpm -r typecheck`
+took 1.8 s with it and 15.3 s with tsc 5.9.3 (2026-11-23, no build info).
+
+- TypeScript 7 sets `types` to `[]` by default. `tsconfig.base.json` names `node`. A config that needs other global types must name them in `types`.
+- `tests/unit/decoder-sites.test.ts` reads the source with the compiler API. The main entry of TypeScript 7.0 has no compiler API, so the test
+  imports `@typescript/typescript6` (the API of TypeScript 6, in the root `devDependencies`). TypeScript 7.1 brings a new API; the test can then
+  move to it.
+
 ## 4. Aiken
 
 | Use | Compiler | Where |

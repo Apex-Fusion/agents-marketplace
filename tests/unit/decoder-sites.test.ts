@@ -39,7 +39,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
-import ts from "typescript";
+// The compiler API of TypeScript 6. The main entry of TypeScript 7.0 has no compiler API.
+import ts from "@typescript/typescript6";
 import { afterAll, describe, expect, it } from "vitest";
 
 const ROOT = resolve(__dirname, "../..");
