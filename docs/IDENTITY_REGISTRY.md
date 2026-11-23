@@ -681,7 +681,7 @@ All three modules get new deployments in this phase. They use `vector_identity` 
   - a reachable endpoint.
 - `vector_discover_agents` reads the indexer, which applies the advert listing rule (§6.2).
 - Attestations are marked `firstParty` when the issuer and the subject share a party key or the controller, or when the issuer key is a key of the subject. Attestations without `issuer_id` are marked `unattributed`. These marks are hints, not guarantees.
-- The policy is published at `/policy`. It also gives the bound of each revocation path at each surface and the bound for an open escrow.
+- The policy is published at `/policy`. It also gives the bound of each revocation path at each surface and the bound for an open escrow. The gateway does not push status changes: a relying party pulls them (Part 1 §9).
 
 ### 8.5 Renderings and endpoint detection
 
