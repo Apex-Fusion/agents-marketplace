@@ -49,10 +49,10 @@ import { pathToFileURL } from "node:url";
 /** Test files that run with every selection. They scan the text of the repository, so no import reaches them. */
 export const ALWAYS_RUN = ["tests/unit/decoder-sites.test.ts"];
 
-/** The folders of the vitest project `aiken-eval` (vitest.workspace.ts). The job `aiken-eval` runs them; the projects `unit` and `ui` do not. */
+/** The folders of the vitest project `aiken-eval` (vitest.config.ts). The job `aiken-eval` runs them; the projects `unit` and `ui` do not. */
 export const EVAL_DIRS = ["tests/legacy-registry", "tests/identity-builders", "tests/identity-vectors", "tests/identity-deploy"];
 
-/** Where the projects `unit` and `ui` (vitest.workspace.ts) look for tests: a folder prefix and the extensions of its test files. */
+/** Where the projects `unit` and `ui` (vitest.config.ts) look for tests: a folder prefix and the extensions of its test files. */
 const UNIT_UI_TEST_ROOTS = [
   ["tests/unit/", "tsx"], ["packages/", "ts"], ["gateway/", "ts"], ["paper2agent/", "ts"], ["identity-gateway/", "ts"],
 ];
