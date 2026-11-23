@@ -24,14 +24,25 @@ export function loadSchemas(dir: URL): ReadonlyMap<string, Buffer> {
 /**
  * The route of the schema files. A path that names no file is not its own (the server answers 404). The
  * files do not change while the gateway runs, so a client may keep a file for an hour.
- * `Access-Control-Allow-Origin: *` lets a validator in a browser read it.
+ * `Access-Control-Allow-Origin: *` lets a validator in a browser read it, and the preflight answers as
+ * the render routes do.
  */
 export function schemaRoutes(schemas: ReadonlyMap<string, Buffer>): Route {
   return async (req, res, path) => {
     const body = schemas.get(SCHEMA_PATH.exec(path)?.[1] ?? "");
     if (body === undefined) return false;
+    if (req.method === "OPTIONS") {
+      res.writeHead(204, {
+        "access-control-allow-origin": "*",
+        "access-control-allow-methods": "GET, HEAD, OPTIONS",
+        "access-control-allow-headers": "Accept, Content-Type, If-None-Match",
+        "access-control-max-age": "86400",
+      });
+      res.end();
+      return true;
+    }
     if (req.method !== "GET" && req.method !== "HEAD") {
-      res.writeHead(405, { allow: "GET, HEAD", "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" });
+      res.writeHead(405, { allow: "GET, HEAD, OPTIONS", "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" });
       res.end("method not allowed\n");
       return true;
     }
