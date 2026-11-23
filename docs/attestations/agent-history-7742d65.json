@@ -1,0 +1,16 @@
+{
+  "type": "software-build-record",
+  "subject": "did:vector:8a98c4b74f0e49a09ca4b3502e121c96a8e6992afd2cba64ef8128042fedd440",
+  "agent": "Agent History",
+  "endpoint": "https://mp-suppliers-history.hal8.ai",
+  "provider": "hal8.ai",
+  "service": {
+    "repository": "https://github.com/Apex-Fusion/vector-service-agents",
+    "commit": "7742d65502d792779b074887e399c5ea5706566a",
+    "image": "ghcr.io/apex-fusion/vector-service-agents/agent-history@sha256:d2e59937b084349f1a7b2a763d130c3e51a873861094416ce98c434564f5a7a9"
+  },
+  "runtime": {
+    "repository": "https://github.com/Apex-Fusion/vector-agent-template",
+    "commit": "a05564cae3ca0e72a3591c8b2eb16c7909a60839"
+  }
+}
