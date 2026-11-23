@@ -692,6 +692,8 @@ All three modules get new deployments in this phase. They use `vector_identity` 
 - **Fetch rules** (Part 1 §9, amplification). Detection and domain linkage run as background jobs, never during a request. They fetch only `https` URLs whose host resolves to a public unicast address, checked for each connection and each redirect. They do not follow a redirect to another host. Each fetch is limited to 1 MiB and 10 seconds, with at most one fetch per host each minute.
 - **Rechecks.** The gateway checks again one day after the end of the last check and after each record change. After a check whose detection found no protocol, it checks again after 10 minutes, then after 20, 40 and 80 minutes, and so on: the wait doubles with each such check in a row, up to one day. Each wait counts from the end of the last check. The result goes to `vectorFetched`.
 - **Rendering source.** Renderings use the on-chain profile, the detected protocol and the listed keys.
+- **Profile schema.** The JSON Schema of the profile is `identity-gateway/schemas/vector-profile-1.json`, and the README of `identity-gateway` maps each field to the renderings (Part 1 §8.2).
+- **Labels.** Part 1 §9.1 gives each link of a record one of the labels `proven`, `verified` and `stated`.
 
 | Rendering | Path | Standard |
 |---|---|---|

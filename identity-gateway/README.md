@@ -126,6 +126,86 @@ the agent does not qualify, 410 when the DID is deactivated, 500 when the ledger
 The gateway's own JWK set (`GET /.well-known/jwks.json`) belongs to the M4 services. The renderings
 sign agent cards with the M4 Ed25519 key (`main.ts` passes `keys.ed25519` as their signer).
 
+## Profile schema and field mapping
+
+The profile of a record is the object `vectorProfile` in the document metadata (Part 1 Section 8.2). Its JSON Schema is
+[`schemas/vector-profile-1.json`](schemas/vector-profile-1.json). The `$schema` member of the file names the dialect. The `$id` of
+the schema is `https://id.vector.apexfusion.org/schemas/vector-profile-1.json`, and the gateway serves the file at that address.
+
+| Member | Source | Identity registry | Legacy registry |
+|---|---|---|---|
+| `name` | Chain | 1 to 64 bytes | up to 256 bytes |
+| `description` | Chain | up to 256 bytes | up to 1024 bytes |
+| `framework` | Chain | up to 64 bytes | up to 128 bytes |
+| `endpoint` | Chain | up to 256 bytes | up to 512 bytes |
+| `capabilities` | Chain | up to 16 items of 1 to 64 bytes, no duplicates | up to 32 items of up to 128 bytes |
+| `protocol` | Resolver | `a2a`, `mcp` or `web` | `a2a`, `mcp` or `web` |
+| `createdAt` | Chain | the creation time that the record holds | the block time of the legacy mint |
+
+The record is Plutus Data on the ledger, so the profile format is specific to Vector. The table gives the JSON shape that the
+resolver shows. Each field except `framework` maps to a member of at least one open format (Table 1).
+
+Rules of the schema:
+
+- The schema is closed. A member that the table does not name makes a profile invalid. A new member needs a new version of the
+  schema: a new file with its own `$id`.
+- No member is required. The resolver leaves out an empty value and a text that is not valid UTF-8 (Part 1 Section 8.2). A
+  tombstone of the identity registry shows `name` and `createdAt`. The end of a legacy record shows `createdAt` only.
+- The limits in the schema are the widest of the two registries. So the schema accepts every profile that the resolver shows. A
+  client that needs the narrower limits of the identity registry applies them itself.
+- `maxLength` counts characters, and the chain limits bytes. A text of 64 characters can have up to 256 bytes. So the schema can
+  accept a text that the chain refuses. It never refuses a text that the chain accepts.
+- `endpoint` has no `format`. The chain checks the length only. A validator that asserts `format: uri` would refuse a text that the
+  chain accepts. The gateway fetches `https` URLs only (Part 1 Section 9).
+- `createdAt` has the form `YYYY-MM-DDThh:mm:ssZ`, in whole seconds.
+- Every text is a statement of the record holder. Part 1 Section 9.1 gives a label to each link that a rendering shows.
+
+### Mapping to agent cards and catalogs
+
+Table 1 shows the member of each format that takes a Vector field. "Req." means that the format requires the member. "None" means
+that the format has no member for the field. The formats differ in status. The A2A agent card is released (version 1.0.0). The
+MCP server card is experimental. `server.json` is the format of the MCP registry. The gateway writes OASF schema version 1.1.0.
+The AI Catalog is a release candidate (version 0.9) and has no JSON Schema.
+
+Table 1. Where each field goes.
+
+| Vector data | A2A agent card | MCP server card | MCP registry `server.json` | OASF record | AI Catalog entry |
+|---|---|---|---|---|---|
+| `name` | `name` (req.) | `title`; `name` (req.) is `<namespace>/<name>` | `title`; `name` (req.) is `<namespace>/<name>` | `name` (req.) | `displayName` |
+| `description` | `description` (req.) | `description` (req., 1 to 100 characters) | `description` (req., at most 100 characters) | `description` (req.) | `description` |
+| `framework` | none | none | none | none | none |
+| `endpoint` | `supportedInterfaces[].url` (req.) | `remotes[].url` | `remotes[].url` | `locators[].urls` | none: `url` points to a card |
+| `capabilities` | `skills[]` (req.) | none | none | `skills[]` (req.) | `tags` |
+| `createdAt` | none | none | none | `created_at` (req.) | none: `updatedAt` has another meaning |
+| `protocol` | the format itself | the format itself | none | `annotations` | `type` |
+| The DID | none | `_meta` | `_meta` | `authors` | `extensions` |
+| `versionId` of the record | `version` (req.) | `version` (req.) | `version` (req.) | `version` (req.) | `version` |
+| Organisation of a party | `provider` | none | none | none | `publisher` |
+
+What the gateway writes, where it is not a plain copy:
+
+- `framework` has no member in these formats. It shows only in `vectorProfile`.
+- A2A and MCP use `version` for the version of the agent. The gateway writes the version of the record (`versionId`). This is a
+  mapping choice. It says nothing about the software.
+- An MCP server card and a `server.json` entry name a server `<namespace>/<name>`. The gateway writes the gateway host in reverse
+  DNS order, a slash and the identifier of the agent. The profile `name` goes to `title`, cut to 100 characters.
+- These two formats take at most 100 characters of `description`. The record allows more. The gateway cuts a longer text and ends
+  it with an ellipsis.
+- An A2A skill needs a `description`, and a capability has none. The gateway writes one for each skill. A record without
+  capabilities gets one skill with the id `agent`.
+- A record without a name gets the name `Vector agent` and the first 12 characters of its identifier. A record without a
+  description gets its name. The A2A card gets the text `An agent with the identity <DID>.` instead.
+- OASF has skill classes for five prefixes of capability names. The gateway maps a capability that equals a prefix or continues it
+  after a dot. The other capabilities show only as a JSON text in `annotations`.
+- `createdAt` of the profile is the creation time that the record holds. OASF `created_at` is the block time of the first mint
+  (`created` in the metadata). The two can differ.
+- The A2A `provider` is the verified organisation of a party, an Accountable Party first. A record without a verified
+  organisation has no `provider`.
+- The AI Catalog entry leaves out `displayName`, `description` and `version`, because the card that it points to holds them. Its
+  `updatedAt` is the block time of the newest record output of the agent.
+- Every rendering links to the DID: A2A `documentationUrl`, MCP `websiteUrl` and `_meta`, OASF `authors` and `annotations`, AI
+  Catalog `extensions`.
+
 ## M4 services (Part 2 Section 8.6)
 
 They run when the two key files are set. Everything that they issue uses the view without options

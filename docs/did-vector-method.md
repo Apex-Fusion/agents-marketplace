@@ -437,7 +437,7 @@ Errors and results with `deactivated: true` always get the resolution result. Th
 | `vectorParties` | `[{ role, signer, organisation, organisationVerified, rights, notBefore, notAfter, removalAfter }]`, in datum order. `role` is `accountable`, `responsible`, `provider`, `distributor` or `guardian`. `rights` lists `suspend`, `revoke` and `recover`, in this order, as they apply. |
 | `vectorRecovery` | `{ guardianThreshold, pendingNewController, pendingEffectiveAfter }`, present only when `guardianThreshold` is at least 1. `pendingNewController` is a key hash. |
 | `vectorParent` | Subagents only: `{ parent: "did:vector:<id>", parentEpoch, depth }`. |
-| `vectorProfile` | `{ name, description, framework, endpoint, protocol, capabilities, createdAt }`. `protocol` is `a2a`, `mcp` or `web`, as detected at the endpoint. For a legacy version, the fields come from the legacy datum, and `createdAt` is the block time of the legacy mint. |
+| `vectorProfile` | `{ name, description, framework, endpoint, protocol, capabilities, createdAt }`. `protocol` is `a2a`, `mcp` or `web`, as detected at the endpoint. For a legacy version, the fields come from the legacy datum, and `createdAt` is the block time of the legacy mint. The JSON Schema of this object is [`vector-profile-1.json`](../identity-gateway/schemas/vector-profile-1.json), with the `$id` `https://id.vector.apexfusion.org/schemas/vector-profile-1.json`. The [mapping of its fields](../identity-gateway/README.md#profile-schema-and-field-mapping) to agent cards and catalogs is in the README of the gateway. |
 | `vectorLedger` | `{ txId, outputIndex, blockHash, blockHeight, slot, confirmations }` of the newest counted record output that the base version owns. For the end of a legacy record, that transaction without `outputIndex`. |
 | `vectorPending` | The transaction IDs of the pending versions, in ledger order. Not present when there are none. |
 | `vectorFetched` | For each value that depends on a fetch (verified domains, `organisationVerified`, `protocol`): the URL, the fetch time and the SHA-256 of the fetched bytes. |
@@ -453,7 +453,7 @@ The resolution metadata is `{"contentType": "application/did"}` when the result 
 
 Two resolvers that read the same ledger tip give byte-identical results, except `alsoKnownAs`, the values listed in `vectorFetched`, and the `title` of an error.
 
-A profile and an organisation name are statements of the record's controller and parties. They are not verified facts.
+A profile and an organisation name are statements of the record's controller and parties. They are not verified facts. Section 9.1 gives them the label `stated`.
 
 ## 9. Security considerations
 
@@ -499,6 +499,36 @@ A profile and an organisation name are statements of the record's controller and
 **Denial of service.** The work for one request is limited to the history of one record and its ancestors, at most five records. A resolver SHOULD cache each record's history for each ledger tip. The public resolver applies a rate limit per client address.
 
 **Residual risks.** The contracts cannot change after deployment and have no external audit. A defect stays until a new registry replaces them. A compromise of a resolver's data sources (Koios, Ogmios) gives wrong results to clients that trust them. A weakness in Ed25519, ECDSA P-256, BLAKE2b or SHA-256 weakens the identifiers, the keys and the proofs.
+
+### 9.1 Proven, verified and stated
+
+A record has links to keys, parties, domains, endpoints and attestations. The links differ in who checked them. Each link has one of three labels:
+
+| Label | Meaning |
+|---|---|
+| `proven` | The ledger shows it. A transaction cannot exist without the signatures, or the approval of a contract, that show the link. A signature by a key that the gateway publishes also shows a link. Anybody can check the transaction or the signature. |
+| `verified` | The resolver checked it off chain. Anybody can repeat the check with public data. |
+| `stated` | A party wrote it: the record holder or an issuer. Neither the ledger nor the resolver checked it. A relying party can check it only with its own work. |
+
+| Link | Label | How to check it |
+|---|---|---|
+| A record and its controller key, and each listed Ed25519 key | `proven` | The transaction that registers the record or adds the key carries the signature of the key (Section 6). |
+| A record and a listed P-256 key | `verified` | The ledger cannot check P-256 signatures. The key carries a `pop` signature (Section 5). The resolver checks it and shows the key only when it is valid (Section 8.1). |
+| A record and a party, with any role | `proven` | Each party approves its own appointment: a key party and the controller sign, and Module-1 approves through its contract. This holds at registration and at each update that adds or changes the party (Section 6). |
+| A subagent and its parent | `proven` | The controller of the parent signs the registration of the subagent, and the parent is Active then (Section 6). |
+| A party and its `organisation` text | `stated` | Nothing checks the text (Section 5). |
+| A domain and the DID: an organisation in domain form, or the host of the endpoint | `verified` | The resolver checks one of two things (Section 8.1). One is a DNS TXT record `_did.<domain>` that names the DID. The other is a DID Configuration file that an assertion key of the DID signed. `vectorFetched` shows the URL, the time and the SHA-256 of what it read. |
+| An organisation in DID form and the party | `stated` | Nothing checks a DID in the text. |
+| An endpoint and its detected protocol | `verified` | The resolver fetches the endpoint in a background job. `vectorFetched` shows the URL, the time and the SHA-256 of the bytes. The check shows that the URL answered as that protocol. It does not show who runs the endpoint. |
+| An attestation and its issuer | `proven` | The issuer key signed the transaction that created the attestation. When the issuer is a registered agent, the contract also checked that the record was Active. It also checked that the record listed the key with the assertion purpose (Section 4.1 of the implementation plan). |
+| An attestation and the consent of its subject | `proven` when the field `solicited` is true | The controller of the subject also signed the transaction that created the attestation. When the field is false, the attestation makes no claim of consent. |
+| An attestation and its document | `stated` | The chain holds a SHA-256 digest and a locator, not the document. A relying party fetches the document and hashes it. |
+| The envelope signature of an attestation | `stated` | The ledger does not check it. A relying party checks the COSE signature with the issuer key (Section 4.2 of the implementation plan). |
+| What an attestation claims, for example that software runs | `stated` | An attestation shows that an issuer signed a claim. It does not show that the claim is true. |
+| The A2A agent card and the gateway | `proven` | The gateway signs the card (JWS, EdDSA) with a key that its own DID document lists. The signature shows that the gateway issued the card. It does not show that the content is true. |
+| The profile texts: `name`, `description`, `framework`, `endpoint` and `capabilities` | `stated` | The controller wrote them. The contract checks the lengths only (Section 5). |
+
+A label tells who checked a link. It does not rate the thing at the other end of the link. Attestations are records of the attestation contract (Section 4 of the implementation plan).
 
 ## 10. Privacy considerations
 
