@@ -81,7 +81,7 @@ jobs:
       - name: Setup pnpm
         # v6 installs pnpm through the @pnpm/exe binary when the Node of the runner is older than 22.13 (this step runs
         # before setup-node). That binary needs libatomic.so.1, which the runner image does not have.
-        uses: pnpm/action-setup@v5
+        uses: pnpm/action-setup@v6
         with:
           version: 10.33.2
 
@@ -152,7 +152,7 @@ jobs:
         uses: ./.github/actions/setup-aiken
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v5
+        uses: pnpm/action-setup@v6
         with:
           version: 10.33.2
 
@@ -203,7 +203,7 @@ jobs:
         run: git diff --exit-code plutus.json
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v5
+        uses: pnpm/action-setup@v6
         with:
           version: 10.33.2
 
