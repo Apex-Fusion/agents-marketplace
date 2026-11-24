@@ -4,17 +4,8 @@
 version: 2
 updates:
   - package-ecosystem: npm
-    directories:
-      - "/"
-      - "/packages/shared"
-      - "/buyer"
-      - "/gateway"
-      - "/supplier"
-      - "/paper2agent"
-      - "/indexer"
-      - "/indexer-ui"
-      - "/wallet-monitor"
-      - "/identity-gateway"
+    # Dependabot reads pnpm-workspace.yaml to find the members and updates the root lockfile.
+    directory: "/"
     schedule:
       interval: weekly
       day: monday
