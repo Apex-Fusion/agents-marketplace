@@ -784,13 +784,12 @@ function DidLookup() {
     event.preventDefault();
     const did = value.trim().toLowerCase();
     const canonical = /^(?:did:vector:)?([0-9a-f]{64})$/.exec(did);
-    if (canonical) {
-      navigate(`/agents/${canonical[1]}`);
-    } else if (LEGACY_DID_RE.test(did)) {
-      navigate(`/agents/${did}`);
-    } else {
+    const agent = canonical?.[1] ?? (LEGACY_DID_RE.test(did) ? did : null);
+    if (!agent) {
       setError("Enter did:vector:<64 hex> or the legacy did:vector:agent:<56 hex>:<64 hex>.");
+      return;
     }
+    navigate(`/agents/${agent}`)?.catch(() => setError("Could not open the agent."));
   };
   return (
     <form onSubmit={submit} className="rounded border border-gray-200 bg-white p-4 shadow-sm">
