@@ -16,10 +16,10 @@
     "@types/better-sqlite3": "^7.6.12",
     "@types/eventsource": "^1.1.15",
     "@types/express": "^5.0.3",
-    "@types/supertest": "^6.0.2",
-    "@types/ws": "^8.5.13",
+    "@types/supertest": "^7.2.1",
+    "@types/ws": "^8.18.2",
     "eventsource": "^2.0.2",
-    "supertest": "^7.0.0",
+    "supertest": "^7.3.2",
     "typescript": "^7.0.2"
   }
 }
