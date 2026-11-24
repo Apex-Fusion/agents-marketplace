@@ -200,6 +200,10 @@ packages, one for the development packages, and a separate pull request for each
 `@harmoniclabs/*`, `@anastasia-labs/*`, `@cardano-sdk/*`, `@noble/*`, `cbor-x`, `libsodium*`) and for each major update. The GitHub
 Actions updates come once a month.
 
+- The `npm` update uses only the workspace root (`/`). Dependabot reads `pnpm-workspace.yaml` to find all members and updates the
+  shared `pnpm-lock.yaml`. Do not add separate update directories for workspace members.
+- CI runs `pnpm install --frozen-lockfile` and fails when the lockfile does not match a manifest. To repair a stale lockfile on a
+  dependency branch, run `rx --no-prepare pnpm install --lockfile-only --no-frozen-lockfile --ignore-scripts` from the root.
 - A dependency pull request changes `pnpm-lock.yaml`, so a merge rebuilds and restarts every service (`SHARED_RE` of
   `deploy/mainnet/deploy.sh`). Do not turn on auto-merge for it. Merge it in a release window.
 - A security fix for a transitive package whose parent locks an old version goes into `pnpm.overrides` of the root `package.json` as a
