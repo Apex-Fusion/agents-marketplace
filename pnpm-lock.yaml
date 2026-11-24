@@ -178,8 +178,8 @@ importers:
         specifier: ^5.0.3
         version: 5.0.6
       '@types/multer':
-        specifier: ^1.4.11
-        version: 1.4.13
+        specifier: ^2.3.0
+        version: 2.3.0
       '@types/pdf-parse':
         specifier: ^1.1.4
         version: 1.1.5
@@ -1479,8 +1479,8 @@ packages:
   '@types/methods@1.1.4':
     resolution: {integrity: sha512-ymXWVrDiCxTBE3+RIrrP533E70eA+9qu7zdWoHuOmGujkYtzf4HQF96b8nwHLqhuf4ykX61IGRIB38CC6/sImQ==}
 
-  '@types/multer@1.4.13':
-    resolution: {integrity: sha512-bhhdtPw7JqCiEfC9Jimx5LqX9BDIPJEh2q/fQ4bqbBPtyEZYr3cvF22NwG0DmPZNYA0CAf2CnqDB4KIGGpJcaw==}
+  '@types/multer@2.3.0':
+    resolution: {integrity: sha512-i7STIm9V4K2MPH4ZYMtrZAwNxs3kglk2LgleaTuB9pUXgADBcQYQuYMd7+6xgTIxfoggIkFA/DkkvycdZpIARA==}
 
   '@types/node@24.19.2':
     resolution: {integrity: sha512-93d49wCWJkCyN87MxLpNN6KXPCwFw7bVUg79mGUV1OS40JGWwVCr8n61DXCSqz7CV6/VfPkb7xec7uP2M+QHWQ==}
@@ -4192,7 +4192,7 @@ snapshots:
 
   '@types/methods@1.1.4': {}
 
-  '@types/multer@1.4.13':
+  '@types/multer@2.3.0':
     dependencies:
       '@types/express': 5.0.6
 
